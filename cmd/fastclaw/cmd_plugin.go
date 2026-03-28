@@ -126,7 +126,8 @@ func isGitHubRef(s string) bool {
 }
 
 func isNpmPackage(s string) bool {
-	return strings.HasPrefix(s, "@") || strings.Contains(s, "openclaw")
+	// @scope/package is always npm. "openclaw-xxx" without @ is a hub plugin name, not npm.
+	return strings.HasPrefix(s, "@")
 }
 
 func installFromLocal(srcDir, pluginsDir string) error {
@@ -193,27 +194,7 @@ func installFromHub(name, pluginsDir string) error {
 
 	fmt.Printf("Installing %q from FastClaw Hub...\n", name)
 
-	// Try latest release tag first, fall back to main branch
-	// Use gh to get latest tag, or default to main
-	branch := "main"
-	tagCmd := exec.Command("gh", "release", "view", "--repo", hubRepo, "--json", "tagName", "-q", ".tagName")
-	if tagOut, err := tagCmd.Output(); err == nil {
-		tag := strings.TrimSpace(string(tagOut))
-		if tag != "" {
-			branch = tag
-		}
-	}
-
-	tarballURL := fmt.Sprintf("https://github.com/%s/archive/refs/heads/%s.tar.gz", hubRepo, branch)
-	if branch != "main" && branch != "dev" {
-		tarballURL = fmt.Sprintf("https://github.com/%s/archive/refs/tags/%s.tar.gz", hubRepo, branch)
-	}
-
-	// Download and extract only the plugins/<name> directory
-	pluginDir := filepath.Join(tmpDir, "plugin")
-	if err := os.MkdirAll(pluginDir, 0o755); err != nil {
-		return err
-	}
+	tarballURL := fmt.Sprintf("https://github.com/%s/archive/refs/heads/main.tar.gz", hubRepo)
 
 	// Download tarball
 	tarball := filepath.Join(tmpDir, "repo.tar.gz")
@@ -222,41 +203,23 @@ func installFromHub(name, pluginsDir string) error {
 		return fmt.Errorf("download failed: %s: %w", string(out), err)
 	}
 
-	// Extract: list top-level dir name first, then extract plugins/<name>
-	// Use --strip-components to remove the top-level directory
-	tarCmd := exec.Command("tar", "-xzf", tarball, "-C", pluginDir,
-		"--strip-components=2",
-		"--include=*/plugins/"+name+"/*",
-	)
+	// Extract full tarball
+	extractDir := filepath.Join(tmpDir, "extract")
+	if err := os.MkdirAll(extractDir, 0o755); err != nil {
+		return err
+	}
+	tarCmd := exec.Command("tar", "-xzf", tarball, "-C", extractDir)
 	if out, err := tarCmd.CombinedOutput(); err != nil {
-		// --include may not be supported on all platforms, try alternative
-		extractDir := filepath.Join(tmpDir, "extract")
-		os.MkdirAll(extractDir, 0o755)
-		tarCmd2 := exec.Command("tar", "-xzf", tarball, "-C", extractDir)
-		if out2, err2 := tarCmd2.CombinedOutput(); err2 != nil {
-			return fmt.Errorf("extract failed: %s: %w", string(out2), err2)
-		}
-		// Find the extracted directory (name varies by branch/tag)
-		entries, _ := os.ReadDir(extractDir)
-		if len(entries) == 0 {
-			return fmt.Errorf("extract failed: empty archive")
-		}
-		repoDir := filepath.Join(extractDir, entries[0].Name(), "plugins", name)
-		if _, err := os.Stat(repoDir); os.IsNotExist(err) {
-			return fmt.Errorf("plugin %q not found in FastClaw Hub", name)
-		}
-		// Copy to pluginDir
-		cpCmd := exec.Command("cp", "-r", repoDir+"/.", pluginDir)
-		if out3, err3 := cpCmd.CombinedOutput(); err3 != nil {
-			return fmt.Errorf("copy failed: %s: %w", string(out3), err3)
-		}
-	} else {
-		_ = out
+		return fmt.Errorf("extract failed: %s: %w", string(out), err)
 	}
 
-	// Verify we got something
-	dirEntries, _ := os.ReadDir(pluginDir)
-	if len(dirEntries) == 0 {
+	// Find top-level dir (name varies: fastclaw-main, fastclaw-v0.16.0, etc.)
+	entries, _ := os.ReadDir(extractDir)
+	if len(entries) == 0 {
+		return fmt.Errorf("extract failed: empty archive")
+	}
+	pluginDir := filepath.Join(extractDir, entries[0].Name(), "plugins", name)
+	if _, err := os.Stat(pluginDir); os.IsNotExist(err) {
 		return fmt.Errorf("plugin %q not found in FastClaw Hub", name)
 	}
 
