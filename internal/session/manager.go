@@ -18,6 +18,7 @@ type Session struct {
 	Messages          []provider.Message
 	LastConsolidated  int // index of last consolidated message
 	filePath          string
+	snapshot          []provider.Message // undo snapshot
 }
 
 // Manager manages sessions, keyed by "channel:chat_id".
@@ -175,4 +176,34 @@ func (s *Session) appendToFile(msg provider.Message) {
 	}
 	f.Write(data)
 	f.Write([]byte("\n"))
+}
+
+// Snapshot saves the current message list as a restore point (for undo).
+func (s *Session) Snapshot() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.snapshot = make([]provider.Message, len(s.Messages))
+	copy(s.snapshot, s.Messages)
+}
+
+// Undo restores the last snapshot. Returns false if no snapshot exists.
+func (s *Session) Undo() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.snapshot == nil {
+		return false
+	}
+	s.Messages = make([]provider.Message, len(s.snapshot))
+	copy(s.Messages, s.snapshot)
+	s.snapshot = nil
+	s.LastConsolidated = 0
+	s.rewriteFile()
+	return true
+}
+
+// HasSnapshot returns true if an undo snapshot exists.
+func (s *Session) HasSnapshot() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.snapshot != nil
 }
