@@ -93,7 +93,8 @@ export interface ModelEntry {
 export interface ProviderData {
   apiKey: string;
   apiBase: string;
-  api?: string;
+  apiType?: string;
+  authType?: string;
   models?: ModelEntry[];
 }
 
@@ -121,7 +122,7 @@ export async function getStatus(): Promise<StatusResponse> {
 }
 
 // Provider
-export async function testProvider(config: { apiBase: string; apiKey: string; model: string }) {
+export async function testProvider(config: { apiBase: string; apiKey: string; model: string; apiType?: string; authType?: string }) {
   const res = await fetch("/api/test-provider", {
     method: "POST",
     headers: { "Content-Type": "application/json" },

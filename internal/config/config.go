@@ -193,10 +193,27 @@ type ModelEntry struct {
 
 // ProviderConfig holds API credentials for an LLM provider.
 type ProviderConfig struct {
-	APIKey  string       `json:"apiKey"`
-	APIBase string       `json:"apiBase"`
-	API     string       `json:"api,omitempty"`
-	Models  []ModelEntry `json:"models,omitempty"`
+	APIKey   string       `json:"apiKey"`
+	APIBase  string       `json:"apiBase"`
+	APIType  string       `json:"apiType,omitempty"`
+	AuthType string       `json:"authType,omitempty"`
+	Models   []ModelEntry `json:"models,omitempty"`
+}
+
+// UnmarshalJSON handles backward compatibility: reads "api" as "apiType".
+func (pc *ProviderConfig) UnmarshalJSON(data []byte) error {
+	type Alias ProviderConfig
+	aux := &struct {
+		*Alias
+		API string `json:"api,omitempty"`
+	}{Alias: (*Alias)(pc)}
+	if err := json.Unmarshal(data, aux); err != nil {
+		return err
+	}
+	if pc.APIType == "" && aux.API != "" {
+		pc.APIType = aux.API
+	}
+	return nil
 }
 
 // AgentsConfig holds agent defaults and the list of agent entries.

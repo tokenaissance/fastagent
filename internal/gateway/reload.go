@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -149,45 +150,40 @@ func (g *Gateway) reloadConfig() {
 	slog.Info("hot-reload complete ✅")
 }
 
-// reloadProvider updates the LLM provider if API key/base changed.
-func (g *Gateway) reloadProvider(newCfg *config.Config) {
-	var newProvCfg config.ProviderConfig
+// resolveProviderCfg picks the active provider config from a Config.
+func resolveProviderCfg(cfg *config.Config) config.ProviderConfig {
+	var pc config.ProviderConfig
+	defaultModel := cfg.Agents.Defaults.Model
+	if parts := strings.SplitN(defaultModel, "/", 2); len(parts) == 2 {
+		if p, ok := cfg.Providers[parts[0]]; ok {
+			return p
+		}
+	}
 	for _, key := range []string{"default", "openai", "openrouter"} {
-		if p, ok := newCfg.Providers[key]; ok {
-			newProvCfg = p
-			break
+		if p, ok := cfg.Providers[key]; ok {
+			return p
 		}
 	}
-	if newProvCfg.APIKey == "" {
-		for _, p := range newCfg.Providers {
-			newProvCfg = p
-			break
-		}
+	for _, p := range cfg.Providers {
+		return p
 	}
+	return pc
+}
 
-	// Check if provider actually changed
+// reloadProvider updates the LLM provider if API key/base/type changed.
+func (g *Gateway) reloadProvider(newCfg *config.Config) {
+	newProvCfg := resolveProviderCfg(newCfg)
+
 	g.mu.RLock()
 	oldCfg := g.config
 	g.mu.RUnlock()
 
-	var oldProvCfg config.ProviderConfig
-	for _, key := range []string{"default", "openai", "openrouter"} {
-		if p, ok := oldCfg.Providers[key]; ok {
-			oldProvCfg = p
-			break
-		}
-	}
-	if oldProvCfg.APIKey == "" {
-		for _, p := range oldCfg.Providers {
-			oldProvCfg = p
-			break
-		}
-	}
+	oldProvCfg := resolveProviderCfg(oldCfg)
 
-	if newProvCfg.APIKey != oldProvCfg.APIKey || newProvCfg.APIBase != oldProvCfg.APIBase {
-		llm := provider.NewOpenAI(newProvCfg.APIKey, newProvCfg.APIBase)
+	if newProvCfg.APIKey != oldProvCfg.APIKey || newProvCfg.APIBase != oldProvCfg.APIBase || newProvCfg.APIType != oldProvCfg.APIType {
+		llm := provider.NewProvider(newProvCfg.APIKey, newProvCfg.APIBase, newProvCfg.APIType)
 		g.agents.UpdateProvider(llm)
-		slog.Info("hot-reload: provider updated", "apiBase", newProvCfg.APIBase)
+		slog.Info("hot-reload: provider updated", "apiBase", newProvCfg.APIBase, "apiType", newProvCfg.APIType)
 	}
 }
 

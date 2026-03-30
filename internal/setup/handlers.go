@@ -136,9 +136,11 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 type testProviderRequest struct {
-	APIBase string `json:"apiBase"`
-	APIKey  string `json:"apiKey"`
-	Model   string `json:"model"`
+	APIBase  string `json:"apiBase"`
+	APIKey   string `json:"apiKey"`
+	Model    string `json:"model"`
+	APIType  string `json:"apiType"`
+	AuthType string `json:"authType"`
 }
 
 func (s *Server) handleTestProvider(w http.ResponseWriter, r *http.Request) {
@@ -148,31 +150,77 @@ func (s *Server) handleTestProvider(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Test connectivity by listing models (GET /models)
-	httpReq, err := http.NewRequestWithContext(r.Context(), "GET", strings.TrimRight(req.APIBase, "/")+"/models", nil)
+	base := strings.TrimRight(req.APIBase, "/")
+	var testURL string
+	var method string
+	var body io.Reader
+
+	if req.APIType == "anthropic-messages" {
+		// Anthropic Messages API: base + /v1/messages
+		testURL = base + "/v1/messages"
+		method = "POST"
+		model := req.Model
+		if model == "" {
+			model = "claude-sonnet-4-20250514"
+		}
+		payload := fmt.Sprintf(`{"model":"%s","messages":[{"role":"user","content":"hi"}]}`, model)
+		body = strings.NewReader(payload)
+	} else {
+		// OpenAI-compatible: send a minimal chat completion to verify API key
+		testURL = base + "/chat/completions"
+		method = "POST"
+		model := req.Model
+		if model == "" {
+			model = "gpt-4o-mini"
+		}
+		payload := fmt.Sprintf(`{"model":"%s","messages":[{"role":"user","content":"hi"}]}`, model)
+		body = strings.NewReader(payload)
+	}
+
+	httpReq, err := http.NewRequestWithContext(r.Context(), method, testURL, body)
 	if err != nil {
-		jsonResponse(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
+		jsonResponse(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error(), "url": testURL})
 		return
 	}
-	if req.APIKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+req.APIKey)
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	// Set auth headers based on API type
+	if req.APIType == "anthropic-messages" {
+		if req.APIKey != "" {
+			httpReq.Header.Set("x-api-key", req.APIKey)
+		}
+		httpReq.Header.Set("anthropic-version", "2023-06-01")
+	} else {
+		if req.APIKey != "" {
+			httpReq.Header.Set("Authorization", "Bearer "+req.APIKey)
+		}
 	}
 
 	client := &http.Client{Timeout: 15 * time.Second}
 	resp, err := client.Do(httpReq)
 	if err != nil {
-		jsonResponse(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
+		jsonResponse(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error(), "url": testURL})
 		return
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		jsonResponse(w, http.StatusOK, map[string]any{"ok": false, "error": fmt.Sprintf("HTTP %d: %s", resp.StatusCode, string(respBody))})
+	// For chat/messages endpoints, 200 means success.
+	// 401/403 means bad API key, other errors are connectivity issues.
+	if resp.StatusCode == http.StatusOK {
+		jsonResponse(w, http.StatusOK, map[string]any{"ok": true, "url": testURL})
 		return
 	}
 
-	jsonResponse(w, http.StatusOK, map[string]any{"ok": true})
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+	errMsg := fmt.Sprintf("HTTP %d: %s", resp.StatusCode, string(respBody))
+
+	// 401/403 = auth failure, clearly report it
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		jsonResponse(w, http.StatusOK, map[string]any{"ok": false, "error": "Authentication failed. Please check your API Key.", "url": testURL})
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]any{"ok": false, "error": errMsg, "url": testURL})
 }
 
 type chatRequest struct {
@@ -209,6 +257,8 @@ type saveConfigRequest struct {
 	ProviderName    string `json:"providerName"`
 	APIBase         string `json:"apiBase"`
 	APIKey          string `json:"apiKey"`
+	APIType         string `json:"apiType"`
+	AuthType        string `json:"authType"`
 	Model           string `json:"model"`
 	TelegramEnabled bool   `json:"telegramEnabled"`
 	TelegramToken   string `json:"telegramToken"`
@@ -240,13 +290,15 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 	cfg := &config.Config{
 		Providers: map[string]config.ProviderConfig{
 			providerKey: {
-				APIKey:  req.APIKey,
-				APIBase: req.APIBase,
+				APIKey:   req.APIKey,
+				APIBase:  req.APIBase,
+				APIType:  req.APIType,
+				AuthType: req.AuthType,
 			},
 		},
 		Agents: config.AgentsConfig{
 			Defaults: config.AgentDefaults{
-				Model:             req.Model,
+				Model:             providerKey + "/" + req.Model,
 				MaxTokens:         8192,
 				Temperature:       0.7,
 				MaxToolIterations: 20,
@@ -373,9 +425,10 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 			cfg.Providers = make(map[string]config.ProviderConfig)
 			for k, v := range providers {
 				p := config.ProviderConfig{
-					APIBase: v.APIBase,
-					API:     v.API,
-					Models:  v.Models,
+					APIBase:  v.APIBase,
+					APIType:  v.APIType,
+					AuthType: v.AuthType,
+					Models:   v.Models,
 				}
 				if v.APIKey != "" && !strings.Contains(v.APIKey, "****") {
 					p.APIKey = v.APIKey

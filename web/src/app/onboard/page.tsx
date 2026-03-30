@@ -24,9 +24,10 @@ import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
 import { testProvider, saveConfig } from "@/lib/api";
 
-const PROVIDERS: Record<string, { apiBase: string; models: string[] }> = {
+const PROVIDERS: Record<string, { apiBase: string; apiType: string; models: string[] }> = {
   openrouter: {
     apiBase: "https://openrouter.ai/api/v1",
+    apiType: "openai-chat",
     models: [
       "openai/gpt-5.4",
       "anthropic/claude-sonnet-4.6",
@@ -35,16 +36,29 @@ const PROVIDERS: Record<string, { apiBase: string; models: string[] }> = {
   },
   ollama: {
     apiBase: "http://localhost:11434/v1",
+    apiType: "openai-chat",
     models: ["llama3", "mistral", "codellama"],
   },
-  custom: { apiBase: "", models: [] },
+  custom: { apiBase: "", apiType: "openai-chat", models: [] },
 };
+
+const API_TYPE_OPTIONS = [
+  { value: "openai-chat", label: "OpenAI Completions" },
+  { value: "anthropic-messages", label: "Anthropic Messages" },
+];
+
+const AUTH_TYPE_OPTIONS = [
+  { value: "api-key", label: "API Key" },
+  { value: "bearer-token", label: "Bearer Token" },
+];
 
 interface OnboardConfig {
   provider: string;
   providerName: string;
   apiBase: string;
   apiKey: string;
+  apiType: string;
+  authType: string;
   model: string;
   telegramEnabled: boolean;
   telegramToken: string;
@@ -108,6 +122,8 @@ export default function OnboardPage() {
     providerName: "openrouter",
     apiBase: "https://openrouter.ai/api/v1",
     apiKey: "",
+    apiType: "openai-chat",
+    authType: "api-key",
     model: "openai/gpt-5.4",
     telegramEnabled: false,
     telegramToken: "",
@@ -144,6 +160,7 @@ export default function OnboardPage() {
         provider,
         providerName: provider === "custom" ? "" : provider,
         apiBase: preset.apiBase,
+        apiType: preset.apiType,
         model: preset.models[0] || "",
       });
       setTestStatus("idle");
@@ -159,18 +176,21 @@ export default function OnboardPage() {
         apiBase: config.apiBase,
         apiKey: config.apiKey,
         model: config.model,
+        apiType: config.apiType,
+        authType: config.authType,
       });
       if (result.ok) {
         setTestStatus("success");
       } else {
+        const urlInfo = result.url ? `\nRequest URL: ${result.url}` : "";
         setTestStatus("error");
-        setTestError(result.error || "Connection failed");
+        setTestError((result.error || "Connection failed") + urlInfo);
       }
     } catch {
       setTestStatus("error");
       setTestError("Could not reach the server. Is FastClaw running?");
     }
-  }, [config.apiBase, config.apiKey, config.model]);
+  }, [config.apiBase, config.apiKey, config.model, config.apiType, config.authType]);
 
   const handleLaunch = useCallback(async () => {
     try {
@@ -368,6 +388,49 @@ export default function OnboardPage() {
                   }
                   className="font-mono text-sm"
                 />
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <Label>API Type</Label>
+                  <Select
+                    value={config.apiType}
+                    onValueChange={(v) => v && updateConfig({ apiType: v })}
+                  >
+                    <SelectTrigger className="w-full text-sm">
+                      <SelectValue>
+                        {API_TYPE_OPTIONS.find((o) => o.value === config.apiType)?.label}
+                      </SelectValue>
+                    </SelectTrigger>
+                    <SelectContent>
+                      {API_TYPE_OPTIONS.map((opt) => (
+                        <SelectItem key={opt.value} value={opt.value}>
+                          {opt.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-2">
+                  <Label>Auth Type</Label>
+                  <Select
+                    value={config.authType}
+                    onValueChange={(v) => v && updateConfig({ authType: v })}
+                  >
+                    <SelectTrigger className="w-full text-sm">
+                      <SelectValue>
+                        {AUTH_TYPE_OPTIONS.find((o) => o.value === config.authType)?.label}
+                      </SelectValue>
+                    </SelectTrigger>
+                    <SelectContent>
+                      {AUTH_TYPE_OPTIONS.map((opt) => (
+                        <SelectItem key={opt.value} value={opt.value}>
+                          {opt.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
               </div>
 
               <div className="space-y-2">
