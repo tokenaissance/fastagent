@@ -178,6 +178,57 @@ func (s *Session) appendToFile(msg provider.Message) {
 	f.Write([]byte("\n"))
 }
 
+// ListWebSessions scans session files for web chat sessions and returns
+// a list with id and preview (first user message).
+func (m *Manager) ListWebSessions() []map[string]string {
+	pattern := filepath.Join(m.dataDir, "web_*.jsonl")
+	files, err := filepath.Glob(pattern)
+	if err != nil {
+		return nil
+	}
+
+	var sessions []map[string]string
+	for _, f := range files {
+		base := filepath.Base(f)
+		// "web_<sessionId>.jsonl" -> "<sessionId>"
+		sessionId := strings.TrimPrefix(base, "web_")
+		sessionId = strings.TrimSuffix(sessionId, ".jsonl")
+
+		// Read first user message as preview
+		preview := ""
+		fh, err := os.Open(f)
+		if err != nil {
+			continue
+		}
+		scanner := bufio.NewScanner(fh)
+		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+		for scanner.Scan() {
+			var msg struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			}
+			if json.Unmarshal(scanner.Bytes(), &msg) == nil && msg.Role == "user" && msg.Content != "" {
+				preview = msg.Content
+				if len(preview) > 50 {
+					preview = preview[:50] + "..."
+				}
+				break
+			}
+		}
+		fh.Close()
+
+		if preview == "" {
+			continue // skip empty sessions
+		}
+
+		sessions = append(sessions, map[string]string{
+			"id":      sessionId,
+			"preview": preview,
+		})
+	}
+	return sessions
+}
+
 // Snapshot saves the current message list as a restore point (for undo).
 func (s *Session) Snapshot() {
 	s.mu.Lock()

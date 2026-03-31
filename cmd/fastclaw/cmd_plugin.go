@@ -228,8 +228,10 @@ func installFromHub(name, pluginsDir string) error {
 		return installFromLocal(pluginDir, pluginsDir)
 	}
 
-	// No plugin.json — copy as utility (e.g. openclaw-proxy)
-	destDir := filepath.Join(pluginsDir, name)
+	// No plugin.json — copy as utility (e.g. openclaw-plugin-bridge)
+	toolsDir := filepath.Join(filepath.Dir(pluginsDir), "tools")
+	os.MkdirAll(toolsDir, 0o755)
+	destDir := filepath.Join(toolsDir, name)
 	os.RemoveAll(destDir)
 	cpCmd := exec.Command("cp", "-r", pluginDir, destDir)
 	if out, err := cpCmd.CombinedOutput(); err != nil {
@@ -297,12 +299,12 @@ func installFromNpm(pkg, pluginsDir string) error {
 	}
 
 	// 4. Test bridgeability — run proxy and check if tools are registered
-	proxyDir := filepath.Join(homeDir, "plugins", "openclaw-proxy")
+	proxyDir := filepath.Join(homeDir, "tools", "openclaw-plugin-bridge")
 	proxyJS := filepath.Join(proxyDir, "proxy.js")
 	if _, err := os.Stat(proxyJS); os.IsNotExist(err) {
-		fmt.Println("Installing openclaw-proxy from FastClaw Hub...")
-		if err := installFromHub("openclaw-proxy", pluginsDir); err != nil {
-			return fmt.Errorf("failed to install openclaw-proxy: %w", err)
+		fmt.Println("Installing openclaw-plugin-bridge from FastClaw Hub...")
+		if err := installFromHub("openclaw-plugin-bridge", pluginsDir); err != nil {
+			return fmt.Errorf("failed to install openclaw-plugin-bridge: %w", err)
 		}
 		depCmd := exec.Command("npm", "install", "--production")
 		depCmd.Dir = proxyDir
@@ -376,7 +378,7 @@ func installFromNpm(pkg, pluginsDir string) error {
 		"id":           pluginID,
 		"name":         fmt.Sprintf("OpenClaw: %s", pkg),
 		"version":      "0.1.0",
-		"description":  fmt.Sprintf("OpenClaw plugin %s (bridged via openclaw-proxy)", pkg),
+		"description":  fmt.Sprintf("OpenClaw plugin %s (bridged via openclaw-plugin-bridge)", pkg),
 		"type":         "tool",
 		"command":      fmt.Sprintf("npx tsx %s %s", proxyJS, entryFile),
 		"capabilities": []string{"tool"},

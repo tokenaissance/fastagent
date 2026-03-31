@@ -34,9 +34,19 @@ type SkillFrontmatter struct {
 	Metadata    yaml.Node    `yaml:"metadata"`
 }
 
-// SkillMetadata represents the openclaw metadata block.
+// SkillMetadata represents the skill metadata block.
+// Supports both "fastclaw" and "openclaw" keys for backward compatibility.
 type SkillMetadata struct {
+	FastClaw *OpenClawMeta `json:"fastclaw"`
 	OpenClaw *OpenClawMeta `json:"openclaw"`
+}
+
+// Meta returns the effective metadata, preferring fastclaw over openclaw.
+func (m *SkillMetadata) Meta() *OpenClawMeta {
+	if m.FastClaw != nil {
+		return m.FastClaw
+	}
+	return m.OpenClaw
 }
 
 // OpenClawMeta holds OpenClaw-specific metadata.
@@ -183,7 +193,7 @@ func (sl *SkillsLoader) BuildSkillsSummary(skills []Skill) string {
 	sb.WriteString("<skills>\n")
 
 	for _, skill := range skills {
-		if alwaysLoad[skill.Name] || (skill.Metadata != nil && skill.Metadata.OpenClaw != nil && skill.Metadata.OpenClaw.Always) {
+		if alwaysLoad[skill.Name] || (skill.Metadata != nil && skill.Metadata.Meta() != nil && skill.Metadata.Meta().Always) {
 			fmt.Fprintf(&sb, "<skill name=%q layer=%q>\n%s\n</skill>\n", skill.Name, skill.Layer, skill.Content)
 		} else {
 			summary := skill.Description
@@ -217,8 +227,8 @@ func (sl *SkillsLoader) SkillEnvVars(skillName string) map[string]string {
 			fm := parseFrontmatter(filepath.Join(skillDir, "SKILL.md"))
 			if fm != nil && fm.Metadata.Kind == yaml.MappingNode {
 				meta := parseMetadata(&fm.Metadata)
-				if meta != nil && meta.OpenClaw != nil && meta.OpenClaw.PrimaryEnv != "" {
-					env[meta.OpenClaw.PrimaryEnv] = entry.APIKey
+				if meta != nil && meta.Meta() != nil && meta.Meta().PrimaryEnv != "" {
+					env[meta.Meta().PrimaryEnv] = entry.APIKey
 					break
 				}
 			}
@@ -400,10 +410,10 @@ func convertYAMLToJSON(v interface{}) interface{} {
 // checkGating validates whether a skill's requirements are met.
 // Returns (gated, reason). gated=true means the skill should be skipped.
 func checkGating(meta *SkillMetadata) (bool, string) {
-	if meta == nil || meta.OpenClaw == nil {
+	if meta == nil || meta.Meta() == nil {
 		return false, ""
 	}
-	oc := meta.OpenClaw
+	oc := meta.Meta()
 
 	if oc.Always {
 		return false, ""

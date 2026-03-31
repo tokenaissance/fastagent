@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/fastclaw-ai/fastclaw/internal/agent"
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 )
 
@@ -224,8 +225,9 @@ func (s *Server) handleTestProvider(w http.ResponseWriter, r *http.Request) {
 }
 
 type chatRequest struct {
-	AgentID string `json:"agentId"`
-	Message string `json:"message"`
+	AgentID   string `json:"agentId"`
+	SessionID string `json:"sessionId"`
+	Message   string `json:"message"`
 }
 
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
@@ -248,8 +250,106 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	reply := ag.HandleWebChat(r.Context(), req.Message)
+	reply := ag.HandleWebChat(r.Context(), req.SessionID, req.Message)
 	jsonResponse(w, http.StatusOK, map[string]any{"response": reply})
+}
+
+func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
+	if s.agentProvider == nil {
+		http.Error(w, "gateway is not running", http.StatusServiceUnavailable)
+		return
+	}
+
+	var req chatRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+
+	ag := s.agentProvider.AgentByID(req.AgentID)
+	if ag == nil {
+		http.Error(w, "agent not found", http.StatusNotFound)
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	events := make(chan agent.ChatEvent, 32)
+
+	// Run agent in background
+	go func() {
+		defer close(events)
+		ag.HandleWebChatStream(r.Context(), req.SessionID, req.Message, events)
+	}()
+
+	for evt := range events {
+		data, _ := json.Marshal(evt)
+		fmt.Fprintf(w, "data: %s\n\n", data)
+		flusher.Flush()
+	}
+
+	// Send final done event (in case agent returned without emitting done)
+	fmt.Fprintf(w, "data: {\"type\":\"done\"}\n\n")
+	flusher.Flush()
+}
+
+func (s *Server) handleChatHistory(w http.ResponseWriter, r *http.Request) {
+	if s.agentProvider == nil {
+		jsonResponse(w, http.StatusOK, []any{})
+		return
+	}
+
+	agentID := r.URL.Query().Get("agentId")
+	sessionID := r.URL.Query().Get("sessionId")
+	if agentID == "" {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "agentId required"})
+		return
+	}
+
+	ag := s.agentProvider.AgentByID(agentID)
+	if ag == nil {
+		jsonResponse(w, http.StatusOK, []any{})
+		return
+	}
+
+	history := ag.WebChatHistory(sessionID)
+	if history == nil {
+		history = []map[string]any{}
+	}
+	jsonResponse(w, http.StatusOK, history)
+}
+
+func (s *Server) handleChatSessions(w http.ResponseWriter, r *http.Request) {
+	if s.agentProvider == nil {
+		jsonResponse(w, http.StatusOK, []any{})
+		return
+	}
+
+	agentID := r.URL.Query().Get("agentId")
+	if agentID == "" {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "agentId required"})
+		return
+	}
+
+	ag := s.agentProvider.AgentByID(agentID)
+	if ag == nil {
+		jsonResponse(w, http.StatusOK, []any{})
+		return
+	}
+
+	sessions := ag.WebChatSessions()
+	if sessions == nil {
+		sessions = []map[string]string{}
+	}
+	jsonResponse(w, http.StatusOK, sessions)
 }
 
 type saveConfigRequest struct {

@@ -17,16 +17,18 @@ type SkillsLearner struct {
 	workspace    string
 	provider     provider.Provider
 	model        string
-	minToolCalls int // minimum tool calls to consider extracting (default: 3)
+	minToolCalls int    // minimum tool calls to consider extracting (default: 3)
+	skillDirs    []string // directories to search for the skill-learner skill
 }
 
 // NewSkillsLearner creates a new SkillsLearner.
-func NewSkillsLearner(workspace string, p provider.Provider, model string) *SkillsLearner {
+func NewSkillsLearner(workspace string, p provider.Provider, model string, skillDirs ...string) *SkillsLearner {
 	return &SkillsLearner{
 		workspace:    workspace,
 		provider:     p,
 		model:        model,
 		minToolCalls: 3,
+		skillDirs:    skillDirs,
 	}
 }
 
@@ -77,7 +79,23 @@ func (sl *SkillsLearner) MaybeExtract(ctx context.Context, messages []provider.M
 	return nil
 }
 
-const extractionPrompt = `Analyze the following conversation and determine if it demonstrates a reusable multi-step skill.
+// loadSkillLearnerPrompt loads the skill-learner SKILL.md from disk.
+// Falls back to a minimal built-in prompt if not found.
+func (sl *SkillsLearner) loadSkillLearnerPrompt() string {
+	// Search skill directories for skill-learner SKILL.md
+	for _, dir := range sl.skillDirs {
+		path := filepath.Join(dir, "fastclaw-skill-learner", "SKILL.md")
+		if data, err := os.ReadFile(path); err == nil {
+			slog.Debug("loaded skill-learner prompt from file", "path", path)
+			return string(data)
+		}
+	}
+
+	// Fallback: minimal built-in prompt
+	return fallbackExtractionPrompt
+}
+
+const fallbackExtractionPrompt = `Analyze the following conversation and determine if it demonstrates a reusable multi-step skill.
 
 Criteria for extraction:
 - The task involved 3+ tool calls in a clear, repeatable sequence
@@ -87,7 +105,7 @@ Criteria for extraction:
 If this conversation demonstrates a reusable skill, output JSON:
 {"extract": true, "skill": {"name": "Human readable name", "slug": "kebab-case-slug", "description": "One line description", "content": "Full SKILL.md content with YAML frontmatter"}}
 
-If not reusable, output: {"extract": false, "skill": {}}
+If not reusable, output: {"extract": false}
 
 The SKILL.md format uses YAML frontmatter:
 ---
@@ -116,8 +134,10 @@ func (sl *SkillsLearner) extractSkill(ctx context.Context, messages []provider.M
 		}
 	}
 
+	prompt := sl.loadSkillLearnerPrompt()
+
 	extractMsgs := []provider.Message{
-		{Role: "system", Content: extractionPrompt},
+		{Role: "system", Content: prompt + "\n\nOutput ONLY the JSON, no markdown fences."},
 		{Role: "user", Content: sb.String()},
 	}
 

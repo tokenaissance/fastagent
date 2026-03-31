@@ -1,10 +1,10 @@
 {
-  "name": "@fastclaw/openclaw-proxy",
+  "name": "@fastclaw/openclaw-plugin-bridge",
   "version": "0.1.0",
-  "description": "Bridge OpenClaw TypeScript plugins to FastClaw JSON-RPC protocol",
+  "description": "Bridge OpenClaw plugins to FastClaw JSON-RPC protocol",
   "main": "proxy.js",
   "bin": {
-    "openclaw-proxy": "proxy.js"
+    "openclaw-plugin-bridge": "proxy.js"
   },
   "scripts": {
     "build": "tsc",

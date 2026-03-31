@@ -83,7 +83,8 @@ func NewAgentWithFullCfg(rc config.ResolvedAgent, prov provider.Provider, mb *bu
 		if model == "" {
 			model = rc.Model
 		}
-		ag.skillsLearner = NewSkillsLearner(rc.Workspace, prov, model)
+		learnerLoader := NewSkillsLoaderWithGlobal(homeDir, rc.Workspace, "", rc.Skills, fullCfg.Skills)
+		ag.skillsLearner = NewSkillsLearner(rc.Workspace, prov, model, learnerLoader.AllSkillDirs()...)
 		if fullCfg.SkillsLearner.MinToolCalls > 0 {
 			ag.skillsLearner.minToolCalls = fullCfg.SkillsLearner.MinToolCalls
 		}
@@ -181,11 +182,30 @@ func (a *Agent) Name() string {
 	return a.name
 }
 
-// HandleWebChat handles a chat message from the web UI.
-func (a *Agent) HandleWebChat(ctx context.Context, text string) string {
+// HandleWebChat handles a chat message from the web UI with a session ID.
+func (a *Agent) HandleWebChat(ctx context.Context, sessionId, text string) string {
+	if sessionId == "" {
+		sessionId = "web-ui"
+	}
 	msg := bus.InboundMessage{
 		Channel:  "web",
-		ChatID:   "web-ui",
+		ChatID:   sessionId,
+		UserID:   "web-user",
+		Text:     text,
+		PeerKind: "dm",
+	}
+	return a.HandleMessage(ctx, msg)
+}
+
+// HandleWebChatStream handles a web chat message with real-time event streaming.
+func (a *Agent) HandleWebChatStream(ctx context.Context, sessionId, text string, events chan<- ChatEvent) string {
+	if sessionId == "" {
+		sessionId = "web-ui"
+	}
+	ctx = ContextWithChatEvents(ctx, events)
+	msg := bus.InboundMessage{
+		Channel:  "web",
+		ChatID:   sessionId,
 		UserID:   "web-user",
 		Text:     text,
 		PeerKind: "dm",
@@ -237,6 +257,61 @@ func (a *Agent) Sessions() *session.Manager {
 	return a.sessions
 }
 
+// WebChatHistory returns chat history for a specific web session.
+func (a *Agent) WebChatHistory(sessionId string) []map[string]any {
+	if sessionId == "" {
+		sessionId = "web-ui"
+	}
+	sess := a.sessions.Get("web", sessionId)
+	msgs := sess.GetMessages()
+	var history []map[string]any
+	for _, m := range msgs {
+		switch m.Role {
+		case "user":
+			if m.Content != "" {
+				history = append(history, map[string]any{
+					"role":    "user",
+					"content": m.Content,
+				})
+			}
+		case "assistant":
+			entry := map[string]any{"role": "assistant"}
+			if m.Content != "" {
+				entry["content"] = m.Content
+			}
+			if len(m.ToolCalls) > 0 {
+				var calls []map[string]string
+				for _, tc := range m.ToolCalls {
+					calls = append(calls, map[string]string{
+						"id":        tc.ID,
+						"name":      tc.Function.Name,
+						"arguments": tc.Function.Arguments,
+					})
+				}
+				entry["toolCalls"] = calls
+			}
+			// Skip empty assistant messages (no content, no tool calls)
+			if m.Content == "" && len(m.ToolCalls) == 0 {
+				continue
+			}
+			history = append(history, entry)
+		case "tool":
+			history = append(history, map[string]any{
+				"role":       "tool",
+				"content":    m.Content,
+				"name":       m.Name,
+				"toolCallId": m.ToolCallID,
+			})
+		}
+	}
+	return history
+}
+
+// WebChatSessions returns a list of web chat sessions with their first user message as preview.
+func (a *Agent) WebChatSessions() []map[string]string {
+	return a.sessions.ListWebSessions()
+}
+
 // Model returns the agent's model name.
 func (a *Agent) Model() string {
 	return a.model
@@ -246,6 +321,8 @@ func (a *Agent) Model() string {
 func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) string {
 	// Check for slash commands first
 	if result := a.handleSlashCommand(msg); result.handled {
+		emitEvent(ctx, ChatEvent{Type: "content", Data: map[string]any{"content": result.reply}})
+		emitEvent(ctx, ChatEvent{Type: "done"})
 		return result.reply
 	}
 
@@ -259,15 +336,12 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	// Hook: AfterSystemPrompt
 	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: AfterSystemPrompt})
 
-	runtimeCtx := a.ctxBuilder.BuildRuntimeContext(msg.Channel, msg.ChatID)
-	userContent := runtimeCtx + "\n\n" + msg.Text
-
-	// Build user message - include image if present
-	userMsg := provider.Message{Role: "user", Content: userContent}
+	// Store the raw user message
+	userMsg := provider.Message{Role: "user", Content: msg.Text}
 	if msg.PhotoURL != "" {
 		userMsg.Content = ""
 		userMsg.ContentParts = []provider.ContentPart{
-			{Type: "text", Text: userContent},
+			{Type: "text", Text: msg.Text},
 			{Type: "image_url", ImageURL: &provider.ImageURL{URL: msg.PhotoURL, Detail: "auto"}},
 		}
 	}
@@ -333,8 +407,24 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 
 		if !resp.HasToolCalls() {
 			sess.Append(provider.Message{Role: "assistant", Content: resp.Content})
+			emitEvent(ctx, ChatEvent{Type: "content", Data: map[string]any{"content": resp.Content}})
+			emitEvent(ctx, ChatEvent{Type: "done"})
 			a.runPostTurn(ctx, messages, totalToolCalls)
 			return resp.Content
+		}
+
+		// Emit assistant content before tool calls if present
+		if resp.Content != "" {
+			emitEvent(ctx, ChatEvent{Type: "content", Data: map[string]any{"content": resp.Content}})
+		}
+
+		// Emit tool_call events
+		for _, tc := range resp.ToolCalls {
+			emitEvent(ctx, ChatEvent{Type: "tool_call", Data: map[string]any{
+				"id":        tc.ID,
+				"name":      tc.Function.Name,
+				"arguments": tc.Function.Arguments,
+			}})
 		}
 
 		assistantMsg := provider.Message{
@@ -426,6 +516,12 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 			}
 			sess.Append(toolMsg)
 			messages = append(messages, toolMsg)
+
+			emitEvent(ctx, ChatEvent{Type: "tool_result", Data: map[string]any{
+				"id":     tc.ID,
+				"name":   tc.Function.Name,
+				"result": result,
+			}})
 		}
 		if loopDetected {
 			break
@@ -498,14 +594,12 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 	systemPrompt := a.ctxBuilder.BuildSystemPrompt()
 	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: AfterSystemPrompt})
 
-	runtimeCtx := a.ctxBuilder.BuildRuntimeContext(msg.Channel, msg.ChatID)
-	userContent := runtimeCtx + "\n\n" + msg.Text
-
-	userMsg := provider.Message{Role: "user", Content: userContent}
+	// Store raw user message
+	userMsg := provider.Message{Role: "user", Content: msg.Text}
 	if msg.PhotoURL != "" {
 		userMsg.Content = ""
 		userMsg.ContentParts = []provider.ContentPart{
-			{Type: "text", Text: userContent},
+			{Type: "text", Text: msg.Text},
 			{Type: "image_url", ImageURL: &provider.ImageURL{URL: msg.PhotoURL, Detail: "auto"}},
 		}
 	}

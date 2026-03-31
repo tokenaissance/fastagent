@@ -39,6 +39,10 @@ func (a *Agent) handleSlashCommand(msg bus.InboundMessage) slashResult {
 		}
 
 	case "/new", "/reset":
+		if msg.Channel == "web" {
+			// For web channel, don't delete the session file — frontend handles new session creation
+			return slashResult{handled: true, reply: "__NEW_SESSION__"}
+		}
 		sess := a.sessions.Get(msg.Channel, msg.ChatID)
 		sess.Clear()
 		return slashResult{handled: true, reply: "🔄 Session cleared. Starting fresh."}
