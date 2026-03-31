@@ -160,14 +160,6 @@ func New(cfg *config.Config) (*Gateway, error) {
 		slog.Info("web search registered", "provider", cfg.WebSearch.Provider)
 	}
 
-	// Register mem0 memory hooks for all agents if configured
-	if cfg.Mem0.Enabled {
-		for _, ag := range agentMgr.All() {
-			ag.RegisterMem0Hook(cfg.Mem0)
-		}
-		slog.Info("mem0 memory registered", "url", cfg.Mem0.URL)
-	}
-
 	// Register sub-agent spawner for all agents
 	spawner := &gatewaySubAgentSpawner{agents: agentMgr}
 	for _, ag := range agentMgr.All() {
@@ -374,6 +366,15 @@ func (g *Gateway) Run() error {
 			for _, ag := range g.agents.All() {
 				if err := plugin.RegisterPluginTools(ctx, g.pluginMgr, inst.Manifest.ID, ag.ToolRegistry()); err != nil {
 					slog.Error("register plugin tools failed", "plugin", inst.Manifest.ID, "agent", ag.Name(), "error", err)
+				}
+			}
+		}
+
+		// Register hook plugins with all agents
+		for _, inst := range g.pluginMgr.HookPlugins() {
+			for _, ag := range g.agents.All() {
+				if err := plugin.RegisterPluginHooks(ctx, g.pluginMgr, inst.Manifest.ID, ag.HookRegistry(), ag.Name()); err != nil {
+					slog.Error("register plugin hooks failed", "plugin", inst.Manifest.ID, "agent", ag.Name(), "error", err)
 				}
 			}
 		}

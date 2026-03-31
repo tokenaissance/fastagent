@@ -247,6 +247,11 @@ func (a *Agent) ToolRegistry() *tools.Registry {
 	return a.registry
 }
 
+// HookRegistry returns the agent's hook registry for external hook registration.
+func (a *Agent) HookRegistry() *HookRegistry {
+	return a.hooks
+}
+
 // RegisterWebSearchTool registers the web_search tool with the given API key.
 func (a *Agent) RegisterWebSearchTool(apiKey string) {
 	tools.RegisterWebSearch(a.registry, apiKey)
