@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/fastclaw-ai/fastclaw/internal/agent"
 	"github.com/fastclaw-ai/fastclaw/internal/api"
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 	"github.com/fastclaw-ai/fastclaw/internal/taskqueue"
@@ -18,7 +19,10 @@ import (
 // AgentHandle is a minimal interface for interacting with an agent from the web UI.
 type AgentHandle interface {
 	Name() string
-	HandleWebChat(ctx context.Context, text string) string
+	HandleWebChat(ctx context.Context, sessionId, text string) string
+	HandleWebChatStream(ctx context.Context, sessionId, text string, events chan<- agent.ChatEvent) string
+	WebChatHistory(sessionId string) []map[string]any
+	WebChatSessions() []map[string]string
 }
 
 // AgentProvider gives the server access to the running agents.
@@ -82,6 +86,9 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("POST /api/test-provider", s.handleTestProvider)
 	mux.HandleFunc("POST /api/save-config", s.handleSaveConfig)
 	mux.HandleFunc("POST /api/chat", s.handleChat)
+	mux.HandleFunc("POST /api/chat/stream", s.handleChatStream)
+	mux.HandleFunc("GET /api/chat/history", s.handleChatHistory)
+	mux.HandleFunc("GET /api/chat/sessions", s.handleChatSessions)
 
 	// Agent management
 	mux.HandleFunc("GET /api/agents", s.handleListAgents)

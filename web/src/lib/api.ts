@@ -73,8 +73,33 @@ export interface CronJobInfo {
   nextRun?: string;
 }
 
+export interface ModelCost {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+}
+
+export interface ModelEntry {
+  id: string;
+  name: string;
+  reasoning: boolean;
+  input: string[];
+  cost: ModelCost;
+  contextWindow: number;
+  maxTokens: number;
+}
+
+export interface ProviderData {
+  apiKey: string;
+  apiBase: string;
+  apiType?: string;
+  authType?: string;
+  models?: ModelEntry[];
+}
+
 export interface ConfigResponse {
-  providers: Record<string, { apiKey: string; apiBase: string }>;
+  providers: Record<string, ProviderData>;
   agents: {
     defaults: {
       model: string;
@@ -97,7 +122,7 @@ export async function getStatus(): Promise<StatusResponse> {
 }
 
 // Provider
-export async function testProvider(config: { apiBase: string; apiKey: string; model: string }) {
+export async function testProvider(config: { apiBase: string; apiKey: string; model: string; apiType?: string; authType?: string }) {
   const res = await fetch("/api/test-provider", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -131,13 +156,71 @@ export async function updateConfig(config: Record<string, unknown>) {
 }
 
 // Chat
-export async function sendChat(agentId: string, message: string): Promise<{ response: string }> {
+export interface ChatHistoryMessage {
+  role: "user" | "assistant" | "tool";
+  content?: string;
+  toolCalls?: { id: string; name: string; arguments: string }[];
+  name?: string;
+  toolCallId?: string;
+}
+
+export async function getChatHistory(agentId: string, sessionId: string): Promise<ChatHistoryMessage[]> {
+  const res = await fetch(`/api/chat/history?agentId=${encodeURIComponent(agentId)}&sessionId=${encodeURIComponent(sessionId)}`);
+  return res.json();
+}
+
+export async function getChatSessions(agentId: string): Promise<{ id: string; preview: string }[]> {
+  const res = await fetch(`/api/chat/sessions?agentId=${encodeURIComponent(agentId)}`);
+  return res.json();
+}
+
+export async function sendChat(agentId: string, sessionId: string, message: string): Promise<{ response: string }> {
   const res = await fetch("/api/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ agentId, message }),
+    body: JSON.stringify({ agentId, sessionId, message }),
   });
   return res.json();
+}
+
+export interface ChatStreamEvent {
+  type: "content" | "tool_call" | "tool_result" | "done";
+  data?: Record<string, string>;
+}
+
+export async function sendChatStream(
+  agentId: string,
+  sessionId: string,
+  message: string,
+  onEvent: (evt: ChatStreamEvent) => void,
+): Promise<void> {
+  const res = await fetch("/api/chat/stream", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ agentId, sessionId, message }),
+  });
+  if (!res.ok || !res.body) throw new Error("stream failed");
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || "";
+
+    for (const line of lines) {
+      if (!line.startsWith("data: ")) continue;
+      try {
+        const evt = JSON.parse(line.slice(6)) as ChatStreamEvent;
+        onEvent(evt);
+      } catch { /* skip */ }
+    }
+  }
 }
 
 // Agents

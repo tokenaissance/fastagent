@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -44,22 +45,31 @@ type Gateway struct {
 func New(cfg *config.Config) (*Gateway, error) {
 	mb := bus.New()
 
-	// Create LLM provider — try known keys in order, fall back to first available
+	// Create LLM provider — resolve from default model's provider prefix,
+	// then try known keys, fall back to first available.
 	var providerCfg config.ProviderConfig
-	for _, key := range []string{"default", "openai", "openrouter"} {
-		if p, ok := cfg.Providers[key]; ok {
+	defaultModel := cfg.Agents.Defaults.Model
+	if parts := strings.SplitN(defaultModel, "/", 2); len(parts) == 2 {
+		if p, ok := cfg.Providers[parts[0]]; ok {
 			providerCfg = p
-			break
 		}
 	}
 	if providerCfg.APIKey == "" {
-		// Use the first provider defined
+		for _, key := range []string{"default", "openai", "openrouter"} {
+			if p, ok := cfg.Providers[key]; ok {
+				providerCfg = p
+				break
+			}
+		}
+	}
+	if providerCfg.APIKey == "" {
 		for _, p := range cfg.Providers {
 			providerCfg = p
 			break
 		}
 	}
-	llm := provider.NewOpenAI(providerCfg.APIKey, providerCfg.APIBase)
+	slog.Info("provider config resolved", "apiBase", providerCfg.APIBase, "apiType", providerCfg.APIType, "defaultModel", defaultModel)
+	llm := provider.NewProvider(providerCfg.APIKey, providerCfg.APIBase, providerCfg.APIType)
 
 	// Resolve agent configs
 	resolved := config.ResolveAgents(cfg)

@@ -89,9 +89,9 @@ func (m *Mem0HookState) BeforeModelCallHook() HookFunc {
 		}
 		userText := lastMsg.Content
 
-		// Derive user_id from chat context in the runtime context line
-		userID := extractUserID(hc.Messages)
-		if userID == "" {
+		// Use chat ID as user identifier for memory isolation
+		userID := hc.ChatID
+		if userID == "" || userID == "web-ui" {
 			return
 		}
 
@@ -155,8 +155,8 @@ func (m *Mem0HookState) AfterModelCallHook() HookFunc {
 			return
 		}
 
-		userID := extractUserID(hc.Messages)
-		if userID == "" {
+		userID := hc.ChatID
+		if userID == "" || userID == "web-ui" {
 			return
 		}
 
@@ -242,22 +242,3 @@ func (m *Mem0HookState) storeMemory(ctx context.Context, userID, userText, assis
 	return nil
 }
 
-// extractUserID derives a user identifier from the messages.
-// It looks for the "Chat ID:" line in the runtime context message.
-func extractUserID(messages []provider.Message) string {
-	for _, msg := range messages {
-		if msg.Role != "user" {
-			continue
-		}
-		for _, line := range strings.Split(msg.Content, "\n") {
-			line = strings.TrimSpace(line)
-			if strings.HasPrefix(line, "Chat ID:") {
-				chatID := strings.TrimSpace(strings.TrimPrefix(line, "Chat ID:"))
-				if chatID != "" && chatID != "web-ui" {
-					return chatID
-				}
-			}
-		}
-	}
-	return ""
-}

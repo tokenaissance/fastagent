@@ -1,6 +1,9 @@
 package provider
 
-import "context"
+import (
+	"context"
+	"strings"
+)
 
 // Message represents a chat message.
 type Message struct {
@@ -100,4 +103,22 @@ func (r *StreamReader) SetErr(err error) {
 type Provider interface {
 	Chat(ctx context.Context, messages []Message, tools []Tool, model string, maxTokens int, temperature float64) (*Response, error)
 	ChatStream(ctx context.Context, messages []Message, tools []Tool, model string, maxTokens int, temperature float64) (*StreamReader, error)
+}
+
+// StripProviderPrefix removes the "provider/" prefix from a model string.
+// e.g. "minimax-coding-plan/MiniMax-M2.7" -> "MiniMax-M2.7"
+func StripProviderPrefix(model string) string {
+	if idx := strings.Index(model, "/"); idx >= 0 {
+		return model[idx+1:]
+	}
+	return model
+}
+
+// NewProvider creates a Provider based on apiType.
+// "anthropic-messages" creates an Anthropic provider, anything else creates OpenAI-compatible.
+func NewProvider(apiKey, apiBase, apiType string) Provider {
+	if apiType == "anthropic-messages" {
+		return NewAnthropic(apiKey, apiBase)
+	}
+	return NewOpenAI(apiKey, apiBase)
 }

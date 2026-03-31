@@ -99,7 +99,7 @@ type sseResponse struct {
 
 func (p *OpenAIProvider) buildRequest(ctx context.Context, messages []Message, tools []Tool, model string, maxTokens int, temperature float64, stream bool) (*http.Request, error) {
 	req := chatRequest{
-		Model:       model,
+		Model:       StripProviderPrefix(model),
 		Messages:    toAPIMessages(messages),
 		MaxTokens:   maxTokens,
 		Temperature: temperature,
@@ -114,7 +114,9 @@ func (p *OpenAIProvider) buildRequest(ctx context.Context, messages []Message, t
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.apiBase+"/chat/completions", bytes.NewReader(body))
+	url := p.apiBase + "/chat/completions"
+	slog.Info("openai request", "url", url, "model", req.Model)
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}

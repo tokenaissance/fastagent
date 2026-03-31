@@ -11,14 +11,24 @@ import (
 // ToolFunc is a function that executes a tool with JSON arguments and returns a result string.
 type ToolFunc func(ctx context.Context, args json.RawMessage) (string, error)
 
+// ToolSource indicates where a tool was registered from.
+type ToolSource int
+
+const (
+	SourceBuiltin ToolSource = iota // built-in tool
+	SourceMCP                       // MCP server tool
+	SourcePlugin                    // plugin-provided tool
+)
+
 // Registry holds all registered tools.
 type Registry struct {
 	tools map[string]registeredTool
 }
 
 type registeredTool struct {
-	def provider.Tool
-	fn  ToolFunc
+	def    provider.Tool
+	fn     ToolFunc
+	source ToolSource
 }
 
 // NewRegistry creates a new tool registry with built-in tools.
@@ -30,8 +40,14 @@ func NewRegistry(workspace string) *Registry {
 	return r
 }
 
-// Register adds a tool to the registry.
+// Register adds a tool to the registry (as a built-in tool).
 func (r *Registry) Register(name, description string, parameters interface{}, fn ToolFunc) {
+	r.RegisterFrom(name, description, parameters, fn, SourceBuiltin)
+}
+
+// RegisterFrom adds a tool to the registry with an explicit source.
+// Plugin-sourced tools can override built-in tools with the same name.
+func (r *Registry) RegisterFrom(name, description string, parameters interface{}, fn ToolFunc, source ToolSource) {
 	r.tools[name] = registeredTool{
 		def: provider.Tool{
 			Type: "function",
@@ -41,8 +57,15 @@ func (r *Registry) Register(name, description string, parameters interface{}, fn
 				Parameters:  parameters,
 			},
 		},
-		fn: fn,
+		fn:     fn,
+		source: source,
 	}
+}
+
+// HasBuiltin returns true if a built-in tool with the given name exists.
+func (r *Registry) HasBuiltin(name string) bool {
+	t, ok := r.tools[name]
+	return ok && t.source == SourceBuiltin
 }
 
 // Definitions returns all tool definitions for the LLM.
