@@ -74,8 +74,8 @@ func New(cfg *config.Config) (*Gateway, error) {
 	// Resolve agent configs
 	resolved := config.ResolveAgents(cfg)
 
-	// Create agent manager (with optional mem0 integration)
-	agentMgr, err := agent.NewManagerWithMem0(resolved, llm, mb, cfg.Mem0)
+	// Create agent manager
+	agentMgr, err := agent.NewManager(resolved, llm, mb)
 	if err != nil {
 		return nil, err
 	}
@@ -158,6 +158,14 @@ func New(cfg *config.Config) (*Gateway, error) {
 			ag.RegisterWebSearchTool(cfg.WebSearch.APIKey)
 		}
 		slog.Info("web search registered", "provider", cfg.WebSearch.Provider)
+	}
+
+	// Register mem0 memory hooks for all agents if configured
+	if cfg.Mem0.Enabled {
+		for _, ag := range agentMgr.All() {
+			ag.RegisterMem0Hook(cfg.Mem0)
+		}
+		slog.Info("mem0 memory registered", "url", cfg.Mem0.URL)
 	}
 
 	// Register sub-agent spawner for all agents

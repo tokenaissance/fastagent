@@ -16,11 +16,6 @@ type Manager struct {
 
 // NewManager creates agents from resolved configs.
 func NewManager(resolved []config.ResolvedAgent, prov provider.Provider, mb *bus.MessageBus) (*Manager, error) {
-	return NewManagerWithMem0(resolved, prov, mb, config.Mem0Cfg{})
-}
-
-// NewManagerWithMem0 creates agents with optional mem0 memory integration.
-func NewManagerWithMem0(resolved []config.ResolvedAgent, prov provider.Provider, mb *bus.MessageBus, mem0Cfg config.Mem0Cfg) (*Manager, error) {
 	m := &Manager{
 		agents: make(map[string]*Agent),
 	}
@@ -32,12 +27,6 @@ func NewManagerWithMem0(resolved []config.ResolvedAgent, prov provider.Provider,
 
 	for _, rc := range resolved {
 		ag := NewAgent(rc, prov, mb, homeDir)
-
-		// Register mem0 hooks if enabled
-		if mem0Cfg.Enabled {
-			ag.RegisterMem0Hook(mem0Cfg)
-		}
-
 		m.agents[rc.ID] = ag
 
 		slog.Info("loaded agent",

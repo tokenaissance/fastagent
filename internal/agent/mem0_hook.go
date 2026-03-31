@@ -61,6 +61,18 @@ func NewMem0HookState(cfg config.Mem0Cfg) *Mem0HookState {
 	}
 }
 
+// RegisterMem0Hook registers the mem0 before/after model call hooks for
+// long-term memory search (sync) and storage (async).
+func (a *Agent) RegisterMem0Hook(cfg config.Mem0Cfg) {
+	if !cfg.Enabled {
+		return
+	}
+	state := NewMem0HookState(cfg)
+	a.hooks.Register(BeforeModelCall, state.BeforeModelCallHook())
+	a.hooks.Register(AfterModelCall, state.AfterModelCallHook())
+	slog.Info("mem0 hook registered", "agent", a.name, "url", cfg.URL)
+}
+
 // BeforeModelCallHook searches mem0 for relevant memories and injects them
 // into the message list as a system message before the first model call.
 func (m *Mem0HookState) BeforeModelCallHook() HookFunc {
