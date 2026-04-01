@@ -83,7 +83,7 @@ func (s *Server) HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Resolve agent from header
-	agentID := r.Header.Get("x-openclaw-agent-id")
+	agentID := r.Header.Get("x-fastclaw-agent-id")
 	ag := s.resolveAgent(agentID)
 	if ag == nil {
 		writeJSON(w, http.StatusNotFound, map[string]any{
@@ -93,7 +93,7 @@ func (s *Server) HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Build session key from header
-	sessionKey := r.Header.Get("x-openclaw-session-key")
+	sessionKey := r.Header.Get("x-fastclaw-session-key")
 	if sessionKey == "" {
 		sessionKey = "api-" + fmt.Sprintf("%d", time.Now().UnixNano())
 	}

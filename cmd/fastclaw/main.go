@@ -120,8 +120,8 @@ func runGateway(port int) error {
 		"chatCompletions", gwCfg.HTTP.Endpoints.ChatCompletions.Enabled,
 	)
 
-	// Write openclaw.json for ChatClaw auto-detect
-	writeOpenClawConfig(port, gatewayToken)
+	// Write fastclaw.gateway.json for ChatClaw auto-detect
+	writeFastClawGatewayConfig(port, gatewayToken)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -159,8 +159,8 @@ func (a *agentProviderAdapter) AgentByID(id string) setup.AgentHandle {
 	return ag
 }
 
-// writeOpenClawConfig writes ~/.openclaw/openclaw.json for ChatClaw auto-detect.
-func writeOpenClawConfig(port int, token string) {
+// writeFastClawGatewayConfig writes ~/.fastclaw/fastclaw.gateway.json for ChatClaw auto-detect.
+func writeFastClawGatewayConfig(port int, token string) {
 	if token == "" {
 		return
 	}
@@ -168,7 +168,7 @@ func writeOpenClawConfig(port int, token string) {
 	if err != nil {
 		return
 	}
-	dir := filepath.Join(home, ".openclaw")
+	dir := filepath.Join(home, ".fastclaw")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return
 	}
@@ -182,10 +182,10 @@ func writeOpenClawConfig(port int, token string) {
 		},
 	}
 	data, _ := json.MarshalIndent(cfg, "", "  ")
-	if err := os.WriteFile(filepath.Join(dir, "openclaw.json"), data, 0o644); err != nil {
-		slog.Warn("failed to write openclaw.json", "error", err)
+	if err := os.WriteFile(filepath.Join(dir, "fastclaw.gateway.json"), data, 0o644); err != nil {
+		slog.Warn("failed to write fastclaw.gateway.json", "error", err)
 	} else {
-		slog.Info("wrote openclaw.json for ChatClaw auto-detect")
+		slog.Info("wrote fastclaw.gateway.json for ChatClaw auto-detect")
 	}
 }
 
