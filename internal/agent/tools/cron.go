@@ -93,7 +93,7 @@ func makeCreateCronJob(st store.Store, userID, agentID, channel, chatID string) 
 		now := time.Now()
 		job := &store.CronJobRecord{
 			ID:        id,
-			UserID:    userID,
+			
 			AgentID:   agentID,
 			Name:      args.Name,
 			Type:      jobType,
@@ -107,7 +107,7 @@ func makeCreateCronJob(st store.Store, userID, agentID, channel, chatID string) 
 			CreatedAt: now,
 		}
 
-		if err := st.SaveCronJob(ctx, userID, job); err != nil {
+		if err := st.SaveCronJob(ctx, job); err != nil {
 			return "", fmt.Errorf("save cron job: %w", err)
 		}
 
@@ -117,7 +117,7 @@ func makeCreateCronJob(st store.Store, userID, agentID, channel, chatID string) 
 
 func makeListCronJobs(st store.Store, userID, agentID string) ToolFunc {
 	return func(ctx context.Context, rawArgs json.RawMessage) (string, error) {
-		jobs, err := st.ListCronJobs(ctx, userID)
+		jobs, err := st.ListCronJobs(ctx)
 		if err != nil {
 			return "", fmt.Errorf("list cron jobs: %w", err)
 		}
@@ -147,7 +147,7 @@ func makeDeleteCronJob(st store.Store, userID string) ToolFunc {
 		if args.ID == "" {
 			return "", fmt.Errorf("id is required")
 		}
-		if err := st.DeleteCronJob(ctx, userID, args.ID); err != nil {
+		if err := st.DeleteCronJob(ctx, args.ID); err != nil {
 			return "", fmt.Errorf("delete cron job: %w", err)
 		}
 		return fmt.Sprintf("Cron job %s deleted.", args.ID), nil

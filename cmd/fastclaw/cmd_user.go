@@ -6,74 +6,55 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/fastclaw-ai/fastclaw/internal/config"
 	"github.com/fastclaw-ai/fastclaw/internal/users"
 )
 
-// userCmd manages the cloud-mode user registry.
+// userCmd manages API keys.
 func userCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "user",
-		Short: "Manage users for cloud/multi-user mode",
-		Long: `Manage the user registry at ~/.fastclaw/users.json.
-
-In local mode FastClaw runs as a single user ("local") and the registry is
-unused. In cloud mode (gateway.mode = "cloud"), the registry maps bearer
-tokens to user IDs so the HTTP API routes each request to the right user's
-agents. Each user gets their own workspace at ~/.fastclaw/users/{id}/.`,
+		Use:     "apikey",
+		Aliases: []string{"user"},
+		Short:   "Manage API keys for accessing FastClaw agents",
+		Long:    `Manage API keys stored in ~/.fastclaw/apikeys.json. API keys grant access to the FastClaw HTTP API (chat, agents, config).`,
 	}
-	cmd.AddCommand(userAddCmd())
-	cmd.AddCommand(userListCmd())
-	cmd.AddCommand(userRemoveCmd())
-	cmd.AddCommand(userTokenCmd())
+	cmd.AddCommand(apikeyAddCmd())
+	cmd.AddCommand(apikeyListCmd())
+	cmd.AddCommand(apikeyRemoveCmd())
+	cmd.AddCommand(apikeyRotateCmd())
 	return cmd
 }
 
-func userAddCmd() *cobra.Command {
+func apikeyAddCmd() *cobra.Command {
 	var name string
 	cmd := &cobra.Command{
-		Use:   "add <id>",
-		Short: "Create a new user and issue an access token",
+		Use:   "add [id]",
+		Short: "Create a new API key",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			id := args[0]
-			if id == config.DefaultUserID {
-				return fmt.Errorf("%q is reserved for local mode", id)
-			}
-
 			reg, err := users.Load()
 			if err != nil {
-				return fmt.Errorf("load registry: %w", err)
+				return err
 			}
-
-			u, token, err := reg.Add(id, name)
+			ak, key, err := reg.Add(args[0], name)
 			if err != nil {
 				return err
 			}
 			if err := reg.Save(); err != nil {
-				return fmt.Errorf("save registry: %w", err)
+				return err
 			}
-
-			if err := users.ProvisionWorkspace(id); err != nil {
-				return fmt.Errorf("provision workspace: %w", err)
-			}
-
-			fmt.Printf("Created user %q (name=%q)\n", u.ID, u.Name)
-			fmt.Printf("Workspace: ~/.fastclaw/users/%s/\n", u.ID)
-			fmt.Printf("Token: %s\n", token)
-			fmt.Println()
-			fmt.Println("Store this token — it won't be shown again.")
+			fmt.Fprintf(os.Stderr, "API key created: %s\n", ak.ID)
+			fmt.Println(key)
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&name, "name", "", "Display name for the user")
+	cmd.Flags().StringVar(&name, "name", "", "display name for this key")
 	return cmd
 }
 
-func userListCmd() *cobra.Command {
+func apikeyListCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "list",
-		Short: "List all users in the registry",
+		Short: "List all API keys",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			reg, err := users.Load()
 			if err != nil {
@@ -81,82 +62,63 @@ func userListCmd() *cobra.Command {
 			}
 			list := reg.List()
 			if len(list) == 0 {
-				fmt.Println("No users registered.")
-				fmt.Println("Local mode uses the implicit \"local\" user; add cloud users with 'fastclaw user add'.")
+				fmt.Println("No API keys configured.")
 				return nil
 			}
-			for _, u := range list {
-				name := u.Name
+			for _, ak := range list {
+				masked := ak.Key
+				if len(masked) > 10 {
+					masked = masked[:6] + "****" + masked[len(masked)-4:]
+				}
+				name := ak.Name
 				if name == "" {
-					name = "-"
+					name = ak.ID
 				}
-				fmt.Printf("  %-20s name=%-20s tokens=%d  created=%s\n",
-					u.ID, name, len(u.Tokens), u.CreatedAt.Format("2006-01-02"))
+				fmt.Printf("%-20s %-20s %s\n", ak.ID, name, masked)
 			}
 			return nil
 		},
 	}
 }
 
-func userRemoveCmd() *cobra.Command {
-	var keepWorkspace bool
-	cmd := &cobra.Command{
-		Use:   "remove <id>",
-		Short: "Remove a user from the registry",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			id := args[0]
-			reg, err := users.Load()
-			if err != nil {
-				return err
-			}
-			if err := reg.Remove(id); err != nil {
-				return err
-			}
-			if err := reg.Save(); err != nil {
-				return err
-			}
-			fmt.Printf("Removed user %q from registry.\n", id)
-
-			if !keepWorkspace {
-				userDir, err := config.UserDir(id)
-				if err == nil {
-					if _, err := os.Stat(userDir); err == nil {
-						fmt.Printf("Workspace at %s was left in place.\n", userDir)
-						fmt.Println("Delete it manually if you want to reclaim the data.")
-					}
-				}
-			}
-			return nil
-		},
-	}
-	cmd.Flags().BoolVar(&keepWorkspace, "keep-workspace", true, "(no-op) workspaces are always kept; delete manually")
-	return cmd
-}
-
-func userTokenCmd() *cobra.Command {
+func apikeyRemoveCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "token <id>",
-		Short: "Issue an additional access token for a user",
+		Use:   "remove [id]",
+		Short: "Remove an API key",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			id := args[0]
 			reg, err := users.Load()
 			if err != nil {
 				return err
 			}
-			token, err := reg.IssueToken(id)
+			if err := reg.Remove(args[0]); err != nil {
+				return err
+			}
+			return reg.Save()
+		},
+	}
+}
+
+func apikeyRotateCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:     "rotate [id]",
+		Aliases: []string{"token"},
+		Short:   "Rotate (regenerate) an API key",
+		Args:    cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			reg, err := users.Load()
+			if err != nil {
+				return err
+			}
+			key, err := reg.IssueToken(args[0])
 			if err != nil {
 				return err
 			}
 			if err := reg.Save(); err != nil {
 				return err
 			}
-			fmt.Println(token)
+			fmt.Println(key)
 			return nil
 		},
 	}
 }
-
-// provisionUserWorkspace is now in internal/users/provision.go as
-// users.ProvisionWorkspace, shared between CLI and Admin API.

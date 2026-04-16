@@ -2,17 +2,28 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 )
 
 // Message represents a chat message.
+// When storing in session, keep ALL fields exactly as returned by the LLM
+// to ensure prompt cache hits on subsequent turns.
 type Message struct {
 	Role         string        `json:"role"`
 	Content      string        `json:"content,omitempty"`
-	ContentParts []ContentPart `json:"content_parts,omitempty"`
+	ContentParts []ContentPart `json:"content_parts,omitempty"` // multimodal input (user messages)
 	ToolCalls    []ToolCall    `json:"tool_calls,omitempty"`
 	ToolCallID   string        `json:"tool_call_id,omitempty"`
 	Name         string        `json:"name,omitempty"`
+	Thinking     string        `json:"thinking,omitempty"`      // model's reasoning (for memory extraction)
+	Timestamp    int64         `json:"timestamp,omitempty"`     // unix ms, for memory timeline
+
+	// RawAssistant preserves the exact assistant message JSON as returned by the API.
+	// When sending history back to the LLM, use this instead of re-serializing from
+	// parsed fields — guarantees prompt cache hits by maintaining byte-identical prefix.
+	// Only set on role="assistant" messages.
+	RawAssistant json.RawMessage `json:"_raw,omitempty"`
 }
 
 // ContentPart represents a part of multimodal content.
@@ -56,8 +67,10 @@ type ToolFunction struct {
 
 // Response is the result of a Chat call.
 type Response struct {
-	Content   string
-	ToolCalls []ToolCall
+	Content      string
+	ToolCalls    []ToolCall
+	Thinking     string          // model's reasoning/thinking content (extracted for memory)
+	RawAssistant json.RawMessage // exact API response message JSON (for cache-safe replay)
 }
 
 // HasToolCalls returns true if the response contains tool calls.

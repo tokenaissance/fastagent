@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -28,11 +29,15 @@ type GroupContext struct {
 
 // ContextBuilder assembles the system prompt and runtime context.
 type ContextBuilder struct {
-	workspace     string
-	memory        *Memory
-	skillsSummary string
-	groupCtx      *GroupContext
-	thinking      string // off, low, medium, high, adaptive
+	workspace      string
+	memory         *Memory
+	skillsSummary  string
+	groupCtx       *GroupContext
+	thinking       string // off, low, medium, high, adaptive
+	sandboxEnabled bool
+	sandboxBackend string
+	store          MemoryStore
+	agentID        string
 }
 
 // NewContextBuilder creates a new context builder.
@@ -54,7 +59,64 @@ OS: %s/%s
 Working Directory: %s`, runtime.GOOS, runtime.GOARCH, cb.workspace)
 	parts = append(parts, identity)
 
-	// 2. Bootstrap files
+	// 2. Sandbox capabilities (auto-injected when sandbox is enabled)
+	if cb.sandboxEnabled {
+		sandboxPrompt := `# Code Execution Environment
+You have access to a sandbox environment for executing code. Key rules:
+- When the user asks you to write a script, calculate something, or process data, **always execute it immediately** using the exec tool. Do NOT just show code.
+- Python 3 is available. Use it for calculations, data processing, web scraping, etc.
+- You can write files, read files, and list directories in the sandbox.
+- Only show code without executing when the user explicitly asks to "just show" or "just write" the code.
+- Always show the execution output/result to the user.
+
+## Delivering Files to the User
+When the user asks you to create a file (document, script, data, etc.):
+- For **text files** (md, txt, csv, json, py, etc.): output the full content directly in your reply using a code block. The user can copy it.
+- For **binary files** (images, pdf, zip, etc.): output as a base64 download link:
+  exec: python3 -c "import base64; data=open('/tmp/file.pdf','rb').read(); print(f'[Download file.pdf](data:application/pdf;base64,{base64.b64encode(data).decode()})')"
+- NEVER just say "file saved" without showing content or providing a download link.
+
+## Important: Multi-line Scripts
+For multi-line code, ALWAYS use write_file first, then exec:
+  1. write_file(path="/tmp/script.py", content="...your code...")
+  2. exec(command="python3 /tmp/script.py")
+NEVER put multi-line Python in a single exec command — it will fail.
+
+## Package Installation
+The sandbox may not have all packages. Install before use:
+  exec(command="pip install -q pillow matplotlib requests")
+
+## Visual/Graphics Tasks
+The sandbox is a **headless** environment (no display). For visual tasks:
+- **Drawing/charts/plots**: Use matplotlib with Agg backend.
+- **Image generation/manipulation**: Use PIL/Pillow. Install first: pip install -q pillow
+- **NEVER use turtle, tkinter, pygame or any GUI library** — they will fail.
+- After generating an image, output as inline base64 so the user sees it:
+
+Example (write to file then exec):
+  write_file(path="/tmp/draw.py", content="""
+import subprocess
+subprocess.check_call(["pip", "install", "-q", "pillow"])
+from PIL import Image, ImageDraw
+import base64
+img = Image.new('RGB', (400, 300), 'white')
+draw = ImageDraw.Draw(img)
+draw.ellipse([100, 50, 300, 250], fill='pink', outline='black')
+img.save('/tmp/output.png')
+with open('/tmp/output.png', 'rb') as f:
+    b64 = base64.b64encode(f.read()).decode()
+    print(f'![image](data:image/png;base64,{b64})')
+""")
+  exec(command="python3 /tmp/draw.py")`
+		if cb.sandboxBackend == "e2b" {
+			sandboxPrompt += "\n- The sandbox is a cloud-hosted E2B environment with network access."
+		} else {
+			sandboxPrompt += "\n- The sandbox is a Docker container."
+		}
+		parts = append(parts, sandboxPrompt)
+	}
+
+	// 3. Bootstrap files
 	for _, name := range bootstrapFiles {
 		content := cb.loadFile(name)
 		if content != "" {
@@ -62,7 +124,7 @@ Working Directory: %s`, runtime.GOOS, runtime.GOARCH, cb.workspace)
 		}
 	}
 
-	// 3. Skills
+	// 4. Skills
 	if cb.skillsSummary != "" {
 		parts = append(parts, fmt.Sprintf("# Skills\n%s", cb.skillsSummary))
 	}
@@ -152,6 +214,13 @@ Structure your reasoning before acting. Think before you respond.`, depth)
 }
 
 func (cb *ContextBuilder) loadFile(name string) string {
+	// Try store first (DB), fall back to file
+	if cb.store != nil {
+		data, err := cb.store.GetWorkspaceFile(context.Background(), cb.agentID, name)
+		if err == nil && len(data) > 0 {
+			return strings.TrimSpace(string(data))
+		}
+	}
 	path := filepath.Join(cb.workspace, name)
 	data, err := os.ReadFile(path)
 	if err != nil {

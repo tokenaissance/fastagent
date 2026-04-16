@@ -14,14 +14,26 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/provider"
 )
 
-// Memory manages the dual-layer memory system (MEMORY.md + HISTORY.md).
-type Memory struct {
-	workspace string
+// MemoryStore is an optional interface for DB-backed memory persistence.
+type MemoryStore interface {
+	GetMemory(ctx context.Context, agentID string) (string, error)
+	SaveMemory(ctx context.Context, agentID, content string) error
+	GetWorkspaceFile(ctx context.Context, agentID, filename string) ([]byte, error)
+	SaveWorkspaceFile(ctx context.Context, agentID, filename string, data []byte) error
 }
 
-// NewMemory creates a new memory manager.
+type Memory struct {
+	workspace string
+	store     MemoryStore
+	agentID   string
+}
+
 func NewMemory(workspace string) *Memory {
 	return &Memory{workspace: workspace}
+}
+
+func NewMemoryWithStore(workspace string, st MemoryStore, agentID string) *Memory {
+	return &Memory{workspace: workspace, store: st, agentID: agentID}
 }
 
 // memoryPath returns the path to MEMORY.md.
@@ -34,8 +46,14 @@ func (m *Memory) historyPath() string {
 	return filepath.Join(m.workspace, "HISTORY.md")
 }
 
-// LoadMemory reads the long-term memory file.
+// LoadMemory reads the long-term memory.
 func (m *Memory) LoadMemory() string {
+	if m.store != nil {
+		content, err := m.store.GetMemory(context.Background(), m.agentID)
+		if err == nil {
+			return content
+		}
+	}
 	data, err := os.ReadFile(m.memoryPath())
 	if err != nil {
 		return ""
@@ -43,8 +61,11 @@ func (m *Memory) LoadMemory() string {
 	return string(data)
 }
 
-// SaveMemory overwrites the long-term memory file.
+// SaveMemory overwrites the long-term memory.
 func (m *Memory) SaveMemory(content string) error {
+	if m.store != nil {
+		return m.store.SaveMemory(context.Background(), m.agentID, content)
+	}
 	os.MkdirAll(m.workspace, 0o755)
 	return os.WriteFile(m.memoryPath(), []byte(content), 0o644)
 }
@@ -169,12 +190,21 @@ func (m *Memory) SaveUserFile(content string) error {
 			)
 		}
 	}
+	if m.store != nil {
+		return m.store.SaveWorkspaceFile(context.Background(), m.agentID, "USER.md", []byte(content))
+	}
 	os.MkdirAll(m.workspace, 0o755)
 	return os.WriteFile(filepath.Join(m.workspace, "USER.md"), []byte(content), 0o644)
 }
 
 // LoadUserFile reads the USER.md file.
 func (m *Memory) LoadUserFile() string {
+	if m.store != nil {
+		data, err := m.store.GetWorkspaceFile(context.Background(), m.agentID, "USER.md")
+		if err == nil {
+			return string(data)
+		}
+	}
 	data, err := os.ReadFile(filepath.Join(m.workspace, "USER.md"))
 	if err != nil {
 		return ""

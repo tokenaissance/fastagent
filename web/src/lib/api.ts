@@ -113,6 +113,7 @@ export interface ConfigResponse {
   };
   channels: Record<string, { enabled: boolean; botToken?: string }>;
   storage: { type: string; dsn?: string };
+  sandbox?: { enabled: boolean; backend?: string; image?: string; e2bKey?: string };
   hooks: { enabled: boolean; token?: string; path?: string; port?: number };
   cronJobs?: Array<Record<string, unknown>>;
 }
@@ -137,7 +138,7 @@ export function getAuthToken(): string {
 }
 
 // Wrapper around fetch that injects Authorization header when a token is set.
-async function apiFetch(url: string, init?: RequestInit): Promise<Response> {
+export async function apiFetch(url: string, init?: RequestInit): Promise<Response> {
   const token = getAuthToken();
   const headers: Record<string, string> = {
     ...(init?.headers as Record<string, string> || {}),

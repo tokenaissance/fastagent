@@ -4,22 +4,23 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
-
-	"github.com/fastclaw-ai/fastclaw/internal/users"
 )
 
-// RegisterAdminRoutes adds /v1/admin/* endpoints to the mux. These are
-// protected by the gateway auth token (the "admin" token) and allow
-// programmatic user management in cloud mode.
+// RegisterAdminRoutes adds /v1/admin/apikeys/* endpoints to the mux.
+// Protected by the gateway admin token.
 func (s *Server) RegisterAdminRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("POST /v1/admin/users", s.adminAuth(s.handleAdminCreateUser))
-	mux.HandleFunc("GET /v1/admin/users", s.adminAuth(s.handleAdminListUsers))
-	mux.HandleFunc("DELETE /v1/admin/users/{id}", s.adminAuth(s.handleAdminDeleteUser))
-	mux.HandleFunc("POST /v1/admin/users/{id}/token", s.adminAuth(s.handleAdminIssueToken))
+	mux.HandleFunc("POST /v1/admin/apikeys", s.adminAuth(s.handleCreateAPIKey))
+	mux.HandleFunc("GET /v1/admin/apikeys", s.adminAuth(s.handleListAPIKeys))
+	mux.HandleFunc("DELETE /v1/admin/apikeys/{id}", s.adminAuth(s.handleDeleteAPIKey))
+	mux.HandleFunc("POST /v1/admin/apikeys/{id}/rotate", s.adminAuth(s.handleRotateAPIKey))
+
+	// Backward compat: old /v1/admin/users/* routes
+	mux.HandleFunc("POST /v1/admin/users", s.adminAuth(s.handleCreateAPIKey))
+	mux.HandleFunc("GET /v1/admin/users", s.adminAuth(s.handleListAPIKeys))
+	mux.HandleFunc("DELETE /v1/admin/users/{id}", s.adminAuth(s.handleDeleteAPIKey))
+	mux.HandleFunc("POST /v1/admin/users/{id}/token", s.adminAuth(s.handleRotateAPIKey))
 }
 
-// adminAuth is a middleware that requires the gateway admin token (the local
-// bearer token). Cloud-user bearer tokens are NOT accepted here.
 func (s *Server) adminAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if s.token == "" {
@@ -37,11 +38,9 @@ func (s *Server) adminAuth(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-func (s *Server) handleAdminCreateUser(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 	if s.registry == nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{
-			"error": "user management requires cloud mode (gateway.mode = \"cloud\")",
-		})
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "API key management not available"})
 		return
 	}
 	var req struct {
@@ -53,7 +52,7 @@ func (s *Server) handleAdminCreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	u, token, err := s.registry.Add(req.ID, req.Name)
+	ak, key, err := s.registry.Add(req.ID, req.Name)
 	if err != nil {
 		writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error()})
 		return
@@ -63,39 +62,30 @@ func (s *Server) handleAdminCreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Provision workspace (config + default agent) so the user can
-	// immediately start using the web UI and API.
-	if err := users.ProvisionWorkspace(req.ID); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "user created but workspace provisioning failed: " + err.Error()})
-		return
-	}
-
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"user":  u,
-		"token": token,
+		"apikey": ak,
+		"key":    key,
 	})
 }
 
-func (s *Server) handleAdminListUsers(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleListAPIKeys(w http.ResponseWriter, r *http.Request) {
 	if s.registry == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"users": []*users.User{}})
+		writeJSON(w, http.StatusOK, map[string]any{"apikeys": []any{}})
 		return
 	}
 	list := s.registry.List()
-	// Mask tokens for list endpoint.
-	for _, u := range list {
-		for i, t := range u.Tokens {
-			if len(t) > 10 {
-				u.Tokens[i] = t[:6] + "..." + t[len(t)-4:]
-			}
+	// Mask keys
+	for _, ak := range list {
+		if len(ak.Key) > 10 {
+			ak.Key = ak.Key[:6] + "****" + ak.Key[len(ak.Key)-4:]
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"users": list})
+	writeJSON(w, http.StatusOK, map[string]any{"apikeys": list})
 }
 
-func (s *Server) handleAdminDeleteUser(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleDeleteAPIKey(w http.ResponseWriter, r *http.Request) {
 	if s.registry == nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "cloud mode required"})
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "not available"})
 		return
 	}
 	id := r.PathValue("id")
@@ -103,27 +93,21 @@ func (s *Server) handleAdminDeleteUser(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": err.Error()})
 		return
 	}
-	if err := s.registry.Save(); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-		return
-	}
+	s.registry.Save()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-func (s *Server) handleAdminIssueToken(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleRotateAPIKey(w http.ResponseWriter, r *http.Request) {
 	if s.registry == nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "cloud mode required"})
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "not available"})
 		return
 	}
 	id := r.PathValue("id")
-	token, err := s.registry.IssueToken(id)
+	key, err := s.registry.IssueToken(id)
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": err.Error()})
 		return
 	}
-	if err := s.registry.Save(); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"token": token})
+	s.registry.Save()
+	writeJSON(w, http.StatusOK, map[string]any{"key": key})
 }

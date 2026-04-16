@@ -13,6 +13,7 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/agent"
 	"github.com/fastclaw-ai/fastclaw/internal/api"
 	"github.com/fastclaw-ai/fastclaw/internal/config"
+	"github.com/fastclaw-ai/fastclaw/internal/session"
 	"github.com/fastclaw-ai/fastclaw/internal/store"
 	"github.com/fastclaw-ai/fastclaw/internal/taskqueue"
 	"github.com/fastclaw-ai/fastclaw/internal/users"
@@ -24,7 +25,9 @@ type AgentHandle interface {
 	HandleWebChat(ctx context.Context, sessionId, text string) string
 	HandleWebChatStream(ctx context.Context, sessionId, text string, events chan<- agent.ChatEvent) string
 	WebChatHistory(sessionId string) []map[string]any
-	WebChatSessions() []map[string]string
+	WebChatSessions() []session.WebSession
+	DeleteWebChatSession(sessionId string) error
+	RenameWebChatSession(sessionId, title string) error
 }
 
 // AgentProvider gives the server access to the running agents.
@@ -162,6 +165,8 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("POST /api/chat/stream", ua(s.handleChatStream))
 	mux.HandleFunc("GET /api/chat/history", ua(s.handleChatHistory))
 	mux.HandleFunc("GET /api/chat/sessions", ua(s.handleChatSessions))
+	mux.HandleFunc("PUT /api/chat/sessions/{key}", ua(s.handleRenameSession))
+	mux.HandleFunc("DELETE /api/chat/sessions/{key}", ua(s.handleDeleteSession))
 
 	// Agent management
 	mux.HandleFunc("GET /api/agents", ua(s.handleListAgents))
@@ -171,6 +176,8 @@ func (s *Server) Run(ctx context.Context) error {
 
 	// Skills (global, not per-user)
 	mux.HandleFunc("GET /api/skills", s.handleListSkills)
+	mux.HandleFunc("GET /api/skills/search", ua(s.handleSearchSkills))
+	mux.HandleFunc("POST /api/skills/install", ua(s.handleInstallSkill))
 	mux.HandleFunc("DELETE /api/skills/{name}", s.handleDeleteSkill)
 
 	// Plugins (global, not per-user)
@@ -279,6 +286,21 @@ func (h spaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.Close()
 		http.ServeFileFS(w, r, h.fs, indexPath)
 		return
+	}
+
+	// Dynamic agent routes: /agents/{id}/chat/ → fall back to /agents/default/chat/
+	// The client-side JS reads the actual agent ID from the URL.
+	if strings.HasPrefix(fsPath, "agents/") {
+		parts := strings.SplitN(fsPath, "/", 3) // ["agents", "{id}", "chat/..."]
+		if len(parts) >= 3 {
+			fallbackPath := "agents/default/" + parts[2] + "/index.html"
+			f, err = h.fs.Open(fallbackPath)
+			if err == nil {
+				f.Close()
+				http.ServeFileFS(w, r, h.fs, fallbackPath)
+				return
+			}
+		}
 	}
 
 	// Try path.html

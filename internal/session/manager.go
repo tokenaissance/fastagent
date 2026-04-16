@@ -2,12 +2,14 @@ package session
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/fastclaw-ai/fastclaw/internal/provider"
 )
@@ -19,20 +21,42 @@ type Session struct {
 	LastConsolidated  int // index of last consolidated message
 	filePath          string
 	snapshot          []provider.Message // undo snapshot
+	store             SessionStore
+	agentID           string
+	sessionKey        string
 }
 
 // Manager manages sessions, keyed by "channel:chat_id".
+// SessionStore is an optional interface for database-backed session persistence.
+type SessionStore interface {
+	GetSession(ctx context.Context, agentID, sessionKey string) ([]provider.Message, error)
+	SaveSession(ctx context.Context, agentID, sessionKey string, messages []provider.Message) error
+	ListWebSessions(ctx context.Context, agentID string) ([]WebSession, error)
+	DeleteSession(ctx context.Context, agentID, sessionKey string) error
+	RenameSession(ctx context.Context, agentID, sessionKey, title string) error
+}
+
 type Manager struct {
 	mu       sync.Mutex
 	sessions map[string]*Session
 	dataDir  string
+	store    SessionStore
+	agentID  string
 }
 
-// NewManager creates a new session manager.
 func NewManager(dataDir string) *Manager {
 	return &Manager{
 		sessions: make(map[string]*Session),
 		dataDir:  dataDir,
+	}
+}
+
+func NewManagerWithStore(dataDir string, st SessionStore, agentID string) *Manager {
+	return &Manager{
+		sessions: make(map[string]*Session),
+		dataDir:  dataDir,
+		store:    st,
+		agentID:  agentID,
 	}
 }
 
@@ -51,14 +75,27 @@ func (m *Manager) Get(channel, chatID string) *Session {
 		return s
 	}
 
-	// Create new session and load from disk if exists
 	safeKey := strings.ReplaceAll(key, ":", "_")
 	filePath := filepath.Join(m.dataDir, safeKey+".jsonl")
 
 	s := &Session{
-		filePath: filePath,
+		filePath:   filePath,
+		store:      m.store,
+		
+		agentID:    m.agentID,
+		sessionKey: key,
 	}
-	s.load()
+
+	// Load from store (DB) if available, otherwise from file
+	if m.store != nil {
+		msgs, err := m.store.GetSession(context.Background(), m.agentID, key)
+		if err == nil && len(msgs) > 0 {
+			s.Messages = msgs
+		}
+	} else {
+		s.load()
+	}
+
 	m.sessions[key] = s
 	return s
 }
@@ -68,8 +105,18 @@ func (s *Session) Append(msg provider.Message) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Auto-set timestamp if not provided
+	if msg.Timestamp == 0 {
+		msg.Timestamp = time.Now().UnixMilli()
+	}
+
 	s.Messages = append(s.Messages, msg)
-	s.appendToFile(msg)
+
+	if s.store != nil {
+		s.store.SaveSession(context.Background(), s.agentID, s.sessionKey, s.Messages)
+	} else {
+		s.appendToFile(msg)
+	}
 }
 
 // GetMessages returns a copy of all messages.
@@ -106,8 +153,11 @@ func (s *Session) ReplaceMessages(msgs []provider.Message) {
 	copy(s.Messages, msgs)
 	s.LastConsolidated = 0
 
-	// Rewrite the session file
-	s.rewriteFile()
+	if s.store != nil {
+		s.store.SaveSession(context.Background(), s.agentID, s.sessionKey, s.Messages)
+	} else {
+		s.rewriteFile()
+	}
 }
 
 // Clear resets the session messages.
@@ -116,8 +166,11 @@ func (s *Session) Clear() {
 	defer s.mu.Unlock()
 	s.Messages = nil
 	s.LastConsolidated = 0
-	// Truncate the file
-	os.Remove(s.filePath)
+	if s.store != nil {
+		s.store.DeleteSession(context.Background(), s.agentID, s.sessionKey)
+	} else {
+		os.Remove(s.filePath)
+	}
 }
 
 func (s *Session) load() {
@@ -178,21 +231,41 @@ func (s *Session) appendToFile(msg provider.Message) {
 	f.Write([]byte("\n"))
 }
 
+// WebSession holds metadata for a web chat session.
+type WebSession struct {
+	ID        string `json:"id"`
+	Title     string `json:"title"`
+	Preview   string `json:"preview"`
+	CreatedAt int64  `json:"createdAt"` // unix ms
+	UpdatedAt int64  `json:"updatedAt"` // unix ms
+}
+
 // ListWebSessions scans session files for web chat sessions and returns
-// a list with id and preview (first user message).
-func (m *Manager) ListWebSessions() []map[string]string {
+// a list with id, title, preview, and timestamps.
+func (m *Manager) ListWebSessions() []WebSession {
+	if m.store != nil {
+		sessions, err := m.store.ListWebSessions(context.Background(), m.agentID)
+		if err == nil {
+			return sessions
+		}
+	}
 	pattern := filepath.Join(m.dataDir, "web_*.jsonl")
 	files, err := filepath.Glob(pattern)
 	if err != nil {
 		return nil
 	}
 
-	var sessions []map[string]string
+	var sessions []WebSession
 	for _, f := range files {
 		base := filepath.Base(f)
 		// "web_<sessionId>.jsonl" -> "<sessionId>"
 		sessionId := strings.TrimPrefix(base, "web_")
 		sessionId = strings.TrimSuffix(sessionId, ".jsonl")
+
+		info, err := os.Stat(f)
+		if err != nil {
+			continue
+		}
 
 		// Read first user message as preview
 		preview := ""
@@ -209,8 +282,8 @@ func (m *Manager) ListWebSessions() []map[string]string {
 			}
 			if json.Unmarshal(scanner.Bytes(), &msg) == nil && msg.Role == "user" && msg.Content != "" {
 				preview = msg.Content
-				if len(preview) > 50 {
-					preview = preview[:50] + "..."
+				if len(preview) > 100 {
+					preview = preview[:100] + "..."
 				}
 				break
 			}
@@ -221,12 +294,83 @@ func (m *Manager) ListWebSessions() []map[string]string {
 			continue // skip empty sessions
 		}
 
-		sessions = append(sessions, map[string]string{
-			"id":      sessionId,
-			"preview": preview,
+		// Read title from metadata file, fallback to preview
+		title := m.readSessionTitle(sessionId)
+		if title == "" {
+			title = preview
+			if len(title) > 60 {
+				title = title[:60] + "..."
+			}
+		}
+
+		sessions = append(sessions, WebSession{
+			ID:        sessionId,
+			Title:     title,
+			Preview:   preview,
+			CreatedAt: info.ModTime().UnixMilli(),
+			UpdatedAt: info.ModTime().UnixMilli(),
 		})
 	}
+
+	// Sort by updatedAt descending (newest first)
+	for i := 0; i < len(sessions); i++ {
+		for j := i + 1; j < len(sessions); j++ {
+			if sessions[j].UpdatedAt > sessions[i].UpdatedAt {
+				sessions[i], sessions[j] = sessions[j], sessions[i]
+			}
+		}
+	}
+
 	return sessions
+}
+
+// DeleteWebSession removes a web chat session file and its metadata.
+func (m *Manager) DeleteWebSession(sessionId string) error {
+	// Remove from in-memory cache
+	m.mu.Lock()
+	delete(m.sessions, "web:"+sessionId)
+	m.mu.Unlock()
+
+	if m.store != nil {
+		return m.store.DeleteSession(context.Background(), m.agentID, "web:"+sessionId)
+	}
+
+	safeId := strings.ReplaceAll(sessionId, "/", "_")
+	safeId = strings.ReplaceAll(safeId, "..", "_")
+	sessionFile := filepath.Join(m.dataDir, "web_"+safeId+".jsonl")
+	metaFile := filepath.Join(m.dataDir, "web_"+safeId+".meta.json")
+	os.Remove(metaFile)
+	return os.Remove(sessionFile)
+}
+
+// RenameWebSession sets a custom title for a web chat session.
+func (m *Manager) RenameWebSession(sessionId, title string) error {
+	if m.store != nil {
+		return m.store.RenameSession(context.Background(), m.agentID, "web:"+sessionId, title)
+	}
+
+	safeId := strings.ReplaceAll(sessionId, "/", "_")
+	safeId = strings.ReplaceAll(safeId, "..", "_")
+	metaFile := filepath.Join(m.dataDir, "web_"+safeId+".meta.json")
+	data, _ := json.Marshal(map[string]string{"title": title})
+	return os.WriteFile(metaFile, data, 0o644)
+}
+
+// readSessionTitle reads the title from a session metadata file.
+func (m *Manager) readSessionTitle(sessionId string) string {
+	safeId := strings.ReplaceAll(sessionId, "/", "_")
+	safeId = strings.ReplaceAll(safeId, "..", "_")
+
+	metaFile := filepath.Join(m.dataDir, "web_"+safeId+".meta.json")
+	data, err := os.ReadFile(metaFile)
+	if err != nil {
+		return ""
+	}
+	var meta struct {
+		Title string `json:"title"`
+	}
+	json.Unmarshal(data, &meta)
+	return meta.Title
 }
 
 // Snapshot saves the current message list as a restore point (for undo).

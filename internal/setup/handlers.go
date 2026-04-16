@@ -16,6 +16,8 @@ import (
 
 	"github.com/fastclaw-ai/fastclaw/internal/agent"
 	"github.com/fastclaw-ai/fastclaw/internal/config"
+	"github.com/fastclaw-ai/fastclaw/internal/session"
+	"github.com/fastclaw-ai/fastclaw/internal/store"
 	"github.com/fastclaw-ai/fastclaw/internal/users"
 )
 
@@ -53,12 +55,13 @@ func unwrapPathError(err error) error {
 }
 
 // saveUserConfig persists the config for the request's user.
+// Writes to file (always) and to Store (if available, for DB-backed deployments).
 func (s *Server) saveUserConfig(r *http.Request, cfg *config.Config) error {
-	userID := config.UserIDFromContext(r.Context())
-	if _, err := config.EnsureUserDir(userID); err != nil {
+	if _, err := config.EnsureUserDir(); err != nil {
 		return err
 	}
-	configPath, err := config.UserConfigPath(userID)
+	// Write to global config path (~/.fastclaw/fastclaw.json)
+	configPath, err := config.GlobalConfigPath()
 	if err != nil {
 		return err
 	}
@@ -66,12 +69,22 @@ func (s *Server) saveUserConfig(r *http.Request, cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(configPath, data, 0o644)
+	// Always write to file (bootstrap source)
+	if err := os.WriteFile(configPath, data, 0o644); err != nil {
+		return err
+	}
+	// Also save to DB store if available
+	if s.dataStore != nil {
+		var rawCfg map[string]interface{}
+		json.Unmarshal(data, &rawCfg)
+		s.dataStore.SaveConfig(r.Context(), &store.GlobalConfig{Data: rawCfg})
+	}
+	return nil
 }
 
 // userDir returns the workspace directory for the request's user.
 func userDirForRequest(r *http.Request) (string, error) {
-	return config.UserDir(config.UserIDFromContext(r.Context()))
+	return config.HomeDir()
 }
 
 // resolveAgent finds an agent for the current request's user. For the local
@@ -124,7 +137,7 @@ func (s *Server) resolveAllAgents(r *http.Request) []AgentHandle {
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
-	configPath, err := config.UserConfigPath(config.UserIDFromContext(r.Context()))
+	configPath, err := config.GlobalConfigPath()
 	if err != nil {
 		jsonResponse(w, http.StatusOK, map[string]any{
 			"configured": false,
@@ -436,9 +449,63 @@ func (s *Server) handleChatSessions(w http.ResponseWriter, r *http.Request) {
 
 	sessions := ag.WebChatSessions()
 	if sessions == nil {
-		sessions = []map[string]string{}
+		sessions = []session.WebSession{}
 	}
 	jsonResponse(w, http.StatusOK, sessions)
+}
+
+func (s *Server) handleRenameSession(w http.ResponseWriter, r *http.Request) {
+	sessionKey := r.PathValue("key")
+	if sessionKey == "" {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "session key required"})
+		return
+	}
+
+	var body struct {
+		AgentID string `json:"agentId"`
+		Title   string `json:"title"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "invalid request"})
+		return
+	}
+	if body.Title == "" {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "title required"})
+		return
+	}
+
+	ag := s.resolveAgent(r, body.AgentID)
+	if ag == nil {
+		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "agent not found"})
+		return
+	}
+
+	if err := ag.RenameWebChatSession(sessionKey, body.Title); err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
+	sessionKey := r.PathValue("key")
+	if sessionKey == "" {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "session key required"})
+		return
+	}
+
+	agentID := r.URL.Query().Get("agentId")
+	ag := s.resolveAgent(r, agentID)
+	if ag == nil {
+		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "agent not found"})
+		return
+	}
+
+	if err := ag.DeleteWebChatSession(sessionKey); err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 type saveConfigRequest struct {
@@ -454,6 +521,7 @@ type saveConfigRequest struct {
 	Port            int    `json:"port"`
 	AgentName       string `json:"agentName"`
 	Personality     string `json:"personality"`
+	GatewayToken    string `json:"gatewayToken"`
 }
 
 func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
@@ -463,51 +531,71 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Normalize agent name to slug: lowercase, spaces/underscores to hyphens
+	// Normalize agent name
 	agentID := strings.ToLower(strings.TrimSpace(req.AgentName))
+	if agentID == "" {
+		agentID = "default"
+	}
 	agentID = strings.ReplaceAll(agentID, " ", "-")
 	agentID = strings.ReplaceAll(agentID, "_", "-")
 
-	// Determine provider key
-	providerKey := req.Provider
-	if req.Provider == "custom" && req.ProviderName != "" {
-		providerKey = strings.ToLower(strings.TrimSpace(req.ProviderName))
-		providerKey = strings.ReplaceAll(providerKey, " ", "-")
-	}
-
-	// Build config
+	// Build global config
 	cfg := &config.Config{
-		Providers: map[string]config.ProviderConfig{
-			providerKey: {
-				APIKey:   req.APIKey,
-				APIBase:  req.APIBase,
-				APIType:  req.APIType,
-				AuthType: req.AuthType,
-			},
-		},
+		Providers: map[string]config.ProviderConfig{},
 		Agents: config.AgentsConfig{
 			Defaults: config.AgentDefaults{
-				Model:             providerKey + "/" + req.Model,
 				MaxTokens:         8192,
 				Temperature:       0.7,
 				MaxToolIterations: 20,
 			},
-			List: []config.AgentEntry{
-				{ID: agentID},
-			},
 		},
 		Channels: map[string]config.ChannelConfig{},
 		Bindings: []config.Binding{},
+		Storage:  config.StorageCfg{Type: "file"},
+		Sandbox:  config.SandboxCfg{Enabled: false},
 	}
 
-	// Auto-generate a gateway auth token
+	// Provider + model (optional — can be configured later per agent)
+	if req.APIKey != "" && req.Provider != "" {
+		providerKey := req.Provider
+		if req.Provider == "custom" && req.ProviderName != "" {
+			providerKey = strings.ToLower(strings.TrimSpace(req.ProviderName))
+			providerKey = strings.ReplaceAll(providerKey, " ", "-")
+		}
+		cfg.Providers[providerKey] = config.ProviderConfig{
+			APIKey:   req.APIKey,
+			APIBase:  req.APIBase,
+			APIType:  req.APIType,
+			AuthType: req.AuthType,
+		}
+		if req.Model != "" {
+			cfg.Agents.Defaults.Model = providerKey + "/" + req.Model
+		}
+	}
+
+	// Gateway (always set)
+	port := req.Port
+	if port == 0 {
+		port = 18953
+	}
+	gatewayToken := req.GatewayToken
+	if gatewayToken == "" {
+		gatewayToken = generateRandomToken(32)
+	}
 	cfg.Gateway = config.GatewayCfg{
-		Port: req.Port,
+		Port: port,
 		Auth: config.GatewayAuth{
-			Token: generateRandomToken(32),
+			Token: gatewayToken,
+		},
+		HTTP: config.GatewayHTTP{
+			Endpoints: config.GatewayHTTPEndpoints{
+				ChatCompletions: config.GatewayEndpoint{Enabled: true},
+				Agents:          config.GatewayEndpoint{Enabled: true},
+			},
 		},
 	}
 
+	// Telegram (optional)
 	if req.TelegramEnabled && req.TelegramToken != "" {
 		cfg.Channels["telegram"] = config.ChannelConfig{
 			Enabled:  true,
@@ -519,15 +607,18 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	// Ensure the default user's directory exists.
-	userDir, err := config.EnsureUserDir(config.DefaultUserID)
-	if err != nil {
+	// Ensure directories exist
+	if _, err := config.EnsureUserDir(); err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
 
-	// Write config
-	configPath := filepath.Join(userDir, "fastclaw.json")
+	// Write global config to ~/.fastclaw/fastclaw.json
+	configPath, err := config.GlobalConfigPath()
+	if err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
 	data, _ := json.MarshalIndent(cfg, "", "  ")
 	if err := os.WriteFile(configPath, data, 0o644); err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
@@ -535,53 +626,48 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create agent workspace
+	userDir, _ := config.HomeDir()
 	agentDir := filepath.Join(userDir, "agents", agentID, "agent")
-	dirs := []string{
+	for _, dir := range []string{
 		agentDir,
 		filepath.Join(agentDir, "memory"),
 		filepath.Join(agentDir, "sessions"),
 		filepath.Join(agentDir, "skills"),
-	}
-	for _, dir := range dirs {
+	} {
 		os.MkdirAll(dir, 0o755)
 	}
 
-	// Write bootstrap files
-	bootstrapFiles := map[string]string{
-		"AGENTS.md":    "# Agent Capabilities\n\nDescribe what this agent can do.\n",
-		"IDENTITY.md":  fmt.Sprintf("# Identity\n\nYou are %s, a FastClaw AI agent.\n", req.AgentName),  // use display name
+	// Write bootstrap workspace files
+	wsFiles := map[string]string{
+		"SOUL.md":      "# Soul\n\nYour personality and behavioral guidelines.\n",
+		"IDENTITY.md":  fmt.Sprintf("# Identity\n\nYou are %s, a FastClaw AI agent.\n", req.AgentName),
 		"USER.md":      "# User\n\nInformation about the user you serve.\n",
-		"TOOLS.md":     "# Tools\n\nAdditional tool usage instructions.\n",
-		"BOOTSTRAP.md": "# Bootstrap\n\nStartup instructions loaded on every conversation.\n",
-		"HEARTBEAT.md": "# Heartbeat\n\nPeriodic check-in instructions.\n",
-		"MEMORY.md":    "# Memory\n\nLong-term memory for this agent.\n",
+		"TOOLS.md":     "",
+		"BOOTSTRAP.md": "",
+		"HEARTBEAT.md": "",
+		"MEMORY.md":    "",
+		"AGENTS.md":    "",
 	}
 	if req.Personality != "" {
-		bootstrapFiles["SOUL.md"] = fmt.Sprintf("# Soul\n\n%s\n", req.Personality)
-	} else {
-		bootstrapFiles["SOUL.md"] = "# Soul\n\nYour personality and behavioral guidelines.\n"
+		wsFiles["SOUL.md"] = fmt.Sprintf("# %s\n\n%s\n", req.AgentName, req.Personality)
 	}
-
-	for filename, content := range bootstrapFiles {
+	for filename, content := range wsFiles {
 		path := filepath.Join(agentDir, filename)
 		if _, err := os.Stat(path); os.IsNotExist(err) {
 			os.WriteFile(path, []byte(content), 0o644)
 		}
 	}
 
-	// Write agent.json
-	agentCfg := config.AgentFileConfig{Model: req.Model}
-	agentData, _ := json.MarshalIndent(agentCfg, "", "  ")
-	agentJSONPath := filepath.Join(agentDir, "agent.json")
-	if _, err := os.Stat(agentJSONPath); os.IsNotExist(err) {
-		os.WriteFile(agentJSONPath, agentData, 0o644)
-	}
+	slog.Info("config saved", "path", configPath, "agent", agentID,
+		"hasProvider", len(cfg.Providers) > 0,
+		"defaultModel", cfg.Agents.Defaults.Model,
+	)
 
-	slog.Info("config saved", "path", configPath, "agent", agentID)
+	jsonResponse(w, http.StatusOK, map[string]any{
+		"ok":    true,
+		"token": cfg.Gateway.Auth.Token,
+	})
 
-	jsonResponse(w, http.StatusOK, map[string]any{"ok": true})
-
-	// Signal that config is ready
 	if s.onConfig != nil {
 		go s.onConfig(cfg)
 	}
@@ -628,13 +714,33 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	// Merge agents defaults
 	if raw, ok := incoming["agents"]; ok {
 		var agentUpdate struct {
-			Defaults struct {
-				Model string `json:"model"`
-			} `json:"defaults"`
+			Defaults config.AgentDefaults `json:"defaults"`
 		}
 		if json.Unmarshal(raw, &agentUpdate) == nil {
-			if agentUpdate.Defaults.Model != "" {
-				cfg.Agents.Defaults.Model = agentUpdate.Defaults.Model
+			d := agentUpdate.Defaults
+			if d.Model != "" {
+				cfg.Agents.Defaults.Model = d.Model
+			}
+		}
+	}
+
+	// Merge sandbox (top-level)
+	if raw, ok := incoming["sandbox"]; ok {
+		var sandbox config.SandboxCfg
+		if json.Unmarshal(raw, &sandbox) == nil {
+			cfg.Sandbox = sandbox
+		}
+	}
+	// Also handle sandbox inside agents.defaults (backwards compat)
+	if raw, ok := incoming["agents"]; ok {
+		var agentSandbox struct {
+			Defaults struct {
+				Sandbox config.SandboxCfg `json:"sandbox"`
+			} `json:"defaults"`
+		}
+		if json.Unmarshal(raw, &agentSandbox) == nil {
+			if agentSandbox.Defaults.Sandbox.Enabled || agentSandbox.Defaults.Sandbox.Backend != "" {
+				cfg.Sandbox = agentSandbox.Defaults.Sandbox
 			}
 		}
 	}
@@ -732,7 +838,7 @@ func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
 
 // saveConfigFile persists the config to ~/.fastclaw/users/local/fastclaw.json.
 func saveConfigFile(cfg *config.Config) error {
-	if _, err := config.EnsureUserDir(config.DefaultUserID); err != nil {
+	if _, err := config.EnsureUserDir(); err != nil {
 		return err
 	}
 	configPath, err := config.UserConfigPath(config.DefaultUserID)

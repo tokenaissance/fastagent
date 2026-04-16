@@ -17,6 +17,7 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 	"github.com/fastclaw-ai/fastclaw/internal/cron"
 	"github.com/fastclaw-ai/fastclaw/internal/plugin"
+	"github.com/fastclaw-ai/fastclaw/internal/session"
 	"github.com/fastclaw-ai/fastclaw/internal/store"
 	"github.com/fastclaw-ai/fastclaw/internal/taskqueue"
 	"github.com/fastclaw-ai/fastclaw/internal/webhook"
@@ -73,7 +74,14 @@ func New(cfg *config.Config) (*Gateway, error) {
 	slog.Info("local provider resolved", "defaultModel", cfg.Agents.Defaults.Model)
 
 	resolved := config.ResolveAgents(cfg)
-	agentMgr, err := agent.NewManager(resolved, llm, mb)
+	var managerOpts []agent.ManagerOption
+	if st != nil {
+		managerOpts = append(managerOpts,
+			agent.WithSessionStore(session.NewStoreAdapter(st)),
+			agent.WithMemoryStore(agent.NewMemoryStoreAdapter(st)),
+		)
+	}
+	agentMgr, err := agent.NewManager(resolved, llm, mb, managerOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -89,7 +97,7 @@ func New(cfg *config.Config) (*Gateway, error) {
 		Provider: llm,
 		Agents:   agentMgr,
 	}
-	userReg := newUserSpaceRegistry(mb)
+	userReg := newUserSpaceRegistry(mb, st)
 	userReg.put(localSpace)
 
 	slog.Info("agents loaded", "user", config.DefaultUserID, "count", len(resolved), "names", agentMgr.Names())

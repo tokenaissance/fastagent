@@ -1,9 +1,8 @@
-// Package users manages the cloud-mode user registry.
+// Package users manages API keys for accessing FastClaw agents via the HTTP API.
 //
-// In local (single-user) mode the registry is unused and the implicit user
-// is config.DefaultUserID ("local"). In cloud mode the registry is loaded
-// from ~/.fastclaw/users.json and maps bearer tokens to user IDs so the
-// HTTP API can route requests to the right per-user agent manager.
+// API keys are stored in ~/.fastclaw/apikeys.json. Each key grants access to
+// the agent API (chat, sessions, config). The gateway auth token (in fastclaw.json)
+// is the admin key — it can manage other API keys.
 package users
 
 import (
@@ -20,32 +19,34 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 )
 
-// User is one entry in the registry.
-type User struct {
+// APIKey is one entry in the registry.
+type APIKey struct {
 	ID        string    `json:"id"`
 	Name      string    `json:"name,omitempty"`
-	Tokens    []string  `json:"tokens"`
+	Key       string    `json:"key"`
 	CreatedAt time.Time `json:"createdAt"`
 }
 
-// Registry is an in-memory, file-backed user store.
+// User is kept as an alias for backward compatibility with API responses.
+type User = APIKey
+
+// Registry is an in-memory, file-backed API key store.
 type Registry struct {
 	path  string
 	mu    sync.RWMutex
-	users map[string]*User // id -> User
-	byTok map[string]string
+	keys  map[string]*APIKey // id -> APIKey
+	byKey map[string]string  // key -> id
 }
 
-// DefaultPath returns the path to the registry file (~/.fastclaw/users.json).
+// DefaultPath returns ~/.fastclaw/apikeys.json.
 func DefaultPath() (string, error) {
 	home, err := config.HomeDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, "users.json"), nil
+	return filepath.Join(home, "apikeys.json"), nil
 }
 
-// Load reads the registry from disk. Missing file is treated as empty.
 func Load() (*Registry, error) {
 	path, err := DefaultPath()
 	if err != nil {
@@ -54,156 +55,157 @@ func Load() (*Registry, error) {
 	return LoadFrom(path)
 }
 
-// LoadFrom reads the registry from an explicit path.
 func LoadFrom(path string) (*Registry, error) {
 	r := &Registry{
 		path:  path,
-		users: make(map[string]*User),
-		byTok: make(map[string]string),
+		keys:  make(map[string]*APIKey),
+		byKey: make(map[string]string),
 	}
+
+	// Try new format first (apikeys.json)
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return r, nil
+		// Try legacy users.json
+		legacyPath := filepath.Join(filepath.Dir(path), "users.json")
+		data, err = os.ReadFile(legacyPath)
+		if errors.Is(err, os.ErrNotExist) {
+			return r, nil
+		}
 	}
 	if err != nil {
-		return nil, fmt.Errorf("read users.json: %w", err)
+		return nil, fmt.Errorf("read apikeys: %w", err)
 	}
-	var list []*User
+
+	var list []*APIKey
 	if err := json.Unmarshal(data, &list); err != nil {
-		return nil, fmt.Errorf("parse users.json: %w", err)
-	}
-	for _, u := range list {
-		r.users[u.ID] = u
-		for _, t := range u.Tokens {
-			r.byTok[t] = u.ID
+		// Try legacy format (tokens field)
+		var legacy []struct {
+			ID     string   `json:"id"`
+			Name   string   `json:"name"`
+			Tokens []string `json:"tokens"`
 		}
+		if json.Unmarshal(data, &legacy) == nil {
+			for _, u := range legacy {
+				for _, t := range u.Tokens {
+					ak := &APIKey{ID: u.ID, Name: u.Name, Key: t, CreatedAt: time.Now()}
+					r.keys[ak.ID+"-"+t[:8]] = ak
+					r.byKey[t] = ak.ID
+				}
+			}
+			return r, nil
+		}
+		return nil, fmt.Errorf("parse apikeys: %w", err)
+	}
+
+	for _, ak := range list {
+		r.keys[ak.ID] = ak
+		r.byKey[ak.Key] = ak.ID
 	}
 	return r, nil
 }
 
-// Save persists the registry to disk.
 func (r *Registry) Save() error {
 	r.mu.RLock()
-	list := make([]*User, 0, len(r.users))
-	for _, u := range r.users {
-		list = append(list, u)
+	list := make([]*APIKey, 0, len(r.keys))
+	for _, ak := range r.keys {
+		list = append(list, ak)
 	}
 	r.mu.RUnlock()
 
-	data, err := json.MarshalIndent(list, "", "  ")
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(r.path), 0o700); err != nil {
-		return err
-	}
+	data, _ := json.MarshalIndent(list, "", "  ")
+	os.MkdirAll(filepath.Dir(r.path), 0o700)
 	return os.WriteFile(r.path, data, 0o600)
 }
 
-// Add creates a new user with a fresh token and returns it.
-// Returns an error if the ID already exists.
-func (r *Registry) Add(id, name string) (*User, string, error) {
+// Add creates a new API key and returns it.
+func (r *Registry) Add(id, name string) (*APIKey, string, error) {
 	if id == "" {
-		return nil, "", errors.New("user id is required")
+		return nil, "", errors.New("id is required")
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if _, exists := r.users[id]; exists {
-		return nil, "", fmt.Errorf("user %q already exists", id)
+	if _, exists := r.keys[id]; exists {
+		return nil, "", fmt.Errorf("API key %q already exists", id)
 	}
-	token, err := newToken()
-	if err != nil {
-		return nil, "", err
-	}
-	u := &User{
+	key, _ := newToken()
+	ak := &APIKey{
 		ID:        id,
 		Name:      name,
-		Tokens:    []string{token},
+		Key:       key,
 		CreatedAt: time.Now().UTC(),
 	}
-	r.users[id] = u
-	r.byTok[token] = id
-	return u, token, nil
+	r.keys[id] = ak
+	r.byKey[key] = id
+	return ak, key, nil
 }
 
-// IssueToken mints a new token for an existing user.
+// IssueToken creates a new key for an existing entry (replaces old key).
 func (r *Registry) IssueToken(id string) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	u, ok := r.users[id]
+	ak, ok := r.keys[id]
 	if !ok {
-		return "", fmt.Errorf("user %q not found", id)
+		return "", fmt.Errorf("API key %q not found", id)
 	}
-	token, err := newToken()
-	if err != nil {
-		return "", err
-	}
-	u.Tokens = append(u.Tokens, token)
-	r.byTok[token] = id
-	return token, nil
+	// Remove old key mapping
+	delete(r.byKey, ak.Key)
+	// Generate new key
+	key, _ := newToken()
+	ak.Key = key
+	r.byKey[key] = id
+	return key, nil
 }
 
-// Remove deletes a user and all their tokens from the registry.
-// Does NOT delete the user's on-disk workspace (~/.fastclaw/users/{id}/).
 func (r *Registry) Remove(id string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	u, ok := r.users[id]
+	ak, ok := r.keys[id]
 	if !ok {
-		return fmt.Errorf("user %q not found", id)
+		return fmt.Errorf("API key %q not found", id)
 	}
-	for _, t := range u.Tokens {
-		delete(r.byTok, t)
-	}
-	delete(r.users, id)
+	delete(r.byKey, ak.Key)
+	delete(r.keys, id)
 	return nil
 }
 
-// List returns a snapshot of all users, sorted by ID.
-func (r *Registry) List() []*User {
+func (r *Registry) List() []*APIKey {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	out := make([]*User, 0, len(r.users))
-	for _, u := range r.users {
-		// Copy so callers can't mutate internal state.
-		cp := *u
-		cp.Tokens = append([]string(nil), u.Tokens...)
+	out := make([]*APIKey, 0, len(r.keys))
+	for _, ak := range r.keys {
+		cp := *ak
 		out = append(out, &cp)
 	}
 	return out
 }
 
-// Get returns a user by ID.
-func (r *Registry) Get(id string) (*User, bool) {
+func (r *Registry) Get(id string) (*APIKey, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	u, ok := r.users[id]
+	ak, ok := r.keys[id]
 	if !ok {
 		return nil, false
 	}
-	cp := *u
+	cp := *ak
 	return &cp, true
 }
 
-// LookupByToken returns the user ID associated with a bearer token.
+// LookupByToken returns the key ID associated with a bearer token.
 func (r *Registry) LookupByToken(token string) (string, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	id, ok := r.byTok[token]
+	id, ok := r.byKey[token]
 	return id, ok
 }
 
-// Count returns the number of registered users.
 func (r *Registry) Count() int {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return len(r.users)
+	return len(r.keys)
 }
 
 func newToken() (string, error) {
 	var buf [32]byte
-	if _, err := rand.Read(buf[:]); err != nil {
-		return "", err
-	}
+	rand.Read(buf[:])
 	return "fc_" + hex.EncodeToString(buf[:]), nil
 }

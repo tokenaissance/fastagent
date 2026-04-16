@@ -186,13 +186,18 @@ func (g *Gateway) reloadProvider(newCfg *config.Config) {
 	}
 }
 
-// reloadAgents updates agent model settings from new config.
+// reloadAgents updates agent model settings and adds new agents dynamically.
 func (g *Gateway) reloadAgents(newCfg *config.Config) {
 	resolved := config.ResolveAgents(newCfg)
 	for _, rc := range resolved {
 		ag := g.agents.AgentByID(rc.ID)
 		if ag == nil {
-			slog.Info("hot-reload: new agent detected (restart required to add)", "id", rc.ID)
+			// New agent — create and add it
+			if err := g.agents.AddAgent(rc, g.localSpace.Provider, g.bus); err != nil {
+				slog.Error("hot-reload: failed to add agent", "id", rc.ID, "error", err)
+			} else {
+				slog.Info("hot-reload: new agent added", "id", rc.ID, "model", rc.Model)
+			}
 			continue
 		}
 		ag.UpdateConfig(rc)

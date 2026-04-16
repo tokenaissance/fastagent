@@ -23,7 +23,7 @@ type FTSResult struct {
 
 // NewFTSStore opens (or creates) a SQLite database at dbPath and returns an FTSStore.
 func NewFTSStore(dbPath string) (*FTSStore, error) {
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("open fts db: %w", err)
 	}

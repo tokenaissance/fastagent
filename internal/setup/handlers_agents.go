@@ -2,9 +2,11 @@ package setup
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 )
@@ -14,10 +16,9 @@ import (
 func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 	cfg, err := s.loadUserConfig(r)
 	if err != nil {
-		jsonResponse(w, http.StatusOK, []any{})
-		return
+		cfg = &config.Config{}
 	}
-	resolved := config.ResolveAgentsForUser(cfg, config.UserIDFromContext(r.Context()))
+	resolved := config.ResolveAgents(cfg)
 	var agents []map[string]any
 	for _, ra := range resolved {
 		soul := ""
@@ -57,35 +58,35 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cfg, err := s.loadUserConfig(r)
-	if err != nil {
-		jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+	// Check for duplicate by checking if directory already exists
+	agentDir, _ := config.AgentWorkspaceDir(req.ID)
+	if _, err := os.Stat(agentDir); err == nil {
+		jsonResponse(w, http.StatusConflict, map[string]any{"ok": false, "error": fmt.Sprintf("agent %q already exists", req.ID)})
 		return
 	}
 
-	// Add agent to config
-	cfg.Agents.List = append(cfg.Agents.List, config.AgentEntry{
-		ID:    req.ID,
-		Model: req.Model,
-	})
-
-	if err := s.saveUserConfig(r, cfg); err != nil {
-		jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
-		return
-	}
-
-	// Create workspace under the default user's directory.
-	userDir, _ := userDirForRequest(r)
-	agentDir := filepath.Join(userDir, "agents", req.ID, "agent")
+	// Create agent workspace directory
 	for _, dir := range []string{agentDir, filepath.Join(agentDir, "memory"), filepath.Join(agentDir, "sessions"), filepath.Join(agentDir, "skills")} {
 		os.MkdirAll(dir, 0o755)
 	}
+
+	// Write SOUL.md
 	if req.Soul != "" {
 		os.WriteFile(filepath.Join(agentDir, "SOUL.md"), []byte(req.Soul), 0o644)
+	} else {
+		os.WriteFile(filepath.Join(agentDir, "SOUL.md"), []byte(fmt.Sprintf("# %s\n\nYou are a helpful AI agent.\n", req.ID)), 0o644)
 	}
+
+	// Write agent.json with model config
 	agentCfg := config.AgentFileConfig{Model: req.Model}
 	agentData, _ := json.MarshalIndent(agentCfg, "", "  ")
 	os.WriteFile(filepath.Join(agentDir, "agent.json"), agentData, 0o644)
+
+	// Touch the global config file to trigger gateway hot-reload (picks up new agent)
+	if cfgPath, err := config.GlobalConfigPath(); err == nil {
+		now := time.Now()
+		os.Chtimes(cfgPath, now, now)
+	}
 
 	jsonResponse(w, http.StatusOK, map[string]any{"ok": true})
 }
@@ -101,35 +102,13 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cfg, err := s.loadUserConfig(r)
-	if err != nil {
-		jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
-		return
-	}
-
-	found := false
-	for i, entry := range cfg.Agents.List {
-		if entry.ID == id {
-			if req.Model != "" {
-				cfg.Agents.List[i].Model = req.Model
-			}
-			found = true
-			break
-		}
-	}
-	if !found {
+	// Update workspace files directly
+	agentDir, _ := config.AgentWorkspaceDir(id)
+	if _, err := os.Stat(agentDir); err != nil {
 		jsonResponse(w, http.StatusNotFound, map[string]any{"ok": false, "error": "agent not found"})
 		return
 	}
 
-	if err := s.saveUserConfig(r, cfg); err != nil {
-		jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
-		return
-	}
-
-	// Update workspace files under the default user's directory.
-	userDir, _ := userDirForRequest(r)
-	agentDir := filepath.Join(userDir, "agents", id, "agent")
 	if req.Soul != "" {
 		os.WriteFile(filepath.Join(agentDir, "SOUL.md"), []byte(req.Soul), 0o644)
 	}
@@ -144,21 +123,11 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	cfg, err := s.loadUserConfig(r)
-	if err != nil {
-		jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
-		return
-	}
+	agentDir, _ := config.AgentWorkspaceDir(id)
 
-	newList := make([]config.AgentEntry, 0, len(cfg.Agents.List))
-	for _, entry := range cfg.Agents.List {
-		if entry.ID != id {
-			newList = append(newList, entry)
-		}
-	}
-	cfg.Agents.List = newList
-
-	if err := s.saveUserConfig(r, cfg); err != nil {
+	// Remove the entire agent directory
+	parent := filepath.Dir(agentDir) // ~/.fastclaw/agents/{id}
+	if err := os.RemoveAll(parent); err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}

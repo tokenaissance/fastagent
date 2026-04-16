@@ -23,6 +23,7 @@ import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
 import { testProvider, saveConfig } from "@/lib/api";
+import { login as loginWithToken } from "@/lib/auth";
 
 const PROVIDERS: Record<string, { apiBase: string; apiType: string; models: string[] }> = {
   openrouter: {
@@ -65,6 +66,7 @@ interface OnboardConfig {
   port: number;
   agentName: string;
   personality: string;
+  gatewayToken: string; // returned after save, for display + auto-login
 }
 
 const STEP_LABELS = [
@@ -131,6 +133,7 @@ export default function OnboardPage() {
     agentName: "FastClaw",
     personality:
       "You are a helpful, friendly AI assistant. You respond concisely and accurately.",
+    gatewayToken: "",
   });
   const [testStatus, setTestStatus] = useState<
     "idle" | "testing" | "success" | "error"
@@ -138,7 +141,7 @@ export default function OnboardPage() {
   const [testError, setTestError] = useState("");
   const [showConfetti, setShowConfetti] = useState(false);
   const [launched, setLaunched] = useState(false);
-  const [jsonExpanded, setJsonExpanded] = useState(false);
+  const [copiedToken, setCopiedToken] = useState(false);
   const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
@@ -151,6 +154,18 @@ export default function OnboardPage() {
     },
     []
   );
+
+  // Generate gateway token when entering the final step
+  useEffect(() => {
+    if (step === 3 && !config.gatewayToken) {
+      const chars = "abcdef0123456789";
+      let token = "";
+      for (let i = 0; i < 64; i++) {
+        token += chars[Math.floor(Math.random() * chars.length)];
+      }
+      updateConfig({ gatewayToken: token });
+    }
+  }, [step, config.gatewayToken, updateConfig]);
 
   const handleProviderChange = useCallback(
     (provider: string | null) => {
@@ -193,21 +208,25 @@ export default function OnboardPage() {
   }, [config.apiBase, config.apiKey, config.model, config.apiType, config.authType]);
 
   const handleLaunch = useCallback(async () => {
+    // Auto-login before saving (in case the server restarts and drops the connection)
+    if (config.gatewayToken) {
+      loginWithToken(config.gatewayToken);
+    }
+
     try {
       await saveConfig(config as unknown as Record<string, unknown>);
-      setShowConfetti(true);
-      setLaunched(true);
-      setTimeout(() => setShowConfetti(false), 4000);
-      setTimeout(() => {
-        const port = config.port || window.location.port;
-        window.location.href = `http://localhost:${port}/chat/`;
-      }, 3000);
     } catch {
-      setLaunched(true);
-      setShowConfetti(true);
-      setTimeout(() => setShowConfetti(false), 4000);
+      // Server may restart mid-request — that's expected
     }
-  }, [config, router]);
+
+    setShowConfetti(true);
+    setLaunched(true);
+    setTimeout(() => setShowConfetti(false), 4000);
+    // Wait for server to restart, then redirect
+    setTimeout(() => {
+      window.location.href = "/overview/";
+    }, 3000);
+  }, [config]);
 
   const canProceed = useCallback(() => {
     switch (step) {
@@ -642,30 +661,35 @@ export default function OnboardPage() {
                     />
                   </div>
 
-                  <button
-                    onClick={() => setJsonExpanded(!jsonExpanded)}
-                    className="flex w-full items-center justify-between rounded-lg border border-border bg-muted/30 px-4 py-2.5 text-sm text-muted-foreground transition-colors hover:bg-muted/50"
-                  >
-                    <span>JSON Preview</span>
-                    <svg
-                      className={`h-4 w-4 transition-transform ${jsonExpanded ? "rotate-180" : ""}`}
-                      fill="none"
-                      viewBox="0 0 24 24"
-                      stroke="currentColor"
-                      strokeWidth={2}
-                    >
-                      <path
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        d="M19 9l-7 7-7-7"
-                      />
-                    </svg>
-                  </button>
-                  {jsonExpanded && (
-                    <pre className="max-h-64 overflow-auto rounded-lg border border-border bg-background p-4 font-mono text-xs text-muted-foreground">
-                      {JSON.stringify(config, null, 2)}
-                    </pre>
-                  )}
+                  <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-4 space-y-2">
+                    <p className="text-sm font-medium text-amber-500">Admin Token</p>
+                    <p className="text-xs text-muted-foreground">
+                      Save this token — you&apos;ll need it to log in to the admin dashboard.
+                    </p>
+                    <div className="flex items-center gap-2">
+                      <code className="flex-1 rounded-md bg-background px-3 py-2 font-mono text-xs break-all select-all">
+                        {config.gatewayToken || "auto-generated on launch"}
+                      </code>
+                      <button
+                        onClick={() => {
+                          const token = config.gatewayToken;
+                          if (token) {
+                            navigator.clipboard.writeText(token);
+                            setCopiedToken(true);
+                            setTimeout(() => setCopiedToken(false), 2000);
+                          }
+                        }}
+                        className="shrink-0 rounded-md border border-border p-2 text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors"
+                        title="Copy token"
+                      >
+                        {copiedToken ? (
+                          <svg className="h-4 w-4 text-emerald-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
+                        ) : (
+                          <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>
+                        )}
+                      </button>
+                    </div>
+                  </div>
 
                   <Button
                     onClick={handleLaunch}

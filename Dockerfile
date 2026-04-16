@@ -29,8 +29,11 @@ COPY --from=go-builder /fastclaw /usr/local/bin/fastclaw
 
 # Default data directory
 ENV HOME=/data
-RUN mkdir -p /data/.fastclaw
+RUN mkdir -p /data/.fastclaw /data/.fastclaw/skills
 VOLUME /data/.fastclaw
+
+# Bundle built-in skills
+COPY skills/ /data/.fastclaw/skills/
 
 EXPOSE 18953
 ENTRYPOINT ["fastclaw"]

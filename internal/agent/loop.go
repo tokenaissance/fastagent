@@ -111,6 +111,7 @@ func NewAgentWithSkillsCfg(rc config.ResolvedAgent, prov provider.Provider, mb *
 	tools.RegisterMemorySearch(registry, rc.Workspace)
 	tools.RegisterWebFetch(registry)
 	tools.RegisterLoadSkill(registry, homeDir, rc.Workspace, "")
+	tools.RegisterSkillInstall(registry, 0) // 0 = use default port 18953
 
 	// Load skills with OpenClaw compatibility
 	loader := NewSkillsLoaderWithGlobal(homeDir, rc.Workspace, "", rc.Skills, globalSkillsCfg)
@@ -140,7 +141,7 @@ func NewAgentWithSkillsCfg(rc config.ResolvedAgent, prov provider.Provider, mb *
 		registry:          registry,
 		sessions:          session.NewManager(rc.Workspace + "/sessions"),
 		memory:            memory,
-		ctxBuilder:        newContextBuilderWithThinking(rc.Workspace, memory, skillsSummary, rc.Thinking),
+		ctxBuilder:        newContextBuilderWithSandbox(rc.Workspace, memory, skillsSummary, rc.Thinking, rc.Sandbox.Enabled, rc.Sandbox.Backend),
 		hooks:             hooks,
 		model:             rc.Model,
 		maxTokens:         rc.MaxTokens,
@@ -183,6 +184,13 @@ func newContextBuilderWithThinking(workspace string, memory *Memory, skillsSumma
 	if thinking != "" {
 		cb.SetThinking(thinking)
 	}
+	return cb
+}
+
+func newContextBuilderWithSandbox(workspace string, memory *Memory, skillsSummary string, thinking string, sandboxEnabled bool, sandboxBackend string) *ContextBuilder {
+	cb := newContextBuilderWithThinking(workspace, memory, skillsSummary, thinking)
+	cb.sandboxEnabled = sandboxEnabled
+	cb.sandboxBackend = sandboxBackend
 	return cb
 }
 
@@ -328,9 +336,19 @@ func (a *Agent) WebChatHistory(sessionId string) []map[string]any {
 	return history
 }
 
-// WebChatSessions returns a list of web chat sessions with their first user message as preview.
-func (a *Agent) WebChatSessions() []map[string]string {
+// WebChatSessions returns a list of web chat sessions with metadata.
+func (a *Agent) WebChatSessions() []session.WebSession {
 	return a.sessions.ListWebSessions()
+}
+
+// DeleteWebChatSession removes a web chat session.
+func (a *Agent) DeleteWebChatSession(sessionId string) error {
+	return a.sessions.DeleteWebSession(sessionId)
+}
+
+// RenameWebChatSession sets a custom title for a web chat session.
+func (a *Agent) RenameWebChatSession(sessionId, title string) error {
+	return a.sessions.RenameWebSession(sessionId, title)
 }
 
 // Model returns the agent's model name.
@@ -432,7 +450,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		}
 
 		if !resp.HasToolCalls() {
-			sess.Append(provider.Message{Role: "assistant", Content: resp.Content})
+			sess.Append(provider.Message{Role: "assistant", Content: resp.Content, Thinking: resp.Thinking, Timestamp: time.Now().UnixMilli(), RawAssistant: resp.RawAssistant})
 			emitEvent(ctx, ChatEvent{Type: "content", Data: map[string]any{"content": resp.Content}})
 			emitEvent(ctx, ChatEvent{Type: "done"})
 			a.runPostTurn(ctx, messages, totalToolCalls)
@@ -454,9 +472,12 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		}
 
 		assistantMsg := provider.Message{
-			Role:      "assistant",
-			Content:   resp.Content,
-			ToolCalls: resp.ToolCalls,
+			Role:         "assistant",
+			Content:      resp.Content,
+			ToolCalls:    resp.ToolCalls,
+			Thinking:     resp.Thinking,
+			Timestamp:    time.Now().UnixMilli(),
+			RawAssistant: resp.RawAssistant,
 		}
 		sess.Append(assistantMsg)
 		messages = append(messages, assistantMsg)
@@ -710,9 +731,12 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 
 		// Tool calls - process concurrently via SDK engine
 		assistantMsg := provider.Message{
-			Role:      "assistant",
-			Content:   resp.Content,
-			ToolCalls: resp.ToolCalls,
+			Role:         "assistant",
+			Content:      resp.Content,
+			ToolCalls:    resp.ToolCalls,
+			Thinking:     resp.Thinking,
+			Timestamp:    time.Now().UnixMilli(),
+			RawAssistant: resp.RawAssistant,
 		}
 		sess.Append(assistantMsg)
 		messages = append(messages, assistantMsg)

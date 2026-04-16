@@ -14,6 +14,8 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 	"github.com/fastclaw-ai/fastclaw/internal/provider"
 	"github.com/fastclaw-ai/fastclaw/internal/sandbox"
+	"github.com/fastclaw-ai/fastclaw/internal/session"
+	"github.com/fastclaw-ai/fastclaw/internal/store"
 )
 
 // UserSpace holds the per-user state that can be multiplexed inside one
@@ -30,7 +32,7 @@ type UserSpace struct {
 // loadUserSpace reads a user's config and instantiates their agent manager.
 // The shared message bus is reused so that cross-user plumbing (typing
 // indicators, outbound routing) stays in one place.
-func loadUserSpace(userID string, mb *bus.MessageBus) (*UserSpace, error) {
+func loadUserSpace(userID string, mb *bus.MessageBus, st store.Store) (*UserSpace, error) {
 	cfg, err := config.LoadForUser(userID)
 	if err != nil {
 		return nil, fmt.Errorf("load config for user %q: %w", userID, err)
@@ -39,7 +41,14 @@ func loadUserSpace(userID string, mb *bus.MessageBus) (*UserSpace, error) {
 	prov := newProviderFromConfig(cfg)
 
 	resolved := config.ResolveAgentsForUser(cfg, userID)
-	agentMgr, err := agent.NewManager(resolved, prov, mb)
+	var managerOpts []agent.ManagerOption
+	if st != nil {
+		managerOpts = append(managerOpts,
+			agent.WithSessionStore(session.NewStoreAdapter(st)),
+			agent.WithMemoryStore(agent.NewMemoryStoreAdapter(st)),
+		)
+	}
+	agentMgr, err := agent.NewManager(resolved, prov, mb, managerOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("create agent manager for user %q: %w", userID, err)
 	}
@@ -55,19 +64,20 @@ func loadUserSpace(userID string, mb *bus.MessageBus) (*UserSpace, error) {
 
 	var pool sandbox.ExecutorPool
 
-	// In cloud mode, enforce isolation. If a sandbox backend is configured
-	// (e.g. Docker), attach a full Executor to each agent so ALL tool calls
-	// (exec + file ops) run inside the sandbox. Otherwise, fall back to the
-	// lighter path-based sandbox that restricts file paths on the host.
-	if cfg.Gateway.Mode == "cloud" {
+	// If a sandbox backend is configured, attach a full Executor to each agent
+	// so ALL tool calls (exec + file ops) run inside the sandbox.
+	{
 		// Check if any agent has sandbox enabled — use the first one's
 		// config to decide the pool backend.
 		for _, rc := range config.ResolveAgentsForUser(cfg, userID) {
 			if rc.Sandbox.Enabled {
 				switch rc.Sandbox.Backend {
 				case "e2b":
-					// E2B needs an API key — check config or env.
-					apiKey := os.Getenv("E2B_API_KEY")
+					// E2B needs an API key — check config first, then env.
+					apiKey := rc.Sandbox.E2BKey
+					if apiKey == "" {
+						apiKey = os.Getenv("E2B_API_KEY")
+					}
 					template := rc.Sandbox.Image // reuse Image field as E2B template
 					if template == "" {
 						template = "base"
@@ -157,6 +167,7 @@ type userSpaceRegistry struct {
 	mu       sync.RWMutex
 	spaces   map[string]*userSpaceEntry
 	bus      *bus.MessageBus
+	store    store.Store // optional DB store for sessions/memory
 	idleTTL  time.Duration // how long before an idle user is evicted (0 = never)
 	pinned   map[string]bool // user IDs that must never be evicted (e.g. "local")
 }
@@ -166,13 +177,17 @@ type userSpaceEntry struct {
 	lastUsed time.Time
 }
 
-func newUserSpaceRegistry(mb *bus.MessageBus) *userSpaceRegistry {
-	return &userSpaceRegistry{
+func newUserSpaceRegistry(mb *bus.MessageBus, st ...store.Store) *userSpaceRegistry {
+	reg := &userSpaceRegistry{
 		spaces:  make(map[string]*userSpaceEntry),
 		bus:     mb,
 		idleTTL: 30 * time.Minute,
 		pinned:  make(map[string]bool),
 	}
+	if len(st) > 0 && st[0] != nil {
+		reg.store = st[0]
+	}
+	return reg
 }
 
 // put stores a preloaded user space that is pinned (never evicted).
@@ -212,7 +227,7 @@ func (r *userSpaceRegistry) getOrLoad(userID string) (*UserSpace, error) {
 		return e.space, nil
 	}
 
-	sp, err := loadUserSpace(userID, r.bus)
+	sp, err := loadUserSpace(userID, r.bus, r.store)
 	if err != nil {
 		return nil, err
 	}

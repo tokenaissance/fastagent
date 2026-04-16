@@ -41,6 +41,7 @@ node_modules/
 
 # Config with secrets (users create their own)
 config.json
+fastclaw.json
 
 # Debug
 debug/
@@ -62,3 +63,10 @@ web/out/
 web/.next/
 
 openclaw.json
+
+# Runtime config
+env.toml
+
+# Local data
+web/node_modules/
+web/pnpm-lock.yaml

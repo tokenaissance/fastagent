@@ -171,7 +171,7 @@ export default function AgentsPage() {
                 <TableRow
                   key={agent.id}
                   className="cursor-pointer hover:bg-muted/50 transition-colors"
-                  onClick={() => handleEdit(agent)}
+                  onClick={() => window.location.href = `/agents/${agent.id}/chat/`}
                 >
                   <TableCell>
                     <div className="flex items-center gap-3">

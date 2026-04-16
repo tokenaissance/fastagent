@@ -2,12 +2,10 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 
 	"github.com/spf13/cobra"
@@ -101,6 +99,9 @@ func runGateway(port int) error {
 
 	slog.Info("starting gateway")
 
+	// Install bundled skills (if not already present)
+	agent.InstallBundledSkills()
+
 	// Write PID file for daemon management
 	if err := daemon.WritePIDFile(); err != nil {
 		slog.Warn("failed to write PID file", "error", err)
@@ -158,9 +159,6 @@ func runGateway(port int) error {
 		"chatCompletions", gwCfg.HTTP.Endpoints.ChatCompletions.Enabled,
 	)
 
-	// Write fastclaw.gateway.json for ChatClaw auto-detect
-	writeFastClawGatewayConfig(port, gatewayToken)
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -195,36 +193,6 @@ func (a *agentProviderAdapter) AgentByID(id string) setup.AgentHandle {
 		return nil
 	}
 	return ag
-}
-
-// writeFastClawGatewayConfig writes ~/.fastclaw/fastclaw.gateway.json for ChatClaw auto-detect.
-func writeFastClawGatewayConfig(port int, token string) {
-	if token == "" {
-		return
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return
-	}
-	dir := filepath.Join(home, ".fastclaw")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return
-	}
-
-	cfg := map[string]any{
-		"gateway": map[string]any{
-			"port": port,
-			"auth": map[string]string{
-				"token": token,
-			},
-		},
-	}
-	data, _ := json.MarshalIndent(cfg, "", "  ")
-	if err := os.WriteFile(filepath.Join(dir, "fastclaw.gateway.json"), data, 0o644); err != nil {
-		slog.Warn("failed to write fastclaw.gateway.json", "error", err)
-	} else {
-		slog.Info("wrote fastclaw.gateway.json for ChatClaw auto-detect")
-	}
 }
 
 func runSetupWizard(port int) error {

@@ -32,7 +32,6 @@ func ProvisionWorkspace(userID string) error {
 				Temperature:       0.7,
 				MaxToolIterations: 20,
 			},
-			List: []config.AgentEntry{{ID: "default"}},
 		},
 		Channels: map[string]config.ChannelConfig{},
 	}
