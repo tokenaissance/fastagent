@@ -34,6 +34,10 @@ type AgentHandle interface {
 type AgentProvider interface {
 	AllAgents() []AgentHandle
 	AgentByID(id string) AgentHandle
+	// ReloadAgents syncs the in-memory agent manager with the filesystem.
+	// Called after the HTTP API creates / updates / deletes agent files so
+	// chat requests can immediately see the new state.
+	ReloadAgents() error
 }
 
 // Server serves the setup wizard UI and handles config API endpoints.
@@ -115,17 +119,22 @@ func (s *Server) userAuth(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 
-		auth := r.Header.Get("Authorization")
-		if auth == "" {
+		// Token can come from the Authorization header (normal API calls) or
+		// a ?token= query param — the latter is needed for <img>, <iframe>,
+		// and anchor downloads where we can't set custom headers.
+		var token string
+		if auth := r.Header.Get("Authorization"); auth != "" {
+			token = strings.TrimPrefix(auth, "Bearer ")
+			if token == auth {
+				jsonResponse(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": "invalid auth header"})
+				return
+			}
+		} else if qt := r.URL.Query().Get("token"); qt != "" {
+			token = qt
+		} else {
 			jsonResponse(w, http.StatusUnauthorized, map[string]any{
 				"ok": false, "error": "token required",
 			})
-			return
-		}
-
-		token := strings.TrimPrefix(auth, "Bearer ")
-		if token == auth {
-			jsonResponse(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": "invalid auth header"})
 			return
 		}
 
@@ -173,6 +182,10 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("POST /api/agents", ua(s.handleCreateAgent))
 	mux.HandleFunc("PUT /api/agents/{id}", ua(s.handleUpdateAgent))
 	mux.HandleFunc("DELETE /api/agents/{id}", ua(s.handleDeleteAgent))
+
+	// Serve agent workspace files (for inline preview / download in chat).
+	// Sandbox-checked to stay inside the agent's workspace root.
+	mux.HandleFunc("GET /api/agents/{id}/files/{path...}", ua(s.handleAgentFile))
 
 	// Skills (global, not per-user)
 	mux.HandleFunc("GET /api/skills", s.handleListSkills)

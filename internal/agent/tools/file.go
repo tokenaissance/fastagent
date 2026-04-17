@@ -26,24 +26,55 @@ type listDirArgs struct {
 
 var errOutsideSandbox = fmt.Errorf("access denied: path is outside the allowed sandbox directory")
 
-func registerFile(r *Registry, workspace string) {
+// systemFiles are the agent metadata/identity files. When a relative path
+// references one of these by basename, file tools resolve it against the
+// system root rather than the user root.
+var systemFiles = map[string]bool{
+	"SOUL.md":      true,
+	"IDENTITY.md":  true,
+	"USER.md":      true,
+	"BOOTSTRAP.md": true,
+	"MEMORY.md":    true,
+	"HEARTBEAT.md": true,
+	"AGENTS.md":    true,
+	"TOOLS.md":     true,
+	"agent.json":   true,
+}
+
+// rootForPath returns the root a relative path should resolve against: the
+// system root for identity files (SOUL.md, IDENTITY.md, ...), the user root
+// for everything else. Absolute paths are returned as-is.
+func (r *Registry) rootForPath(path string) string {
+	if filepath.IsAbs(path) {
+		return ""
+	}
+	clean := filepath.Clean(path)
+	// Only single-segment relative paths can target a system file — nested
+	// paths like "notes/SOUL.md" are treated as user content.
+	if !strings.ContainsRune(clean, filepath.Separator) && systemFiles[clean] {
+		return r.systemRoot
+	}
+	return r.userRoot
+}
+
+func registerFile(r *Registry) {
 	r.Register("read_file", "Read the contents of a file", map[string]interface{}{
 		"type": "object",
 		"properties": map[string]interface{}{
 			"path": map[string]interface{}{
 				"type":        "string",
-				"description": "File path (relative to workspace or absolute)",
+				"description": "File path (relative to your working directory or absolute)",
 			},
 		},
 		"required": []string{"path"},
-	}, makeReadFile(workspace, &r.sandboxRoot))
+	}, makeReadFile(r))
 
 	r.Register("write_file", "Write content to a file (creates directories as needed)", map[string]interface{}{
 		"type": "object",
 		"properties": map[string]interface{}{
 			"path": map[string]interface{}{
 				"type":        "string",
-				"description": "File path (relative to workspace or absolute)",
+				"description": "File path (relative to your working directory or absolute)",
 			},
 			"content": map[string]interface{}{
 				"type":        "string",
@@ -51,31 +82,31 @@ func registerFile(r *Registry, workspace string) {
 			},
 		},
 		"required": []string{"path", "content"},
-	}, makeWriteFile(workspace, &r.sandboxRoot))
+	}, makeWriteFile(r))
 
 	r.Register("list_dir", "List files and directories in a path", map[string]interface{}{
 		"type": "object",
 		"properties": map[string]interface{}{
 			"path": map[string]interface{}{
 				"type":        "string",
-				"description": "Directory path (relative to workspace or absolute)",
+				"description": "Directory path (relative to your working directory or absolute)",
 			},
 		},
 		"required": []string{"path"},
-	}, makeListDir(workspace, &r.sandboxRoot))
+	}, makeListDir(r))
 }
 
-func resolvePath(workspace, path string) string {
+func resolvePath(root, path string) string {
 	if filepath.IsAbs(path) {
 		return filepath.Clean(path)
 	}
-	return filepath.Clean(filepath.Join(workspace, path))
+	return filepath.Clean(filepath.Join(root, path))
 }
 
 // resolvePathSandboxed resolves a path and validates that it stays within
 // sandboxRoot. Returns an error when the resolved path escapes.
-func resolvePathSandboxed(workspace, sandboxRoot, path string) (string, error) {
-	full := resolvePath(workspace, path)
+func resolvePathSandboxed(root, sandboxRoot, path string) (string, error) {
+	full := resolvePath(root, path)
 	if sandboxRoot == "" {
 		return full, nil
 	}
@@ -93,14 +124,14 @@ func resolvePathSandboxed(workspace, sandboxRoot, path string) (string, error) {
 	return absFull, nil
 }
 
-func makeReadFile(workspace string, sandboxRoot *string) ToolFunc {
+func makeReadFile(r *Registry) ToolFunc {
 	return func(ctx context.Context, rawArgs json.RawMessage) (string, error) {
 		var args readFileArgs
 		if err := json.Unmarshal(rawArgs, &args); err != nil {
 			return "", fmt.Errorf("parse args: %w", err)
 		}
 
-		fullPath, err := resolvePathSandboxed(workspace, *sandboxRoot, args.Path)
+		fullPath, err := resolvePathSandboxed(r.rootForPath(args.Path), r.sandboxRoot, args.Path)
 		if err != nil {
 			return "", err
 		}
@@ -113,14 +144,14 @@ func makeReadFile(workspace string, sandboxRoot *string) ToolFunc {
 	}
 }
 
-func makeWriteFile(workspace string, sandboxRoot *string) ToolFunc {
+func makeWriteFile(r *Registry) ToolFunc {
 	return func(ctx context.Context, rawArgs json.RawMessage) (string, error) {
 		var args writeFileArgs
 		if err := json.Unmarshal(rawArgs, &args); err != nil {
 			return "", fmt.Errorf("parse args: %w", err)
 		}
 
-		fullPath, err := resolvePathSandboxed(workspace, *sandboxRoot, args.Path)
+		fullPath, err := resolvePathSandboxed(r.rootForPath(args.Path), r.sandboxRoot, args.Path)
 		if err != nil {
 			return "", err
 		}
@@ -137,14 +168,14 @@ func makeWriteFile(workspace string, sandboxRoot *string) ToolFunc {
 	}
 }
 
-func makeListDir(workspace string, sandboxRoot *string) ToolFunc {
+func makeListDir(r *Registry) ToolFunc {
 	return func(ctx context.Context, rawArgs json.RawMessage) (string, error) {
 		var args listDirArgs
 		if err := json.Unmarshal(rawArgs, &args); err != nil {
 			return "", fmt.Errorf("parse args: %w", err)
 		}
 
-		fullPath, err := resolvePathSandboxed(workspace, *sandboxRoot, args.Path)
+		fullPath, err := resolvePathSandboxed(r.rootForPath(args.Path), r.sandboxRoot, args.Path)
 		if err != nil {
 			return "", err
 		}

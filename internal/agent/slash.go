@@ -164,7 +164,7 @@ func (a *Agent) slashCompact(msg bus.InboundMessage) slashResult {
 		return slashResult{handled: true, reply: "No messages to compact."}
 	}
 
-	result, err := CompactMessages(sessionMsgs, a.workspacePath, a.provider, a.model)
+	result, err := CompactMessages(sessionMsgs, a.homePath, a.provider, a.model)
 	if err != nil {
 		return slashResult{handled: true, reply: fmt.Sprintf("Compaction error: %v", err)}
 	}
@@ -200,7 +200,7 @@ func (a *Agent) slashStatus(msg bus.InboundMessage) slashResult {
 		"Workspace:   %s",
 		a.name, a.model, soul,
 		a.maxTokens, a.temperature, a.maxToolIterations,
-		len(sessionMsgs), memLines, a.workspacePath,
+		len(sessionMsgs), memLines, a.homePath,
 	)
 	return slashResult{handled: true, reply: status}
 }
@@ -250,7 +250,7 @@ func (a *Agent) slashUsage(msg bus.InboundMessage) slashResult {
 }
 
 func (a *Agent) slashInsights(msg bus.InboundMessage, days int) slashResult {
-	logDir := filepath.Join(a.workspacePath, "memory", "logs")
+	logDir := filepath.Join(a.homePath, "memory", "logs")
 	cutoff := time.Now().AddDate(0, 0, -days)
 
 	files, _ := filepath.Glob(filepath.Join(logDir, "*.jsonl"))
@@ -271,13 +271,13 @@ func (a *Agent) slashInsights(msg bus.InboundMessage, days int) slashResult {
 		"Tip: Use /status for session info, /usage for token stats.",
 		days, totalFiles, recentFiles,
 		func() string {
-			info, err := os.Stat(filepath.Join(a.workspacePath, "MEMORY.md"))
+			info, err := os.Stat(filepath.Join(a.homePath, "MEMORY.md"))
 			if err != nil {
 				return "not found"
 			}
 			return fmt.Sprintf("%.1f KB, updated %s", float64(info.Size())/1024, info.ModTime().Format("2006-01-02 15:04"))
 		}(),
-		a.workspacePath,
+		a.homePath,
 	)
 	return slashResult{handled: true, reply: reply}
 }
@@ -306,7 +306,7 @@ func (a *Agent) slashPersonalityList(msg bus.InboundMessage) slashResult {
 // slashPersonalitySet switches the active SOUL.md.
 func (a *Agent) slashPersonalitySet(msg bus.InboundMessage, name string) slashResult {
 	// Look for SOUL-<name>.md in workspace
-	srcPath := filepath.Join(a.workspacePath, fmt.Sprintf("SOUL-%s.md", name))
+	srcPath := filepath.Join(a.homePath, fmt.Sprintf("SOUL-%s.md", name))
 	if _, err := os.Stat(srcPath); os.IsNotExist(err) {
 		return slashResult{handled: true, reply: fmt.Sprintf("Personality '%s' not found.\nExpected: %s", name, srcPath)}
 	}
@@ -316,7 +316,7 @@ func (a *Agent) slashPersonalitySet(msg bus.InboundMessage, name string) slashRe
 		return slashResult{handled: true, reply: fmt.Sprintf("Error reading personality: %v", err)}
 	}
 
-	destPath := filepath.Join(a.workspacePath, "SOUL.md")
+	destPath := filepath.Join(a.homePath, "SOUL.md")
 	if err := os.WriteFile(destPath, data, 0o644); err != nil {
 		return slashResult{handled: true, reply: fmt.Sprintf("Error applying personality: %v", err)}
 	}
@@ -333,7 +333,7 @@ func (a *Agent) slashModel(msg bus.InboundMessage, model string) slashResult {
 
 // listPersonalities finds SOUL-<name>.md files in workspace.
 func (a *Agent) listPersonalities() []string {
-	pattern := filepath.Join(a.workspacePath, "SOUL-*.md")
+	pattern := filepath.Join(a.homePath, "SOUL-*.md")
 	files, _ := filepath.Glob(pattern)
 	var names []string
 	for _, f := range files {
@@ -350,8 +350,8 @@ func (a *Agent) listPersonalities() []string {
 func (a *Agent) loadSoulName() string {
 	// Check if current SOUL.md is a known preset
 	for _, p := range a.listPersonalities() {
-		srcPath := filepath.Join(a.workspacePath, fmt.Sprintf("SOUL-%s.md", p))
-		soulPath := filepath.Join(a.workspacePath, "SOUL.md")
+		srcPath := filepath.Join(a.homePath, fmt.Sprintf("SOUL-%s.md", p))
+		soulPath := filepath.Join(a.homePath, "SOUL.md")
 		srcData, err1 := os.ReadFile(srcPath)
 		soulData, err2 := os.ReadFile(soulPath)
 		if err1 == nil && err2 == nil && string(srcData) == string(soulData) {

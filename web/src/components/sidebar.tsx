@@ -21,6 +21,8 @@ import {
   History,
   Wrench,
   Heart,
+  PanelLeftClose,
+  PanelLeftOpen,
 } from "lucide-react";
 import { useState, useEffect } from "react";
 import { useTheme } from "@/components/theme-provider";
@@ -58,6 +60,7 @@ function extractAgentId(pathname: string): string | null {
 export function SidebarLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [collapsed, setCollapsed] = useState(false);
   const { theme, toggleTheme } = useTheme();
   const [gatewayRunning, setGatewayRunning] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
@@ -98,36 +101,41 @@ export function SidebarLayout({ children }: { children: React.ReactNode }) {
     ? [...globalNavItems, adminNavItem]
     : globalNavItems;
 
-  const NavLinks = ({ onClick }: { onClick?: () => void }) => (
+  const NavLinks = ({ onClick, iconOnly }: { onClick?: () => void; iconOnly?: boolean }) => (
     <>
-      {/* Back button when inside agent view */}
       {isAgentView && (
         <Link
           href="/agents/"
           onClick={onClick}
-          className="flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors mb-2"
+          className={`flex items-center rounded-lg text-sm font-medium text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors mb-2 ${iconOnly ? "justify-center p-2" : "gap-3 px-3 py-2"}`}
+          title="Back to FastClaw"
         >
           <ArrowLeft className="h-4 w-4" />
-          Back to FastClaw
+          {!iconOnly && "Back to FastClaw"}
         </Link>
       )}
 
       {navItems.map((item) => {
+        const normPath = pathname.replace(/\/$/, "");
+        const normHref = item.href.replace(/\/$/, "");
         const isActive =
-          pathname === item.href || pathname.startsWith(item.href);
+          normPath === normHref || normPath.startsWith(normHref + "/");
         return (
           <Link
             key={item.href}
             href={item.href}
             onClick={onClick}
-            className={`flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors ${
+            className={`flex items-center rounded-lg text-sm font-medium transition-colors ${
+              iconOnly ? "justify-center p-2" : "gap-3 px-3 py-2"
+            } ${
               isActive
                 ? "bg-primary/10 text-primary"
                 : "text-muted-foreground hover:bg-muted/50 hover:text-foreground"
             }`}
+            title={iconOnly ? item.label : undefined}
           >
             <item.icon className="h-4 w-4" />
-            {item.label}
+            {!iconOnly && item.label}
           </Link>
         );
       })}
@@ -137,53 +145,59 @@ export function SidebarLayout({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex min-h-screen bg-background">
       {/* Desktop sidebar */}
-      <aside className="hidden w-60 flex-col border-r border-border bg-card/50 md:flex">
+      <aside className={`hidden flex-col border-r border-border bg-card/50 md:flex transition-all duration-200 ${collapsed ? "w-14" : "w-60"}`}>
         {/* Logo/header */}
-        <div className="flex h-14 items-center gap-2.5 border-b border-border px-4">
-          {isAgentView ? (
+        <div className={`flex h-14 items-center border-b border-border ${collapsed ? "justify-center px-2" : "gap-2.5 px-4"}`}>
+          {collapsed ? (
+            <button
+              onClick={() => setCollapsed(false)}
+              className="flex h-8 w-8 items-center justify-center rounded-lg hover:bg-muted/50 transition-colors"
+              title="Expand sidebar"
+            >
+              <PanelLeftOpen className="h-4 w-4 text-muted-foreground" />
+            </button>
+          ) : isAgentView ? (
             <>
-              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10">
+              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 shrink-0">
                 <Bot className="h-4 w-4 text-primary" />
               </div>
-              <div>
-                <span className="text-sm font-semibold text-foreground">
+              <div className="flex-1 min-w-0">
+                <span className="text-sm font-semibold text-foreground truncate block">
                   {activeAgentId}
                 </span>
-                <p className="text-[10px] text-muted-foreground leading-none">
-                  Agent
-                </p>
+                <p className="text-[10px] text-muted-foreground leading-none">Agent</p>
               </div>
+              <button onClick={() => setCollapsed(true)} className="shrink-0 rounded-md p-1 text-muted-foreground hover:text-foreground hover:bg-muted/50" title="Collapse sidebar">
+                <PanelLeftClose className="h-4 w-4" />
+              </button>
             </>
           ) : (
             <>
-              <div className="relative flex h-8 w-8 items-center justify-center">
+              <div className="relative flex h-8 w-8 items-center justify-center shrink-0">
                 <img src="/logo.png" alt="FastClaw" className="h-8 w-8 rounded-lg" />
-                <span
-                  className={`absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border-2 border-card ${
-                    gatewayRunning
-                      ? "bg-emerald-500 animate-pulse"
-                      : "bg-muted-foreground/40"
-                  }`}
-                />
+                <span className={`absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border-2 border-card ${gatewayRunning ? "bg-emerald-500 animate-pulse" : "bg-muted-foreground/40"}`} />
               </div>
-              <div>
+              <div className="flex-1 min-w-0">
                 <span className="text-sm font-semibold text-foreground">FastClaw</span>
                 <p className="text-[10px] text-muted-foreground leading-none">
                   {gatewayRunning ? "Gateway running" : "Gateway stopped"}
                 </p>
               </div>
+              <button onClick={() => setCollapsed(true)} className="shrink-0 rounded-md p-1 text-muted-foreground hover:text-foreground hover:bg-muted/50" title="Collapse sidebar">
+                <PanelLeftClose className="h-4 w-4" />
+              </button>
             </>
           )}
         </div>
 
         {/* Navigation */}
-        <nav className="flex-1 space-y-1 p-3 overflow-y-auto">
-          <NavLinks />
+        <nav className={`flex-1 space-y-1 overflow-y-auto ${collapsed ? "p-1.5" : "p-3"}`}>
+          <NavLinks iconOnly={collapsed} />
         </nav>
 
         {/* Footer */}
-        <div className="border-t border-border p-3 space-y-2">
-          {isAdmin && !isAgentView && (
+        <div className={`border-t border-border space-y-2 ${collapsed ? "p-1.5" : "p-3"}`}>
+          {isAdmin && !isAgentView && !collapsed && (
             <div className="flex items-center gap-2 px-1">
               <div className="h-6 w-6 rounded-full bg-emerald-600/20 flex items-center justify-center">
                 <span className="text-[10px] font-bold text-emerald-400">A</span>
@@ -194,11 +208,13 @@ export function SidebarLayout({ children }: { children: React.ReactNode }) {
               </div>
             </div>
           )}
-          <div className="flex items-center justify-between">
-            <span className="text-[11px] text-muted-foreground/60 font-mono">
-              v0.1.0
-            </span>
-            <div className="flex items-center gap-1">
+          <div className={`flex items-center ${collapsed ? "flex-col gap-1" : "justify-between"}`}>
+            {!collapsed && (
+              <span className="text-[11px] text-muted-foreground/60 font-mono">
+                v0.1.0
+              </span>
+            )}
+            <div className={`flex items-center ${collapsed ? "flex-col" : ""} gap-1`}>
               {isLoggedIn() && (
                 <button
                   onClick={() => { logout(); window.location.reload(); }}

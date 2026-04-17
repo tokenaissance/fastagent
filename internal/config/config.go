@@ -265,7 +265,11 @@ type AgentDefaults struct {
 	PolicyPreset      string  `json:"policy,omitempty"`
 }
 
-// AgentEntry is a per-agent entry in config.json agents.list.
+// AgentEntry is a per-agent entry — populated by merging agent.json with
+// config defaults. The `workspace` field here is the agent's working dir
+// for user-facing files (overrides the default ~/.fastclaw/workspaces/{id}).
+// The agent's home dir (SOUL.md, sessions, memory) is always derived from
+// the agent ID via AgentHomeDir.
 type AgentEntry struct {
 	ID                string                     `json:"id"`
 	Workspace         string                     `json:"workspace,omitempty"`
@@ -320,8 +324,12 @@ type AgentFileConfig struct {
 	MaxTokens         int                        `json:"maxTokens,omitempty"`
 	Temperature       float64                    `json:"temperature,omitempty"`
 	MaxToolIterations int                        `json:"maxToolIterations,omitempty"`
-	Skills            SkillsConfig               `json:"skills,omitempty"`
-	MCPServers        map[string]MCPServerConfig `json:"mcpServers,omitempty"`
+	// Workspace overrides the default working directory (where the agent
+	// saves user-facing files). Supports `~/` expansion. Leave empty to
+	// use the default `~/.fastclaw/workspaces/{id}`.
+	Workspace  string                     `json:"workspace,omitempty"`
+	Skills     SkillsConfig               `json:"skills,omitempty"`
+	MCPServers map[string]MCPServerConfig `json:"mcpServers,omitempty"`
 }
 
 // SkillsConfig controls skill loading for an agent.
@@ -358,7 +366,8 @@ type SkillsLoadCfg struct {
 // ResolvedAgent is the fully merged config for a single agent.
 type ResolvedAgent struct {
 	ID                string
-	Workspace         string
+	Home              string // agent's own directory: SOUL.md, IDENTITY.md, sessions, memory, skills
+	Workspace         string // working directory where agent creates user-facing files
 	Model             string
 	MaxTokens         int
 	Temperature       float64
@@ -412,13 +421,27 @@ func EnsureUserDir(userID ...string) (string, error) {
 	return home, nil
 }
 
-// AgentWorkspaceDir returns ~/.fastclaw/agents/{agentID}/agent.
-func AgentWorkspaceDir(agentID string) (string, error) {
+// AgentHomeDir returns ~/.fastclaw/agents/{agentID}/agent — the agent's own
+// directory where its identity files (SOUL.md, IDENTITY.md), sessions, memory
+// and skills live. Think of it as the agent's "home".
+func AgentHomeDir(agentID string) (string, error) {
 	home, err := HomeDir()
 	if err != nil {
 		return "", err
 	}
 	return filepath.Join(home, "agents", agentID, "agent"), nil
+}
+
+// AgentWorkspaceDir returns ~/.fastclaw/workspaces/{agentID} — the agent's
+// working directory for user-facing artifacts (files it creates for or with
+// the user). Separate from AgentHomeDir so identity files and user work
+// don't share a directory.
+func AgentWorkspaceDir(agentID string) (string, error) {
+	home, err := HomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, "workspaces", agentID), nil
 }
 
 func expandPath(path string) string {
@@ -515,6 +538,7 @@ func (cfg *Config) MergedAgentConfig(entry AgentEntry) ResolvedAgent {
 // MergedAgentConfigForUser is like MergedAgentConfig but resolves the
 // workspace path under the given user's directory.
 func (cfg *Config) MergedAgentConfigForUser(entry AgentEntry, userID string) ResolvedAgent {
+	home, _ := AgentHomeDir(entry.ID)
 	workspace := expandPath(entry.Workspace)
 	if workspace == "" {
 		workspace, _ = AgentWorkspaceDir(entry.ID)
@@ -522,6 +546,7 @@ func (cfg *Config) MergedAgentConfigForUser(entry AgentEntry, userID string) Res
 
 	resolved := ResolvedAgent{
 		ID:                entry.ID,
+		Home:              home,
 		Workspace:         workspace,
 		Model:             cfg.Agents.Defaults.Model,
 		MaxTokens:         cfg.Agents.Defaults.MaxTokens,

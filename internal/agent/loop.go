@@ -37,8 +37,9 @@ type Agent struct {
 	temperature       float64
 	maxToolIterations int
 	thinking          string
-	workspacePath     string
-	homeDir           string
+	homePath          string // agent's home: SOUL.md, sessions, memory, skills
+	workspacePath     string // working dir where agent creates user files
+	homeDir           string // FastClaw root, ~/.fastclaw
 	ownerUserID       string // the user that owns this agent (for hook namespacing)
 	skillsCfg         config.SkillsConfig
 	globalSkillsCfg   config.SkillsCfg
@@ -68,7 +69,7 @@ func NewAgentWithFullCfg(rc config.ResolvedAgent, prov provider.Provider, mb *bu
 	if fullCfg.Memory.FTS.Enabled {
 		dbPath := fullCfg.Memory.FTS.DBPath
 		if dbPath == "" {
-			dbPath = rc.Workspace + "/memory/fts.db"
+			dbPath = rc.Home + "/memory/fts.db"
 		}
 		if fts, err := store.NewFTSStore(dbPath); err == nil {
 			if err := fts.Init(); err == nil {
@@ -88,8 +89,8 @@ func NewAgentWithFullCfg(rc config.ResolvedAgent, prov provider.Provider, mb *bu
 		if model == "" {
 			model = rc.Model
 		}
-		learnerLoader := NewSkillsLoaderWithGlobal(homeDir, rc.Workspace, "", rc.Skills, fullCfg.Skills)
-		ag.skillsLearner = NewSkillsLearner(rc.Workspace, prov, model, learnerLoader.AllSkillDirs()...)
+		learnerLoader := NewSkillsLoaderWithGlobal(homeDir, rc.Home, "", rc.Skills, fullCfg.Skills)
+		ag.skillsLearner = NewSkillsLearner(rc.Home, prov, model, learnerLoader.AllSkillDirs()...)
 		if fullCfg.SkillsLearner.MinToolCalls > 0 {
 			ag.skillsLearner.minToolCalls = fullCfg.SkillsLearner.MinToolCalls
 		}
@@ -105,16 +106,27 @@ func NewAgentWithFullCfg(rc config.ResolvedAgent, prov provider.Provider, mb *bu
 
 // NewAgentWithSkillsCfg creates a new Agent with global skills config for env injection.
 func NewAgentWithSkillsCfg(rc config.ResolvedAgent, prov provider.Provider, mb *bus.MessageBus, homeDir string, globalSkillsCfg config.SkillsCfg) *Agent {
-	memory := NewMemory(rc.Workspace)
-	registry := tools.NewRegistry(rc.Workspace)
+	workspace := rc.Workspace
+	if workspace == "" {
+		// Fallback for callers (tests, legacy configs) that don't populate
+		// Workspace — use the agent's home as a single-dir fallback.
+		workspace = rc.Home
+	}
+	// Ensure the workspace dir exists so the first write_file doesn't fail.
+	if workspace != "" {
+		_ = os.MkdirAll(workspace, 0o755)
+	}
+
+	memory := NewMemory(rc.Home)
+	registry := tools.NewRegistry(rc.Home, workspace)
 	tools.RegisterMessage(registry, mb)
-	tools.RegisterMemorySearch(registry, rc.Workspace)
+	tools.RegisterMemorySearch(registry, rc.Home)
 	tools.RegisterWebFetch(registry)
-	tools.RegisterLoadSkill(registry, homeDir, rc.Workspace, "")
+	tools.RegisterLoadSkill(registry, homeDir, rc.Home, "")
 	tools.RegisterSkillInstall(registry, 0) // 0 = use default port 18953
 
 	// Load skills with OpenClaw compatibility
-	loader := NewSkillsLoaderWithGlobal(homeDir, rc.Workspace, "", rc.Skills, globalSkillsCfg)
+	loader := NewSkillsLoaderWithGlobal(homeDir, rc.Home, "", rc.Skills, globalSkillsCfg)
 	skills := loader.LoadSkills()
 	skillsSummary := loader.BuildSkillsSummary(skills)
 
@@ -139,16 +151,17 @@ func NewAgentWithSkillsCfg(rc config.ResolvedAgent, prov provider.Provider, mb *
 		name:              rc.ID,
 		provider:          prov,
 		registry:          registry,
-		sessions:          session.NewManager(rc.Workspace + "/sessions"),
+		sessions:          session.NewManager(rc.Home + "/sessions"),
 		memory:            memory,
-		ctxBuilder:        newContextBuilderWithSandbox(rc.Workspace, memory, skillsSummary, rc.Thinking, rc.Sandbox.Enabled, rc.Sandbox.Backend),
+		ctxBuilder:        newContextBuilderWithSandbox(rc.Home, workspace, memory, skillsSummary, rc.Thinking, rc.Sandbox.Enabled, rc.Sandbox.Backend),
 		hooks:             hooks,
 		model:             rc.Model,
 		maxTokens:         rc.MaxTokens,
 		temperature:       rc.Temperature,
 		maxToolIterations: rc.MaxToolIterations,
 		thinking:          rc.Thinking,
-		workspacePath:     rc.Workspace,
+		homePath:          rc.Home,
+		workspacePath:     workspace,
 		homeDir:           homeDir,
 		skillsCfg:         rc.Skills,
 		globalSkillsCfg:   globalSkillsCfg,
@@ -179,16 +192,17 @@ func NewAgentWithSkillsCfg(rc config.ResolvedAgent, prov provider.Provider, mb *
 	return ag
 }
 
-func newContextBuilderWithThinking(workspace string, memory *Memory, skillsSummary string, thinking string) *ContextBuilder {
-	cb := NewContextBuilder(workspace, memory, skillsSummary)
+func newContextBuilderWithThinking(home string, memory *Memory, skillsSummary string, thinking string) *ContextBuilder {
+	cb := NewContextBuilder(home, memory, skillsSummary)
 	if thinking != "" {
 		cb.SetThinking(thinking)
 	}
 	return cb
 }
 
-func newContextBuilderWithSandbox(workspace string, memory *Memory, skillsSummary string, thinking string, sandboxEnabled bool, sandboxBackend string) *ContextBuilder {
-	cb := newContextBuilderWithThinking(workspace, memory, skillsSummary, thinking)
+func newContextBuilderWithSandbox(home, workspace string, memory *Memory, skillsSummary string, thinking string, sandboxEnabled bool, sandboxBackend string) *ContextBuilder {
+	cb := newContextBuilderWithThinking(home, memory, skillsSummary, thinking)
+	cb.SetWorkspace(workspace)
 	cb.sandboxEnabled = sandboxEnabled
 	cb.sandboxBackend = sandboxBackend
 	return cb
@@ -230,9 +244,9 @@ func (a *Agent) HandleWebChatStream(ctx context.Context, sessionId, text string,
 	return a.HandleMessage(ctx, msg)
 }
 
-// workspace returns the agent's workspace path.
-func (a *Agent) workspace() string {
-	return a.workspacePath
+// home returns the agent's home (metadata) directory path.
+func (a *Agent) home() string {
+	return a.homePath
 }
 
 // SetGroupContext configures group chat awareness for this agent's system prompt.
@@ -393,7 +407,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 
 	// Context compaction: check if session messages are too large
 	sessionMsgs := sess.GetMessages()
-	compactResult, err := CompactMessages(sessionMsgs, a.workspacePath, a.provider, a.model)
+	compactResult, err := CompactMessages(sessionMsgs, a.homePath, a.provider, a.model)
 	if err != nil {
 		slog.Warn("compaction error", "agent", a.name, "error", err)
 	}
@@ -604,7 +618,7 @@ func (a *Agent) runPostTurn(ctx context.Context, messages []provider.Message, to
 		Messages:      messages,
 		TurnCount:     a.turnCount,
 		ToolCallCount: toolCallCount,
-		Workspace:     a.workspacePath,
+		Workspace:     a.homePath,
 		UserID:        a.ownerUserID,
 	})
 
@@ -658,7 +672,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 	sess.Append(userMsg)
 
 	sessionMsgs := sess.GetMessages()
-	compactResult, err := CompactMessages(sessionMsgs, a.workspacePath, a.provider, a.model)
+	compactResult, err := CompactMessages(sessionMsgs, a.homePath, a.provider, a.model)
 	if err != nil {
 		slog.Warn("compaction error", "agent", a.name, "error", err)
 	}
@@ -809,7 +823,12 @@ func (a *Agent) stringStream(text string) *provider.StreamReader {
 	return provider.NewStreamReader(ch)
 }
 
-// WorkspacePath returns the agent's workspace directory.
+// HomePath returns the agent's home directory (identity/metadata).
+func (a *Agent) HomePath() string {
+	return a.homePath
+}
+
+// WorkspacePath returns the agent's working directory for user-facing files.
 func (a *Agent) WorkspacePath() string {
 	return a.workspacePath
 }
@@ -825,12 +844,13 @@ func (a *Agent) UpdateConfig(rc config.ResolvedAgent) {
 // ReloadWorkspaceFiles re-reads workspace .md files (SOUL.md, AGENTS.md, etc.)
 // and rebuilds the context builder.
 func (a *Agent) ReloadWorkspaceFiles() {
-	a.memory = NewMemory(a.workspacePath)
+	a.memory = NewMemory(a.homePath)
 	// Rebuild skills summary
-	loader := NewSkillsLoaderWithGlobal(a.homeDir, a.workspacePath, "", a.skillsCfg, a.globalSkillsCfg)
+	loader := NewSkillsLoaderWithGlobal(a.homeDir, a.homePath, "", a.skillsCfg, a.globalSkillsCfg)
 	skills := loader.LoadSkills()
 	skillsSummary := loader.BuildSkillsSummary(skills)
-	a.ctxBuilder = NewContextBuilder(a.workspacePath, a.memory, skillsSummary)
+	a.ctxBuilder = NewContextBuilder(a.homePath, a.memory, skillsSummary)
+	a.ctxBuilder.SetWorkspace(a.workspacePath)
 }
 
 // extractMediaPaths scans tool output for MEDIA: lines and returns file paths.

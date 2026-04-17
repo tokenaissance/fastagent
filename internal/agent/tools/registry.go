@@ -26,6 +26,12 @@ type Registry struct {
 	tools       map[string]registeredTool
 	sandboxRoot string // if non-empty, file tools reject paths outside this dir
 	executor    sandbox.Executor // if non-nil, all file+exec tools route through this
+	// File tool roots. systemRoot is the agent metadata dir (SOUL.md etc.);
+	// userRoot is where user-facing artifacts go. A relative path whose base
+	// matches a known system filename routes to systemRoot; everything else
+	// goes to userRoot.
+	systemRoot  string
+	userRoot    string
 }
 
 type registeredTool struct {
@@ -35,11 +41,17 @@ type registeredTool struct {
 }
 
 // NewRegistry creates a new tool registry with built-in tools.
-func NewRegistry(workspace string) *Registry {
+// NewRegistry creates a Registry whose file tools route relative paths between
+// two roots: system files (SOUL.md, IDENTITY.md, etc.) land in systemRoot;
+// everything else lands in userRoot. Passing the same value for both gives
+// the legacy single-root behavior.
+func NewRegistry(systemRoot, userRoot string) *Registry {
 	r := &Registry{
-		tools: make(map[string]registeredTool),
+		tools:      make(map[string]registeredTool),
+		systemRoot: systemRoot,
+		userRoot:   userRoot,
 	}
-	r.registerBuiltins(workspace)
+	r.registerBuiltins()
 	return r
 }
 
@@ -129,8 +141,8 @@ func (r *Registry) SetExecutor(ex sandbox.Executor) {
 	registerSandboxedExec(r, ex)
 }
 
-func (r *Registry) registerBuiltins(workspace string) {
+func (r *Registry) registerBuiltins() {
 	registerExec(r)
-	registerFile(r, workspace)
+	registerFile(r)
 	registerMessage(r)
 }

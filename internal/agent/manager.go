@@ -51,10 +51,10 @@ func NewManager(resolved []config.ResolvedAgent, prov provider.Provider, mb *bus
 		ag := NewAgent(rc, prov, mb, homeDir)
 		// Inject store-backed session manager if available
 		if mopt.sessionStore != nil {
-			ag.sessions = session.NewManagerWithStore(rc.Workspace+"/sessions", mopt.sessionStore, rc.ID)
+			ag.sessions = session.NewManagerWithStore(rc.Home+"/sessions", mopt.sessionStore, rc.ID)
 		}
 		if mopt.memoryStore != nil {
-			ag.memory = NewMemoryWithStore(rc.Workspace, mopt.memoryStore, rc.ID)
+			ag.memory = NewMemoryWithStore(rc.Home, mopt.memoryStore, rc.ID)
 			ag.ctxBuilder.store = mopt.memoryStore
 			ag.ctxBuilder.agentID = rc.ID
 		}
@@ -63,6 +63,7 @@ func NewManager(resolved []config.ResolvedAgent, prov provider.Provider, mb *bus
 		slog.Info("loaded agent",
 			"id", rc.ID,
 			"model", rc.Model,
+			"home", rc.Home,
 			"workspace", rc.Workspace,
 		)
 	}
@@ -87,6 +88,18 @@ func (m *Manager) AddAgent(rc config.ResolvedAgent, prov provider.Provider, mb *
 	m.agents[rc.ID] = ag
 	slog.Info("agent added dynamically", "id", rc.ID, "model", rc.Model)
 	return nil
+}
+
+// RemoveAgent unregisters an agent by ID. No-op if the agent is not loaded.
+func (m *Manager) RemoveAgent(id string) {
+	if _, ok := m.agents[id]; !ok {
+		return
+	}
+	delete(m.agents, id)
+	if m.defaultAgent != nil && m.defaultAgent.Name() == id {
+		m.defaultAgent = nil
+	}
+	slog.Info("agent removed dynamically", "id", id)
 }
 
 // AgentByID returns an agent by its ID.

@@ -120,7 +120,7 @@ func runGateway(port int) error {
 	}
 
 	webSrv := setup.NewServer(port, nil)
-	webSrv.SetAgentProvider(&agentProviderAdapter{mgr: gw.AgentManager()})
+	webSrv.SetAgentProvider(&agentProviderAdapter{mgr: gw.AgentManager(), gw: gw})
 	webSrv.SetTaskQueue(gw.TaskQueue())
 	webSrv.SetGatewayConfig(gwCfg)
 	webSrv.SetUserResolver(&apiResolver{gw: gw})
@@ -176,6 +176,7 @@ func runGateway(port int) error {
 // agentProviderAdapter adapts agent.Manager to setup.AgentProvider.
 type agentProviderAdapter struct {
 	mgr *agent.Manager
+	gw  *gateway.Gateway
 }
 
 func (a *agentProviderAdapter) AllAgents() []setup.AgentHandle {
@@ -193,6 +194,10 @@ func (a *agentProviderAdapter) AgentByID(id string) setup.AgentHandle {
 		return nil
 	}
 	return ag
+}
+
+func (a *agentProviderAdapter) ReloadAgents() error {
+	return a.gw.ReloadAgents()
 }
 
 func runSetupWizard(port int) error {

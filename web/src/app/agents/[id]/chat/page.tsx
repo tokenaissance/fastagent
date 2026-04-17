@@ -1,12 +1,18 @@
 "use client";
 
 import { useEffect, useState, useRef, useCallback } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { getChatHistory, getChatSessions, sendChatStream, type ChatHistoryMessage, type ChatStreamEvent } from "@/lib/api";
-import { Bot, Send, Copy, Check, SquarePen, MessageSquare, Wrench, ChevronDown, ChevronRight } from "lucide-react";
+import { getChatHistory, getChatSessions, sendChatStream, getAuthToken, type ChatHistoryMessage, type ChatStreamEvent } from "@/lib/api";
+import { Bot, Send, Copy, Check, Plus, MessageSquare, Wrench, ChevronDown, ChevronRight, Download, X, File, FileText, Image as ImageIcon, FileCode, Film, Music } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+
+interface ProducedFile {
+  path: string; // path relative to workspace
+  size?: number;
+}
 
 interface ChatMessage {
   id: string;
@@ -14,6 +20,23 @@ interface ChatMessage {
   content: string;
   timestamp: number;
   toolCalls?: { id: string; name: string; arguments: string; result?: string }[];
+  files?: ProducedFile[];
+}
+
+// Single-segment identity filenames that route to the agent's home dir
+// (not the workspace) — exclude from the "Your files" panel.
+const SYSTEM_FILES = new Set([
+  "SOUL.md", "IDENTITY.md", "USER.md", "BOOTSTRAP.md",
+  "MEMORY.md", "HEARTBEAT.md", "AGENTS.md", "TOOLS.md", "agent.json",
+]);
+
+function isSystemFile(path: string): boolean {
+  return !path.includes("/") && SYSTEM_FILES.has(path);
+}
+
+function parseWrittenSize(result: string): number | undefined {
+  const m = result.match(/^Written (\d+) bytes/);
+  return m ? parseInt(m[1], 10) : undefined;
 }
 
 interface ChatSession {
@@ -75,8 +98,10 @@ function getAgentIdFromURL(): string {
 }
 
 export default function AgentChatPage() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const [selectedAgent] = useState(() => getAgentIdFromURL());
-  const [sessionId, setSessionId] = useState<string>(() => generateSessionId());
+  const [sessionId, setSessionId] = useState<string>(() => searchParams.get("session") || generateSessionId());
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
@@ -127,6 +152,14 @@ export default function AgentChatPage() {
     const text = input.trim();
     if (!text || !selectedAgent || sending) return;
 
+    // Pin the sessionId into the URL on the first send so a refresh keeps
+    // the user in the same conversation. Use history.replaceState (not
+    // router.replace) to avoid Next.js remounting the page and interrupting
+    // the stream we're about to start.
+    if (typeof window !== "undefined" && !window.location.search.includes("session=")) {
+      window.history.replaceState(null, "", `/agents/${selectedAgent}/chat/?session=${sessionId}`);
+    }
+
     setInput("");
     setMessages((prev) => [
       ...prev,
@@ -137,6 +170,8 @@ export default function AgentChatPage() {
     let curGroupId = "";
     let curCalls: { id: string; name: string; arguments: string; result?: string }[] = [];
     let curContent = "";
+    const turnFiles: ProducedFile[] = [];
+    const seenPaths = new Set<string>();
 
     const startNewGroup = () => {
       curGroupId = `tg-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
@@ -202,7 +237,20 @@ export default function AgentChatPage() {
           }
           case "tool_result": {
             const tc = curCalls.find((c) => c.id === (evt.data?.id || ""));
-            if (tc) tc.result = evt.data?.result || "";
+            const resultText = evt.data?.result || "";
+            if (tc) tc.result = resultText;
+            // Track successful write_file calls that landed in the workspace
+            // (i.e. a relative path that isn't a system identity file).
+            if (tc && tc.name === "write_file" && /^Written \d+ bytes/.test(resultText)) {
+              try {
+                const args = JSON.parse(tc.arguments);
+                const p: string = typeof args?.path === "string" ? args.path : "";
+                if (p && !p.startsWith("/") && !isSystemFile(p) && !seenPaths.has(p)) {
+                  seenPaths.add(p);
+                  turnFiles.push({ path: p, size: parseWrittenSize(resultText) });
+                }
+              } catch { /* ignore bad args */ }
+            }
             const groupId = curGroupId;
             const calls = [...curCalls];
             setMessages((prev) => {
@@ -216,6 +264,17 @@ export default function AgentChatPage() {
           }
         }
       });
+      // Attach files produced this turn to the final message so the UI can
+      // render a "Your files" panel below it.
+      if (turnFiles.length > 0) {
+        setMessages((prev) => {
+          if (prev.length === 0) return prev;
+          const updated = [...prev];
+          const last = updated[updated.length - 1];
+          updated[updated.length - 1] = { ...last, files: turnFiles };
+          return updated;
+        });
+      }
       loadSessions(selectedAgent);
     } catch {
       setMessages((prev) => [
@@ -228,7 +287,12 @@ export default function AgentChatPage() {
     }
   }, [input, selectedAgent, sessionId, sending, loadSessions]);
 
-  const handleKeyDown = (e: React.KeyboardEvent) => {
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // Don't submit while an IME composition is active — Enter in that state
+    // is the user confirming the IME candidate (e.g. pinyin → 好), not
+    // sending the message. keyCode 229 also signals "composing" on some
+    // browsers where isComposing isn't set.
+    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       handleSend();
@@ -242,12 +306,15 @@ export default function AgentChatPage() {
   };
 
   const handleNewChat = () => {
-    setSessionId(generateSessionId());
+    const newId = generateSessionId();
+    setSessionId(newId);
     setMessages([]);
+    router.replace(`/agents/${selectedAgent}/chat/`);
   };
 
   const handleSelectSession = (sid: string) => {
     setSessionId(sid);
+    router.replace(`/agents/${selectedAgent}/chat/?session=${sid}`);
   };
 
   const formatTime = (ts: number) =>
@@ -257,12 +324,12 @@ export default function AgentChatPage() {
     <div className="flex h-[calc(100vh-3rem)] md:h-screen">
       {/* Sidebar: sessions only */}
       <div className="hidden w-56 flex-col border-r border-border bg-card/30 lg:flex">
-        <div className="flex items-center justify-between border-b border-border p-3">
+        <div className="flex h-14 items-center justify-between border-b border-border px-4">
           <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-            Sessions
+            Chat
           </p>
           <button onClick={handleNewChat} title="New chat" className="rounded-md p-1 text-muted-foreground hover:text-foreground hover:bg-muted/50">
-            <SquarePen className="h-3.5 w-3.5" />
+            <Plus className="h-4 w-4" />
           </button>
         </div>
         <div className="flex-1 overflow-auto p-2 space-y-1">
@@ -289,7 +356,7 @@ export default function AgentChatPage() {
       {/* Chat area */}
       <div className="flex flex-1 flex-col">
         {/* Chat header */}
-        <div className="flex h-12 items-center justify-between border-b border-border px-4 shrink-0">
+        <div className="flex h-14 items-center border-b border-border px-4 shrink-0">
           <div className="flex items-center gap-2.5">
             <div className="flex h-7 w-7 items-center justify-center rounded-full bg-primary/10">
               <Bot className="h-4 w-4 text-primary" />
@@ -297,15 +364,6 @@ export default function AgentChatPage() {
             <span className="text-sm font-semibold">
               {selectedAgent}
             </span>
-          </div>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={handleNewChat}
-              className="flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors"
-              title="New Chat"
-            >
-              <SquarePen className="h-4 w-4" />
-            </button>
           </div>
         </div>
 
@@ -328,7 +386,12 @@ export default function AgentChatPage() {
 
             {messages.map((msg) =>
               msg.role === "tool-group" ? (
-                <ToolCallGroup key={msg.id} msg={msg} />
+                <div key={msg.id}>
+                  <ToolCallGroup msg={msg} />
+                  {msg.files && msg.files.length > 0 && (
+                    <FilesPanel agentId={selectedAgent} files={msg.files} />
+                  )}
+                </div>
               ) : (
                 <div
                   key={msg.id}
@@ -352,6 +415,9 @@ export default function AgentChatPage() {
                         </ReactMarkdown>
                       </div>
                     </div>
+                    {msg.files && msg.files.length > 0 && (
+                      <FilesPanel agentId={selectedAgent} files={msg.files} />
+                    )}
                     <div
                       className={`flex items-center gap-1.5 mt-1 ${
                         msg.role === "user" ? "justify-end" : "justify-start"
@@ -541,6 +607,173 @@ function ToolCallGroup({ msg }: { msg: ChatMessage }) {
                   )}
                 </div>
               ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** File extension → icon + preview kind. */
+function fileKind(path: string): { icon: typeof File; preview: "image" | "pdf" | "markdown" | "text" | "none" } {
+  const ext = path.toLowerCase().split(".").pop() || "";
+  if (["png", "jpg", "jpeg", "gif", "svg", "webp", "bmp", "ico"].includes(ext)) return { icon: ImageIcon, preview: "image" };
+  if (ext === "pdf") return { icon: FileText, preview: "pdf" };
+  if (ext === "md" || ext === "markdown") return { icon: FileText, preview: "markdown" };
+  if (["mp4", "webm", "mov", "mkv"].includes(ext)) return { icon: Film, preview: "none" };
+  if (["mp3", "wav", "ogg", "flac", "m4a"].includes(ext)) return { icon: Music, preview: "none" };
+  if (["js", "ts", "tsx", "jsx", "py", "go", "rs", "c", "cpp", "h", "java", "rb", "sh", "json", "yaml", "yml", "toml", "xml", "html", "css"].includes(ext))
+    return { icon: FileCode, preview: "text" };
+  if (["txt", "csv", "log"].includes(ext)) return { icon: FileText, preview: "text" };
+  return { icon: File, preview: "none" };
+}
+
+function formatBytes(n?: number): string {
+  if (n === undefined) return "";
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function fileUrl(agentId: string, path: string, download: boolean): string {
+  const token = getAuthToken();
+  const encoded = path.split("/").map(encodeURIComponent).join("/");
+  const params = new URLSearchParams();
+  if (download) params.set("download", "1");
+  if (token) params.set("token", token);
+  const qs = params.toString();
+  return `/api/agents/${agentId}/files/${encoded}${qs ? "?" + qs : ""}`;
+}
+
+function FilesPanel({ agentId, files }: { agentId: string; files: ProducedFile[] }) {
+  const [previewing, setPreviewing] = useState<ProducedFile | null>(null);
+  return (
+    <>
+      <div className="mt-2 space-y-1.5 max-w-[85%]">
+        <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/70">
+          Your files
+        </p>
+        <div className="flex flex-col gap-1.5">
+          {files.map((f) => {
+            const { icon: Icon } = fileKind(f.path);
+            const basename = f.path.split("/").pop() || f.path;
+            const downloadUrl = fileUrl(agentId, f.path, true);
+            return (
+              <div
+                key={f.path}
+                className="group flex items-center gap-2.5 rounded-lg border border-border bg-card/50 px-3 py-2 hover:bg-card/80 transition-colors"
+              >
+                <Icon className="h-4 w-4 text-muted-foreground shrink-0" />
+                <button
+                  onClick={() => setPreviewing(f)}
+                  className="flex-1 min-w-0 text-left"
+                  title="Open preview"
+                >
+                  <div className="text-sm font-medium text-foreground truncate">{basename}</div>
+                  {f.size !== undefined && (
+                    <div className="text-[11px] text-muted-foreground/70">{formatBytes(f.size)}</div>
+                  )}
+                </button>
+                <a
+                  href={downloadUrl}
+                  className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors"
+                  title="Download"
+                >
+                  <Download className="h-4 w-4" />
+                </a>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+      {previewing && (
+        <FilePreview
+          agentId={agentId}
+          file={previewing}
+          onClose={() => setPreviewing(null)}
+        />
+      )}
+    </>
+  );
+}
+
+function FilePreview({ agentId, file, onClose }: { agentId: string; file: ProducedFile; onClose: () => void }) {
+  const { preview } = fileKind(file.path);
+  const src = fileUrl(agentId, file.path, false);
+  const downloadUrl = fileUrl(agentId, file.path, true);
+  const basename = file.path.split("/").pop() || file.path;
+  const [text, setText] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (preview !== "markdown" && preview !== "text") return;
+    let cancelled = false;
+    fetch(src)
+      .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.text(); })
+      .then((t) => { if (!cancelled) setText(t); })
+      .catch((e) => { if (!cancelled) setError(String(e)); });
+    return () => { cancelled = true; };
+  }, [src, preview]);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm p-4" onClick={onClose}>
+      <div className="flex h-[85vh] w-full max-w-4xl flex-col rounded-xl border border-border bg-card shadow-2xl" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between border-b border-border px-4 py-3 shrink-0">
+          <div className="flex items-center gap-2 min-w-0">
+            <FileText className="h-4 w-4 text-muted-foreground shrink-0" />
+            <span className="font-medium text-sm truncate">{basename}</span>
+            {file.size !== undefined && (
+              <span className="text-[11px] text-muted-foreground shrink-0">{formatBytes(file.size)}</span>
+            )}
+          </div>
+          <div className="flex items-center gap-1 shrink-0">
+            <a
+              href={downloadUrl}
+              className="rounded-md p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted/50"
+              title="Download"
+            >
+              <Download className="h-4 w-4" />
+            </a>
+            <button
+              onClick={onClose}
+              className="rounded-md p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted/50"
+              title="Close"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+        </div>
+        <div className="flex-1 overflow-auto p-4 min-h-0">
+          {preview === "image" && (
+            <img src={src} alt={basename} className="max-w-full max-h-full mx-auto object-contain" />
+          )}
+          {preview === "pdf" && (
+            <iframe src={src} className="h-full w-full border-0" title={basename} />
+          )}
+          {preview === "markdown" && (
+            error ? <p className="text-sm text-destructive">Failed to load: {error}</p>
+            : text === null ? <p className="text-sm text-muted-foreground">Loading…</p>
+            : (
+              <div className="prose prose-sm dark:prose-invert max-w-none">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
+              </div>
+            )
+          )}
+          {preview === "text" && (
+            error ? <p className="text-sm text-destructive">Failed to load: {error}</p>
+            : text === null ? <p className="text-sm text-muted-foreground">Loading…</p>
+            : (
+              <pre className="text-xs font-mono whitespace-pre-wrap break-all bg-muted/30 rounded p-3">{text}</pre>
+            )
+          )}
+          {preview === "none" && (
+            <div className="flex flex-col items-center justify-center h-full gap-3 text-center">
+              <File className="h-12 w-12 text-muted-foreground/50" />
+              <p className="text-sm text-muted-foreground">Preview not available for this file type.</p>
+              <a href={downloadUrl} className="inline-flex items-center gap-2 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90">
+                <Download className="h-3.5 w-3.5" /> Download
+              </a>
             </div>
           )}
         </div>

@@ -29,7 +29,8 @@ type GroupContext struct {
 
 // ContextBuilder assembles the system prompt and runtime context.
 type ContextBuilder struct {
-	workspace      string
+	home           string // agent's home: SOUL.md, IDENTITY.md, memory, sessions
+	workspace      string // working dir where agent creates user-facing files
 	memory         *Memory
 	skillsSummary  string
 	groupCtx       *GroupContext
@@ -41,22 +42,40 @@ type ContextBuilder struct {
 }
 
 // NewContextBuilder creates a new context builder.
-func NewContextBuilder(workspace string, memory *Memory, skillsSummary string) *ContextBuilder {
+func NewContextBuilder(home string, memory *Memory, skillsSummary string) *ContextBuilder {
 	return &ContextBuilder{
-		workspace:     workspace,
+		home:          home,
 		memory:        memory,
 		skillsSummary: skillsSummary,
 	}
 }
+
+// SetWorkspace attaches the working directory for user-facing output. When
+// set, the system prompt advertises it as "Working Directory" and keeps it
+// distinct from the agent's home (identity) dir.
+func (cb *ContextBuilder) SetWorkspace(p string) { cb.workspace = p }
 
 // BuildSystemPrompt assembles the system prompt from identity, bootstrap files, memory, and skills.
 func (cb *ContextBuilder) BuildSystemPrompt() string {
 	var parts []string
 
 	// 1. Identity (runtime environment info)
+	workdir := cb.workspace
+	if workdir == "" {
+		workdir = cb.home
+	}
 	identity := fmt.Sprintf(`You are FastClaw, a lightweight AI Agent.
 OS: %s/%s
-Working Directory: %s`, runtime.GOOS, runtime.GOARCH, cb.workspace)
+Working Directory: %s
+
+File-tool routing: when you call write_file / read_file / list_dir with a
+relative path, FastClaw automatically places it in the right directory:
+- A bare identity filename (SOUL.md, IDENTITY.md, USER.md, MEMORY.md,
+  BOOTSTRAP.md, HEARTBEAT.md, AGENTS.md, TOOLS.md, agent.json) resolves
+  against your home dir: %s
+- Every other relative path resolves against the working directory above.
+So to update your own identity, just pass "IDENTITY.md"; to save a document
+for the user, pass a meaningful filename like "report.md".`, runtime.GOOS, runtime.GOARCH, workdir, cb.home)
 	parts = append(parts, identity)
 
 	// 2. Sandbox capabilities (auto-injected when sandbox is enabled)
@@ -221,7 +240,7 @@ func (cb *ContextBuilder) loadFile(name string) string {
 			return strings.TrimSpace(string(data))
 		}
 	}
-	path := filepath.Join(cb.workspace, name)
+	path := filepath.Join(cb.home, name)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return ""
