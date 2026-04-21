@@ -192,6 +192,19 @@ func (s *Server) userAuth(next http.HandlerFunc) http.HandlerFunc {
 func (s *Server) Run(ctx context.Context) error {
 	mux := http.NewServeMux()
 
+	// Unauthenticated health probes for K8s / load balancers. The auth
+	// middleware returns 401 without a bearer token, which would make
+	// every probe fail and trigger pod restarts. /healthz is the
+	// conventional name; /livez and /readyz mirror Kubernetes' own
+	// control-plane endpoints.
+	healthz := func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}
+	mux.HandleFunc("GET /healthz", healthz)
+	mux.HandleFunc("GET /livez", healthz)
+	mux.HandleFunc("GET /readyz", healthz)
+
 	// API routes — all wrapped with user auth so cloud users get their own
 	// config/agents/sessions when they access the web UI with a bearer token.
 	ua := s.userAuth

@@ -138,12 +138,14 @@ spec:
             # - { name: E2B_API_KEY, valueFrom: { secretKeyRef: { name: fastclaw-secrets, key: E2B_API_KEY } } }
           volumeMounts:
             - { name: data, mountPath: /data/.fastclaw }
+          # /healthz / /readyz 不经过 auth 中间件,K8s 直接探活。别用
+          # /api/status —— 它被 userAuth 包住了,匿名请求一律 401。
           readinessProbe:
-            httpGet: { path: /api/status, port: http }
+            httpGet: { path: /readyz, port: http }
             periodSeconds: 5
             failureThreshold: 3
           livenessProbe:
-            httpGet: { path: /api/status, port: http }
+            httpGet: { path: /livez, port: http }
             initialDelaySeconds: 30
             periodSeconds: 30
           resources:
