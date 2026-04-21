@@ -67,25 +67,39 @@ type StorageCfg struct {
 	AutoMigrate bool   `json:"autoMigrate,omitempty"` // auto-create tables on startup
 }
 
-// WorkspaceCfg controls where agent-generated artifacts (PDFs, images,
-// audio, …) are stored. "local" keeps them on the pod's filesystem, which
-// won't survive pod restarts in cloud deployments. "s3" uses any S3-compat
-// bucket and is the only option for stateless multi-pod setups.
-type WorkspaceCfg struct {
-	Backend string            `json:"backend,omitempty"` // "local" (default) | "s3"
-	Local   WorkspaceLocalCfg `json:"local,omitempty"`
-	S3      WorkspaceS3Cfg    `json:"s3,omitempty"`
+// ObjectStoreCfg controls the object-storage backend that holds agent-
+// produced artifacts (generated PDFs/images/audio, workspace files…).
+// Internally the gateway still speaks `workspace.Store`; this is the
+// operator-facing config for where those bytes actually go.
+//
+// Type picks the provider. For hosted S3-compat providers the factory
+// fills in a preset endpoint from Region / AccountID so operators don't
+// need to memorise vendor URLs.
+//
+// Valid Type values:
+//   "", "local"     — pod-local filesystem (single-host only)
+//   "aws-s3"        — AWS S3
+//   "cloudflare-r2" — Cloudflare R2
+//   "backblaze-b2"  — Backblaze B2 S3-compat
+//   "aliyun-oss"    — Aliyun OSS
+//   "minio"         — Self-hosted MinIO (needs explicit S3.Endpoint)
+//   "s3"            — Any other S3-compat; needs explicit S3.Endpoint
+type ObjectStoreCfg struct {
+	Type         string              `json:"type,omitempty"`
+	Local        ObjectStoreLocalCfg `json:"local,omitempty"`
+	S3           ObjectStoreS3Cfg    `json:"s3,omitempty"`
+	AccountID    string              `json:"accountId,omitempty"`      // Cloudflare R2
+	AliyunIntern bool                `json:"aliyunInternal,omitempty"` // prefer OSS -internal endpoint
 }
 
-// WorkspaceLocalCfg configures the local filesystem backend.
-type WorkspaceLocalCfg struct {
+// ObjectStoreLocalCfg configures the local-filesystem backend.
+type ObjectStoreLocalCfg struct {
 	Root string `json:"root,omitempty"` // default ~/.fastclaw/workspaces
 }
 
-// WorkspaceS3Cfg configures an S3-compatible backend. Field names mirror
-// internal/workspace.S3Config; conversion is a straight copy.
-type WorkspaceS3Cfg struct {
-	Endpoint  string `json:"endpoint"`
+// ObjectStoreS3Cfg configures any S3-compatible backend.
+type ObjectStoreS3Cfg struct {
+	Endpoint  string `json:"endpoint,omitempty"`
 	Region    string `json:"region,omitempty"`
 	Bucket    string `json:"bucket"`
 	Prefix    string `json:"prefix,omitempty"`
@@ -93,6 +107,7 @@ type WorkspaceS3Cfg struct {
 	SecretKey string `json:"secretKey"`
 	UseSSL    bool   `json:"useSSL"`
 }
+
 
 
 // WebSearchCfg is the legacy single-provider web search config, kept for
@@ -276,7 +291,9 @@ type Config struct {
 	WebSearch     WebSearchCfg               `json:"webSearch,omitempty"` // legacy; migrated into ToolProviders/Tools on load
 	ToolProviders map[string]ToolProviderCfg `json:"toolProviders,omitempty"`
 	Tools         map[string]ToolCategoryCfg `json:"tools,omitempty"`
-	Workspace     WorkspaceCfg               `json:"workspace,omitempty"`
+	// ObjectStore configures the blob backend for agent-produced artifacts
+	// (AWS S3 / Cloudflare R2 / Aliyun OSS / MinIO / local filesystem).
+	ObjectStore ObjectStoreCfg `json:"objectStore,omitempty"`
 	Hooks         HooksCfg                   `json:"hooks,omitempty"`
 	Plugins       PluginsCfg                 `json:"plugins,omitempty"`
 	Gateway    GatewayCfg                 `json:"gateway,omitempty"`

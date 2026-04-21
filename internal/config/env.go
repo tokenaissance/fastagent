@@ -114,36 +114,45 @@ func LoadEnv() *EnvConfig {
 	return cfg
 }
 
-// applyWorkspaceEnv copies workspace-backend vars onto a fully-resolved
-// config. Called from ApplyToConfig — kept as a separate helper so
-// gateway.New doesn't have to know the env-var name convention.
-func applyWorkspaceEnv(cfg *Config) {
-	if v := os.Getenv("FASTCLAW_WORKSPACE_BACKEND"); v != "" {
-		cfg.Workspace.Backend = v
+// applyObjectStoreEnv reads FASTCLAW_OBJECT_STORE_* env vars into the
+// Config.ObjectStore block. Called from ApplyToConfig — kept as a
+// separate helper so gateway.New doesn't have to know the env-var
+// name convention.
+func applyObjectStoreEnv(cfg *Config) {
+	read := func(key string) string { return os.Getenv("FASTCLAW_OBJECT_STORE_" + key) }
+
+	if v := read("TYPE"); v != "" {
+		cfg.ObjectStore.Type = v
 	}
-	if v := os.Getenv("FASTCLAW_WORKSPACE_LOCAL_ROOT"); v != "" {
-		cfg.Workspace.Local.Root = v
+	if v := read("LOCAL_ROOT"); v != "" {
+		cfg.ObjectStore.Local.Root = v
 	}
-	if v := os.Getenv("FASTCLAW_WORKSPACE_S3_ENDPOINT"); v != "" {
-		cfg.Workspace.S3.Endpoint = v
+	if v := read("REGION"); v != "" {
+		cfg.ObjectStore.S3.Region = v
 	}
-	if v := os.Getenv("FASTCLAW_WORKSPACE_S3_REGION"); v != "" {
-		cfg.Workspace.S3.Region = v
+	if v := read("BUCKET"); v != "" {
+		cfg.ObjectStore.S3.Bucket = v
 	}
-	if v := os.Getenv("FASTCLAW_WORKSPACE_S3_BUCKET"); v != "" {
-		cfg.Workspace.S3.Bucket = v
+	if v := read("PREFIX"); v != "" {
+		cfg.ObjectStore.S3.Prefix = v
 	}
-	if v := os.Getenv("FASTCLAW_WORKSPACE_S3_PREFIX"); v != "" {
-		cfg.Workspace.S3.Prefix = v
+	if v := read("ACCESSKEY"); v != "" {
+		cfg.ObjectStore.S3.AccessKey = v
 	}
-	if v := os.Getenv("FASTCLAW_WORKSPACE_S3_ACCESSKEY"); v != "" {
-		cfg.Workspace.S3.AccessKey = v
+	if v := read("SECRETKEY"); v != "" {
+		cfg.ObjectStore.S3.SecretKey = v
 	}
-	if v := os.Getenv("FASTCLAW_WORKSPACE_S3_SECRETKEY"); v != "" {
-		cfg.Workspace.S3.SecretKey = v
+	if v := read("ACCOUNTID"); v != "" {
+		cfg.ObjectStore.AccountID = v
 	}
-	if v := os.Getenv("FASTCLAW_WORKSPACE_S3_USESSL"); v != "" {
-		cfg.Workspace.S3.UseSSL = v == "true" || v == "1"
+	if v := read("ENDPOINT"); v != "" {
+		cfg.ObjectStore.S3.Endpoint = v
+	}
+	if v := read("USESSL"); v != "" {
+		cfg.ObjectStore.S3.UseSSL = v == "true" || v == "1"
+	}
+	if v := read("ALIYUN_INTERNAL"); v != "" {
+		cfg.ObjectStore.AliyunIntern = v == "true" || v == "1"
 	}
 }
 
@@ -181,10 +190,10 @@ func (e *EnvConfig) ApplyToConfig(cfg *Config) {
 			cfg.Sandbox.E2BKey = e.Sandbox.E2BKey
 		}
 	}
-	// Workspace backend vars are read directly from the env (not mirrored
-	// in EnvConfig) since they came later and the EnvConfig struct is
-	// already doing too much indirection.
-	applyWorkspaceEnv(cfg)
+	// Object-store vars are read directly from the env (not mirrored in
+	// EnvConfig) — they came later and the EnvConfig struct is already
+	// doing too much indirection.
+	applyObjectStoreEnv(cfg)
 }
 
 // GenerateToken creates a random hex token.

@@ -83,14 +83,13 @@ services:
       FASTCLAW_STORAGE_DSN: postgres://fastclaw:fastclaw@db:5432/fastclaw?sslmode=disable
       FASTCLAW_MODE: cloud
       FASTCLAW_AUTH_TOKEN: dev-admin-token
-      # Workspace blob store → MinIO. Gateway reads these in env.go; the
-      # keys mirror the JSON shape of config.WorkspaceS3Cfg.
-      FASTCLAW_WORKSPACE_BACKEND: s3
-      FASTCLAW_WORKSPACE_S3_ENDPOINT: minio:9000
-      FASTCLAW_WORKSPACE_S3_BUCKET: fastclaw
-      FASTCLAW_WORKSPACE_S3_ACCESSKEY: minioadmin
-      FASTCLAW_WORKSPACE_S3_SECRETKEY: minioadmin
-      FASTCLAW_WORKSPACE_S3_USESSL: "false"
+      # Object store → MinIO. The keys mirror config.ObjectStoreCfg.
+      FASTCLAW_OBJECT_STORE_TYPE: minio
+      FASTCLAW_OBJECT_STORE_ENDPOINT: minio:9000
+      FASTCLAW_OBJECT_STORE_BUCKET: fastclaw
+      FASTCLAW_OBJECT_STORE_ACCESSKEY: minioadmin
+      FASTCLAW_OBJECT_STORE_SECRETKEY: minioadmin
+      FASTCLAW_OBJECT_STORE_USESSL: "false"
     depends_on:
       db:
         condition: service_healthy
@@ -109,12 +108,12 @@ services:
       FASTCLAW_STORAGE_DSN: postgres://fastclaw:fastclaw@db:5432/fastclaw?sslmode=disable
       FASTCLAW_MODE: cloud
       FASTCLAW_AUTH_TOKEN: dev-admin-token
-      FASTCLAW_WORKSPACE_BACKEND: s3
-      FASTCLAW_WORKSPACE_S3_ENDPOINT: minio:9000
-      FASTCLAW_WORKSPACE_S3_BUCKET: fastclaw
-      FASTCLAW_WORKSPACE_S3_ACCESSKEY: minioadmin
-      FASTCLAW_WORKSPACE_S3_SECRETKEY: minioadmin
-      FASTCLAW_WORKSPACE_S3_USESSL: "false"
+      FASTCLAW_OBJECT_STORE_TYPE: minio
+      FASTCLAW_OBJECT_STORE_ENDPOINT: minio:9000
+      FASTCLAW_OBJECT_STORE_BUCKET: fastclaw
+      FASTCLAW_OBJECT_STORE_ACCESSKEY: minioadmin
+      FASTCLAW_OBJECT_STORE_SECRETKEY: minioadmin
+      FASTCLAW_OBJECT_STORE_USESSL: "false"
     depends_on:
       db:
         condition: service_healthy

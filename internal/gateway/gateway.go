@@ -167,23 +167,26 @@ func New(cfg *config.Config) (*Gateway, error) {
 	// Workspace blob store (local FS or S3). Distinct from the Store above:
 	// that one holds small structured state (sessions, identity md files);
 	// this one holds arbitrary artifacts (generated PDFs/images/audio).
+	osCfg := cfg.ObjectStore
 	wsInner, err := workspace.Factory{
-		Backend:  cfg.Workspace.Backend,
-		LocalDir: cfg.Workspace.Local.Root,
+		Type:         osCfg.Type,
+		LocalDir:     osCfg.Local.Root,
+		AccountID:    osCfg.AccountID,
+		AliyunIntern: osCfg.AliyunIntern,
 		S3: workspace.S3Config{
-			Endpoint:  cfg.Workspace.S3.Endpoint,
-			Region:    cfg.Workspace.S3.Region,
-			Bucket:    cfg.Workspace.S3.Bucket,
-			Prefix:    cfg.Workspace.S3.Prefix,
-			AccessKey: cfg.Workspace.S3.AccessKey,
-			SecretKey: cfg.Workspace.S3.SecretKey,
-			UseSSL:    cfg.Workspace.S3.UseSSL,
+			Endpoint:  osCfg.S3.Endpoint,
+			Region:    osCfg.S3.Region,
+			Bucket:    osCfg.S3.Bucket,
+			Prefix:    osCfg.S3.Prefix,
+			AccessKey: osCfg.S3.AccessKey,
+			SecretKey: osCfg.S3.SecretKey,
+			UseSSL:    osCfg.S3.UseSSL,
 		},
 	}.New(filepath.Join(homeDir, "workspaces"))
 	if err != nil {
-		return nil, fmt.Errorf("open workspace store: %w", err)
+		return nil, fmt.Errorf("open object store: %w", err)
 	}
-	slog.Info("workspace store", "backend", defaultStr(cfg.Workspace.Backend, "local"))
+	slog.Info("object store", "type", defaultStr(osCfg.Type, "local"))
 
 	// Usage meter sits on top of the workspace store so every agent Put is
 	// automatically counted as workspace_bytes. In-memory for now;
