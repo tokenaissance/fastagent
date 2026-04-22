@@ -190,6 +190,21 @@ export async function updateConfig(config: Record<string, unknown>) {
   return res.json();
 }
 
+// Workspace files listing — used to diff a turn's outputs so the chat
+// UI can surface produced files under the final reply.
+export interface WorkspaceFile {
+  path: string;
+  size: number;
+  modTime: number;
+}
+
+export async function listAgentFiles(agentId: string): Promise<WorkspaceFile[]> {
+  const res = await apiFetch(`/api/agents/${encodeURIComponent(agentId)}/files`);
+  if (!res.ok) return [];
+  const data = await res.json();
+  return (data.files || []) as WorkspaceFile[];
+}
+
 // Chat
 export interface ChatHistoryMessage {
   role: "user" | "assistant" | "tool";
@@ -197,6 +212,7 @@ export interface ChatHistoryMessage {
   toolCalls?: { id: string; name: string; arguments: string }[];
   name?: string;
   toolCallId?: string;
+  metadata?: ToolResultMetadata;
 }
 
 export async function getChatHistory(agentId: string, sessionId: string): Promise<ChatHistoryMessage[]> {
@@ -204,8 +220,25 @@ export async function getChatHistory(agentId: string, sessionId: string): Promis
   return res.json();
 }
 
-export async function getChatSessions(agentId: string): Promise<{ id: string; preview: string }[]> {
+export async function getChatSessions(agentId: string): Promise<{ id: string; title?: string; preview: string }[]> {
   const res = await apiFetch(`/api/chat/sessions?agentId=${encodeURIComponent(agentId)}`);
+  return res.json();
+}
+
+export async function renameChatSession(agentId: string, sessionId: string, title: string) {
+  const res = await apiFetch(`/api/chat/sessions/${encodeURIComponent(sessionId)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ agentId, title }),
+  });
+  return res.json();
+}
+
+export async function deleteChatSession(agentId: string, sessionId: string) {
+  const res = await apiFetch(
+    `/api/chat/sessions/${encodeURIComponent(sessionId)}?agentId=${encodeURIComponent(agentId)}`,
+    { method: "DELETE" },
+  );
   return res.json();
 }
 
@@ -218,9 +251,20 @@ export async function sendChat(agentId: string, sessionId: string, message: stri
   return res.json();
 }
 
+export interface ToolResultMetadata {
+  sandbox?: boolean;
+}
+
 export interface ChatStreamEvent {
   type: "content" | "tool_call" | "tool_result" | "done";
-  data?: Record<string, string>;
+  data?: {
+    content?: string;
+    id?: string;
+    name?: string;
+    arguments?: string;
+    result?: string;
+    metadata?: ToolResultMetadata;
+  };
 }
 
 export async function sendChatStream(
@@ -273,12 +317,48 @@ export async function createAgent(agent: Partial<AgentDetail>) {
   return res.json();
 }
 
-export async function updateAgent(id: string, agent: Partial<AgentDetail>) {
+export interface AgentSkillsConfig {
+  disabled?: string[];
+  alwaysLoad?: string[];
+}
+
+// The backend accepts model / soul / skills / providers on update.
+// `AgentDetail.skills` is a flat string[] (legacy), but per-agent skills
+// config is really { disabled, alwaysLoad } — use an explicit payload
+// type so the two shapes don't collide in the type system.
+export interface AgentUpdatePayload {
+  model?: string;
+  soul?: string;
+  skills?: AgentSkillsConfig;
+  // Whole-map replace: omit to leave providers untouched, send {} to
+  // clear them, or send the full desired map to replace.
+  providers?: Record<string, ProviderData>;
+}
+
+export async function updateAgent(id: string, agent: AgentUpdatePayload) {
   const res = await apiFetch(`/api/agents/${id}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(agent),
   });
+  return res.json();
+}
+
+export interface AgentFileConfig {
+  model?: string;
+  maxTokens?: number;
+  temperature?: number;
+  maxToolIterations?: number;
+  workspace?: string;
+  skills?: AgentSkillsConfig;
+  providers?: Record<string, ProviderData>;
+}
+
+// Fetch the raw agent.json for one agent (per-agent overrides only — not
+// the merged/resolved config). Used by the per-agent Models and Skills
+// admin pages.
+export async function getAgentConfig(id: string): Promise<AgentFileConfig> {
+  const res = await apiFetch(`/api/agents/${id}/config`);
   return res.json();
 }
 
@@ -299,6 +379,21 @@ export async function deleteSkill(name: string) {
   const res = await apiFetch(`/api/skills/${name}`, {
     method: "DELETE",
   });
+  return res.json();
+}
+
+// Per-agent skills: list what's installed in an agent's own home/skills dir.
+// Agent-scoped skills shadow global ones with the same name.
+export async function getAgentSkills(agentId: string): Promise<SkillInfo[]> {
+  const res = await apiFetch(`/api/agents/${encodeURIComponent(agentId)}/skills`);
+  return res.json();
+}
+
+export async function deleteAgentSkill(agentId: string, name: string) {
+  const res = await apiFetch(
+    `/api/agents/${encodeURIComponent(agentId)}/skills/${encodeURIComponent(name)}`,
+    { method: "DELETE" },
+  );
   return res.json();
 }
 

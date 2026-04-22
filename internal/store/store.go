@@ -25,6 +25,7 @@ type Store interface {
 	SaveSession(ctx context.Context, agentID, sessionKey string, session *SessionRecord) error
 	ListSessions(ctx context.Context, agentID string) ([]SessionMeta, error)
 	DeleteSession(ctx context.Context, agentID, sessionKey string) error
+	RenameSession(ctx context.Context, agentID, sessionKey, title string) error
 
 	// Memory (per agent)
 	GetMemory(ctx context.Context, agentID string) (string, error)
@@ -90,16 +91,19 @@ type SessionRecord struct {
 
 // SessionMessage is a single message in a session.
 type SessionMessage struct {
-	Role       string      `json:"role"`
-	Content    string      `json:"content"`
-	ToolCalls  interface{} `json:"toolCalls,omitempty"`
-	ToolCallID string      `json:"toolCallId,omitempty"`
-	Timestamp  time.Time   `json:"timestamp"`
+	Role       string                 `json:"role"`
+	Content    string                 `json:"content"`
+	ToolCalls  interface{}            `json:"toolCalls,omitempty"`
+	ToolCallID string                 `json:"toolCallId,omitempty"`
+	Name       string                 `json:"name,omitempty"`
+	Metadata   map[string]interface{} `json:"metadata,omitempty"`
+	Timestamp  time.Time              `json:"timestamp"`
 }
 
 // SessionMeta is summary info for a session (for listing).
 type SessionMeta struct {
 	Key          string    `json:"key"`
+	Title        string    `json:"title,omitempty"`
 	MessageCount int       `json:"messageCount"`
 	UpdatedAt    time.Time `json:"updatedAt"`
 }

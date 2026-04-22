@@ -363,12 +363,16 @@ func (a *Agent) WebChatHistory(sessionId string) []map[string]any {
 			}
 			history = append(history, entry)
 		case "tool":
-			history = append(history, map[string]any{
+			entry := map[string]any{
 				"role":       "tool",
 				"content":    m.Content,
 				"name":       m.Name,
 				"toolCallId": m.ToolCallID,
-			})
+			}
+			if len(m.Metadata) > 0 {
+				entry["metadata"] = m.Metadata
+			}
+			history = append(history, entry)
 		}
 	}
 	return history
@@ -571,13 +575,14 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		for idx, r := range results {
 			totalToolCalls++
 			tc := resp.ToolCalls[idx]
+			resultContent, meta := extractToolMeta(r.result)
 
 			// Hook: AfterToolCall
 			a.hooks.Run(ctx, &HookContext{
 				AgentName:  a.name,
 				Point:      AfterToolCall,
 				ToolName:   r.toolName,
-				ToolResult: r.result,
+				ToolResult: resultContent,
 				Error:      r.err,
 				UserID:     a.ownerUserID,
 			})
@@ -592,28 +597,33 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 
 			// Index in FTS if available
 			if a.ftsStore != nil {
-				_ = a.ftsStore.Index(a.name, msg.ChatID, "tool:"+r.toolName, r.result, time.Now())
+				_ = a.ftsStore.Index(a.name, msg.ChatID, "tool:"+r.toolName, resultContent, time.Now())
 			}
 
 			// Check for MEDIA: protocol in tool output
-			if mediaPaths := extractMediaPaths(r.result); len(mediaPaths) > 0 {
+			if mediaPaths := extractMediaPaths(resultContent); len(mediaPaths) > 0 {
 				a.sendMediaFiles(msg, mediaPaths)
 			}
 
 			toolMsg := provider.Message{
 				Role:       "tool",
-				Content:    r.result,
+				Content:    resultContent,
 				ToolCallID: tc.ID,
 				Name:       r.toolName,
+				Metadata:   meta,
 			}
 			sess.Append(toolMsg)
 			messages = append(messages, toolMsg)
 
-			emitEvent(ctx, ChatEvent{Type: "tool_result", Data: map[string]any{
+			evt := map[string]any{
 				"id":     tc.ID,
 				"name":   r.toolName,
-				"result": r.result,
-			}})
+				"result": resultContent,
+			}
+			if meta != nil {
+				evt["metadata"] = meta
+			}
+			emitEvent(ctx, ChatEvent{Type: "tool_result", Data: evt})
 		}
 	}
 
@@ -818,23 +828,35 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 
 		for idx, r := range results {
 			tc := resp.ToolCalls[idx]
-			a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: AfterToolCall, ToolName: r.toolName, ToolResult: r.result, Error: r.err, UserID: a.ownerUserID})
+			resultContent, meta := extractToolMeta(r.result)
+			a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: AfterToolCall, ToolName: r.toolName, ToolResult: resultContent, Error: r.err, UserID: a.ownerUserID})
 
 			if r.err != nil {
 				slog.Warn("tool execution error", "agent", a.name, "name", r.toolName, "error", r.err)
 			}
 
-			if mediaPaths := extractMediaPaths(r.result); len(mediaPaths) > 0 {
+			if mediaPaths := extractMediaPaths(resultContent); len(mediaPaths) > 0 {
 				a.sendMediaFiles(msg, mediaPaths)
 			}
 
-			toolMsg := provider.Message{Role: "tool", Content: r.result, ToolCallID: tc.ID, Name: r.toolName}
+			toolMsg := provider.Message{Role: "tool", Content: resultContent, ToolCallID: tc.ID, Name: r.toolName, Metadata: meta}
 			sess.Append(toolMsg)
 			messages = append(messages, toolMsg)
 		}
 	}
 
 	return a.stringStream("I've reached the maximum number of tool iterations. Here's what I have so far.")
+}
+
+// extractToolMeta strips a FC_META prefix (if present) from a tool result and
+// returns the remaining content plus the parsed metadata. Today the only
+// signal is whether exec ran in a sandbox. Keeping the helper shared so all
+// tool-result handoff paths emit the same shape to the frontend.
+func extractToolMeta(result string) (string, map[string]any) {
+	if strings.HasPrefix(result, tools.MetaSandboxPrefix) {
+		return strings.TrimPrefix(result, tools.MetaSandboxPrefix), map[string]any{"sandbox": true}
+	}
+	return result, nil
 }
 
 // stringStream creates a StreamReader that yields a single string.

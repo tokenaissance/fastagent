@@ -55,7 +55,19 @@ func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 		cfg = &config.Config{}
 	}
 	caller := callerFrom(r)
-	resolved := config.ResolveAgents(cfg)
+	// In multi-pod / cloud deploys not every agent has a directory on the
+	// pod that's serving this request — the canonical list lives in the
+	// dataStore. Supplement filesystem discovery with store IDs so the
+	// admin UI shows every agent regardless of which pod wrote it.
+	var storeAgentIDs []string
+	if s.dataStore != nil {
+		if records, lerr := s.dataStore.ListAgents(r.Context()); lerr == nil {
+			for _, ar := range records {
+				storeAgentIDs = append(storeAgentIDs, ar.ID)
+			}
+		}
+	}
+	resolved := config.ResolveAgentsWithExtra(cfg, "", storeAgentIDs)
 	var agents []map[string]any
 	for _, ra := range resolved {
 		// API-key callers only see agents bound to their key; admins see all.
@@ -175,8 +187,10 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Model string `json:"model"`
-		Soul  string `json:"soul"`
+		Model     string                            `json:"model"`
+		Soul      string                            `json:"soul"`
+		Skills    *config.SkillsConfig              `json:"skills,omitempty"`
+		Providers *map[string]config.ProviderConfig `json:"providers,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid request"})
@@ -193,8 +207,28 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 	if req.Soul != "" {
 		_ = s.writeIdentityFile(r.Context(), id, "SOUL.md", []byte(req.Soul))
 	}
-	if req.Model != "" {
-		agentCfg := config.AgentFileConfig{Model: req.Model}
+
+	// Model / skills / providers live in agent.json. Read-modify-write so
+	// updating one field doesn't clobber the others (prior implementation
+	// overwrote the whole file when only `model` changed, silently dropping
+	// skills / tools / MCP config).
+	if req.Model != "" || req.Skills != nil || req.Providers != nil {
+		var agentCfg config.AgentFileConfig
+		if existing, rerr := s.readIdentityFile(r.Context(), id, "agent.json"); rerr == nil && len(existing) > 0 {
+			_ = json.Unmarshal(existing, &agentCfg) // tolerate malformed — start fresh
+		}
+		if req.Model != "" {
+			agentCfg.Model = req.Model
+		}
+		if req.Skills != nil {
+			agentCfg.Skills = *req.Skills
+		}
+		if req.Providers != nil {
+			// Whole-map replace (incl. empty-map to clear all per-agent
+			// providers). Callers that want surgical update should merge
+			// on the client side and PUT the full map.
+			agentCfg.Providers = *req.Providers
+		}
 		agentData, _ := json.MarshalIndent(agentCfg, "", "  ")
 		_ = s.writeIdentityFile(r.Context(), id, "agent.json", agentData)
 	}
@@ -206,6 +240,27 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jsonResponse(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// handleGetAgentConfig returns the raw agent.json contents for a single
+// agent. Used by the admin UI's per-agent model / skills pages, which need
+// current per-agent overrides (not the merged resolved config).
+func (s *Server) handleGetAgentConfig(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !s.canAccessAgent(callerFrom(r), id) {
+		forbid(w, id)
+		return
+	}
+	homePath, _ := config.AgentHomeDir(id)
+	if _, err := os.Stat(homePath); err != nil {
+		jsonResponse(w, http.StatusNotFound, map[string]any{"ok": false, "error": "agent not found"})
+		return
+	}
+	var agentCfg config.AgentFileConfig
+	if data, rerr := s.readIdentityFile(r.Context(), id, "agent.json"); rerr == nil && len(data) > 0 {
+		_ = json.Unmarshal(data, &agentCfg)
+	}
+	jsonResponse(w, http.StatusOK, agentCfg)
 }
 
 // systemFileNames is the allowlist of agent metadata files that the admin UI
@@ -279,6 +334,43 @@ func (s *Server) handlePutAgentSystemFile(w http.ResponseWriter, r *http.Request
 		}
 	}
 	jsonResponse(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// handleAgentFileList returns the list of objects currently in the agent's
+// workspace. Used by the chat UI to show a "produced files" panel under
+// the final reply bubble — the frontend diffs a pre-turn snapshot against
+// the post-turn list to find files the turn just created or updated.
+// Identity files (SOUL.md, USER.md, …) are excluded — those live in the
+// system store, not the workspace, and shouldn't be offered as downloads.
+func (s *Server) handleAgentFileList(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !s.canAccessAgent(callerFrom(r), id) {
+		forbid(w, id)
+		return
+	}
+	if s.workspaceStore == nil {
+		// Legacy filesystem-only setups can't list through the store API;
+		// returning an empty list is fine — the UI just hides the panel.
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"files": []any{}})
+		return
+	}
+	objs, err := s.workspaceStore.List(r.Context(), id)
+	if err != nil {
+		http.Error(w, "list workspace: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	type fileItem struct {
+		Path    string `json:"path"`
+		Size    int64  `json:"size"`
+		ModTime int64  `json:"modTime"`
+	}
+	files := make([]fileItem, 0, len(objs))
+	for _, o := range objs {
+		files = append(files, fileItem{Path: o.Path, Size: o.Size, ModTime: o.ModTime.UnixMilli()})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"files": files})
 }
 
 // handleAgentFile serves a file from the agent's workspace directory for

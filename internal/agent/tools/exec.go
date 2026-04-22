@@ -18,6 +18,12 @@ type execArgs struct {
 	Sandbox bool   `json:"sandbox,omitempty"` // force sandbox for this call
 }
 
+// MetaSandboxPrefix marks an exec result as having run inside a sandbox.
+// Placed on the first line so the agent loop can extract it into the
+// tool_result event metadata and strip it from the content the model sees.
+// Uses the ASCII Unit Separator so it never collides with shell output.
+const MetaSandboxPrefix = "\x1fFC_META:sandbox\x1f\n"
+
 var dangerousCommands = []string{
 	"rm -rf /",
 	"mkfs",
@@ -53,7 +59,7 @@ func RegisterExecWithSkillEnv(r *Registry, sbCfg *SandboxConfig, envProvider Ski
 }
 
 func registerExecFull(r *Registry, sbCfg *SandboxConfig, envProvider SkillEnvProvider, skillDirs []string) {
-	r.Register("exec", "Execute a shell command and return stdout/stderr", map[string]interface{}{
+	r.Register("exec", "Execute a shell command and return stdout/stderr. For binary or image output (PNG, JPEG, PDF, audio, video), write the file into the workspace (e.g. ./out.png) and reference it by relative path in your reply — do NOT base64-encode it into stdout, and do NOT inline data: URLs in your response. The workspace file will be surfaced to the user via the Files panel.", map[string]interface{}{
 		"type": "object",
 		"properties": map[string]interface{}{
 			"command": map[string]interface{}{
@@ -108,7 +114,8 @@ func makeExecToolFull(sbCfg *SandboxConfig, envProvider SkillEnvProvider, skillD
 		useSandbox := args.Sandbox || (sbCfg != nil && sbCfg.Enabled)
 		if useSandbox && sbCfg != nil && sbCfg.Pool != nil {
 			sb := sbCfg.Pool.Get(sbCfg.AgentID, sbCfg.Image, sbCfg.Workspace, sbCfg.Policy)
-			return sb.Exec(execCtx, args.Command, "/workspace")
+			out, err := sb.Exec(execCtx, args.Command, "/workspace")
+			return MetaSandboxPrefix + out, err
 		}
 
 		cmd := exec.CommandContext(execCtx, "sh", "-c", args.Command)
@@ -181,7 +188,7 @@ func mergeEnv(base []string, additional map[string]string) []string {
 // registerSandboxedExec re-registers the exec tool so it delegates to a
 // sandbox.Executor instead of running on the host.
 func registerSandboxedExec(r *Registry, ex sandbox.Executor) {
-	r.Register("exec", "Execute a shell command in the sandbox and return stdout/stderr", map[string]interface{}{
+	r.Register("exec", "Execute a shell command in the sandbox and return stdout/stderr. For binary or image output (PNG, JPEG, PDF, audio, video), write the file into the workspace (e.g. ./out.png) and reference it by relative path in your reply — do NOT base64-encode it into stdout, and do NOT inline data: URLs in your response. The workspace file will be surfaced to the user via the Files panel.", map[string]interface{}{
 		"type": "object",
 		"properties": map[string]interface{}{
 			"command": map[string]interface{}{
@@ -206,6 +213,7 @@ func registerSandboxedExec(r *Registry, ex sandbox.Executor) {
 		if args.Timeout > 0 {
 			timeout = args.Timeout
 		}
-		return ex.Exec(ctx, args.Command, time.Duration(timeout)*time.Second)
+		out, err := ex.Exec(ctx, args.Command, time.Duration(timeout)*time.Second)
+		return MetaSandboxPrefix + out, err
 	})
 }

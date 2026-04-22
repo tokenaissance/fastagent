@@ -16,8 +16,14 @@ type Message struct {
 	ToolCalls    []ToolCall    `json:"tool_calls,omitempty"`
 	ToolCallID   string        `json:"tool_call_id,omitempty"`
 	Name         string        `json:"name,omitempty"`
-	Thinking     string        `json:"thinking,omitempty"`      // model's reasoning (for memory extraction)
-	Timestamp    int64         `json:"timestamp,omitempty"`     // unix ms, for memory timeline
+	Thinking     string        `json:"thinking,omitempty"`  // model's reasoning (for memory extraction)
+	Timestamp    int64         `json:"timestamp,omitempty"` // unix ms, for memory timeline
+
+	// Metadata is UI-only state attached to a tool-role message (e.g.
+	// { "sandbox": true } so the chat UI can badge it). Not sent to the
+	// LLM — provider.toLLMMessages / anthropic / openai serializers
+	// ignore it.
+	Metadata map[string]any `json:"metadata,omitempty"`
 
 	// RawAssistant preserves the exact assistant message JSON as returned by the API.
 	// When sending history back to the LLM, use this instead of re-serializing from

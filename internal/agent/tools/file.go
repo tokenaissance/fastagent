@@ -197,6 +197,18 @@ func makeReadFile(r *Registry) ToolFunc {
 			return string(data), nil
 		}
 
+		// Identity file reads go through the same durable store as writes
+		// so the agent sees the admin UI's latest edits (and vice-versa)
+		// regardless of which pod answered the request.
+		if r.systemFileStore != nil && r.agentID != "" && isSingleSegmentSystemFile(args.Path) {
+			name := filepath.Clean(args.Path)
+			if data, err := r.systemFileStore.GetWorkspaceFile(ctx, r.agentID, name); err == nil {
+				return string(data), nil
+			}
+			// Store miss falls through to the filesystem below — e.g. a
+			// pod with a local-only copy that hasn't been mirrored yet.
+		}
+
 		fullPath, err := resolvePathSandboxed(r.rootForPath(args.Path), r.sandboxRoot, args.Path)
 		if err != nil {
 			return "", err
@@ -229,6 +241,28 @@ func makeWriteFile(r *Registry) ToolFunc {
 			return fmt.Sprintf("Written %d bytes to %s", len(args.Content), args.Path), nil
 		}
 
+		// Identity files (SOUL.md / IDENTITY.md / ...) need to land in the
+		// same durable store the admin UI reads from — otherwise the
+		// agent's BOOTSTRAP flow would write to pod-local disk and the
+		// Customize page would show blanks. Route through the
+		// systemFileStore when available.
+		if r.systemFileStore != nil && r.agentID != "" && isSingleSegmentSystemFile(args.Path) {
+			name := filepath.Clean(args.Path)
+			if err := r.systemFileStore.SaveWorkspaceFile(ctx, r.agentID, name, []byte(args.Content)); err != nil {
+				return "", fmt.Errorf("system file save: %w", err)
+			}
+			// Keep a filesystem mirror so the agent runtime (context
+			// builder, skills loader, etc.) which still reads from disk
+			// sees the same content on this pod. Other pods will pick
+			// up the next call via their own store reads.
+			if r.systemRoot != "" {
+				disk := filepath.Join(r.systemRoot, name)
+				_ = os.MkdirAll(filepath.Dir(disk), 0o755)
+				_ = os.WriteFile(disk, []byte(args.Content), 0o644)
+			}
+			return fmt.Sprintf("Written %d bytes to %s", len(args.Content), name), nil
+		}
+
 		fullPath, err := resolvePathSandboxed(r.rootForPath(args.Path), r.sandboxRoot, args.Path)
 		if err != nil {
 			return "", err
@@ -247,6 +281,21 @@ func makeWriteFile(r *Registry) ToolFunc {
 
 		return fmt.Sprintf("Written %d bytes to %s", len(args.Content), fullPath), nil
 	}
+}
+
+// isSingleSegmentSystemFile matches "SOUL.md", "IDENTITY.md", etc. —
+// the allow-listed identity file names, and only when the write targets
+// the top-level directory (no slashes). Nested paths like
+// "notes/SOUL.md" deliberately don't qualify.
+func isSingleSegmentSystemFile(path string) bool {
+	if filepath.IsAbs(path) {
+		return false
+	}
+	clean := filepath.Clean(path)
+	if strings.ContainsRune(clean, filepath.Separator) {
+		return false
+	}
+	return systemFiles[clean]
 }
 
 func makeListDir(r *Registry) ToolFunc {
@@ -319,14 +368,24 @@ func makeListDir(r *Registry) ToolFunc {
 }
 
 // registerSandboxedFile re-registers file tools so they delegate to a
-// sandbox.Executor instead of operating on the host filesystem.
+// sandbox.Executor for paths that don't belong to a store.
+//
+// IMPORTANT: identity files (SOUL.md, USER.md, MEMORY.md, …) live in
+// `systemFileStore` (Postgres in cloud mode) and workspace artifacts live
+// in `workspaceStore`. If we routed every path straight to the sandbox
+// executor, the agent would 404 on its own identity files — they simply
+// don't exist in the sandbox fs. Mirror the store-routing from the
+// non-sandboxed path; only hit the sandbox executor when no store handles
+// the path (absolute paths, `skills/...`, ad-hoc scripts, etc.). The
+// sandbox badge is emitted only for the executor-fallback path — store
+// hits intentionally don't badge, since they didn't run in the sandbox.
 func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 	r.Register("read_file", "Read the contents of a file", map[string]interface{}{
 		"type": "object",
 		"properties": map[string]interface{}{
 			"path": map[string]interface{}{
 				"type":        "string",
-				"description": "File path inside the sandbox workspace",
+				"description": "File path (identity file, workspace-relative, or absolute inside the sandbox)",
 			},
 		},
 		"required": []string{"path"},
@@ -335,7 +394,24 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 		if err := json.Unmarshal(rawArgs, &args); err != nil {
 			return "", fmt.Errorf("parse args: %w", err)
 		}
-		return ex.ReadFile(ctx, args.Path)
+		if r.systemFileStore != nil && r.agentID != "" && isSingleSegmentSystemFile(args.Path) {
+			name := filepath.Clean(args.Path)
+			if data, err := r.systemFileStore.GetWorkspaceFile(ctx, r.agentID, name); err == nil {
+				return string(data), nil
+			}
+		}
+		if r.workspaceStore != nil && r.agentID != "" && r.isWorkspacePath(args.Path) {
+			rc, err := r.workspaceStore.Get(ctx, r.agentID, args.Path)
+			if err == nil {
+				defer rc.Close()
+				data, readErr := io.ReadAll(rc)
+				if readErr == nil {
+					return string(data), nil
+				}
+			}
+		}
+		out, err := ex.ReadFile(ctx, args.Path)
+		return MetaSandboxPrefix + out, err
 	})
 
 	r.Register("write_file", "Write content to a file (creates directories as needed)", map[string]interface{}{
@@ -343,7 +419,7 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 		"properties": map[string]interface{}{
 			"path": map[string]interface{}{
 				"type":        "string",
-				"description": "File path inside the sandbox workspace",
+				"description": "File path (identity file, workspace-relative, or absolute inside the sandbox)",
 			},
 			"content": map[string]interface{}{
 				"type":        "string",
@@ -356,7 +432,22 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 		if err := json.Unmarshal(rawArgs, &args); err != nil {
 			return "", fmt.Errorf("parse args: %w", err)
 		}
-		return ex.WriteFile(ctx, args.Path, args.Content)
+		if r.systemFileStore != nil && r.agentID != "" && isSingleSegmentSystemFile(args.Path) {
+			name := filepath.Clean(args.Path)
+			if err := r.systemFileStore.SaveWorkspaceFile(ctx, r.agentID, name, []byte(args.Content)); err != nil {
+				return "", fmt.Errorf("system file save: %w", err)
+			}
+			return fmt.Sprintf("Written %d bytes to %s", len(args.Content), name), nil
+		}
+		if r.workspaceStore != nil && r.agentID != "" && r.isWorkspacePath(args.Path) {
+			if err := r.workspaceStore.Put(ctx, r.agentID, args.Path,
+				strings.NewReader(args.Content), int64(len(args.Content)), ""); err != nil {
+				return "", fmt.Errorf("workspace put: %w", err)
+			}
+			return fmt.Sprintf("Written %d bytes to %s", len(args.Content), args.Path), nil
+		}
+		out, err := ex.WriteFile(ctx, args.Path, args.Content)
+		return MetaSandboxPrefix + out, err
 	})
 
 	r.Register("list_dir", "List files and directories in a path", map[string]interface{}{
@@ -364,7 +455,7 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 		"properties": map[string]interface{}{
 			"path": map[string]interface{}{
 				"type":        "string",
-				"description": "Directory path inside the sandbox workspace",
+				"description": "Directory path (workspace-relative or absolute inside the sandbox)",
 			},
 		},
 		"required": []string{"path"},
@@ -373,6 +464,39 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 		if err := json.Unmarshal(rawArgs, &args); err != nil {
 			return "", fmt.Errorf("parse args: %w", err)
 		}
-		return ex.ListDir(ctx, args.Path)
+		if r.workspaceStore != nil && r.agentID != "" && r.isWorkspacePath(args.Path) {
+			objs, err := r.workspaceStore.List(ctx, r.agentID)
+			if err == nil {
+				prefix := strings.Trim(filepath.ToSlash(filepath.Clean(args.Path)), "/")
+				if prefix == "." {
+					prefix = ""
+				}
+				var sb strings.Builder
+				seenDirs := map[string]bool{}
+				for _, o := range objs {
+					p := filepath.ToSlash(o.Path)
+					if prefix != "" && !strings.HasPrefix(p, prefix+"/") && p != prefix {
+						continue
+					}
+					rel := strings.TrimPrefix(p, prefix)
+					rel = strings.TrimPrefix(rel, "/")
+					if rel == "" {
+						continue
+					}
+					if i := strings.IndexByte(rel, '/'); i >= 0 {
+						dirName := rel[:i]
+						if !seenDirs[dirName] {
+							seenDirs[dirName] = true
+							fmt.Fprintf(&sb, "d %s/\n", dirName)
+						}
+						continue
+					}
+					fmt.Fprintf(&sb, "f %s (%d bytes)\n", rel, o.Size)
+				}
+				return sb.String(), nil
+			}
+		}
+		out, err := ex.ListDir(ctx, args.Path)
+		return MetaSandboxPrefix + out, err
 	})
 }

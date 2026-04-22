@@ -187,6 +187,51 @@ func (s *Server) userAuth(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// optionalUserAuth is a permissive middleware for bootstrap endpoints (like
+// /api/status) that the login / onboarding UI must call before it has a
+// token. It resolves the user when a valid bearer token is present, but falls
+// through unauthenticated when the header is missing or the token is unknown
+// — the handler then only returns non-sensitive public fields.
+func (s *Server) optionalUserAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// No auth configured → local mode, default user.
+		if s.authToken == "" && s.userRegistry == nil {
+			r = r.WithContext(config.WithUserID(r.Context(), config.DefaultUserID))
+			next(w, r)
+			return
+		}
+
+		var token string
+		if auth := r.Header.Get("Authorization"); auth != "" {
+			if t := strings.TrimPrefix(auth, "Bearer "); t != auth {
+				token = t
+			}
+		} else if qt := r.URL.Query().Get("token"); qt != "" {
+			token = qt
+		}
+
+		if token != "" {
+			if s.userRegistry != nil {
+				if uid, ok := s.userRegistry.LookupByToken(token); ok {
+					r = r.WithContext(config.WithUserID(r.Context(), uid))
+					next(w, r)
+					return
+				}
+			}
+			if s.authToken != "" && token == s.authToken {
+				r = r.WithContext(config.WithUserID(r.Context(), config.DefaultUserID))
+				next(w, r)
+				return
+			}
+		}
+
+		// No / invalid token — still serve the endpoint, but leave the
+		// request context without a resolved user ID. The handler must
+		// gate user-specific details on UserIDFromContext.
+		next(w, r)
+	}
+}
+
 // Run starts the HTTP server and blocks until the context is canceled
 // or the setup is completed.
 func (s *Server) Run(ctx context.Context) error {
@@ -208,7 +253,12 @@ func (s *Server) Run(ctx context.Context) error {
 	// API routes — all wrapped with user auth so cloud users get their own
 	// config/agents/sessions when they access the web UI with a bearer token.
 	ua := s.userAuth
-	mux.HandleFunc("GET /api/status", ua(s.handleStatus))
+	// /api/status is the bootstrap endpoint the login / onboarding UI calls
+	// before it has a token — it must answer unauthenticated so the client
+	// can decide between showing the login form (configured) and the
+	// onboarding wizard (not configured). The handler itself hides
+	// user-scoped details when no user is resolved.
+	mux.HandleFunc("GET /api/status", s.optionalUserAuth(s.handleStatus))
 	mux.HandleFunc("GET /api/config", ua(s.handleGetConfig))
 	mux.HandleFunc("POST /api/config", ua(s.handleUpdateConfig))
 	mux.HandleFunc("POST /api/test-provider", ua(s.handleTestProvider))
@@ -224,10 +274,12 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("GET /api/agents", ua(s.handleListAgents))
 	mux.HandleFunc("POST /api/agents", ua(s.handleCreateAgent))
 	mux.HandleFunc("PUT /api/agents/{id}", ua(s.handleUpdateAgent))
+	mux.HandleFunc("GET /api/agents/{id}/config", ua(s.handleGetAgentConfig))
 	mux.HandleFunc("DELETE /api/agents/{id}", ua(s.handleDeleteAgent))
 
 	// Serve agent workspace files (for inline preview / download in chat).
 	// Sandbox-checked to stay inside the agent's workspace root.
+	mux.HandleFunc("GET /api/agents/{id}/files", ua(s.handleAgentFileList))
 	mux.HandleFunc("GET /api/agents/{id}/files/{path...}", ua(s.handleAgentFile))
 
 	// Agent identity/metadata files (SOUL.md, IDENTITY.md, ...) in the home dir.
@@ -240,6 +292,11 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("GET /api/skills/search", ua(s.handleSearchSkills))
 	mux.HandleFunc("POST /api/skills/install", ua(s.handleInstallSkill))
 	mux.HandleFunc("DELETE /api/skills/{name}", s.handleDeleteSkill)
+
+	// Per-agent skills: installs land in the agent's own home/skills/ dir
+	// and are exclusive to that agent (skills loader Layer 1).
+	mux.HandleFunc("GET /api/agents/{id}/skills", ua(s.handleListAgentSkills))
+	mux.HandleFunc("DELETE /api/agents/{id}/skills/{name}", ua(s.handleDeleteAgentSkill))
 
 	// Plugins (global, not per-user)
 	mux.HandleFunc("GET /api/plugins", s.handleListPlugins)
@@ -362,16 +419,35 @@ func (h spaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Dynamic agent routes: /agents/{id}/chat/ → fall back to /agents/default/chat/
+	// Dynamic agent routes: /agents/{id}/... → fall back to /agents/default/...
 	// The client-side JS reads the actual agent ID from the URL.
+	//
+	// Covers two shapes:
+	//  1. Page HTML:      /agents/clawbot/chat/       → agents/default/chat/index.html
+	//  2. RSC payload:    /agents/clawbot/chat/index.txt, /agents/clawbot/chat/__next.*.txt
+	//     Next.js fetches these on client-side nav between server components.
+	//     Without this fallback Next gets a 404/HTML, aborts the soft nav, and
+	//     does a full page reload — which remounts the sidebar (visible flash).
 	if strings.HasPrefix(fsPath, "agents/") {
-		parts := strings.SplitN(fsPath, "/", 3) // ["agents", "{id}", "chat/..."]
-		if len(parts) >= 3 {
-			fallbackPath := "agents/default/" + parts[2] + "/index.html"
-			f, err = h.fs.Open(fallbackPath)
+		parts := strings.SplitN(fsPath, "/", 3) // ["agents", "{id}", "rest..."]
+		if len(parts) >= 3 && parts[1] != "default" {
+			// Try exact file match under agents/default/ first (for RSC .txt, .html, etc.)
+			directFallback := "agents/default/" + parts[2]
+			f, err = h.fs.Open(directFallback)
+			if err == nil {
+				stat, statErr := f.Stat()
+				f.Close()
+				if statErr == nil && !stat.IsDir() {
+					http.ServeFileFS(w, r, h.fs, directFallback)
+					return
+				}
+			}
+			// Then the directory's index.html
+			dirFallback := "agents/default/" + parts[2] + "/index.html"
+			f, err = h.fs.Open(dirFallback)
 			if err == nil {
 				f.Close()
-				http.ServeFileFS(w, r, h.fs, fallbackPath)
+				http.ServeFileFS(w, r, h.fs, dirFallback)
 				return
 			}
 		}

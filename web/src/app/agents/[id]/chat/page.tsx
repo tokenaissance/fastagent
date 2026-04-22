@@ -1,14 +1,104 @@
 "use client";
 
-import { useEffect, useState, useRef, useCallback } from "react";
+import { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { getChatHistory, getChatSessions, sendChatStream, getAuthToken, getSkills, type ChatHistoryMessage, type ChatStreamEvent, type SkillInfo } from "@/lib/api";
-import { Bot, Send, Copy, Check, Plus, MessageSquare, Wrench, ChevronDown, ChevronRight, Download, X, File, FileText, Image as ImageIcon, FileCode, Film, Music, Puzzle, SlidersHorizontal } from "lucide-react";
+import { getChatHistory, getChatSessions, listAgentFiles, renameChatSession, sendChatStream, getAuthToken, getSkills, type ChatHistoryMessage, type ChatStreamEvent, type SkillInfo, type ToolResultMetadata } from "@/lib/api";
+import { Bot, Send, Copy, Check, Pencil, Wrench, ChevronDown, ChevronRight, Download, X, File, FileText, Image as ImageIcon, FileCode, Film, Music, Puzzle, SlidersHorizontal, ShieldCheck } from "lucide-react";
 import Link from "next/link";
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
+
+// react-markdown's default urlTransform strips any protocol not in the
+// safe-list (http, https, mailto, ircs, xmpp) — including `data:`. We want
+// inline base64 images to render, so fall through to the default for
+// everything else.
+function urlTransform(url: string, key: string): string {
+  if (key === "src" && url.startsWith("data:image/")) return url;
+  return defaultUrlTransform(url);
+}
+
+// Split a string on `![alt](data:image/...;base64,...)` markdown.
+//
+// Real-world content from models is messier than the grammar: base64
+// payloads get wrapped with newlines/spaces, the closing `)` is
+// sometimes cut off by truncation, and `]` and `(` may sit on separate
+// lines. So we look for the header with a regex but consume the URL
+// body with a hand-rolled scan that tolerates whitespace inside base64
+// and a missing trailing `)`. Returns [...{type:"text"|"image", ...}].
+function splitDataImages(s: string): Array<{ type: "text"; text: string } | { type: "image"; alt: string; src: string }> {
+  const out: Array<{ type: "text"; text: string } | { type: "image"; alt: string; src: string }> = [];
+  const headerRe = /!\[([^\]]*?)\]\s*\(\s*<?\s*(data:image\/[a-z0-9.+-]+;base64,)/gi;
+  let lastIdx = 0;
+  let m: RegExpExecArray | null;
+  while ((m = headerRe.exec(s)) !== null) {
+    const alt = m[1];
+    const dataPrefix = m[2];
+    // Consume base64 body: A–Z a–z 0–9 + / = and any whitespace.
+    let cursor = m.index + m[0].length;
+    while (cursor < s.length && /[A-Za-z0-9+/=\s]/.test(s[cursor])) cursor++;
+    const rawBody = s.slice(m.index + m[0].length, cursor);
+    const body = rawBody.replace(/\s+/g, "");
+    if (!body) continue;
+    const src = dataPrefix + body;
+    // Step past optional `>` and `)` closers (or accept truncation).
+    let after = cursor;
+    while (after < s.length && /[\s>]/.test(s[after])) after++;
+    if (s[after] === ")") after++;
+
+    if (m.index > lastIdx) out.push({ type: "text", text: s.slice(lastIdx, m.index) });
+    out.push({ type: "image", alt, src });
+    lastIdx = after;
+    headerRe.lastIndex = after;
+  }
+  if (lastIdx < s.length) out.push({ type: "text", text: s.slice(lastIdx) });
+  return out;
+}
+
+// Models sometimes emit markdown images with a line break between `]` and
+// `(`, or with very long base64 destinations that some commonmark parsers
+// give up on. Rather than fight the markdown parser, extract
+// `![alt](data:image/...)` (tolerating whitespace/newlines between `]`
+// and `(`) and render those as native <img>, letting ReactMarkdown
+// handle everything else. Returns null if no data-URL images are present
+// so the caller can fall through to a plain ReactMarkdown render.
+// When `suppressAllInlineImages` is true, every data-URL image inside
+// the content is dropped (used when the bubble has tool-output images
+// already attached at the top — the model often re-embeds an image in
+// its reply, and because LLMs can't reproduce base64 verbatim the
+// re-embedded bytes are either a duplicate we already showed or a
+// hallucination that renders as a different picture). `surfacedSrcs`
+// provides a narrower exact-src match for cases where nothing is
+// attached to this bubble but a prior bubble showed the same bytes.
+function renderContentWithDataImages(
+  content: string,
+  surfacedSrcs?: ReadonlySet<string>,
+  suppressAllInlineImages?: boolean,
+): React.ReactNode | null {
+  const parts = splitDataImages(content);
+  if (!parts.some((p) => p.type === "image")) return null;
+  return (
+    <>
+      {parts.map((p, i) => {
+        if (p.type === "image") {
+          if (suppressAllInlineImages || surfacedSrcs?.has(p.src)) return null;
+          return (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img key={i} src={p.src} alt={p.alt} className="rounded-lg max-w-full h-auto my-2" />
+          );
+        }
+        return (
+          <ReactMarkdown key={i} remarkPlugins={[remarkGfm]}>
+            {p.text}
+          </ReactMarkdown>
+        );
+      })}
+    </>
+  );
+}
+
+import { usePageHeader } from "@/components/sidebar";
 
 interface ProducedFile {
   path: string; // path relative to workspace
@@ -20,7 +110,7 @@ interface ChatMessage {
   role: "user" | "agent" | "tool-group";
   content: string;
   timestamp: number;
-  toolCalls?: { id: string; name: string; arguments: string; result?: string }[];
+  toolCalls?: { id: string; name: string; arguments: string; result?: string; metadata?: ToolResultMetadata }[];
   files?: ProducedFile[];
 }
 
@@ -42,6 +132,7 @@ function parseWrittenSize(result: string): number | undefined {
 
 interface ChatSession {
   id: string;
+  title?: string;
   preview: string;
 }
 
@@ -60,13 +151,20 @@ function buildChatMessages(history: ChatHistoryMessage[]): ChatMessage[] {
       i++;
     } else if (h.role === "assistant" && h.toolCalls && h.toolCalls.length > 0) {
       // Group: assistant tool_calls + following tool results + final assistant content
-      const calls = h.toolCalls.map((tc) => ({ ...tc, result: undefined as string | undefined }));
+      const calls = h.toolCalls.map((tc) => ({
+        ...tc,
+        result: undefined as string | undefined,
+        metadata: undefined as ToolResultMetadata | undefined,
+      }));
       i++;
       // Collect tool results
       while (i < history.length && history[i].role === "tool") {
         const toolMsg = history[i];
         const call = calls.find((c) => c.id === toolMsg.toolCallId);
-        if (call) call.result = toolMsg.content;
+        if (call) {
+          call.result = toolMsg.content;
+          if (toolMsg.metadata) call.metadata = toolMsg.metadata;
+        }
         i++;
       }
       // Show as tool-group
@@ -77,8 +175,18 @@ function buildChatMessages(history: ChatHistoryMessage[]): ChatMessage[] {
         timestamp: 0,
         toolCalls: calls,
       });
-      // If next is assistant with content (final answer), add it
-      if (i < history.length && history[i].role === "assistant" && history[i].content) {
+      // If next is assistant with ONLY content and no tool calls (final
+      // answer), add it. Must skip when the next assistant also has tool
+      // calls — in a multi-turn conversation that's the *start of the next
+      // tool-group*, not a final answer, and consuming it here would drop
+      // its tool calls on the floor and leave subsequent tool-result
+      // messages orphaned.
+      if (
+        i < history.length &&
+        history[i].role === "assistant" &&
+        history[i].content &&
+        !(history[i].toolCalls && history[i].toolCalls!.length > 0)
+      ) {
         msgs.push({ id: `h-${i}`, role: "agent", content: history[i].content || "", timestamp: 0 });
         i++;
       }
@@ -108,6 +216,7 @@ export default function AgentChatPage() {
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [sessionTitle, setSessionTitle] = useState<string>("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -181,6 +290,81 @@ export default function AgentChatPage() {
     loadSessions(selectedAgent);
   }, [selectedAgent, loadSessions]);
 
+  // Sync URL's ?session= back into local state. Without this, navigating
+  // between sessions / to "New chat" from the sidebar (router.push of the
+  // same page with a different query string) changes the URL but doesn't
+  // remount the page — sessionId / messages would stay on the old value.
+  //
+  // Three transitions to handle:
+  //   - /chat/?session=A → /chat/?session=B  : swap sessionId, history effect reloads messages
+  //   - /chat/?session=A → /chat/           : brand-new session, clear messages pane
+  //   - /chat/           → /chat/?session=A : open the targeted session
+  // We track `prevHadSession` so the initial mount (useState already picked
+  // an id) doesn't trigger a redundant reset.
+  const prevHadSessionRef = useRef(false);
+  useEffect(() => {
+    const urlSession = searchParams.get("session");
+    if (urlSession) {
+      prevHadSessionRef.current = true;
+      if (urlSession !== sessionId) {
+        setSessionId(urlSession);
+      }
+      return;
+    }
+    if (prevHadSessionRef.current) {
+      prevHadSessionRef.current = false;
+      setSessionId(generateSessionId());
+      setMessages([]);
+    }
+  }, [searchParams, sessionId]);
+
+  // Keep the local sessionTitle in sync with the session list. Unknown
+  // sessions (brand-new, not saved yet) fall back to empty so the header
+  // can render "New chat".
+  useEffect(() => {
+    const s = sessions.find((x) => x.id === sessionId);
+    setSessionTitle(s?.title || s?.preview || "");
+  }, [sessionId, sessions]);
+
+  const handleRenameTitle = useCallback(
+    async (next: string) => {
+      const trimmed = next.trim();
+      if (!trimmed || !selectedAgent || trimmed === sessionTitle) return;
+      setSessionTitle(trimmed);
+      try {
+        await renameChatSession(selectedAgent, sessionId, trimmed);
+      } finally {
+        loadSessions(selectedAgent);
+        // Tell the global sidebar to refetch its Chats list so the new
+        // title shows up without a full page reload. AppSidebar's own
+        // fetch only re-runs when activeAgentId changes, which doesn't
+        // happen on rename.
+        if (typeof window !== "undefined") {
+          window.dispatchEvent(
+            new CustomEvent("fastclaw:sessions-changed", {
+              detail: { agentId: selectedAgent },
+            }),
+          );
+        }
+      }
+    },
+    [selectedAgent, sessionId, sessionTitle, loadSessions],
+  );
+
+  // Render the editable title into the global sticky header (next to the
+  // sidebar toggle). Re-fires whenever the title changes.
+  const headerSlot = useMemo(
+    () => (
+      <ChatHeaderTitle
+        title={sessionTitle}
+        fallback={`Chat with ${selectedAgent}`}
+        onSave={handleRenameTitle}
+      />
+    ),
+    [sessionTitle, selectedAgent, handleRenameTitle],
+  );
+  usePageHeader(headerSlot, [headerSlot]);
+
   // Load history when session changes
   useEffect(() => {
     if (!selectedAgent || !sessionId) return;
@@ -226,8 +410,20 @@ export default function AgentChatPage() {
     ]);
     setSending(true);
 
+    // Snapshot the workspace before the turn so we can diff at `done` and
+    // attach newly-created / modified files (PDFs, images, …) to the
+    // final reply. Fire-and-forget; if the snapshot fails we just won't
+    // surface files this turn. `path → size|modTime` key.
+    const preTurnFilesPromise = listAgentFiles(selectedAgent)
+      .then((items) => {
+        const m = new Map<string, string>();
+        for (const f of items) m.set(f.path, `${f.size}|${f.modTime}`);
+        return m;
+      })
+      .catch(() => new Map<string, string>());
+
     let curGroupId = "";
-    let curCalls: { id: string; name: string; arguments: string; result?: string }[] = [];
+    let curCalls: { id: string; name: string; arguments: string; result?: string; metadata?: ToolResultMetadata }[] = [];
     let curContent = "";
     const turnFiles: ProducedFile[] = [];
     const seenPaths = new Set<string>();
@@ -262,6 +458,15 @@ export default function AgentChatPage() {
             break;
           }
           case "tool_call": {
+            // New round starts if every tool in the current group has
+            // already resolved. Without this, two assistant turns that
+            // happen back-to-back with no intervening content event get
+            // merged into one visual group live — inconsistent with the
+            // refresh path (buildChatMessages) which correctly splits
+            // per assistant message.
+            if (curCalls.length > 0 && curCalls.every((c) => c.result !== undefined)) {
+              startNewGroup();
+            }
             curCalls.push({
               id: evt.data?.id || "",
               name: evt.data?.name || "",
@@ -297,7 +502,10 @@ export default function AgentChatPage() {
           case "tool_result": {
             const tc = curCalls.find((c) => c.id === (evt.data?.id || ""));
             const resultText = evt.data?.result || "";
-            if (tc) tc.result = resultText;
+            if (tc) {
+              tc.result = resultText;
+              if (evt.data?.metadata) tc.metadata = evt.data.metadata;
+            }
             // Track successful write_file calls that landed in the workspace
             // (i.e. a relative path that isn't a system identity file).
             if (tc && tc.name === "write_file" && /^Written \d+ bytes/.test(resultText)) {
@@ -323,18 +531,42 @@ export default function AgentChatPage() {
           }
         }
       });
-      // Attach files produced this turn to the final message so the UI can
-      // render a "Your files" panel below it.
-      if (turnFiles.length > 0) {
+      // Diff the workspace against the pre-turn snapshot so files
+      // produced by *exec* (e.g. a Python script that saves PDFs) get
+      // surfaced too — `turnFiles` only catches write_file tool calls
+      // with relative, non-identity paths, which misses most real-
+      // world flows. Union both sources by path.
+      const postTurnFiles = await listAgentFiles(selectedAgent).catch(() => []);
+      const preSnap = await preTurnFilesPromise;
+      const diffFiles: ProducedFile[] = [];
+      for (const f of postTurnFiles) {
+        if (isSystemFile(f.path)) continue;
+        const key = `${f.size}|${f.modTime}`;
+        if (preSnap.get(f.path) === key) continue; // unchanged
+        if (seenPaths.has(f.path)) continue;
+        diffFiles.push({ path: f.path, size: f.size });
+      }
+      const allFiles = [...turnFiles, ...diffFiles];
+      if (allFiles.length > 0) {
         setMessages((prev) => {
           if (prev.length === 0) return prev;
           const updated = [...prev];
           const last = updated[updated.length - 1];
-          updated[updated.length - 1] = { ...last, files: turnFiles };
+          updated[updated.length - 1] = { ...last, files: allFiles };
           return updated;
         });
       }
       loadSessions(selectedAgent);
+      // First-turn of a brand-new session just got persisted — tell the
+      // global sidebar to refetch its Chats list so the new title shows
+      // up without a full page reload.
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(
+          new CustomEvent("fastclaw:sessions-changed", {
+            detail: { agentId: selectedAgent },
+          }),
+        );
+      }
     } catch {
       setMessages((prev) => [
         ...prev,
@@ -421,53 +653,8 @@ export default function AgentChatPage() {
     new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
   return (
-    <div className="flex h-[calc(100vh-3rem)] md:h-screen">
-      {/* Sidebar: sessions only */}
-      <div className="hidden w-56 flex-col border-r border-border bg-card/30 lg:flex">
-        <div className="flex h-14 items-center justify-between border-b border-border px-4">
-          <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-            Chat
-          </p>
-          <button onClick={handleNewChat} title="New chat" className="rounded-md p-1 text-muted-foreground hover:text-foreground hover:bg-muted/50">
-            <Plus className="h-4 w-4" />
-          </button>
-        </div>
-        <div className="flex-1 overflow-auto p-2 space-y-1">
-          {sessions.map((s) => (
-            <button
-              key={s.id}
-              onClick={() => handleSelectSession(s.id)}
-              className={`flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm transition-colors ${
-                sessionId === s.id
-                  ? "bg-primary/10 text-primary"
-                  : "text-muted-foreground hover:bg-muted/50 hover:text-foreground"
-              }`}
-            >
-              <MessageSquare className="h-3.5 w-3.5 shrink-0" />
-              <span className="truncate text-xs">{s.preview}</span>
-            </button>
-          ))}
-          {sessions.length === 0 && (
-            <p className="text-xs text-muted-foreground text-center py-4">No sessions yet</p>
-          )}
-        </div>
-      </div>
-
-      {/* Chat area */}
-      <div className="flex flex-1 flex-col">
-        {/* Chat header */}
-        <div className="flex h-14 items-center border-b border-border px-4 shrink-0">
-          <div className="flex items-center gap-2.5">
-            <div className="flex h-7 w-7 items-center justify-center rounded-full bg-primary/10">
-              <Bot className="h-4 w-4 text-primary" />
-            </div>
-            <span className="text-sm font-semibold">
-              {selectedAgent}
-            </span>
-          </div>
-        </div>
-
-        {/* Messages */}
+    <div className="flex h-[calc(100vh-3rem)] flex-col">
+      {/* Messages */}
         <div className="flex-1 overflow-y-auto min-h-0 px-4 py-4">
           <div className="mx-auto max-w-2xl space-y-3">
             {messages.length === 0 && (
@@ -484,10 +671,40 @@ export default function AgentChatPage() {
               </div>
             )}
 
-            {messages.map((msg) =>
+            {(() => {
+              // Tool-group artefacts (e.g. an image rendered to base64 by
+              // a Python script inside the sandbox) are attached to the
+              // *next* agent reply bubble — so they appear as part of the
+              // assistant's answer, not inside the tool panel. If no agent
+              // reply follows (tool still running or chain didn't finish),
+              // we skip surfacing the image; it will show up with the next
+              // reply. `surfacedSrcs` tracks every image src we've
+              // surfaced so bubbles can suppress duplicate inline copies.
+              const attachedImages = new Map<string, Array<{ alt: string; src: string }>>();
+              const surfacedSrcs = new Set<string>();
+              let pending: Array<{ alt: string; src: string }> = [];
+              for (const m of messages) {
+                if (m.role === "tool-group" && m.toolCalls) {
+                  for (const tc of m.toolCalls) {
+                    if (!tc.result) continue;
+                    for (const p of splitDataImages(tc.result)) {
+                      if (p.type === "image") {
+                        pending.push({ alt: p.alt, src: p.src });
+                      }
+                    }
+                  }
+                  continue;
+                }
+                if (m.role === "agent" && pending.length > 0) {
+                  attachedImages.set(m.id, pending);
+                  for (const img of pending) surfacedSrcs.add(img.src);
+                  pending = [];
+                }
+              }
+              return messages.map((msg) =>
               msg.role === "tool-group" ? (
                 <div key={msg.id}>
-                  <ToolCallGroup msg={msg} />
+                  <ToolCallGroup msg={msg} surfacedSrcs={surfacedSrcs} />
                   {msg.files && msg.files.length > 0 && (
                     <FilesPanel agentId={selectedAgent} files={msg.files} />
                   )}
@@ -509,10 +726,32 @@ export default function AgentChatPage() {
                           : "bg-muted rounded-bl-md"
                       }`}
                     >
+                      {(() => {
+                        const attached = attachedImages.get(msg.id);
+                        return attached && attached.length > 0 ? (
+                          <div className="space-y-2 mb-2">
+                            {attached.map((img, i) => (
+                              // eslint-disable-next-line @next/next/no-img-element
+                              <img
+                                key={i}
+                                src={img.src}
+                                alt={img.alt}
+                                className="rounded-lg max-w-full h-auto"
+                              />
+                            ))}
+                          </div>
+                        ) : null;
+                      })()}
                       <div className="text-[15px] leading-relaxed prose prose-sm dark:prose-invert max-w-none prose-p:my-1 prose-pre:my-2 prose-ul:my-1 prose-ol:my-1">
-                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                          {msg.content}
-                        </ReactMarkdown>
+                        {renderContentWithDataImages(
+                          msg.content,
+                          surfacedSrcs,
+                          (attachedImages.get(msg.id)?.length ?? 0) > 0,
+                        ) ?? (
+                          <ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={urlTransform}>
+                            {msg.content}
+                          </ReactMarkdown>
+                        )}
                       </div>
                     </div>
                     {msg.files && msg.files.length > 0 && (
@@ -545,7 +784,8 @@ export default function AgentChatPage() {
                   </div>
                 </div>
               )
-            )}
+            );
+            })()}
 
             {sending && (
               <div className="flex justify-start">
@@ -605,13 +845,85 @@ export default function AgentChatPage() {
             </p>
           </div>
         </div>
-      </div>
     </div>
   );
 }
 
+interface ChatHeaderTitleProps {
+  title: string;
+  fallback: string;
+  onSave: (next: string) => void | Promise<void>;
+}
+
+/** Editable chat title rendered into the global sticky header via
+ *  usePageHeader. Click / focus to edit; Enter or blur commits. */
+function ChatHeaderTitle({ title, fallback, onSave }: ChatHeaderTitleProps) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(title);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!editing) setDraft(title);
+  }, [title, editing]);
+
+  useEffect(() => {
+    if (editing) inputRef.current?.select();
+  }, [editing]);
+
+  const commit = () => {
+    setEditing(false);
+    const next = draft.trim();
+    if (!next || next === title) return;
+    onSave(next);
+  };
+
+  if (editing) {
+    // field-sizing: content grows the input to match its text; min width
+    // keeps it reasonable right after entering edit mode even if the
+    // current title is very short.
+    return (
+      <input
+        ref={inputRef}
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={(e) => {
+          // Ignore Enter while the user is mid-composition (CJK IME). Both
+          // conditions matter: isComposing is the modern signal, keyCode 229
+          // is the legacy flag some browsers (and macOS Pinyin in particular)
+          // still emit without isComposing set.
+          if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+          if (e.key === "Enter") {
+            e.preventDefault();
+            commit();
+          } else if (e.key === "Escape") {
+            setDraft(title);
+            setEditing(false);
+          }
+        }}
+        onBlur={commit}
+        style={{ fieldSizing: "content" } as React.CSSProperties}
+        className="h-7 min-w-[8ch] max-w-[40ch] rounded-md bg-transparent px-2 text-sm outline-none ring-1 ring-border focus:ring-primary/40"
+      />
+    );
+  }
+
+  return (
+    <button
+      onClick={() => {
+        setDraft(title);
+        setEditing(true);
+      }}
+      className="group flex min-w-0 items-center gap-1.5 rounded-md px-2 py-1 text-sm text-foreground hover:bg-muted/50"
+      title="Click to rename"
+    >
+      <span className="truncate">{title || fallback}</span>
+      <Pencil className="h-3 w-3 shrink-0 text-muted-foreground/50 opacity-0 transition-opacity group-hover:opacity-100" />
+    </button>
+  );
+}
+
 /** Renders a group of tool calls as a collapsible summary. */
-function ToolCallGroup({ msg }: { msg: ChatMessage }) {
+function ToolCallGroup({ msg, surfacedSrcs }: { msg: ChatMessage; surfacedSrcs?: ReadonlySet<string> }) {
   const [groupOpen, setGroupOpen] = useState(false);
   const [expandedTool, setExpandedTool] = useState<Record<string, boolean>>({});
 
@@ -629,9 +941,11 @@ function ToolCallGroup({ msg }: { msg: ChatMessage }) {
         {msg.content && (
           <div className="bg-muted rounded-2xl rounded-bl-md px-4 py-2.5">
             <div className="text-[15px] leading-relaxed prose prose-sm dark:prose-invert max-w-none prose-p:my-1">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                {msg.content}
-              </ReactMarkdown>
+              {renderContentWithDataImages(msg.content, surfacedSrcs) ?? (
+                <ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={urlTransform}>
+                  {msg.content}
+                </ReactMarkdown>
+              )}
             </div>
           </div>
         )}
@@ -675,6 +989,15 @@ function ToolCallGroup({ msg }: { msg: ChatMessage }) {
                       <Check className="h-3 w-3 text-emerald-500 shrink-0" />
                     )}
                     <span className="font-medium text-foreground">{tc.name}</span>
+                    {tc.metadata?.sandbox && (
+                      <span
+                        className="flex items-center gap-0.5 rounded bg-emerald-500/10 px-1 py-0.5 text-[10px] font-medium text-emerald-600 dark:text-emerald-400"
+                        title="Executed inside a sandboxed container"
+                      >
+                        <ShieldCheck className="h-2.5 w-2.5" />
+                        sandbox
+                      </span>
+                    )}
                     <span className="text-muted-foreground/50 font-mono truncate flex-1 text-left text-[11px]">
                       {(() => {
                         try {
