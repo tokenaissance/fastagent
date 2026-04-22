@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "github.com/lib/pq"          // PostgreSQL driver
@@ -60,7 +61,32 @@ func (d *DBStore) Migrate(ctx context.Context) error {
 			return fmt.Errorf("migrate: %w\nSQL: %s", err, stmt)
 		}
 	}
+	// Idempotent column adds for tables that pre-date the column. Postgres
+	// supports `IF NOT EXISTS`; SQLite doesn't, so we ignore the
+	// "duplicate column" error. Any other error is real and returned.
+	altered, err := d.addColumnIfMissing(ctx, "sessions", "title", "TEXT NOT NULL DEFAULT ''")
+	if err != nil {
+		return fmt.Errorf("migrate: add sessions.title: %w", err)
+	}
+	_ = altered
 	return nil
+}
+
+// addColumnIfMissing adds `<col> <spec>` to `<table>` if the column is not
+// already present. Tolerates SQLite's lack of IF NOT EXISTS by swallowing the
+// duplicate-column error text.
+func (d *DBStore) addColumnIfMissing(ctx context.Context, table, col, spec string) (bool, error) {
+	if d.dialect == "postgres" {
+		_, err := d.db.ExecContext(ctx,
+			fmt.Sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s %s", table, col, spec))
+		return err == nil, err
+	}
+	_, err := d.db.ExecContext(ctx,
+		fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, col, spec))
+	if err != nil && strings.Contains(err.Error(), "duplicate column") {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 func (d *DBStore) migrationSQL() []string {
@@ -94,6 +120,7 @@ func (d *DBStore) migrationSQL() []string {
 			user_id TEXT NOT NULL,
 			agent_id TEXT NOT NULL,
 			session_key TEXT NOT NULL,
+			title TEXT NOT NULL DEFAULT '',
 			messages TEXT NOT NULL DEFAULT '[]',
 			message_count INTEGER NOT NULL DEFAULT 0,
 			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -290,7 +317,7 @@ func (d *DBStore) SaveSession(ctx context.Context, agentID, sessionKey string, s
 
 func (d *DBStore) ListSessions(ctx context.Context, agentID string) ([]SessionMeta, error) {
 	rows, err := d.db.QueryContext(ctx,
-		fmt.Sprintf("SELECT session_key, message_count, updated_at FROM sessions WHERE user_id = %s AND agent_id = %s ORDER BY updated_at DESC", d.ph(1), d.ph(2)),
+		fmt.Sprintf("SELECT session_key, title, message_count, updated_at FROM sessions WHERE user_id = %s AND agent_id = %s ORDER BY updated_at DESC", d.ph(1), d.ph(2)),
 		"", agentID)
 	if err != nil {
 		return nil, err
@@ -300,7 +327,7 @@ func (d *DBStore) ListSessions(ctx context.Context, agentID string) ([]SessionMe
 	var metas []SessionMeta
 	for rows.Next() {
 		var m SessionMeta
-		rows.Scan(&m.Key, &m.MessageCount, &m.UpdatedAt)
+		rows.Scan(&m.Key, &m.Title, &m.MessageCount, &m.UpdatedAt)
 		metas = append(metas, m)
 	}
 	return metas, nil
@@ -310,6 +337,14 @@ func (d *DBStore) DeleteSession(ctx context.Context, agentID, sessionKey string)
 	_, err := d.db.ExecContext(ctx,
 		fmt.Sprintf("DELETE FROM sessions WHERE user_id = %s AND agent_id = %s AND session_key = %s", d.ph(1), d.ph(2), d.ph(3)),
 		"", agentID, sessionKey)
+	return err
+}
+
+func (d *DBStore) RenameSession(ctx context.Context, agentID, sessionKey, title string) error {
+	_, err := d.db.ExecContext(ctx,
+		fmt.Sprintf("UPDATE sessions SET title = %s WHERE user_id = %s AND agent_id = %s AND session_key = %s",
+			d.ph(1), d.ph(2), d.ph(3), d.ph(4)),
+		title, "", agentID, sessionKey)
 	return err
 }
 

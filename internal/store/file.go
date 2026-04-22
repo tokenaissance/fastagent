@@ -152,8 +152,10 @@ func (f *FileStore) ListSessions(ctx context.Context, agentID string) ([]Session
 			continue
 		}
 		info, _ := e.Info()
+		key := strings.TrimSuffix(e.Name(), ".jsonl")
 		metas = append(metas, SessionMeta{
-			Key:       strings.TrimSuffix(e.Name(), ".jsonl"),
+			Key:       key,
+			Title:     f.readSessionTitle(agentID, key),
 			UpdatedAt: info.ModTime(),
 		})
 	}
@@ -161,7 +163,30 @@ func (f *FileStore) ListSessions(ctx context.Context, agentID string) ([]Session
 }
 
 func (f *FileStore) DeleteSession(ctx context.Context, agentID, sessionKey string) error {
+	_ = os.Remove(f.sessionTitlePath(agentID, sessionKey))
 	return os.Remove(f.sessionPath(agentID, sessionKey))
+}
+
+// sessionTitlePath is the sidecar file that stores a user-assigned chat
+// title next to the .jsonl history.
+func (f *FileStore) sessionTitlePath(agentID, sessionKey string) string {
+	return filepath.Join(f.agentDir(agentID), "sessions", sessionKey+".title")
+}
+
+func (f *FileStore) readSessionTitle(agentID, sessionKey string) string {
+	data, err := os.ReadFile(f.sessionTitlePath(agentID, sessionKey))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+func (f *FileStore) RenameSession(ctx context.Context, agentID, sessionKey, title string) error {
+	path := f.sessionTitlePath(agentID, sessionKey)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(title), 0o644)
 }
 
 // --- Memory ---

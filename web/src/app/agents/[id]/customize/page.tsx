@@ -6,7 +6,9 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Save, Check, Loader2 } from "lucide-react";
 import { apiFetch } from "@/lib/api";
 
-const WORKSPACE_FILES = [
+import { useAgentIdFromURL } from "@/hooks/use-agent-id";
+
+const CUSTOMIZE_FILES = [
   { name: "SOUL.md", label: "Soul" },
   { name: "IDENTITY.md", label: "Identity" },
   { name: "USER.md", label: "User" },
@@ -17,16 +19,8 @@ const WORKSPACE_FILES = [
   { name: "AGENTS.md", label: "Agents" },
 ];
 
-// Static-export pages hardcode useParams() to the `generateStaticParams` value
-// ("default"), so read the real id from the URL like the chat page does.
-function getAgentIdFromURL(): string {
-  if (typeof window === "undefined") return "default";
-  const match = window.location.pathname.match(/\/agents\/([^/]+)\//);
-  return match ? match[1] : "default";
-}
-
-export default function AgentFilesPage() {
-  const [agentId] = useState(() => getAgentIdFromURL());
+export default function AgentCustomizePage() {
+  const agentId = useAgentIdFromURL();
   const [activeTab, setActiveTab] = useState("SOUL.md");
   const [files, setFiles] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
@@ -35,9 +29,10 @@ export default function AgentFilesPage() {
 
   useEffect(() => {
     setLoading(true);
-    // Load all workspace files for this agent
+    // Load every customize-file tab's current content up front so switching
+    // tabs is instant and Save only has to PUT the active one.
     Promise.all(
-      WORKSPACE_FILES.map(async (f) => {
+      CUSTOMIZE_FILES.map(async (f) => {
         try {
           const res = await apiFetch(`/api/agents/${agentId}/system-files/${f.name}`);
           if (res.ok) {
@@ -80,9 +75,10 @@ export default function AgentFilesPage() {
     <div className="p-6 max-w-4xl mx-auto">
       <div className="flex items-center justify-between mb-4">
         <div>
-          <h2 className="text-2xl font-semibold tracking-tight">Files</h2>
+          <h2 className="text-2xl font-semibold tracking-tight">Customize</h2>
           <p className="text-sm text-muted-foreground mt-1">
-            Agent workspace files for <strong>{agentId}</strong>
+            Personality, memory, and behavior files for{" "}
+            <strong>{agentId}</strong>
           </p>
         </div>
         <Button
@@ -103,7 +99,7 @@ export default function AgentFilesPage() {
 
       {/* Tabs */}
       <div className="flex gap-1 border-b border-border mb-4 overflow-x-auto">
-        {WORKSPACE_FILES.map((f) => (
+        {CUSTOMIZE_FILES.map((f) => (
           <button
             key={f.name}
             onClick={() => setActiveTab(f.name)}

@@ -301,11 +301,19 @@ func New(cfg *config.Config) (*Gateway, error) {
 		ag.SetOwnerUserID(config.DefaultUserID)
 	}
 
+	// Attach sandbox (E2B / Docker) to every local-user agent so exec +
+	// file tool calls run inside an isolated env, not on the pod's host
+	// shell. loadUserSpace does the same for cloud users; this inline
+	// bootstrap used to skip it entirely — which meant admin chats
+	// ignored the sandbox config no matter what env we set.
+	sandboxPool := attachSandboxToAgents(config.DefaultUserID, resolved, agentMgr, ws)
+
 	localSpace := &UserSpace{
-		UserID:   config.DefaultUserID,
-		Config:   cfg,
-		Provider: llm,
-		Agents:   agentMgr,
+		UserID:      config.DefaultUserID,
+		Config:      cfg,
+		Provider:    llm,
+		Agents:      agentMgr,
+		SandboxPool: sandboxPool,
 	}
 	userReg := newUserSpaceRegistry(mb, st)
 	userReg.workspace = ws

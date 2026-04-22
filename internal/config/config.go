@@ -33,6 +33,18 @@ func UserIDFromContext(ctx context.Context) string {
 	return DefaultUserID
 }
 
+// HasUserID reports whether the context carries an explicit user ID (i.e. an
+// auth middleware resolved a caller). Handlers on bootstrap endpoints that
+// are reachable unauthenticated use this to gate user-scoped fields, since
+// UserIDFromContext would otherwise silently return DefaultUserID.
+func HasUserID(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	v, ok := ctx.Value(userIDKey{}).(string)
+	return ok && v != ""
+}
+
 // MCPServerConfig holds configuration for a single MCP server.
 type MCPServerConfig struct {
 	Type    string            `json:"type"`              // "http" or "stdio"
@@ -436,6 +448,11 @@ type AgentFileConfig struct {
 	// prefers a different primary than the global default). Categories not
 	// listed here inherit the global chain.
 	Tools map[string]ToolCategoryCfg `json:"tools,omitempty"`
+	// Providers holds LLM provider credentials that are scoped to this
+	// agent only. Entries shadow the global providers map by key name; the
+	// admin UI writes agent-exclusive providers here instead of the
+	// global config.
+	Providers map[string]ProviderConfig `json:"providers,omitempty"`
 }
 
 // SkillsConfig controls skill loading for an agent.
@@ -489,6 +506,11 @@ type ResolvedAgent struct {
 	// Tools is the per-agent view of category→chain config (primary +
 	// fallbacks), with agent.json entries shadowing the global map.
 	Tools map[string]ToolCategoryCfg
+	// Providers is the per-agent LLM-provider credentials view: starts from
+	// the global providers map and merges in any overrides from agent.json.
+	// Lets each agent pin its own API key + base URL for models that only
+	// it should see (e.g. a personal OpenRouter account).
+	Providers map[string]ProviderConfig
 }
 
 // TeamEntry defines a team of agents with group chat behavior settings.
@@ -589,6 +611,36 @@ func Load() (*Config, error) {
 	}
 	// Fallback: legacy per-user path
 	return LoadForUser(DefaultUserID)
+}
+
+// LoadOrEmpty returns the parsed config if a fastclaw.json exists, or an
+// empty Config (with defaults applied) when it doesn't. Callers that run
+// in cloud/K8s mode — where infra comes from env and product config is
+// persisted in the DB store — should prefer this over Load() so a missing
+// file doesn't break hot-reload paths.
+func LoadOrEmpty() *Config {
+	cfg, err := Load()
+	if err == nil {
+		return cfg
+	}
+	if !os.IsNotExist(err) && !isNotFound(err) {
+		// Malformed file (not "doesn't exist") is still surfaced via a
+		// fresh config — callers downstream may log it — but we never
+		// block the hot-reload here.
+	}
+	empty := &Config{}
+	applyDefaults(empty)
+	return empty
+}
+
+func isNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	return os.IsNotExist(err) ||
+		// loadConfigFile wraps the os.ReadFile error — check for the
+		// canonical "no such file or directory" substring as a fallback.
+		(err.Error() != "" && strings.Contains(err.Error(), "no such file"))
 }
 
 func loadConfigFile(path string) (*Config, error) {
@@ -701,6 +753,14 @@ func (cfg *Config) MergedAgentConfigForUser(entry AgentEntry, userID string) Res
 		}
 	}
 
+	// Seed LLM providers from global — agent.json entries below shadow by key.
+	if len(cfg.Providers) > 0 {
+		resolved.Providers = make(map[string]ProviderConfig, len(cfg.Providers))
+		for k, v := range cfg.Providers {
+			resolved.Providers[k] = v
+		}
+	}
+
 	// Seed tool config from the global config. agent.json (layer 3) overlays
 	// individual providers/categories below, so agents inherit shared keys
 	// until they explicitly shadow one.
@@ -743,6 +803,14 @@ func (cfg *Config) MergedAgentConfigForUser(entry AgentEntry, userID string) Res
 					resolved.MCPServers = make(map[string]MCPServerConfig)
 				}
 				resolved.MCPServers[k] = v
+			}
+
+			// Merge per-agent LLM providers (whole-entry replace by key).
+			for name, pc := range fileCfg.Providers {
+				if resolved.Providers == nil {
+					resolved.Providers = make(map[string]ProviderConfig)
+				}
+				resolved.Providers[name] = pc
 			}
 
 			// Merge per-agent tool providers (whole-entry replace: a provider

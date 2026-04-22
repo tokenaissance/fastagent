@@ -40,6 +40,24 @@ type Registry struct {
 	// builder still reads them via the separate small-state Store.
 	workspaceStore workspace.Store
 	agentID        string
+	// systemFileStore is the optional durable store for identity files
+	// (SOUL.md, IDENTITY.md, USER.md, MEMORY.md, ...). In cloud/K8s
+	// deployments Server.readIdentityFile / writeIdentityFile go through
+	// Postgres via Store.{Get,Save}WorkspaceFile so the admin UI sees
+	// the same content across pods. Without this hook the agent's own
+	// write_file tool would write SOUL.md etc. to pod-local disk and
+	// never be visible from the UI — so we route identity writes here
+	// when set.
+	systemFileStore SystemFileStore
+}
+
+// SystemFileStore is the narrow slice of the DB store that write_file /
+// read_file need to keep identity files (SOUL.md, IDENTITY.md, …) in
+// sync across pods. It matches the shape of agent.MemoryStore (and
+// store.Store) intentionally so existing adapters can be reused.
+type SystemFileStore interface {
+	GetWorkspaceFile(ctx context.Context, agentID, filename string) ([]byte, error)
+	SaveWorkspaceFile(ctx context.Context, agentID, filename string, data []byte) error
 }
 
 // SetWorkspaceStore installs a workspace store on the registry. File tools
@@ -49,6 +67,18 @@ type Registry struct {
 func (r *Registry) SetWorkspaceStore(ws workspace.Store, agentID string) {
 	r.workspaceStore = ws
 	r.agentID = agentID
+}
+
+// SetSystemFileStore installs a durable store for identity files so the
+// agent's write_file / read_file tools share a single source of truth
+// with the admin UI (Customize page). Also records agentID so the store
+// calls work even when SetWorkspaceStore isn't configured. Pass store=nil
+// to disable and fall back to filesystem.
+func (r *Registry) SetSystemFileStore(s SystemFileStore, agentID string) {
+	r.systemFileStore = s
+	if agentID != "" {
+		r.agentID = agentID
+	}
 }
 
 type registeredTool struct {

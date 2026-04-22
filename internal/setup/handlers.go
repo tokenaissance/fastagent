@@ -205,8 +205,12 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		configured = statErr == nil
 	}
 
+	// /api/status is reachable unauthenticated so the login / onboarding UI
+	// can bootstrap — in that case we only return the non-sensitive public
+	// fields and skip everything that would leak user-scoped data.
+	authenticated := config.HasUserID(r.Context())
 	userID := config.UserIDFromContext(r.Context())
-	isAdmin := userID == config.DefaultUserID && s.authToken != ""
+	isAdmin := authenticated && userID == config.DefaultUserID && s.authToken != ""
 
 	resp := map[string]any{
 		"configured": configured,
@@ -216,12 +220,18 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"agents":     []any{},
 		"channels":   []any{},
 		"provider":   nil,
-		"uptime":     "",
-		"userId":     userID,
+		"uptime":     formatDuration(time.Since(s.startedAt)),
 		"isAdmin":    isAdmin,
 	}
+	if authenticated {
+		resp["userId"] = userID
+	}
 
-	resp["uptime"] = formatDuration(time.Since(s.startedAt))
+	if !authenticated {
+		jsonResponse(w, http.StatusOK, resp)
+		return
+	}
+
 	allAgents := s.resolveAllAgents(r)
 	if len(allAgents) > 0 {
 		var agentList []map[string]string
@@ -262,10 +272,20 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 				resp["channels"] = channelList
 			}
 
-			// Agent info with model details
+			// Agent info with model details. Supplement filesystem
+			// discovery with DB agent IDs so admin sees agents owned by
+			// other pods in a multi-replica cloud deploy.
+			var storeAgentIDs []string
+			if s.dataStore != nil {
+				if records, lerr := s.dataStore.ListAgents(r.Context()); lerr == nil {
+					for _, ar := range records {
+						storeAgentIDs = append(storeAgentIDs, ar.ID)
+					}
+				}
+			}
+			resolved := config.ResolveAgentsWithExtra(cfg, userID, storeAgentIDs)
 			if s.agentProvider == nil {
 				// Not running - get agent list from config
-				resolved := config.ResolveAgentsForUser(cfg, userID)
 				var agentList []map[string]string
 				for _, ra := range resolved {
 					agentList = append(agentList, map[string]string{
@@ -277,7 +297,6 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 				resp["agents"] = agentList
 			} else {
 				// Running - enrich with model info from config
-				resolved := config.ResolveAgentsForUser(cfg, userID)
 				modelMap := make(map[string]string)
 				wsMap := make(map[string]string)
 				for _, ra := range resolved {

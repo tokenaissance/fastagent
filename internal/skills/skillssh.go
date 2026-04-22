@@ -89,7 +89,22 @@ func InstallFromSkillsSh(r SkillsShResult, targetDir string) (*Result, error) {
 
 	client := defaultHTTPClient()
 	var lastErr error
-	for _, ref := range []string{"main", "master"} {
+	// Try the repo's actual default branch first, then the common
+	// conventions as fallback. Many skills.sh entries point at repos with
+	// non-standard branches (e.g. `trunk`, `develop`, `dev`) — without the
+	// API probe we'd 404 even though the repo exists and contains the
+	// skill. Dedup so we don't hit the same ref twice when default is
+	// already `main`/`master`.
+	refs := []string{"main", "master"}
+	if def := githubDefaultBranch(client, owner, repo); def != "" {
+		if def != "main" && def != "master" {
+			refs = append([]string{def}, refs...)
+		} else {
+			// Move matching ref to front to short-circuit the happy path.
+			refs = append([]string{def}, filterOut(refs, def)...)
+		}
+	}
+	for _, ref := range refs {
 		tarURL := fmt.Sprintf("https://codeload.github.com/%s/%s/tar.gz/refs/heads/%s", owner, repo, ref)
 
 		// Probe once to discover the real in-tarball subpath of the skill
@@ -133,4 +148,46 @@ func InstallFromSkillsSh(r SkillsShResult, targetDir string) (*Result, error) {
 		lastErr = fmt.Errorf("no main or master branch on %s/%s", owner, repo)
 	}
 	return nil, lastErr
+}
+
+// githubDefaultBranch asks the GitHub API for the repo's default branch.
+// Returns "" on any error (API rate limit, private repo, etc.) — callers
+// fall back to the well-known conventions. Best-effort only; we never
+// block the install path on this call.
+func githubDefaultBranch(client *http.Client, owner, repo string) string {
+	u := fmt.Sprintf("https://api.github.com/repos/%s/%s", owner, repo)
+	req, err := http.NewRequest(http.MethodGet, u, nil)
+	if err != nil {
+		return ""
+	}
+	// Explicit Accept keeps the v3 JSON format stable. No auth header —
+	// unauthenticated requests have a low rate limit (60/h per IP) but
+	// that's enough for interactive installs and we don't want to require
+	// configuring a token just for default-branch lookup.
+	req.Header.Set("Accept", "application/vnd.github+json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
+	var body struct {
+		DefaultBranch string `json:"default_branch"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return ""
+	}
+	return body.DefaultBranch
+}
+
+func filterOut(items []string, drop string) []string {
+	out := make([]string, 0, len(items))
+	for _, s := range items {
+		if s != drop {
+			out = append(out, s)
+		}
+	}
+	return out
 }

@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -13,6 +14,7 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/channels"
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 	"github.com/fastclaw-ai/fastclaw/internal/cron"
+	"github.com/fastclaw-ai/fastclaw/internal/skills"
 	"github.com/fastclaw-ai/fastclaw/internal/provider"
 	"github.com/fsnotify/fsnotify"
 )
@@ -122,11 +124,10 @@ func isWatchedWorkspaceFile(filename string) bool {
 func (g *Gateway) reloadConfig() {
 	slog.Info("hot-reloading config...")
 
-	newCfg, err := config.Load()
-	if err != nil {
-		slog.Error("hot-reload: failed to load config", "error", err)
-		return
-	}
+	// Tolerate missing fastclaw.json in cloud mode (config comes from env +
+	// DB). Env overlay keeps infra fields correct.
+	newCfg := config.LoadOrEmpty()
+	config.LoadEnv().ApplyToConfig(newCfg)
 
 	// 1. Update LLM provider if changed
 	g.reloadProvider(newCfg)
@@ -181,18 +182,45 @@ func (g *Gateway) reloadProvider(newCfg *config.Config) {
 
 	if newProvCfg.APIKey != oldProvCfg.APIKey || newProvCfg.APIBase != oldProvCfg.APIBase || newProvCfg.APIType != oldProvCfg.APIType {
 		llm := provider.NewProvider(newProvCfg.APIKey, newProvCfg.APIBase, newProvCfg.APIType)
-		g.agents.UpdateProvider(llm)
+		// Pass the resolved-agent list so per-agent overrides survive the
+		// hot-reload (otherwise UpdateProvider would clobber agent-specific
+		// providers with the shared fallback).
+		resolved := config.ResolveAgents(newCfg)
+		g.agents.UpdateProviderResolved(llm, resolved)
 		slog.Info("hot-reload: provider updated", "apiBase", newProvCfg.APIBase, "apiType", newProvCfg.APIType)
 	}
 }
 
 // reloadAgents adds new agents, updates configs on existing ones, and removes
-// agents that no longer have a workspace on disk.
+// agents that no longer have a workspace on disk or in the DB store.
+//
+// Multi-pod invariant: agents created on pod A land in the DB via
+// Store.SaveAgent, but the home directory is mkdir'd on pod A's local
+// emptyDir only. On pod B this function needs to (a) still discover the
+// agent (via the store agent list) and (b) lazy-create its home dir so
+// subsequent filesystem reads on pod B succeed. `ResolveAgentsWithExtra`
+// + ensureAgentHome below handle exactly that.
 func (g *Gateway) reloadAgents(newCfg *config.Config) {
-	resolved := config.ResolveAgents(newCfg)
+	var storeAgentIDs []string
+	if g.store != nil {
+		if records, err := g.store.ListAgents(context.Background()); err == nil {
+			for _, ar := range records {
+				storeAgentIDs = append(storeAgentIDs, ar.ID)
+			}
+		}
+	}
+	resolved := config.ResolveAgentsWithExtra(newCfg, "", storeAgentIDs)
 	seen := make(map[string]bool, len(resolved))
 	for _, rc := range resolved {
 		seen[rc.ID] = true
+		ensureAgentHome(rc)
+		if g.workspace != nil {
+			if err := skills.HydrateSkillsDown(
+				context.Background(), g.workspace, rc.ID, filepath.Join(rc.Home, "skills"),
+			); err != nil {
+				slog.Warn("hot-reload: skill hydrate failed", "agent", rc.ID, "error", err)
+			}
+		}
 		ag := g.agents.AgentByID(rc.ID)
 		if ag == nil {
 			if err := g.agents.AddAgent(rc, g.localSpace.Provider, g.bus); err != nil {
@@ -205,7 +233,7 @@ func (g *Gateway) reloadAgents(newCfg *config.Config) {
 		ag.UpdateConfig(rc)
 		slog.Info("hot-reload: agent config updated", "id", rc.ID, "model", rc.Model)
 	}
-	// Remove agents that disappeared from disk.
+	// Remove agents that disappeared from both disk and the store.
 	for _, existing := range g.agents.All() {
 		if !seen[existing.Name()] {
 			g.agents.RemoveAgent(existing.Name())
@@ -213,14 +241,36 @@ func (g *Gateway) reloadAgents(newCfg *config.Config) {
 	}
 }
 
+// ensureAgentHome idempotently creates the standard agent home layout
+// (home + memory/sessions/skills subdirs) on the local filesystem. Safe
+// to call on every reload — mkdirall is no-op if the dirs exist. This is
+// what lets a pod that *didn't* handle the original create request still
+// serve requests for that agent after discovering it via the store.
+func ensureAgentHome(rc config.ResolvedAgent) {
+	if rc.Home == "" {
+		return
+	}
+	for _, dir := range []string{
+		rc.Home,
+		filepath.Join(rc.Home, "memory"),
+		filepath.Join(rc.Home, "sessions"),
+		filepath.Join(rc.Home, "skills"),
+	} {
+		_ = os.MkdirAll(dir, 0o755)
+	}
+}
+
 // ReloadAgents is the public entrypoint used by the HTTP API after an agent
 // is created / updated / deleted via the web UI. It reloads the local user's
 // config and syncs the in-memory agent manager with disk.
+//
+// In cloud/K8s mode there may be no fastclaw.json on the pod's filesystem —
+// infra comes from FASTCLAW_* env vars and agent state from the DB store.
+// Use LoadOrEmpty so a missing file doesn't block reload; env overlay via
+// LoadEnv/ApplyToConfig keeps infra fields correct.
 func (g *Gateway) ReloadAgents() error {
-	newCfg, err := config.Load()
-	if err != nil {
-		return err
-	}
+	newCfg := config.LoadOrEmpty()
+	config.LoadEnv().ApplyToConfig(newCfg)
 	g.reloadAgents(newCfg)
 	g.mu.Lock()
 	g.config = newCfg

@@ -59,24 +59,33 @@ func (cb *ContextBuilder) SetWorkspace(p string) { cb.workspace = p }
 func (cb *ContextBuilder) BuildSystemPrompt() string {
 	var parts []string
 
-	// 1. Identity (runtime environment info)
+	// 1. Runtime environment info. Deliberately NOT an identity claim —
+	// the agent's name, role, and persona live in IDENTITY.md / SOUL.md.
+	// A fresh agent has empty identity files and should follow BOOTSTRAP.md
+	// to ask the user what identity to adopt, instead of introducing itself
+	// as "FastClaw" (which is the runtime, not the agent).
 	workdir := cb.workspace
 	if workdir == "" {
 		workdir = cb.home
 	}
-	identity := fmt.Sprintf(`You are FastClaw, a lightweight AI Agent.
+	runtimeInfo := fmt.Sprintf(`You are an AI agent running on the FastClaw runtime.
+Your identity (name, role, personality) is defined by IDENTITY.md and SOUL.md
+below — if those are empty, you do NOT yet have a name and must follow the
+bootstrap instructions in BOOTSTRAP.md before answering the user.
+
+Runtime info:
 OS: %s/%s
 Working Directory: %s
 
 File-tool routing: when you call write_file / read_file / list_dir with a
-relative path, FastClaw automatically places it in the right directory:
+relative path, the runtime automatically places it in the right directory:
 - A bare identity filename (SOUL.md, IDENTITY.md, USER.md, MEMORY.md,
   BOOTSTRAP.md, HEARTBEAT.md, AGENTS.md, TOOLS.md, agent.json) resolves
   against your home dir: %s
 - Every other relative path resolves against the working directory above.
 So to update your own identity, just pass "IDENTITY.md"; to save a document
 for the user, pass a meaningful filename like "report.md".`, runtime.GOOS, runtime.GOARCH, workdir, cb.home)
-	parts = append(parts, identity)
+	parts = append(parts, runtimeInfo)
 
 	// 2. Sandbox capabilities (auto-injected when sandbox is enabled)
 	if cb.sandboxEnabled {

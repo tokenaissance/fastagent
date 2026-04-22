@@ -49,6 +49,15 @@ func (s *Server) handleInstallSkill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// For per-agent installs, validate access against the canonical source
+	// (store + filesystem) and let resolveInstallTarget lazy-create the
+	// home/skills dir if this pod hasn't seen the agent yet. Without this
+	// step, multi-pod deployments 403 on the non-creating pod because its
+	// emptyDir doesn't contain agents/<id>/.
+	if req.Agent != "" && !s.canAccessAgent(callerFrom(r), req.Agent) {
+		forbid(w, req.Agent)
+		return
+	}
 	targetDir, err := resolveInstallTarget(r, req.Agent)
 	if err != nil {
 		jsonResponse(w, http.StatusForbidden, map[string]any{"ok": false, "error": err.Error()})
@@ -59,6 +68,21 @@ func (s *Server) handleInstallSkill(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		jsonResponse(w, http.StatusNotFound, map[string]any{"ok": false, "error": err.Error()})
 		return
+	}
+
+	// Mirror the installed skill bundle to the shared object store so
+	// other pods can hydrate it on their next reload. Without this step
+	// the skill only exists on this pod's emptyDir, and a chat request
+	// balanced to another pod wouldn't see it.
+	if s.workspaceStore != nil && result != nil && result.Name != "" {
+		owner := req.Agent
+		if owner == "" {
+			owner = skills.GlobalSkillOwner
+		}
+		if uerr := skills.SyncSkillUp(r.Context(), s.workspaceStore, owner, result.Name, targetDir); uerr != nil {
+			slog.Warn("failed to mirror skill to object store",
+				"owner", owner, "skill", result.Name, "error", uerr)
+		}
 	}
 
 	// Hot-reload the target agent so the new skill is visible on the next turn.
@@ -85,12 +109,13 @@ func (s *Server) handleInstallSkill(w http.ResponseWriter, r *http.Request) {
 // the admin-only rule for global installs.
 func resolveInstallTarget(r *http.Request, agentID string) (string, error) {
 	if agentID != "" {
+		// Access has already been checked by the caller against the
+		// authoritative agent source (DB store + bindings). The home dir
+		// may legitimately not exist yet on this pod (emptyDir in
+		// multi-pod deploys) — just create it.
 		homePath, err := config.AgentHomeDir(agentID)
 		if err != nil {
 			return "", fmt.Errorf("resolve agent home: %w", err)
-		}
-		if _, err := os.Stat(homePath); err != nil {
-			return "", fmt.Errorf("agent %q not found", agentID)
 		}
 		dir := filepath.Join(homePath, "skills")
 		if err := os.MkdirAll(dir, 0o755); err != nil {

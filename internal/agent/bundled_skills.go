@@ -11,6 +11,25 @@ import (
 //go:embed all:bundled_skills
 var bundledSkillsFS embed.FS
 
+// BundledSkillNames returns the folder names of every skill embedded in the
+// binary. Exposed so startup/reload code can protect these entries from
+// the object-store hydrator's "prune local-only dirs" step (bundled skills
+// aren't stored in the object store; they're always regenerated on startup
+// by InstallBundledSkills).
+func BundledSkillNames() []string {
+	entries, err := fs.ReadDir(bundledSkillsFS, "bundled_skills")
+	if err != nil {
+		return nil
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() {
+			names = append(names, e.Name())
+		}
+	}
+	return names
+}
+
 // InstallBundledSkills copies bundled skills to the managed skills directory
 // (~/.fastclaw/skills/) if they don't already exist. Subdirectories (scripts,
 // references, assets, ...) are copied recursively so skills with supporting
