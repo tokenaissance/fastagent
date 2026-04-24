@@ -305,7 +305,13 @@ export async function sendChatStream(
 // Agents
 export async function getAgents(): Promise<AgentDetail[]> {
   const res = await apiFetch("/api/agents");
-  return res.json();
+  if (!res.ok) {
+    // 401 etc. return a JSON error envelope, not an array — throw so callers
+    // can fall back to [] instead of crashing on .map of a non-array.
+    throw new Error(`getAgents failed: ${res.status}`);
+  }
+  const data = await res.json();
+  return Array.isArray(data) ? data : [];
 }
 
 export async function createAgent(agent: Partial<AgentDetail>) {

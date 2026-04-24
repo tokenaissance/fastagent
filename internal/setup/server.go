@@ -261,8 +261,11 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("GET /api/status", s.optionalUserAuth(s.handleStatus))
 	mux.HandleFunc("GET /api/config", ua(s.handleGetConfig))
 	mux.HandleFunc("POST /api/config", ua(s.handleUpdateConfig))
-	mux.HandleFunc("POST /api/test-provider", ua(s.handleTestProvider))
-	mux.HandleFunc("POST /api/save-config", ua(s.handleSaveConfig))
+	// test-provider / save-config must reach the onboarding wizard before
+	// the user has a token — gate on "is the system already configured?"
+	// inside the handler instead (admin-only once configured).
+	mux.HandleFunc("POST /api/test-provider", s.optionalUserAuth(s.handleTestProvider))
+	mux.HandleFunc("POST /api/save-config", s.optionalUserAuth(s.handleSaveConfig))
 	mux.HandleFunc("POST /api/chat", ua(s.handleChat))
 	mux.HandleFunc("POST /api/chat/stream", ua(s.handleChatStream))
 	mux.HandleFunc("GET /api/chat/history", ua(s.handleChatHistory))

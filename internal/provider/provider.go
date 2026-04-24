@@ -89,6 +89,12 @@ type StreamChunk struct {
 	Content   string
 	ToolCalls []ToolCall
 	Done      bool
+	// Thinking is emitted once at message_stop (if the model produced any)
+	// so callers can persist it alongside the final assistant message —
+	// required so the next turn can echo content[].thinking back to
+	// extended-thinking providers (Anthropic + DeepSeek /anthropic compat).
+	Thinking          string
+	ThinkingSignature string
 }
 
 // StreamReader reads streaming chunks from an LLM response.

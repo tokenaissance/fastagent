@@ -84,6 +84,9 @@ func toAnthropicMessages(msgs []Message) (string, []anthropicMessage) {
 		// Assistant messages with tool calls
 		if m.Role == "assistant" && len(m.ToolCalls) > 0 {
 			var blocks []interface{}
+			if tb := thinkingBlockFor(m); tb != nil {
+				blocks = append(blocks, tb)
+			}
 			if m.Content != "" {
 				blocks = append(blocks, map[string]interface{}{
 					"type": "text",
@@ -108,6 +111,11 @@ func toAnthropicMessages(msgs []Message) (string, []anthropicMessage) {
 		// Regular text content
 		if len(m.ContentParts) > 0 {
 			var blocks []interface{}
+			if m.Role == "assistant" {
+				if tb := thinkingBlockFor(m); tb != nil {
+					blocks = append(blocks, tb)
+				}
+			}
 			for _, part := range m.ContentParts {
 				if part.Type == "text" {
 					blocks = append(blocks, map[string]interface{}{
@@ -125,6 +133,22 @@ func toAnthropicMessages(msgs []Message) (string, []anthropicMessage) {
 				}
 			}
 			am.Content, _ = json.Marshal(blocks)
+		} else if m.Role == "assistant" {
+			var blocks []interface{}
+			if tb := thinkingBlockFor(m); tb != nil {
+				blocks = append(blocks, tb)
+			}
+			if m.Content != "" {
+				blocks = append(blocks, map[string]interface{}{
+					"type": "text",
+					"text": m.Content,
+				})
+			}
+			if len(blocks) > 0 {
+				am.Content, _ = json.Marshal(blocks)
+			} else if m.Content != "" {
+				am.Content, _ = json.Marshal(m.Content)
+			}
 		} else if m.Content != "" {
 			am.Content, _ = json.Marshal(m.Content)
 		}
@@ -133,6 +157,34 @@ func toAnthropicMessages(msgs []Message) (string, []anthropicMessage) {
 	}
 
 	return system, out
+}
+
+// thinkingBlockFor returns a content-block map for an assistant message's
+// prior thinking, or nil if nothing to replay. Extended-thinking models
+// (real Anthropic, DeepSeek's /anthropic compat) reject the next turn when
+// the prior `content[].thinking` is dropped, so we echo it back verbatim.
+func thinkingBlockFor(m Message) map[string]interface{} {
+	if m.Role != "assistant" {
+		return nil
+	}
+	// Prefer the raw thinking block we captured on the response — preserves
+	// signature for real Anthropic. Falls back to the plain text we stored
+	// on Message.Thinking for sessions written before signature capture.
+	if len(m.RawAssistant) > 0 {
+		var raw map[string]interface{}
+		if err := json.Unmarshal(m.RawAssistant, &raw); err == nil {
+			if t, _ := raw["type"].(string); t == "thinking" {
+				return raw
+			}
+		}
+	}
+	if m.Thinking != "" {
+		return map[string]interface{}{
+			"type":     "thinking",
+			"thinking": m.Thinking,
+		}
+	}
+	return nil
 }
 
 func (p *AnthropicProvider) buildRequest(ctx context.Context, messages []Message, tools []Tool, model string, maxTokens int, temperature float64, stream bool) (*http.Request, error) {
@@ -204,9 +256,11 @@ type anthropicContentBlockDelta struct {
 }
 
 type anthropicDeltaContent struct {
-	Type        string `json:"type"` // "text_delta" or "input_json_delta"
+	Type        string `json:"type"` // "text_delta" | "input_json_delta" | "thinking_delta" | "signature_delta"
 	Text        string `json:"text,omitempty"`
 	PartialJSON string `json:"partial_json,omitempty"`
+	Thinking    string `json:"thinking,omitempty"`
+	Signature   string `json:"signature,omitempty"`
 }
 
 func (p *AnthropicProvider) Chat(ctx context.Context, messages []Message, tools []Tool, model string, maxTokens int, temperature float64) (*Response, error) {
@@ -257,10 +311,12 @@ func (p *AnthropicProvider) ChatStream(ctx context.Context, messages []Message, 
 		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
 		type blockState struct {
-			blockType string // "text" or "tool_use"
+			blockType string // "text" | "tool_use" | "thinking"
 			id        string
 			name      string
 			argsJSON  strings.Builder
+			thinking  strings.Builder
+			signature string
 		}
 		blocks := make(map[int]*blockState)
 
@@ -297,27 +353,40 @@ func (p *AnthropicProvider) ChatStream(ctx context.Context, messages []Message, 
 			case "content_block_delta":
 				var cbd anthropicContentBlockDelta
 				if json.Unmarshal([]byte(data), &cbd) == nil {
-					if cbd.Delta.Type == "text_delta" && cbd.Delta.Text != "" {
-						select {
-						case ch <- StreamChunk{Content: cbd.Delta.Text}:
-						case <-ctx.Done():
-							return
+					switch cbd.Delta.Type {
+					case "text_delta":
+						if cbd.Delta.Text != "" {
+							select {
+							case ch <- StreamChunk{Content: cbd.Delta.Text}:
+							case <-ctx.Done():
+								return
+							}
 						}
-					} else if cbd.Delta.Type == "input_json_delta" {
+					case "input_json_delta":
 						if bs, ok := blocks[cbd.Index]; ok {
 							bs.argsJSON.WriteString(cbd.Delta.PartialJSON)
+						}
+					case "thinking_delta":
+						if bs, ok := blocks[cbd.Index]; ok {
+							bs.thinking.WriteString(cbd.Delta.Thinking)
+						}
+					case "signature_delta":
+						if bs, ok := blocks[cbd.Index]; ok {
+							bs.signature = cbd.Delta.Signature
 						}
 					}
 				}
 
 			case "message_stop":
 				var toolCalls []ToolCall
+				var thinkingText, thinkingSig string
 				for i := 0; i < len(blocks); i++ {
 					bs, ok := blocks[i]
 					if !ok {
 						continue
 					}
-					if bs.blockType == "tool_use" {
+					switch bs.blockType {
+					case "tool_use":
 						toolCalls = append(toolCalls, ToolCall{
 							ID:   bs.id,
 							Type: "function",
@@ -326,10 +395,22 @@ func (p *AnthropicProvider) ChatStream(ctx context.Context, messages []Message, 
 								Arguments: bs.argsJSON.String(),
 							},
 						})
+					case "thinking":
+						if t := bs.thinking.String(); t != "" {
+							thinkingText = t
+						}
+						if bs.signature != "" {
+							thinkingSig = bs.signature
+						}
 					}
 				}
 				select {
-				case ch <- StreamChunk{ToolCalls: toolCalls, Done: true}:
+				case ch <- StreamChunk{
+					ToolCalls:         toolCalls,
+					Thinking:          thinkingText,
+					ThinkingSignature: thinkingSig,
+					Done:              true,
+				}:
 				case <-ctx.Done():
 				}
 				return
@@ -355,6 +436,8 @@ func (p *AnthropicProvider) parseSSE(body io.Reader) (*Response, error) {
 		id        string
 		name      string
 		argsJSON  strings.Builder
+		thinking  strings.Builder
+		signature string
 	}
 	blocks := make(map[int]*blockState)
 
@@ -388,11 +471,20 @@ func (p *AnthropicProvider) parseSSE(body io.Reader) (*Response, error) {
 		case "content_block_delta":
 			var cbd anthropicContentBlockDelta
 			if json.Unmarshal([]byte(data), &cbd) == nil {
-				if cbd.Delta.Type == "text_delta" {
+				switch cbd.Delta.Type {
+				case "text_delta":
 					contentBuilder.WriteString(cbd.Delta.Text)
-				} else if cbd.Delta.Type == "input_json_delta" {
+				case "input_json_delta":
 					if bs, ok := blocks[cbd.Index]; ok {
 						bs.argsJSON.WriteString(cbd.Delta.PartialJSON)
+					}
+				case "thinking_delta":
+					if bs, ok := blocks[cbd.Index]; ok {
+						bs.thinking.WriteString(cbd.Delta.Thinking)
+					}
+				case "signature_delta":
+					if bs, ok := blocks[cbd.Index]; ok {
+						bs.signature = cbd.Delta.Signature
 					}
 				}
 			}
@@ -409,12 +501,15 @@ func (p *AnthropicProvider) parseSSE(body io.Reader) (*Response, error) {
 	result := &Response{
 		Content: contentBuilder.String(),
 	}
+	var thinkingBuilder strings.Builder
+	var thinkingSig string
 	for i := 0; i < len(blocks); i++ {
 		bs, ok := blocks[i]
 		if !ok {
 			continue
 		}
-		if bs.blockType == "tool_use" {
+		switch bs.blockType {
+		case "tool_use":
 			result.ToolCalls = append(result.ToolCalls, ToolCall{
 				ID:   bs.id,
 				Type: "function",
@@ -423,6 +518,32 @@ func (p *AnthropicProvider) parseSSE(body io.Reader) (*Response, error) {
 					Arguments: bs.argsJSON.String(),
 				},
 			})
+		case "thinking":
+			if t := bs.thinking.String(); t != "" {
+				thinkingBuilder.WriteString(t)
+			}
+			if bs.signature != "" {
+				thinkingSig = bs.signature
+			}
+		}
+	}
+	if thinking := thinkingBuilder.String(); thinking != "" {
+		result.Thinking = thinking
+		// DeepSeek's Anthropic-compat endpoint (and real Anthropic extended
+		// thinking) requires the thinking block to be echoed verbatim on the
+		// next turn. Pack {thinking, signature} into RawAssistant so
+		// toAnthropicMessages can replay it as a content block.
+		type thinkingBlock struct {
+			Type      string `json:"type"`
+			Thinking  string `json:"thinking"`
+			Signature string `json:"signature,omitempty"`
+		}
+		if raw, err := json.Marshal(thinkingBlock{
+			Type:      "thinking",
+			Thinking:  thinking,
+			Signature: thinkingSig,
+		}); err == nil {
+			result.RawAssistant = raw
 		}
 	}
 

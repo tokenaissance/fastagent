@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { getStatus } from "@/lib/api";
-import { isLoggedIn, login } from "@/lib/auth";
+import { isLoggedIn, login, logout } from "@/lib/auth";
 
 export default function RootPage() {
   const router = useRouter();
@@ -13,15 +13,18 @@ export default function RootPage() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    if (isLoggedIn()) {
-      router.replace("/overview/");
-      return;
-    }
-
     getStatus()
       .then((status) => {
+        // Never trust a stale localStorage token when the backend reports
+        // the system is unconfigured — that token belongs to a previous
+        // deployment and would otherwise short-circuit onboarding.
         if (!status.configured) {
+          logout();
           router.replace("/onboard/");
+          return;
+        }
+        if (isLoggedIn()) {
+          router.replace("/overview/");
         } else {
           setShowLogin(true);
           setLoading(false);

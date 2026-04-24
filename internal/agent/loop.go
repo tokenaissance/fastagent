@@ -770,6 +770,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 			go func() {
 				defer close(outCh)
 				var full strings.Builder
+				var thinking, thinkingSig string
 				for {
 					chunk, ok := sr.Next()
 					if !ok {
@@ -778,13 +779,32 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 					if chunk.Content != "" {
 						full.WriteString(chunk.Content)
 					}
+					if chunk.Thinking != "" {
+						thinking = chunk.Thinking
+					}
+					if chunk.ThinkingSignature != "" {
+						thinkingSig = chunk.ThinkingSignature
+					}
 					select {
 					case outCh <- chunk:
 					case <-ctx.Done():
 						return
 					}
 				}
-				sess.Append(provider.Message{Role: "assistant", Content: full.String()})
+				msg := provider.Message{Role: "assistant", Content: full.String(), Thinking: thinking}
+				if thinking != "" {
+					// Pack {thinking, signature} into RawAssistant so the next
+					// turn can echo content[].thinking back to extended-
+					// thinking providers that require it.
+					if raw, err := json.Marshal(map[string]string{
+						"type":      "thinking",
+						"thinking":  thinking,
+						"signature": thinkingSig,
+					}); err == nil {
+						msg.RawAssistant = raw
+					}
+				}
+				sess.Append(msg)
 			}()
 			return outReader
 		}

@@ -57,8 +57,18 @@ func (s *Server) loadUserConfig(r *http.Request) (*config.Config, error) {
 		}, nil
 	}
 
-	// Local mode: auto-provision if missing.
+	// Local mode: auto-provision if missing — but NOT for the default user,
+	// since the missing file there means "setup wizard hasn't run yet" and
+	// writing a stub flips `configured` to true, sending the UI to the
+	// login/overview screen instead of onboarding. Return an empty config
+	// so GET /api/config can still succeed without side effects.
 	if os.IsNotExist(unwrapPathError(err)) {
+		if userID == config.DefaultUserID {
+			return &config.Config{
+				Providers: map[string]config.ProviderConfig{},
+				Channels:  map[string]config.ChannelConfig{},
+			}, nil
+		}
 		if provErr := users.ProvisionWorkspace(userID); provErr != nil {
 			return nil, fmt.Errorf("auto-provision user %s: %w", userID, provErr)
 		}
@@ -345,7 +355,48 @@ type testProviderRequest struct {
 	AuthType string `json:"authType"`
 }
 
+// systemConfigured reports whether initial setup has completed. Mirrors
+// the logic in handleStatus so onboarding-only endpoints can tell whether
+// they're running for a first-time setup (allow unauthenticated) or for an
+// already-configured deployment (require admin auth).
+func (s *Server) systemConfigured(r *http.Request) bool {
+	mode := ""
+	if s.gatewayCfg != nil {
+		mode = s.gatewayCfg.Mode
+	}
+	if mode == "cloud" && s.dataStore != nil {
+		if gc, err := s.dataStore.GetConfig(r.Context()); err == nil && gc != nil && len(gc.Data) > 0 {
+			return true
+		}
+		return false
+	}
+	configPath, err := config.GlobalConfigPath()
+	if err != nil {
+		return false
+	}
+	_, statErr := os.Stat(configPath)
+	return statErr == nil
+}
+
+// requireOnboardingOrAuthed gates endpoints that the onboarding wizard must
+// reach before a token exists. When the system is already configured, the
+// caller must be an authenticated user — otherwise anyone could overwrite
+// the deployment's provider/config from the public network.
+func (s *Server) requireOnboardingOrAuthed(w http.ResponseWriter, r *http.Request) bool {
+	if !s.systemConfigured(r) {
+		return true
+	}
+	if config.HasUserID(r.Context()) {
+		return true
+	}
+	jsonResponse(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": "invalid token"})
+	return false
+}
+
 func (s *Server) handleTestProvider(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOnboardingOrAuthed(w, r) {
+		return
+	}
 	var req testProviderRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid request"})
@@ -365,7 +416,9 @@ func (s *Server) handleTestProvider(w http.ResponseWriter, r *http.Request) {
 		if model == "" {
 			model = "claude-sonnet-4-20250514"
 		}
-		payload := fmt.Sprintf(`{"model":"%s","messages":[{"role":"user","content":"hi"}]}`, model)
+		// max_tokens is required by the Anthropic Messages API — some
+		// compat gateways (e.g. DeepSeek's /anthropic endpoint) 400 without it.
+		payload := fmt.Sprintf(`{"model":"%s","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`, model)
 		body = strings.NewReader(payload)
 	} else {
 		// OpenAI-compatible: send a minimal chat completion to verify API key
@@ -375,7 +428,7 @@ func (s *Server) handleTestProvider(w http.ResponseWriter, r *http.Request) {
 		if model == "" {
 			model = "gpt-4o-mini"
 		}
-		payload := fmt.Sprintf(`{"model":"%s","messages":[{"role":"user","content":"hi"}]}`, model)
+		payload := fmt.Sprintf(`{"model":"%s","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`, model)
 		body = strings.NewReader(payload)
 	}
 
@@ -602,6 +655,9 @@ type saveConfigRequest struct {
 }
 
 func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOnboardingOrAuthed(w, r) {
+		return
+	}
 	var req saveConfigRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid request"})
