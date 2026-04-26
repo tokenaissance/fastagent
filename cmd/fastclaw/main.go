@@ -89,20 +89,24 @@ func runGateway(port int) error {
 		Level: slog.LevelInfo,
 	})))
 
-	// Check if config exists. When FASTCLAW_* env vars are set (typical
-	// K8s/container deploy), a missing fastclaw.json is fine — env
-	// provides the infra fields and the UI bootstraps product config.
-	// Absent both env and file, fall back to the setup wizard for
-	// interactive local onboarding.
+	// Boot with whatever config we can find — fastclaw.json is optional
+	// since #4 made the configs row in the store the source of truth.
+	// When neither file nor store has anything, the gateway still starts;
+	// the web UI's /onboard page configures product fields against the
+	// running gateway, which writes to the store and hot-reloads in
+	// place. Storage / sandbox infra defaults come from env.toml or
+	// FASTCLAW_* env vars (resolving to SQLite at ~/.fastclaw/fastclaw.db
+	// when nothing is set — see store.New).
 	cfg, err := config.Load()
 	if err != nil {
-		if hasInfraEnv() {
+		switch {
+		case hasInfraEnv():
 			slog.Info("no fastclaw.json found, bootstrapping from env")
-			cfg = &config.Config{}
-		} else {
-			slog.Info("no config found, starting setup wizard", "url", fmt.Sprintf("http://localhost:%d", port))
-			return runSetupWizard(port)
+		default:
+			slog.Info("no config found; web UI will run onboarding flow",
+				"url", fmt.Sprintf("http://localhost:%d", port))
 		}
+		cfg = &config.Config{}
 	}
 
 	// Env vars win over JSON for infra fields — see ApplyToConfig. This
@@ -191,7 +195,14 @@ func runGateway(port int) error {
 		}
 	}()
 
-	slog.Info("web UI available", "url", fmt.Sprintf("http://localhost:%d", port))
+	url := fmt.Sprintf("http://localhost:%d", port)
+	slog.Info("web UI available", "url", url)
+	// Auto-open the browser on a fresh install (no providers, no agents).
+	// Used to be runSetupWizard's job; now runGateway handles onboarding
+	// itself — same UX, one less process.
+	if len(cfg.Providers) == 0 {
+		go openBrowser(url)
+	}
 
 	return gw.Run()
 }
@@ -221,31 +232,6 @@ func (a *agentProviderAdapter) AgentByID(id string) setup.AgentHandle {
 
 func (a *agentProviderAdapter) ReloadAgents() error {
 	return a.gw.ReloadAgents()
-}
-
-func runSetupWizard(port int) error {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	srv := setup.NewServer(port, func(cfg *config.Config) {
-		slog.Info("setup complete, config saved")
-		// Stop the setup wizard and restart as gateway
-		go func() {
-			cancel()
-		}()
-	})
-
-	// Open browser
-	url := fmt.Sprintf("http://localhost:%d", port)
-	go openBrowser(url)
-
-	if err := srv.Run(ctx); err != nil {
-		return err
-	}
-
-	// Config was saved, now start the gateway
-	slog.Info("restarting as gateway")
-	return runGateway(port)
 }
 
 // hasInfraEnv reports whether the environment carries enough infra config
