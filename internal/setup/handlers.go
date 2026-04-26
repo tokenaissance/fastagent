@@ -229,31 +229,32 @@ func (s *Server) resolveAllAgents(r *http.Request) []AgentHandle {
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
-	// Deployment mode decides where "configured" lives. In cloud mode the
-	// pod-local fastclaw.json is ephemeral and doesn't roam across replicas,
-	// so we treat the shared dataStore as the source of truth.
 	mode := ""
 	if s.gatewayCfg != nil {
 		mode = s.gatewayCfg.Mode
 	}
 
+	// Post-#4, the store is the source of truth for "configured" in BOTH
+	// local and cloud modes — saveUserConfig stops writing fastclaw.json
+	// the moment a store is wired. The previous "mode == cloud" gate
+	// was too narrow and made local-mode onboarding bounce back to
+	// /onboard forever (status reports configured=false → page.tsx
+	// redirects → save again → still false → loop).
 	configured := false
-	if mode == "cloud" && s.dataStore != nil {
+	if s.dataStore != nil {
 		if gc, err := s.dataStore.GetConfig(r.Context()); err == nil && gc != nil && len(gc.Data) > 0 {
 			configured = true
 		}
-	} else {
-		configPath, err := config.GlobalConfigPath()
-		if err != nil {
-			jsonResponse(w, http.StatusOK, map[string]any{
-				"configured": false,
-				"running":    false,
-				"mode":       mode,
-			})
-			return
+	}
+	if !configured {
+		// Back-compat fallback: legacy single-user installs that still
+		// only have fastclaw.json on disk. Once they save anything via
+		// the UI, the store row appears and this branch stops firing.
+		if configPath, err := config.GlobalConfigPath(); err == nil {
+			if _, statErr := os.Stat(configPath); statErr == nil {
+				configured = true
+			}
 		}
-		_, statErr := os.Stat(configPath)
-		configured = statErr == nil
 	}
 
 	// /api/status is reachable unauthenticated so the login / onboarding UI
@@ -400,23 +401,22 @@ type testProviderRequest struct {
 // the logic in handleStatus so onboarding-only endpoints can tell whether
 // they're running for a first-time setup (allow unauthenticated) or for an
 // already-configured deployment (require admin auth).
+//
+// Post-#4 the store is authoritative regardless of mode — saveUserConfig
+// stops touching fastclaw.json once a store is wired. Fall back to the
+// FS check only as legacy support for installs predating that change.
 func (s *Server) systemConfigured(r *http.Request) bool {
-	mode := ""
-	if s.gatewayCfg != nil {
-		mode = s.gatewayCfg.Mode
-	}
-	if mode == "cloud" && s.dataStore != nil {
+	if s.dataStore != nil {
 		if gc, err := s.dataStore.GetConfig(r.Context()); err == nil && gc != nil && len(gc.Data) > 0 {
 			return true
 		}
-		return false
 	}
-	configPath, err := config.GlobalConfigPath()
-	if err != nil {
-		return false
+	if configPath, err := config.GlobalConfigPath(); err == nil {
+		if _, statErr := os.Stat(configPath); statErr == nil {
+			return true
+		}
 	}
-	_, statErr := os.Stat(configPath)
-	return statErr == nil
+	return false
 }
 
 // requireOnboardingOrAuthed gates endpoints that the onboarding wizard must
