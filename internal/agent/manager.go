@@ -104,6 +104,7 @@ func NewManager(resolved []config.ResolvedAgent, prov provider.Provider, mb *bus
 			ag.ctxBuilder.store = mopt.memoryStore
 			ag.ctxBuilder.agentID = rc.ID
 			ag.ctxBuilder.userID = uid
+			ag.ctxBuilder.templateID = rc.TemplateID
 			ag.memoryStore = mopt.memoryStore
 			// Identity files (SOUL/IDENTITY/USER/...) share the same DB
 			// store as memory so write_file from the agent ends up in

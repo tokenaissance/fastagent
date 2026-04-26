@@ -64,6 +64,7 @@ type ContextBuilder struct {
 	store          MemoryStore
 	userID         string
 	agentID        string
+	templateID     string // optional: agent inherits identity files from this template
 }
 
 // ctx returns a context tagged with this builder's user, used when reading
@@ -295,14 +296,21 @@ func (cb *ContextBuilder) loadFile(name string) string {
 			return strings.TrimSpace(string(data))
 		}
 	}
-	// Per-agent file is missing or empty. For inheritable identity files,
-	// fall back to the platform baseline so products with one shared
-	// SOUL/IDENTITY don't have to copy it into every per-user agent.
-	if platformInheritable[name] && cb.store != nil {
-		platformCtx := config.WithUserID(context.Background(), config.DefaultUserID)
-		if data, err := cb.store.GetWorkspaceFile(platformCtx, PlatformAgentID, name); err == nil && len(data) > 0 {
+	// Per-agent file missing/empty. Inheritable identity files cascade
+	// per-agent → template → platform so products with one shared
+	// baseline (Manus / ChatGPT-style) or per-function templates
+	// (ThinkAny) don't duplicate it across every user-agent.
+	if !platformInheritable[name] || cb.store == nil {
+		return ""
+	}
+	sharedCtx := config.WithUserID(context.Background(), config.DefaultUserID)
+	if cb.templateID != "" {
+		if data, err := cb.store.GetWorkspaceFile(sharedCtx, cb.templateID, name); err == nil && len(data) > 0 {
 			return strings.TrimSpace(string(data))
 		}
+	}
+	if data, err := cb.store.GetWorkspaceFile(sharedCtx, PlatformAgentID, name); err == nil && len(data) > 0 {
+		return strings.TrimSpace(string(data))
 	}
 	return ""
 }

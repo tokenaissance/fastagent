@@ -384,6 +384,8 @@ type AgentEntry struct {
 	ID                string                     `json:"id"`
 	Workspace         string                     `json:"workspace,omitempty"`
 	Model             string                     `json:"model,omitempty"`
+	TemplateID        string                     `json:"templateId,omitempty"` // optional: inherit identity files from this template
+
 	MaxTokens         int                        `json:"maxTokens,omitempty"`
 	Temperature       float64                    `json:"temperature,omitempty"`
 	MaxToolIterations int                        `json:"maxToolIterations,omitempty"`
@@ -492,6 +494,7 @@ type ResolvedAgent struct {
 	Home              string // agent's own directory: SOUL.md, IDENTITY.md, sessions, memory, skills
 	Workspace         string // working directory where agent creates user-facing files
 	Model             string
+	TemplateID        string // optional: agent_id of a template whose identity files this agent inherits
 	MaxTokens         int
 	Temperature       float64
 	MaxToolIterations int
@@ -714,6 +717,7 @@ func (cfg *Config) MergedAgentConfigForUser(entry AgentEntry, userID string) Res
 		Home:              home,
 		Workspace:         workspace,
 		Model:             cfg.Agents.Defaults.Model,
+		TemplateID:        entry.TemplateID,
 		MaxTokens:         cfg.Agents.Defaults.MaxTokens,
 		Temperature:       cfg.Agents.Defaults.Temperature,
 		MaxToolIterations: cfg.Agents.Defaults.MaxToolIterations,

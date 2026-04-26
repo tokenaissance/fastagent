@@ -77,6 +77,13 @@ func (d *DBStore) Migrate(ctx context.Context) error {
 		return fmt.Errorf("migrate: add sessions.title: %w", err)
 	}
 	_ = altered
+	// agents.template_id: per-(user, function) agents reference a shared
+	// template row whose SOUL/IDENTITY/skills they inherit. Templates are
+	// just regular agents; the FK is by name only (no SQL constraint) so
+	// templates can be deleted independently. Empty string = no template.
+	if _, err := d.addColumnIfMissing(ctx, "agents", "template_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("migrate: add agents.template_id: %w", err)
+	}
 	// One-time backfill: per-(user, agent) tables previously stored every
 	// row under user_id='' (single-user assumption). Now that queries scope
 	// by the resolved user_id (default "local"), legacy rows would become
@@ -123,6 +130,7 @@ func (d *DBStore) migrationSQL() []string {
 			agent_id TEXT NOT NULL,
 			name TEXT NOT NULL DEFAULT '',
 			model TEXT NOT NULL DEFAULT '',
+			template_id TEXT NOT NULL DEFAULT '',
 			config TEXT NOT NULL DEFAULT '{}',
 			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -222,7 +230,7 @@ func (d *DBStore) SaveConfig(ctx context.Context, cfg *GlobalConfig) error {
 
 func (d *DBStore) ListAgents(ctx context.Context) ([]AgentRecord, error) {
 	rows, err := d.db.QueryContext(ctx,
-		fmt.Sprintf("SELECT agent_id, name, model, config, created_at, updated_at FROM agents WHERE user_id = %s ORDER BY created_at", d.ph(1)),
+		fmt.Sprintf("SELECT agent_id, name, model, template_id, config, created_at, updated_at FROM agents WHERE user_id = %s ORDER BY created_at", d.ph(1)),
 		"")
 	if err != nil {
 		return nil, err
@@ -233,7 +241,7 @@ func (d *DBStore) ListAgents(ctx context.Context) ([]AgentRecord, error) {
 	for rows.Next() {
 		var ag AgentRecord
 		var cfgStr string
-		if err := rows.Scan(&ag.ID, &ag.Name, &ag.Model, &cfgStr, &ag.CreatedAt, &ag.UpdatedAt); err != nil {
+		if err := rows.Scan(&ag.ID, &ag.Name, &ag.Model, &ag.TemplateID, &cfgStr, &ag.CreatedAt, &ag.UpdatedAt); err != nil {
 			continue
 		}
 		json.Unmarshal([]byte(cfgStr), &ag.Config)
@@ -244,12 +252,12 @@ func (d *DBStore) ListAgents(ctx context.Context) ([]AgentRecord, error) {
 
 func (d *DBStore) GetAgent(ctx context.Context, agentID string) (*AgentRecord, error) {
 	row := d.db.QueryRowContext(ctx,
-		fmt.Sprintf("SELECT agent_id, name, model, config, created_at, updated_at FROM agents WHERE user_id = %s AND agent_id = %s", d.ph(1), d.ph(2)),
+		fmt.Sprintf("SELECT agent_id, name, model, template_id, config, created_at, updated_at FROM agents WHERE user_id = %s AND agent_id = %s", d.ph(1), d.ph(2)),
 		"", agentID)
 
 	var ag AgentRecord
 	var cfgStr string
-	if err := row.Scan(&ag.ID, &ag.Name, &ag.Model, &cfgStr, &ag.CreatedAt, &ag.UpdatedAt); err != nil {
+	if err := row.Scan(&ag.ID, &ag.Name, &ag.Model, &ag.TemplateID, &cfgStr, &ag.CreatedAt, &ag.UpdatedAt); err != nil {
 		return nil, err
 	}
 	json.Unmarshal([]byte(cfgStr), &ag.Config)
@@ -263,19 +271,19 @@ func (d *DBStore) SaveAgent(ctx context.Context, agent *AgentRecord) error {
 
 	if d.dialect == "postgres" {
 		_, err := d.db.ExecContext(ctx,
-			`INSERT INTO agents (user_id, agent_id, name, model, config, created_at, updated_at)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7)
-			 ON CONFLICT (user_id, agent_id) DO UPDATE SET name=$3, model=$4, config=$5, updated_at=$7`,
-			"", agent.ID, agent.Name, agent.Model, string(cfgData), now, now)
+			`INSERT INTO agents (user_id, agent_id, name, model, template_id, config, created_at, updated_at)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			 ON CONFLICT (user_id, agent_id) DO UPDATE SET name=$3, model=$4, template_id=$5, config=$6, updated_at=$8`,
+			"", agent.ID, agent.Name, agent.Model, agent.TemplateID, string(cfgData), now, now)
 		return err
 	}
 
 	_, err := d.db.ExecContext(ctx,
-		`INSERT INTO agents (user_id, agent_id, name, model, config, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO agents (user_id, agent_id, name, model, template_id, config, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT (user_id, agent_id) DO UPDATE SET
-		   name=excluded.name, model=excluded.model, config=excluded.config, updated_at=excluded.updated_at`,
-		"", agent.ID, agent.Name, agent.Model, string(cfgData), now, now)
+		   name=excluded.name, model=excluded.model, template_id=excluded.template_id, config=excluded.config, updated_at=excluded.updated_at`,
+		"", agent.ID, agent.Name, agent.Model, agent.TemplateID, string(cfgData), now, now)
 	return err
 }
 

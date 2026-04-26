@@ -106,8 +106,9 @@ func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ID    string `json:"id"`
-		Model string `json:"model"`
+		ID         string `json:"id"`
+		Model      string `json:"model"`
+		TemplateID string `json:"templateId,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid request"})
@@ -153,11 +154,12 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 	// Record the agent in the Store so other pods can discover it.
 	if s.dataStore != nil {
 		_ = s.dataStore.SaveAgent(r.Context(), &store.AgentRecord{
-			ID:        req.ID,
-			Name:      req.ID,
-			Model:     req.Model,
-			CreatedAt: time.Now().UTC(),
-			UpdatedAt: time.Now().UTC(),
+			ID:         req.ID,
+			Name:       req.ID,
+			Model:      req.Model,
+			TemplateID: req.TemplateID,
+			CreatedAt:  time.Now().UTC(),
+			UpdatedAt:  time.Now().UTC(),
 		})
 	}
 

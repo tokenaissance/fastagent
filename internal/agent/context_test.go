@@ -72,6 +72,19 @@ func newTestBuilder(store *fakeMemoryStore, userID, agentID string) *ContextBuil
 	}
 }
 
+func newTestBuilderWithTemplate(store *fakeMemoryStore, userID, agentID, templateID string) *ContextBuilder {
+	cb := newTestBuilder(store, userID, agentID)
+	cb.templateID = templateID
+	return cb
+}
+
+// seedTemplate writes a file under a template agent (templates ARE agents,
+// stored at user_id=DefaultUserID). Mirrors how an admin or app would set
+// up ThinkAny's per-function templates.
+func (s *fakeMemoryStore) seedTemplate(templateID, filename, content string) {
+	s.files[key(config.DefaultUserID, templateID, filename)] = []byte(content)
+}
+
 func TestLoadFile_PerAgentBeatsPlatform(t *testing.T) {
 	store := newFakeStore()
 	store.seedPlatform("SOUL.md", "platform soul")
@@ -132,5 +145,61 @@ func TestLoadFile_PlatformIsScopedToDefaultUser(t *testing.T) {
 	got := newTestBuilder(store, "alice", "agent-x").loadFile("SOUL.md")
 	if got != "the real platform soul" {
 		t.Fatalf("platform read crossed user scope, got %q", got)
+	}
+}
+
+// --- template inheritance (#8) ---
+
+func TestLoadFile_FallsBackToTemplateBeforePlatform(t *testing.T) {
+	store := newFakeStore()
+	store.seedPlatform("SOUL.md", "platform soul")
+	store.seedTemplate("translator-tmpl", "SOUL.md", "translator template soul")
+	// per-agent SOUL is empty/missing, but templateID is set
+
+	got := newTestBuilderWithTemplate(store, "alice", "alice-translator", "translator-tmpl").
+		loadFile("SOUL.md")
+	if got != "translator template soul" {
+		t.Fatalf("expected template fallback before platform, got %q", got)
+	}
+}
+
+func TestLoadFile_PerAgentBeatsTemplateAndPlatform(t *testing.T) {
+	store := newFakeStore()
+	store.seedPlatform("SOUL.md", "platform soul")
+	store.seedTemplate("translator-tmpl", "SOUL.md", "translator template")
+	ctx := config.WithUserID(context.Background(), "alice")
+	store.SaveWorkspaceFile(ctx, "alice-translator", "SOUL.md", []byte("alice override"))
+
+	got := newTestBuilderWithTemplate(store, "alice", "alice-translator", "translator-tmpl").
+		loadFile("SOUL.md")
+	if got != "alice override" {
+		t.Fatalf("per-agent override should still win, got %q", got)
+	}
+}
+
+func TestLoadFile_TemplateMissesFallsToPlatform(t *testing.T) {
+	store := newFakeStore()
+	store.seedPlatform("IDENTITY.md", "platform identity")
+	// templateID set, but template has no IDENTITY.md row — should
+	// fall through to the platform layer rather than returning empty.
+
+	got := newTestBuilderWithTemplate(store, "alice", "alice-x", "missing-tmpl").
+		loadFile("IDENTITY.md")
+	if got != "platform identity" {
+		t.Fatalf("expected platform fallback when template lacks the file, got %q", got)
+	}
+}
+
+func TestLoadFile_TemplateNotConsultedForNonInheritable(t *testing.T) {
+	store := newFakeStore()
+	// Even if a template happened to seed USER.md (it shouldn't, but be
+	// defensive), per-(user, agent) state must never inherit from a
+	// platform-shared row.
+	store.seedTemplate("evil-tmpl", "USER.md", "leaked profile from template")
+
+	got := newTestBuilderWithTemplate(store, "alice", "alice-x", "evil-tmpl").
+		loadFile("USER.md")
+	if got != "" {
+		t.Fatalf("USER.md must not inherit from template, got %q", got)
 	}
 }
