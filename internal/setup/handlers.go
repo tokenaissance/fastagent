@@ -872,6 +872,18 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Adopt the freshly persisted gateway token in-memory so the running
+	// server starts accepting it immediately. Pre-#5 the wizard process
+	// got around this by exiting and letting the gateway re-read the
+	// token from disk on restart; now that wizard + gateway are one
+	// process, we have to update s.authToken explicitly or admin login
+	// keeps reporting "Invalid admin token" because s.authToken is
+	// still the empty boot value while the user types the just-saved
+	// token from the UI.
+	if t := cfg.Gateway.Auth.Token; t != "" && t != s.authToken {
+		s.SetAuth(t, s.userRegistry)
+	}
+
 	slog.Info("config saved", "agent", agentID,
 		"backend", configBackend(s.dataStore),
 		"hasProvider", len(cfg.Providers) > 0,
