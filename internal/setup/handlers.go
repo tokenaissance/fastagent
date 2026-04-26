@@ -57,17 +57,27 @@ func (s *Server) loadUserConfig(r *http.Request) (*config.Config, error) {
 		}, nil
 	}
 
-	// Local mode: auto-provision if missing — but NOT for the default user,
-	// since the missing file there means "setup wizard hasn't run yet" and
-	// writing a stub flips `configured` to true, sending the UI to the
-	// login/overview screen instead of onboarding. Return an empty config
-	// so GET /api/config can still succeed without side effects.
+	// Auto-provision a default agent on first access — but NOT for the
+	// default (local) user, since the missing file there means "setup
+	// wizard hasn't run yet" and writing a stub flips `configured` to true,
+	// sending the UI to the login/overview screen instead of onboarding.
+	// Return an empty config so GET /api/config can still succeed without
+	// side effects.
 	if os.IsNotExist(unwrapPathError(err)) {
 		if userID == config.DefaultUserID {
 			return &config.Config{
 				Providers: map[string]config.ProviderConfig{},
 				Channels:  map[string]config.ChannelConfig{},
 			}, nil
+		}
+		// Prefer the store-aware path so cloud pods don't write per-user
+		// directories on ephemeral disk. Falls through to the legacy FS
+		// implementation when no store is wired (early bootstrap, tests).
+		if s.dataStore != nil {
+			if provErr := users.ProvisionWorkspaceInStore(r.Context(), s.dataStore, userID); provErr != nil {
+				return nil, fmt.Errorf("auto-provision user %s: %w", userID, provErr)
+			}
+			return s.loadUserConfig(r) // re-enter; agent rows are now visible
 		}
 		if provErr := users.ProvisionWorkspace(userID); provErr != nil {
 			return nil, fmt.Errorf("auto-provision user %s: %w", userID, provErr)
@@ -766,19 +776,7 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create agent workspace
-	userDir, _ := config.HomeDir()
-	agentDir := filepath.Join(userDir, "agents", agentID, "agent")
-	for _, dir := range []string{
-		agentDir,
-		filepath.Join(agentDir, "memory"),
-		filepath.Join(agentDir, "sessions"),
-		filepath.Join(agentDir, "skills"),
-	} {
-		os.MkdirAll(dir, 0o755)
-	}
-
-	// Write bootstrap workspace files
+	// Bootstrap identity files for the new agent.
 	wsFiles := map[string]string{
 		"SOUL.md":      "# Soul\n\nYour personality and behavioral guidelines.\n",
 		"IDENTITY.md":  fmt.Sprintf("# Identity\n\nYou are %s, a FastClaw AI agent.\n", req.AgentName),
@@ -792,19 +790,10 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 	if req.Personality != "" {
 		wsFiles["SOUL.md"] = fmt.Sprintf("# %s\n\n%s\n", req.AgentName, req.Personality)
 	}
-	for filename, content := range wsFiles {
-		path := filepath.Join(agentDir, filename)
-		if _, err := os.Stat(path); os.IsNotExist(err) {
-			os.WriteFile(path, []byte(content), 0o644)
-		}
-	}
 
-	// In cloud deploys the pod-local filesystem is ephemeral and not shared
-	// across replicas. Mirror the config, the agent record, and its identity
-	// files into the shared dataStore so any pod can serve the agent after
-	// restart/scheduling. Failures here are logged but don't block the save
-	// — local fastclaw.json on this pod is still a valid fallback.
 	if s.dataStore != nil {
+		// DB-primary path (cloud deployments): everything goes through the
+		// store. No filesystem writes — pod-local FS is ephemeral anyway.
 		var rawCfg map[string]interface{}
 		if marshalled, err := json.Marshal(cfg); err == nil {
 			_ = json.Unmarshal(marshalled, &rawCfg)
@@ -823,6 +812,27 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 		for filename, content := range wsFiles {
 			if err := s.dataStore.SaveWorkspaceFile(r.Context(), agentID, filename, []byte(content)); err != nil {
 				slog.Warn("dataStore.SaveWorkspaceFile failed", "file", filename, "error", err)
+			}
+		}
+	} else {
+		// Store-less mode (the wizard process before gateway boots, or
+		// tests). Fall back to filesystem so the next gateway start can
+		// load the agent from disk. This branch goes away once the wizard
+		// is merged into the gateway in step #5.
+		userDir, _ := config.HomeDir()
+		agentDir := filepath.Join(userDir, "agents", agentID, "agent")
+		for _, dir := range []string{
+			agentDir,
+			filepath.Join(agentDir, "memory"),
+			filepath.Join(agentDir, "sessions"),
+			filepath.Join(agentDir, "skills"),
+		} {
+			os.MkdirAll(dir, 0o755)
+		}
+		for filename, content := range wsFiles {
+			path := filepath.Join(agentDir, filename)
+			if _, err := os.Stat(path); os.IsNotExist(err) {
+				os.WriteFile(path, []byte(content), 0o644)
 			}
 		}
 	}

@@ -121,36 +121,28 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check for duplicate by checking if the home dir already exists.
-	homePath, _ := config.AgentHomeDir(req.ID)
-	if _, err := os.Stat(homePath); err == nil {
-		jsonResponse(w, http.StatusConflict, map[string]any{"ok": false, "error": fmt.Sprintf("agent name %q is already taken", req.ID)})
-		return
+	// Duplicate check goes through the Store so multi-pod deployments don't
+	// race on a stat() that another pod's filesystem doesn't reflect. The
+	// FS-only fallback (for store-less wizard mode, which is going away) was
+	// `os.Stat(AgentHomeDir(req.ID))`.
+	if s.dataStore != nil {
+		if existing, err := s.dataStore.GetAgent(r.Context(), req.ID); err == nil && existing != nil {
+			jsonResponse(w, http.StatusConflict, map[string]any{"ok": false, "error": fmt.Sprintf("agent name %q is already taken", req.ID)})
+			return
+		}
 	}
 
-	// Create the agent's home (identity, sessions, memory, skills).
-	for _, dir := range []string{homePath, filepath.Join(homePath, "memory"), filepath.Join(homePath, "sessions"), filepath.Join(homePath, "skills")} {
-		os.MkdirAll(dir, 0o755)
-	}
-
-	// Create the separate workspace dir for agent-generated user content.
-	if workPath, err := config.AgentWorkspaceDir(req.ID); err == nil {
-		os.MkdirAll(workPath, 0o755)
-	}
-
-	// Identity files go through the Store so Postgres-backed deployments
-	// keep agent state consistent across pods. FileStore also goes through
-	// this path and writes to the same filesystem layout, so file-mode
-	// deployments see no behavior change.
+	// Identity files go through the Store. With DBStore, this writes to
+	// `workspace_files` rows; with FileStore, it writes to
+	// ~/.fastclaw/agents/<id>/agent/ — and FileStore.SaveWorkspaceFile
+	// MkdirAlls the parent. So neither mode needs us to pre-create dirs.
 	_ = s.writeIdentityFile(r.Context(), req.ID, "SOUL.md", nil) // empty; agent fills during BOOTSTRAP
 	_ = s.writeIdentityFile(r.Context(), req.ID, "BOOTSTRAP.md", []byte(defaultBootstrap))
 	agentCfg := config.AgentFileConfig{Model: req.Model}
 	agentData, _ := json.MarshalIndent(agentCfg, "", "  ")
 	_ = s.writeIdentityFile(r.Context(), req.ID, "agent.json", agentData)
 
-	// Record the agent in the Store so other pods can discover it without a
-	// shared filesystem. In file mode this is a cheap extra write; in
-	// Postgres mode it is how multi-pod deployments see each others' agents.
+	// Record the agent in the Store so other pods can discover it.
 	if s.dataStore != nil {
 		_ = s.dataStore.SaveAgent(r.Context(), &store.AgentRecord{
 			ID:        req.ID,
