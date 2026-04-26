@@ -100,13 +100,46 @@ func unwrapPathError(err error) error {
 // saveUserConfig persists a UI-originated config update. Infra fields
 // (storage, objectStore, gateway.auth.token, sandbox) are deliberately
 // NOT overwritten — those belong to the deployment and are sourced from
-// env / Secret in cloud mode or bootstrap JSON in local mode. Letting the
-// UI touch them would let an admin brick their own deployment.
+// env / Secret. Letting the UI touch them would let an admin brick their
+// own deployment.
 //
 // Everything else (providers, toolProviders, tools, agents.defaults,
-// channels, plugins, cron, skills, …) flows through to disk + the DB
-// store as before.
+// channels, plugins, cron, skills, …) goes to the DB store. The
+// fastclaw.json filesystem path is the back-compat fallback used only
+// when no store is wired (legacy single-user installs predating the
+// DB-primary refactor); it'll go away after #5 merges the wizard.
 func (s *Server) saveUserConfig(r *http.Request, cfg *config.Config) error {
+	merged := *cfg
+	// Preserve infra fields from whatever the caller assembled. In the
+	// store-primary path we read the previous DB row; in the FS path we
+	// read fastclaw.json. Either way, the UI's caller passed a Config
+	// that already had infra populated (handleUpdateConfig copies it
+	// from the running cfg), so this read-modify-write is mostly a
+	// belt-and-suspenders against the UI accidentally clearing fields.
+	if s.dataStore != nil {
+		if existing, err := s.dataStore.GetConfig(r.Context()); err == nil && existing != nil && len(existing.Data) > 0 {
+			if blob, err := json.Marshal(existing.Data); err == nil {
+				var stored config.Config
+				if err := json.Unmarshal(blob, &stored); err == nil {
+					merged.Storage = stored.Storage
+					merged.ObjectStore = stored.ObjectStore
+					merged.Gateway = stored.Gateway
+					merged.Sandbox = stored.Sandbox
+				}
+			}
+		}
+		data, err := json.MarshalIndent(&merged, "", "  ")
+		if err != nil {
+			return err
+		}
+		var rawCfg map[string]interface{}
+		if err := json.Unmarshal(data, &rawCfg); err != nil {
+			return err
+		}
+		return s.dataStore.SaveConfig(r.Context(), &store.GlobalConfig{Data: rawCfg})
+	}
+	// Store-less fallback (legacy FS-only mode). Same read-modify-write
+	// against fastclaw.json on disk.
 	if _, err := config.EnsureUserDir(); err != nil {
 		return err
 	}
@@ -114,11 +147,6 @@ func (s *Server) saveUserConfig(r *http.Request, cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
-	// Read-modify-write: start from what's on disk so infra fields are
-	// preserved verbatim. When there's no file yet (first-run bootstrap)
-	// we inherit whatever the caller assembled — the setup wizard still
-	// gets to write a complete initial JSON.
-	merged := *cfg
 	if existingData, readErr := os.ReadFile(configPath); readErr == nil {
 		var existing config.Config
 		if jsonErr := json.Unmarshal(existingData, &existing); jsonErr == nil {
@@ -132,20 +160,23 @@ func (s *Server) saveUserConfig(r *http.Request, cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(configPath, data, 0o644); err != nil {
-		return err
-	}
-	if s.dataStore != nil {
-		var rawCfg map[string]interface{}
-		json.Unmarshal(data, &rawCfg)
-		s.dataStore.SaveConfig(r.Context(), &store.GlobalConfig{Data: rawCfg})
-	}
-	return nil
+	return os.WriteFile(configPath, data, 0o644)
 }
 
 // userDir returns the workspace directory for the request's user.
 func userDirForRequest(r *http.Request) (string, error) {
 	return config.HomeDir()
+}
+
+// configBackend names the persistence path for log lines so operators
+// can tell at a glance whether a save landed in the DB or in legacy
+// fastclaw.json. The store-less branch goes away once #5 merges the
+// wizard into the gateway.
+func configBackend(st store.Store) string {
+	if st != nil {
+		return "store"
+	}
+	return "fastclaw.json"
 }
 
 // resolveAgent finds an agent for the current request's user. For the local
@@ -758,22 +789,26 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	// Ensure directories exist
-	if _, err := config.EnsureUserDir(); err != nil {
-		jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
-		return
-	}
-
-	// Write global config to ~/.fastclaw/fastclaw.json
-	configPath, err := config.GlobalConfigPath()
-	if err != nil {
-		jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
-		return
-	}
-	data, _ := json.MarshalIndent(cfg, "", "  ")
-	if err := os.WriteFile(configPath, data, 0o644); err != nil {
-		jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
-		return
+	// In store-primary mode (the path post-#4) the global config lives in
+	// the configs row written below — no fastclaw.json. Store-less mode
+	// (the wizard process before #5 merges it into the gateway) still
+	// needs the file because the next process restart reads it back to
+	// learn the gateway token / storage DSN before the store is open.
+	if s.dataStore == nil {
+		if _, err := config.EnsureUserDir(); err != nil {
+			jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		configPath, err := config.GlobalConfigPath()
+		if err != nil {
+			jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		data, _ := json.MarshalIndent(cfg, "", "  ")
+		if err := os.WriteFile(configPath, data, 0o644); err != nil {
+			jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
 	}
 
 	// Bootstrap identity files for the new agent.
@@ -837,7 +872,8 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	slog.Info("config saved", "path", configPath, "agent", agentID,
+	slog.Info("config saved", "agent", agentID,
+		"backend", configBackend(s.dataStore),
 		"hasProvider", len(cfg.Providers) > 0,
 		"defaultModel", cfg.Agents.Defaults.Model,
 	)
