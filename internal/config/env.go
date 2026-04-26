@@ -62,7 +62,12 @@ func LoadEnv() *EnvConfig {
 			Bind: "loopback",
 		},
 		Storage: EnvStorage{
-			Type:        "file",
+			// SQLite is the zero-config default: one .db file under
+			// ~/.fastclaw/, no external service to run, and the same
+			// schema/code path as Postgres so cloud upgrades are a DSN
+			// swap. Empty DSN means "the factory picks it" — see
+			// store.New for the resolved location.
+			Type:        "sqlite",
 			AutoMigrate: true,
 		},
 		Log: EnvLog{
