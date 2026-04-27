@@ -313,15 +313,15 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			// Agent info with model details. Supplement filesystem
 			// discovery with DB agent IDs so admin sees agents owned by
 			// other pods in a multi-replica cloud deploy.
-			var storeAgentIDs []string
+			var storeAgents []config.AgentEntry
 			if s.dataStore != nil {
 				if records, lerr := s.dataStore.ListAgents(r.Context()); lerr == nil {
 					for _, ar := range records {
-						storeAgentIDs = append(storeAgentIDs, ar.ID)
+						storeAgents = append(storeAgents, config.AgentEntry{ID: ar.ID, Model: ar.Model})
 					}
 				}
 			}
-			resolved := config.ResolveAgentsWithExtra(cfg, userID, storeAgentIDs)
+			resolved := config.ResolveAgentsWithExtra(cfg, userID, storeAgents)
 			if s.agentProvider == nil {
 				// Not running - get agent list from config
 				var agentList []map[string]string

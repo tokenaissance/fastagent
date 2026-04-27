@@ -284,17 +284,17 @@ func New(cfg *config.Config) (*Gateway, error) {
 	// filesystem — DiscoverAgents returns nothing even though agents exist
 	// in the DB. Supplement filesystem discovery with the Store's agent
 	// list so any pod can serve any agent without relying on pod-local FS.
-	var storeAgentIDs []string
+	var storeAgents []config.AgentEntry
 	if st != nil {
 		if records, err := st.ListAgents(context.Background()); err == nil {
 			for _, ar := range records {
-				storeAgentIDs = append(storeAgentIDs, ar.ID)
+				storeAgents = append(storeAgents, config.AgentEntry{ID: ar.ID, Model: ar.Model})
 			}
 		} else {
 			slog.Warn("store ListAgents failed", "error", err)
 		}
 	}
-	resolved := config.ResolveAgentsWithExtra(cfg, "", storeAgentIDs)
+	resolved := config.ResolveAgentsWithExtra(cfg, "", storeAgents)
 	managerOpts := []agent.ManagerOption{agent.WithUserID(config.DefaultUserID)}
 	if st != nil {
 		managerOpts = append(managerOpts,

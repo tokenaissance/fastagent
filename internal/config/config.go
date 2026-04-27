@@ -880,15 +880,15 @@ func ResolveAgentsForUser(cfg *Config, userID string) []ResolvedAgent {
 // auto-revive agents that the operator thought were gone, and that
 // arbitrary FS state could shadow what the DB said. Both confused the
 // hell out of operators wondering "why is this agent loading".
-func ResolveAgentsWithExtra(cfg *Config, userID string, extra []string) []ResolvedAgent {
+func ResolveAgentsWithExtra(cfg *Config, userID string, extra []AgentEntry) []ResolvedAgent {
 	entries := make([]AgentEntry, 0, len(extra))
 	seen := make(map[string]bool, len(extra))
-	for _, id := range extra {
-		if id == "" || seen[id] {
+	for _, e := range extra {
+		if e.ID == "" || seen[e.ID] {
 			continue
 		}
-		entries = append(entries, AgentEntry{ID: id})
-		seen[id] = true
+		entries = append(entries, e)
+		seen[e.ID] = true
 	}
 
 	agents := make([]ResolvedAgent, 0, len(entries))

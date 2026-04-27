@@ -150,15 +150,15 @@ func loadUserSpace(userID string, mb *bus.MessageBus, st store.Store, ws workspa
 	// original create request still see the agent on startup. For each
 	// resolved agent we also make sure the home dir layout exists on this
 	// pod's filesystem (idempotent MkdirAll).
-	var storeAgentIDs []string
+	var storeAgents []config.AgentEntry
 	if st != nil {
 		if records, lerr := st.ListAgents(context.Background()); lerr == nil {
 			for _, ar := range records {
-				storeAgentIDs = append(storeAgentIDs, ar.ID)
+				storeAgents = append(storeAgents, config.AgentEntry{ID: ar.ID, Model: ar.Model})
 			}
 		}
 	}
-	resolved := config.ResolveAgentsWithExtra(cfg, userID, storeAgentIDs)
+	resolved := config.ResolveAgentsWithExtra(cfg, userID, storeAgents)
 	for _, rc := range resolved {
 		ensureAgentHome(rc)
 		// Pull skills that other pods have installed for this agent onto

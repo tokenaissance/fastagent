@@ -484,6 +484,10 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 			llmMessages = privacy.ScrubMessages(messages)
 		}
 
+		if a.provider == nil {
+			slog.Error("agent has no provider configured", "agent", a.name, "model", a.model)
+			return "Agent is not configured with a usable LLM provider. Check that cfg.Providers contains the prefix referenced by model `" + a.model + "`."
+		}
 		resp, err := a.provider.Chat(ctx, llmMessages, toolDefs, a.model, a.maxTokens, a.temperature)
 
 		// Hook: AfterModelCall

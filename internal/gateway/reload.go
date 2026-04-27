@@ -201,15 +201,15 @@ func (g *Gateway) reloadProvider(newCfg *config.Config) {
 // subsequent filesystem reads on pod B succeed. `ResolveAgentsWithExtra`
 // + ensureAgentHome below handle exactly that.
 func (g *Gateway) reloadAgents(newCfg *config.Config) {
-	var storeAgentIDs []string
+	var storeAgents []config.AgentEntry
 	if g.store != nil {
 		if records, err := g.store.ListAgents(context.Background()); err == nil {
 			for _, ar := range records {
-				storeAgentIDs = append(storeAgentIDs, ar.ID)
+				storeAgents = append(storeAgents, config.AgentEntry{ID: ar.ID, Model: ar.Model})
 			}
 		}
 	}
-	resolved := config.ResolveAgentsWithExtra(newCfg, "", storeAgentIDs)
+	resolved := config.ResolveAgentsWithExtra(newCfg, "", storeAgents)
 	seen := make(map[string]bool, len(resolved))
 	for _, rc := range resolved {
 		seen[rc.ID] = true

@@ -61,15 +61,15 @@ func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 	// pod that's serving this request — the canonical list lives in the
 	// dataStore. Supplement filesystem discovery with store IDs so the
 	// admin UI shows every agent regardless of which pod wrote it.
-	var storeAgentIDs []string
+	var storeAgents []config.AgentEntry
 	if s.dataStore != nil {
 		if records, lerr := s.dataStore.ListAgents(r.Context()); lerr == nil {
 			for _, ar := range records {
-				storeAgentIDs = append(storeAgentIDs, ar.ID)
+				storeAgents = append(storeAgents, config.AgentEntry{ID: ar.ID, Model: ar.Model})
 			}
 		}
 	}
-	resolved := config.ResolveAgentsWithExtra(cfg, "", storeAgentIDs)
+	resolved := config.ResolveAgentsWithExtra(cfg, "", storeAgents)
 	var agents []map[string]any
 	for _, ra := range resolved {
 		// API-key callers only see agents bound to their key; admins see all.
