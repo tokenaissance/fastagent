@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 )
@@ -21,6 +23,7 @@ type DockerSandbox struct {
 	containerID string
 	image       string
 	workspace   string
+	skillDirs   []string // host paths to mount read-only at /skills/<name>/
 	policy      *Policy
 	env         map[string]string
 	mu          sync.Mutex
@@ -40,6 +43,17 @@ func NewDockerSandbox(image, workspace string, policy *Policy) *DockerSandbox {
 		policy:    policy,
 		env:       make(map[string]string),
 	}
+}
+
+// SetSkillDirs configures host paths whose contents (skill folders)
+// should be visible inside the sandbox at /skills/<skill-name>/. The
+// LLM is told to invoke skills via `python /skills/<name>/main.py`,
+// so without these mounts the script files don't exist in the
+// container. Passed paths are mounted read-only.
+func (s *DockerSandbox) SetSkillDirs(dirs []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.skillDirs = append(s.skillDirs[:0], dirs...)
 }
 
 // SetEnv sets environment variables to inject into the container.
@@ -70,6 +84,34 @@ func (s *DockerSandbox) Create() error {
 	if s.workspace != "" {
 		args = append(args, "-v", fmt.Sprintf("%s:/workspace:rw", s.workspace))
 		args = append(args, "-w", "/workspace")
+	}
+
+	// Mount each skill dir read-only at /skills/<basename>/. The LLM
+	// is told to invoke skills via `python /skills/<name>/main.py`,
+	// so without these mounts the script files don't exist in the
+	// container. Auto-default to FASTCLAW_HOME/skills/ when no dirs
+	// are explicitly set, so a freshly-installed product agent works
+	// without operators having to wire SetSkillDirs themselves.
+	dirs := s.skillDirs
+	if len(dirs) == 0 {
+		if h := os.Getenv("FASTCLAW_HOME"); h != "" {
+			dirs = []string{filepath.Join(h, "skills")}
+		} else if home, err := os.UserHomeDir(); err == nil {
+			dirs = []string{filepath.Join(home, ".fastclaw", "skills")}
+		}
+	}
+	for _, dir := range dirs {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			host := filepath.Join(dir, e.Name())
+			args = append(args, "-v", fmt.Sprintf("%s:/skills/%s:ro", host, e.Name()))
+		}
 	}
 
 	// Resource limits
