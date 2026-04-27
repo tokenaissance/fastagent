@@ -84,9 +84,23 @@ func (cb *ContextBuilder) BuildSystemPrompt() string {
 	// A fresh agent has empty identity files and should follow BOOTSTRAP.md
 	// to ask the user what identity to adopt, instead of introducing itself
 	// as "FastClaw" (which is the runtime, not the agent).
-	workdir := cb.workspace
-	if workdir == "" {
-		workdir = cb.home
+	//
+	// When the agent has a sandbox attached, every exec call runs INSIDE
+	// the container — host paths don't exist there. Sandbox bind-mounts:
+	//   <host workspace>  → /workspace
+	//   <host skills/x>   → /skills/x  (read-only, one mount per skill)
+	// We tell the LLM about the sandbox-side paths only, otherwise it
+	// hallucinates `cd /Users/...` commands that fail with "No such file".
+	var workdir, homeDesc string
+	if cb.sandboxEnabled {
+		workdir = "/workspace"
+		homeDesc = "/workspace (identity files like SOUL.md / IDENTITY.md are managed by the runtime, not the sandbox FS — call write_file with a bare filename, never path it)"
+	} else {
+		workdir = cb.workspace
+		if workdir == "" {
+			workdir = cb.home
+		}
+		homeDesc = cb.home
 	}
 	runtimeInfo := fmt.Sprintf(`You are an AI agent running on the FastClaw runtime.
 Your identity (name, role, personality) is defined by IDENTITY.md and SOUL.md
@@ -104,7 +118,7 @@ relative path, the runtime automatically places it in the right directory:
   against your home dir: %s
 - Every other relative path resolves against the working directory above.
 So to update your own identity, just pass "IDENTITY.md"; to save a document
-for the user, pass a meaningful filename like "report.md".`, runtime.GOOS, runtime.GOARCH, workdir, cb.home)
+for the user, pass a meaningful filename like "report.md".`, runtime.GOOS, runtime.GOARCH, workdir, homeDesc)
 	parts = append(parts, runtimeInfo)
 
 	// 2. Sandbox capabilities (auto-injected when sandbox is enabled)
@@ -116,6 +130,19 @@ You have access to a sandbox environment for executing code. Key rules:
 - You can write files, read files, and list directories in the sandbox.
 - Only show code without executing when the user explicitly asks to "just show" or "just write" the code.
 - Always show the execution output/result to the user.
+
+## Filesystem layout INSIDE the sandbox
+- /workspace                      ← your working dir (cd here, save outputs here)
+- /skills/<skill-name>/           ← every skill listed below is mounted here read-only.
+                                    Invoke with: python /skills/<name>/main.py
+- Host paths (anything starting with /Users/, /home/, /var/, etc.) DO NOT EXIST in the sandbox. Never reference them.
+
+## Shell quirks
+The exec tool runs commands through /bin/sh, NOT bash. Specifically:
+- ` + "`" + `<<<` + "`" + ` (here-string) is NOT supported. Use a pipe instead:
+    echo '{"prompt":"..."}' | python /skills/generate-image/main.py
+- ` + "`" + `[[ ... ]]` + "`" + ` is NOT supported. Use ` + "`" + `[ ... ]` + "`" + ` (POSIX test).
+- Process substitution ` + "`" + `<(...)` + "`" + ` is NOT supported. Use a temp file.
 
 ## Delivering Files to the User
 When the user asks you to create a file (document, script, data, etc.):
