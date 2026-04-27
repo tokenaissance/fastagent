@@ -208,12 +208,21 @@ func HydrateSkillsDown(ctx context.Context, ws workspace.Store, owner, rootDir s
 	// pod's SkillsLoader stops returning a stale entry. `keepLocal` shields
 	// bundled skills (embedded in the binary, never mirrored to OSS) from
 	// getting nuked the first time an empty OSS listing comes back.
+	//
+	// SAFETY: when the remote has zero skill objects, the listing is
+	// indistinguishable from "OSS misconfigured" or "fresh install with
+	// only filesystem-installed skills". Pruning in that case is
+	// destructive — it deletes every local skill the operator dropped
+	// into FASTCLAW_HOME/skills/ for product agents that don't use OSS
+	// at all. Skip pruning entirely unless the remote authoritatively
+	// has at least one skill, which is the only state where "missing
+	// from remote" carries meaning.
 	keep := make(map[string]bool, len(keepLocal))
 	for _, name := range keepLocal {
 		keep[name] = true
 	}
 	removed := 0
-	if entries, err := os.ReadDir(rootDir); err == nil {
+	if entries, err := os.ReadDir(rootDir); err == nil && len(remoteSkills) > 0 {
 		for _, e := range entries {
 			if !e.IsDir() {
 				continue
