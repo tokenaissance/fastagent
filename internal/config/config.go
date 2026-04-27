@@ -384,7 +384,6 @@ type AgentEntry struct {
 	ID                string                     `json:"id"`
 	Workspace         string                     `json:"workspace,omitempty"`
 	Model             string                     `json:"model,omitempty"`
-	TemplateID        string                     `json:"templateId,omitempty"` // optional: inherit identity files from this template
 
 	MaxTokens         int                        `json:"maxTokens,omitempty"`
 	Temperature       float64                    `json:"temperature,omitempty"`
@@ -458,20 +457,9 @@ type AgentFileConfig struct {
 }
 
 // SkillsConfig controls skill loading for an agent.
-//
-// NoMarketplace disables the skill marketplace integration for product
-// agents that should only use their pre-installed skills:
-//   - Skips registering load_skill / install_skill / search_skills tools
-//   - Strips the lazy-load directive from the system prompt so the LLM
-//     calls bundled skills directly instead of going off to skills.sh /
-//     clawhub looking for an alternative
-//
-// Default false preserves the general-purpose agent behavior (skill
-// discovery + on-demand install) for ChatClaw / Claude Code-style use.
 type SkillsConfig struct {
-	Disabled       []string `json:"disabled,omitempty"`
-	AlwaysLoad     []string `json:"alwaysLoad,omitempty"`
-	NoMarketplace  bool     `json:"noMarketplace,omitempty"`
+	Disabled   []string `json:"disabled,omitempty"`
+	AlwaysLoad []string `json:"alwaysLoad,omitempty"`
 }
 
 // SkillsCfg is the top-level skills configuration (global).
@@ -505,7 +493,6 @@ type ResolvedAgent struct {
 	Home              string // agent's own directory: SOUL.md, IDENTITY.md, sessions, memory, skills
 	Workspace         string // working directory where agent creates user-facing files
 	Model             string
-	TemplateID        string // optional: agent_id of a template whose identity files this agent inherits
 	MaxTokens         int
 	Temperature       float64
 	MaxToolIterations int
@@ -742,7 +729,6 @@ func (cfg *Config) MergedAgentConfigForUser(entry AgentEntry, userID string) Res
 		Home:              home,
 		Workspace:         workspace,
 		Model:             cfg.Agents.Defaults.Model,
-		TemplateID:        entry.TemplateID,
 		MaxTokens:         cfg.Agents.Defaults.MaxTokens,
 		Temperature:       cfg.Agents.Defaults.Temperature,
 		MaxToolIterations: cfg.Agents.Defaults.MaxToolIterations,

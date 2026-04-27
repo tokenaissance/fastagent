@@ -74,22 +74,13 @@ type GlobalConfig struct {
 }
 
 // AgentRecord is the persisted state for one agent.
-//
-// TemplateID, when non-empty, names another agent whose identity files
-// (SOUL.md / IDENTITY.md / TOOLS.md / ...) this agent inherits. The
-// per-agent rows can override on a per-file basis; missing/empty per-
-// agent rows fall back to the template, then to the platform layer
-// (see agent.PlatformAgentID). Lets ThinkAny-style products keep one
-// editable per-function template + N user-specific overrides without
-// duplicating the baseline SOUL across every user.
 type AgentRecord struct {
-	ID         string                 `json:"id"`
-	Name       string                 `json:"name"`
-	Model      string                 `json:"model"`
-	TemplateID string                 `json:"templateId,omitempty"`
-	Config     map[string]interface{} `json:"config"`
-	CreatedAt  time.Time              `json:"createdAt"`
-	UpdatedAt  time.Time              `json:"updatedAt"`
+	ID        string                 `json:"id"`
+	Name      string                 `json:"name"`
+	Model     string                 `json:"model"`
+	Config    map[string]interface{} `json:"config"`
+	CreatedAt time.Time              `json:"createdAt"`
+	UpdatedAt time.Time              `json:"updatedAt"`
 }
 
 // SessionRecord holds a conversation session.

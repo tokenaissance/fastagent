@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/fastclaw-ai/fastclaw/internal/agent"
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 	"github.com/fastclaw-ai/fastclaw/internal/store"
 	"github.com/fastclaw-ai/fastclaw/internal/workspace"
@@ -106,9 +105,8 @@ func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ID         string `json:"id"`
-		Model      string `json:"model"`
-		TemplateID string `json:"templateId,omitempty"`
+		ID    string `json:"id"`
+		Model string `json:"model"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid request"})
@@ -120,13 +118,6 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	if !agentNameRE.MatchString(req.ID) {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "agent name must be 3–32 chars, lowercase letters, digits or hyphens, and cannot start with a hyphen"})
-		return
-	}
-	if req.ID == agent.PlatformAgentID {
-		// Reserved for the platform-shared identity layer. Per-user agents
-		// inheriting from it must not be able to overwrite it via the
-		// public agent-create endpoint.
-		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "agent id is reserved"})
 		return
 	}
 
@@ -154,12 +145,11 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 	// Record the agent in the Store so other pods can discover it.
 	if s.dataStore != nil {
 		_ = s.dataStore.SaveAgent(r.Context(), &store.AgentRecord{
-			ID:         req.ID,
-			Name:       req.ID,
-			Model:      req.Model,
-			TemplateID: req.TemplateID,
-			CreatedAt:  time.Now().UTC(),
-			UpdatedAt:  time.Now().UTC(),
+			ID:        req.ID,
+			Name:      req.ID,
+			Model:     req.Model,
+			CreatedAt: time.Now().UTC(),
+			UpdatedAt: time.Now().UTC(),
 		})
 	}
 

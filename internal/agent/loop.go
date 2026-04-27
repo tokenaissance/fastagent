@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -135,13 +134,6 @@ func NewAgentWithSkillsCfg(rc config.ResolvedAgent, prov provider.Provider, mb *
 	tools.RegisterMessage(registry, mb)
 	tools.RegisterMemorySearch(registry, rc.Home)
 	tools.RegisterWebFetch(registry)
-	// Marketplace tooling (load_skill, search_skills, install_skill) is
-	// registered conditionally so product agents (imgany / copyweb / etc.)
-	// can opt out via skills.noMarketplace=true and avoid the LLM going
-	// off to skills.sh / clawhub instead of using the pre-installed skills.
-	if !rc.Skills.NoMarketplace {
-		tools.RegisterLoadSkill(registry, homeDir, rc.Home, "")
-	}
 
 	// Load skills with OpenClaw compatibility. We can't hydrate from OSS
 	// here — the Agent isn't constructed yet and the manager hasn't wired
@@ -192,13 +184,6 @@ func NewAgentWithSkillsCfg(rc config.ResolvedAgent, prov provider.Provider, mb *
 		costTracker:       eng.costTracker,
 	}
 
-	// Wire the skill-install tool after the Agent exists so it can hot-reload
-	// this agent's skills after a successful install. Installs go into the
-	// agent's own skills dir (never global) — see RegisterSkillInstall for
-	// the rationale. Same opt-out as load_skill above.
-	if !rc.Skills.NoMarketplace {
-		tools.RegisterSkillInstall(registry, filepath.Join(rc.Home, "skills"), ag.ReloadWorkspaceFiles)
-	}
 
 	// Connect MCP servers and register their tools
 	if len(rc.MCPServers) > 0 {

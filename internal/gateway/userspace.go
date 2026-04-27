@@ -150,26 +150,14 @@ func loadUserSpace(userID string, mb *bus.MessageBus, st store.Store, ws workspa
 	// resolved agent we also make sure the home dir layout exists on this
 	// pod's filesystem (idempotent MkdirAll).
 	var storeAgentIDs []string
-	templateByID := map[string]string{}
 	if st != nil {
 		if records, lerr := st.ListAgents(context.Background()); lerr == nil {
 			for _, ar := range records {
 				storeAgentIDs = append(storeAgentIDs, ar.ID)
-				if ar.TemplateID != "" {
-					templateByID[ar.ID] = ar.TemplateID
-				}
 			}
 		}
 	}
 	resolved := config.ResolveAgentsWithExtra(cfg, userID, storeAgentIDs)
-	// DB is the source of truth for template_id post-#4. Overlay it onto
-	// the resolved entries so ContextBuilder can read the template's
-	// SOUL/IDENTITY when the per-agent rows are empty (#3 + #8).
-	for i := range resolved {
-		if t, ok := templateByID[resolved[i].ID]; ok {
-			resolved[i].TemplateID = t
-		}
-	}
 	for _, rc := range resolved {
 		ensureAgentHome(rc)
 		// Pull skills that other pods have installed for this agent onto

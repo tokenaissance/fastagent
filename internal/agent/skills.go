@@ -206,88 +206,31 @@ func (sl *SkillsLoader) LoadSkills() []Skill {
 	return result
 }
 
-// BuildSkillsSummary returns an XML summary of all skills for the system prompt.
-//
-// When the agent runs in no-marketplace mode (skills.NoMarketplace=true)
-// the lazy-load / install directive is replaced with a "skills are
-// pre-loaded, call them directly" directive, AND every skill is inlined
-// in full — there's no `load_skill` tool to fetch their bodies on demand
-// when the marketplace is off.
+// BuildSkillsSummary returns the skill section of the system prompt.
+// All discovered skills are inlined in full — operators install exactly
+// the skill set they want for their product agent (no marketplace, no
+// lazy load), so the LLM gets the complete SKILL.md content and can
+// invoke each skill directly via exec.
 func (sl *SkillsLoader) BuildSkillsSummary(skills []Skill) string {
 	if len(skills) == 0 {
 		return ""
 	}
-
-	alwaysLoad := make(map[string]bool, len(sl.skillsCfg.AlwaysLoad)+len(sl.globalCfg.AlwaysLoad))
-	for _, name := range sl.skillsCfg.AlwaysLoad {
-		alwaysLoad[name] = true
-	}
-	for _, name := range sl.globalCfg.AlwaysLoad {
-		alwaysLoad[name] = true
-	}
-
 	var sb strings.Builder
-	if sl.skillsCfg.NoMarketplace {
-		sb.WriteString(skillsDirectModeDirective)
-	} else {
-		sb.WriteString(skillsUsageDirective)
-	}
+	sb.WriteString(skillsDirective)
 	sb.WriteString("\n\n<skills>\n")
-
 	for _, skill := range skills {
-		// In no-marketplace mode every skill's full content is inlined —
-		// there's no load_skill to fetch it on demand. In normal mode we
-		// only inline the always-loaded ones to keep the prompt small.
-		if sl.skillsCfg.NoMarketplace ||
-			alwaysLoad[skill.Name] ||
-			(skill.Metadata != nil && skill.Metadata.Meta() != nil && skill.Metadata.Meta().Always) {
-			fmt.Fprintf(&sb, "<skill name=%q layer=%q>\n%s\n</skill>\n", skill.Name, skill.Layer, skill.Content)
-		} else {
-			summary := skill.Description
-			if summary == "" {
-				summary = firstLine(skill.Content)
-			}
-			fmt.Fprintf(&sb, "<skill name=%q layer=%q summary=%q />\n", skill.Name, skill.Layer, summary)
-		}
+		fmt.Fprintf(&sb, "<skill name=%q layer=%q>\n%s\n</skill>\n", skill.Name, skill.Layer, skill.Content)
 	}
-
 	sb.WriteString("</skills>")
 	return sb.String()
 }
 
-// skillsDirectModeDirective replaces the marketplace-oriented usage rules
-// when the agent runs in no-marketplace mode. The skills below are the
-// agent's full toolset — there is no fallback to skills.sh / clawhub —
-// so the directive tells the LLM to call them directly via exec instead
-// of going through load_skill / install_skill (which aren't registered).
-const skillsDirectModeDirective = `<skill_usage_rules>
-The skills listed below are the agent's complete pre-installed toolset.
-- Their full SKILL.md content is included inline; do NOT call load_skill (it isn't available).
-- To invoke a skill, run its main script directly through exec, passing arguments on stdin as JSON. The SKILL.md describes the args + return shape.
-- Do NOT call install_skill or search_skills — those tools are disabled in this deployment. If a needed capability isn't here, surface that to the user; don't try to install one.
+// skillsDirective tells the LLM how to invoke the pre-installed skills.
+// Short and assertive — no marketplace mentions, no "load_skill first"
+// dance, just "here are your skills, run the script via exec".
+const skillsDirective = `<skill_usage_rules>
+The skills listed below are this agent's complete toolset. Each skill's full SKILL.md is included inline. To invoke a skill, run its main script via the exec tool and pass arguments on stdin as JSON; the SKILL.md describes args and return shape.
 </skill_usage_rules>`
-
-// skillsUsageDirective is the set of hard rules about how skills must be
-// used. Kept terse and assertive because weaker local models (qwen3.5 etc.)
-// ignore soft hints. The skill-creator rule in particular spells out the
-// literal trigger phrases in EN + ZH — in practice "create/write/build a
-// skill" was reliably missed when phrased only abstractly.
-const skillsUsageDirective = `<skill_usage_rules>
-RULE 1 — Creating a skill. When the user asks to CREATE / BUILD / WRITE / MAKE / SCAFFOLD a skill ("帮我写一个 X skill", "create a foo skill", "turn this into a skill", "build a skill for Y"):
-  • Your VERY FIRST tool call MUST be: load_skill(name="skill-creator")
-  • Then follow skill-creator's workflow (define → test prompts → draft → eval → iterate). Do NOT call write_file to author SKILL.md, scripts, or scaffolding before load_skill("skill-creator") has been called in THIS turn.
-  • Loading a SIMILAR existing skill (e.g. "minimax-speech" for a TTS task) is context, not a substitute. You still MUST load skill-creator first.
-  • PATH CONVENTION: scaffold the skill at the RELATIVE path "skills/<skill-name>/..." (e.g. write_file("skills/minimax-tts/SKILL.md", ...)). The write_file tool routes "skills/..." to this agent's private skills dir where SkillsLoader discovers it. DO NOT write skills into the workspace (default tool root) — they won't be found there.
-
-RULE 2 — Using a skill. If the user's task matches the summary of a skill below, call load_skill(name) FIRST and follow it. Do not improvise the work with generic tools when a skill applies.
-
-RULE 3 — Installing an existing skill. Use the install_skill tool (searches skills.sh, falls back to clawhub). It writes to THIS agent's private skills dir. Do not install by calling write_file manually.
-
-RULE 4 — Global skills dir. ~/.fastclaw/skills/ is admin-managed. Never write there from chat under any circumstance.
-
-RULE 5 — Slash prefix. If the user's message starts with "/<skill-name>" (e.g. "/skill-creator build me a pdf skill"), that prefix is an explicit request to use that skill. Your VERY FIRST tool call must be load_skill(name="<skill-name>"), and you must then follow its workflow for the remainder of the message. Treat everything after the slash-name as the actual request.
-</skill_usage_rules>`
-
 
 // SkillEnvVars returns environment variables for a specific skill from global config.
 func (sl *SkillsLoader) SkillEnvVars(skillName string) map[string]string {

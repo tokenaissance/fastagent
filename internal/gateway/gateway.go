@@ -306,25 +306,16 @@ func New(cfg *config.Config) (*Gateway, error) {
 	// in the DB. Supplement filesystem discovery with the Store's agent
 	// list so any pod can serve any agent without relying on pod-local FS.
 	var storeAgentIDs []string
-	templateByID := map[string]string{}
 	if st != nil {
 		if records, err := st.ListAgents(context.Background()); err == nil {
 			for _, ar := range records {
 				storeAgentIDs = append(storeAgentIDs, ar.ID)
-				if ar.TemplateID != "" {
-					templateByID[ar.ID] = ar.TemplateID
-				}
 			}
 		} else {
 			slog.Warn("store ListAgents failed", "error", err)
 		}
 	}
 	resolved := config.ResolveAgentsWithExtra(cfg, "", storeAgentIDs)
-	for i := range resolved {
-		if t, ok := templateByID[resolved[i].ID]; ok {
-			resolved[i].TemplateID = t
-		}
-	}
 	managerOpts := []agent.ManagerOption{agent.WithUserID(config.DefaultUserID)}
 	if st != nil {
 		managerOpts = append(managerOpts,

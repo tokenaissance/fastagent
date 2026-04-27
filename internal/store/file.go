@@ -79,9 +79,6 @@ func (f *FileStore) GetAgent(ctx context.Context, agentID string) (*AgentRecord,
 		if m, ok := rec.Config["model"].(string); ok {
 			rec.Model = m
 		}
-		if t, ok := rec.Config["template_id"].(string); ok {
-			rec.TemplateID = t
-		}
 	}
 	return rec, nil
 }
@@ -89,17 +86,8 @@ func (f *FileStore) GetAgent(ctx context.Context, agentID string) (*AgentRecord,
 func (f *FileStore) SaveAgent(ctx context.Context, agent *AgentRecord) error {
 	wsDir := f.agentDir(agent.ID)
 	os.MkdirAll(wsDir, 0o755)
-	cfg := agent.Config
-	if agent.TemplateID != "" {
-		// Persist template_id alongside model in agent.json so the FS
-		// backend reflects the same shape DBStore does.
-		if cfg == nil {
-			cfg = map[string]interface{}{}
-		}
-		cfg["template_id"] = agent.TemplateID
-	}
-	if cfg != nil {
-		data, _ := json.MarshalIndent(cfg, "", "  ")
+	if agent.Config != nil {
+		data, _ := json.MarshalIndent(agent.Config, "", "  ")
 		os.WriteFile(filepath.Join(wsDir, "agent.json"), data, 0o644)
 	}
 	return nil

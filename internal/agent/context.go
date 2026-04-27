@@ -23,27 +23,6 @@ var bootstrapFiles = []string{
 	"IDENTITY.md",
 }
 
-// PlatformAgentID is the reserved agent_id under which platform-shared
-// identity files live. When a per-(user, function) agent's own copy of an
-// inheritable file is empty, ContextBuilder falls back to the platform
-// row at (user_id=DefaultUserID, agent_id=PlatformAgentID). This is what
-// lets ThinkAny / Manus / ChatGPT-style products keep one editable
-// baseline SOUL.md instead of duplicating it across every user agent.
-const PlatformAgentID = "__platform__"
-
-// platformInheritable lists identity files where the platform baseline
-// is meaningful. SOUL/IDENTITY define agent persona; AGENTS/BOOTSTRAP/
-// HEARTBEAT/TOOLS describe shared behavior. USER/MEMORY/HISTORY are
-// strictly per-(user, agent) — they describe the user themselves or the
-// agent's accumulated memory of them — so platform-fallback is wrong.
-var platformInheritable = map[string]bool{
-	"SOUL.md":      true,
-	"IDENTITY.md":  true,
-	"AGENTS.md":    true,
-	"BOOTSTRAP.md": true,
-	"HEARTBEAT.md": true,
-	"TOOLS.md":     true,
-}
 
 // GroupContext holds information about the group chat environment for system prompt injection.
 type GroupContext struct {
@@ -61,10 +40,9 @@ type ContextBuilder struct {
 	thinking       string // off, low, medium, high, adaptive
 	sandboxEnabled bool
 	sandboxBackend string
-	store          MemoryStore
-	userID         string
-	agentID        string
-	templateID     string // optional: agent inherits identity files from this template
+	store   MemoryStore
+	userID  string
+	agentID string
 }
 
 // ctx returns a context tagged with this builder's user, used when reading
@@ -284,33 +262,18 @@ Structure your reasoning before acting. Think before you respond.`, depth)
 }
 
 func (cb *ContextBuilder) loadFile(name string) string {
-	// Try per-agent store row first (DB), fall back to file.
+	// Per-agent only — store row first, FS as legacy fallback for
+	// installs that predate the store-primary refactor.
 	if cb.store != nil {
 		data, err := cb.store.GetWorkspaceFile(cb.ctx(), cb.agentID, name)
 		if err == nil && len(data) > 0 {
 			return strings.TrimSpace(string(data))
 		}
 	}
-	if path := filepath.Join(cb.home, name); cb.home != "" {
-		if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
+	if cb.home != "" {
+		if data, err := os.ReadFile(filepath.Join(cb.home, name)); err == nil && len(data) > 0 {
 			return strings.TrimSpace(string(data))
 		}
-	}
-	// Per-agent file missing/empty. Inheritable identity files cascade
-	// per-agent → template → platform so products with one shared
-	// baseline (Manus / ChatGPT-style) or per-function templates
-	// (ThinkAny) don't duplicate it across every user-agent.
-	if !platformInheritable[name] || cb.store == nil {
-		return ""
-	}
-	sharedCtx := config.WithUserID(context.Background(), config.DefaultUserID)
-	if cb.templateID != "" {
-		if data, err := cb.store.GetWorkspaceFile(sharedCtx, cb.templateID, name); err == nil && len(data) > 0 {
-			return strings.TrimSpace(string(data))
-		}
-	}
-	if data, err := cb.store.GetWorkspaceFile(sharedCtx, PlatformAgentID, name); err == nil && len(data) > 0 {
-		return strings.TrimSpace(string(data))
 	}
 	return ""
 }
