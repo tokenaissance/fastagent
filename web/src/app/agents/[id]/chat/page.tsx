@@ -19,6 +19,25 @@ function urlTransform(url: string, key: string): string {
   return defaultUrlTransform(url);
 }
 
+// makeUrlTransform builds a urlTransform that also remaps sandbox
+// `/workspace/<name>` paths to the authenticated file API URL for the
+// active agent. Skills that produce a file return a sandbox path like
+// /workspace/img_xxx.png; the LLM puts that in `![](/workspace/...)`.
+// Without rewriting, the browser tries to fetch
+// http://host:port/workspace/... (404). Use this in chat messages that
+// belong to a known agent.
+function makeUrlTransform(agentId: string) {
+  return (url: string, key: string): string => {
+    if (key === "src") {
+      if (url.startsWith("data:image/")) return url;
+      if (url.startsWith("/workspace/")) {
+        return fileUrl(agentId, url.slice("/workspace/".length), false);
+      }
+    }
+    return defaultUrlTransform(url);
+  };
+}
+
 // Split a string on `![alt](data:image/...;base64,...)` markdown.
 //
 // Real-world content from models is messier than the grammar: base64
@@ -704,7 +723,7 @@ export default function AgentChatPage() {
               return messages.map((msg) =>
               msg.role === "tool-group" ? (
                 <div key={msg.id}>
-                  <ToolCallGroup msg={msg} surfacedSrcs={surfacedSrcs} />
+                  <ToolCallGroup msg={msg} surfacedSrcs={surfacedSrcs} agentId={selectedAgent} />
                   {msg.files && msg.files.length > 0 && (
                     <FilesPanel agentId={selectedAgent} files={msg.files} />
                   )}
@@ -748,7 +767,7 @@ export default function AgentChatPage() {
                           surfacedSrcs,
                           (attachedImages.get(msg.id)?.length ?? 0) > 0,
                         ) ?? (
-                          <ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={urlTransform}>
+                          <ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={makeUrlTransform(selectedAgent)}>
                             {msg.content}
                           </ReactMarkdown>
                         )}
@@ -923,7 +942,7 @@ function ChatHeaderTitle({ title, fallback, onSave }: ChatHeaderTitleProps) {
 }
 
 /** Renders a group of tool calls as a collapsible summary. */
-function ToolCallGroup({ msg, surfacedSrcs }: { msg: ChatMessage; surfacedSrcs?: ReadonlySet<string> }) {
+function ToolCallGroup({ msg, surfacedSrcs, agentId }: { msg: ChatMessage; surfacedSrcs?: ReadonlySet<string>; agentId: string }) {
   const [groupOpen, setGroupOpen] = useState(false);
   const [expandedTool, setExpandedTool] = useState<Record<string, boolean>>({});
 
@@ -942,7 +961,7 @@ function ToolCallGroup({ msg, surfacedSrcs }: { msg: ChatMessage; surfacedSrcs?:
           <div className="bg-muted rounded-2xl rounded-bl-md px-4 py-2.5">
             <div className="text-[15px] leading-relaxed prose prose-sm dark:prose-invert max-w-none prose-p:my-1">
               {renderContentWithDataImages(msg.content, surfacedSrcs) ?? (
-                <ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={urlTransform}>
+                <ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={makeUrlTransform(agentId)}>
                   {msg.content}
                 </ReactMarkdown>
               )}
