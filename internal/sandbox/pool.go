@@ -3,6 +3,7 @@ package sandbox
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 )
 
@@ -37,32 +38,43 @@ func (p *SandboxPool) Get(agentID, image, workspace string, policy *Policy) *Doc
 	}
 
 	sb := NewDockerSandbox(image, workspace, policy)
-	if dirs := skillDirsForAgent(agentID); len(dirs) > 0 {
-		sb.SetSkillDirs(dirs)
+	// Best-effort skill mount when the workspace path follows the
+	// standard layout (<home>/workspaces/<agentID>); falls through
+	// silently if the caller used a custom workspace path.
+	if home := homeFromWorkspace(workspace, agentID); home != "" {
+		if dirs := skillDirsForAgent(home, agentID); len(dirs) > 0 {
+			sb.SetSkillDirs(dirs)
+		}
 	}
 	p.sandboxes[agentID] = sb
 	return sb
 }
 
+// homeFromWorkspace inverts <home>/workspaces/<agentID> → <home>.
+// Returns "" if workspace doesn't follow that convention.
+func homeFromWorkspace(workspace, agentID string) string {
+	suffix := filepath.Join("workspaces", agentID)
+	if strings.HasSuffix(workspace, string(os.PathSeparator)+suffix) {
+		return strings.TrimSuffix(workspace, string(os.PathSeparator)+suffix)
+	}
+	return ""
+}
+
 // skillDirsForAgent returns the host paths whose `<dir>/<skill-name>/`
 // children should be mounted at /skills/<skill-name>/ inside the
-// sandbox. Order matters only for conflict resolution at mount time
-// (later dirs win since Docker rejects duplicate mount paths) — keep
-// the per-agent dir first so it overrides any global skill of the
-// same name, matching SkillsLoader's per-agent-wins precedence.
-func skillDirsForAgent(agentID string) []string {
-	home := os.Getenv("FASTCLAW_HOME")
-	if home == "" {
-		if h, err := os.UserHomeDir(); err == nil {
-			home = filepath.Join(h, ".fastclaw")
-		}
-	}
+// sandbox. Per-agent dir comes first so its skills override
+// same-named global ones, matching SkillsLoader precedence.
+//
+// home is the resolved FASTCLAW_HOME (the pool's workspaceRoot), not
+// the process env — keeps tests / multi-instance debug honest.
+func skillDirsForAgent(home, agentID string) []string {
 	if home == "" {
 		return nil
 	}
-	dirs := []string{filepath.Join(home, "agents", agentID, "agent", "skills")}
-	dirs = append(dirs, filepath.Join(home, "skills"))
-	return dirs
+	return []string{
+		filepath.Join(home, "agents", agentID, "agent", "skills"),
+		filepath.Join(home, "skills"),
+	}
 }
 
 // Close shuts down and removes all sandbox containers.

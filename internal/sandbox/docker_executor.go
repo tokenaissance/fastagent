@@ -136,20 +136,36 @@ func NewDockerExecutorPool(image, workspaceRoot string, policy *Policy) *DockerE
 	}
 }
 
-func (p *DockerExecutorPool) Get(ctx context.Context, userID string) (Executor, error) {
+func (p *DockerExecutorPool) Get(ctx context.Context, agentID string) (Executor, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	if ex, ok := p.executors[userID]; ok {
+	if ex, ok := p.executors[agentID]; ok {
 		return ex, nil
 	}
 
-	workspace := fmt.Sprintf("%s/%s", p.workspaceRoot, userID)
-	ex, err := NewDockerExecutor(p.image, workspace, p.policy)
-	if err != nil {
-		return nil, err
+	// workspaceRoot is FASTCLAW_HOME (~/.fastclaw or env override). The
+	// per-agent workspace lives under workspaces/<agentID>/, NOT at the
+	// root + agentID — that earlier path mounted runtime/imgany into
+	// the container, which doesn't exist, instead of
+	// runtime/workspaces/imgany which is where the agent runtime
+	// actually writes files.
+	workspace := filepath.Join(p.workspaceRoot, "workspaces", agentID)
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		return nil, fmt.Errorf("create workspace dir %s: %w", workspace, err)
 	}
-	p.executors[userID] = ex
+
+	// Build the sandbox by hand so we can wire skill mounts BEFORE
+	// Create() bakes the docker run args. Constructing through
+	// NewDockerExecutor would call Create immediately on a sandbox
+	// that hasn't been told about skill dirs.
+	sb := NewDockerSandbox(p.image, workspace, p.policy)
+	sb.SetSkillDirs(skillDirsForAgent(p.workspaceRoot, agentID))
+	if err := sb.Create(); err != nil {
+		return nil, fmt.Errorf("create docker sandbox: %w", err)
+	}
+	ex := &DockerExecutor{sb: sb}
+	p.executors[agentID] = ex
 	return ex, nil
 }
 
