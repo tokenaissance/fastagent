@@ -486,7 +486,10 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 
 		if a.provider == nil {
 			slog.Error("agent has no provider configured", "agent", a.name, "model", a.model)
-			return "Agent is not configured with a usable LLM provider. Check that cfg.Providers contains the prefix referenced by model `" + a.model + "`."
+			noProviderMsg := "Agent is not configured with a usable LLM provider. Check that cfg.Providers contains the prefix referenced by model `" + a.model + "`."
+			emitEvent(ctx, ChatEvent{Type: "error", Data: map[string]any{"message": noProviderMsg}})
+			emitEvent(ctx, ChatEvent{Type: "done"})
+			return noProviderMsg
 		}
 		resp, err := a.provider.Chat(ctx, llmMessages, toolDefs, a.model, a.maxTokens, a.temperature)
 
@@ -496,6 +499,8 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 
 		if err != nil {
 			slog.Error("LLM chat failed", "agent", a.name, "error", err)
+			emitEvent(ctx, ChatEvent{Type: "error", Data: map[string]any{"message": err.Error()}})
+			emitEvent(ctx, ChatEvent{Type: "done"})
 			return "Sorry, I encountered an error processing your request."
 		}
 
@@ -578,6 +583,32 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 			"count", len(resp.ToolCalls),
 		)
 		results := a.engine.executeToolsConcurrently(ctx, a.registry, resp.ToolCalls, a.workspacePath)
+
+		// Defensive backstop: if the SDK returned fewer results than tool
+		// calls (and the bridge somehow didn't already pad — belt and
+		// suspenders since orphan tool_use ids poison the next API request
+		// with HTTP 400), synthesize a failure result so every tool_use
+		// gets a paired tool_result in the conversation history.
+		if len(results) < len(resp.ToolCalls) {
+			padded := make([]toolCallResult, len(resp.ToolCalls))
+			gotByID := make(map[string]toolCallResult, len(results))
+			for _, r := range results {
+				gotByID[r.toolCallID] = r
+			}
+			for i, tc := range resp.ToolCalls {
+				if r, ok := gotByID[tc.ID]; ok {
+					padded[i] = r
+					continue
+				}
+				padded[i] = toolCallResult{
+					toolCallID: tc.ID,
+					toolName:   tc.Function.Name,
+					result:     "tool execution did not return a result",
+					err:        fmt.Errorf("missing executor response for %s", tc.ID),
+				}
+			}
+			results = padded
+		}
 
 		// Process results
 		for idx, r := range results {

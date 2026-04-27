@@ -1,110 +1,92 @@
 package users
 
 import (
-	"encoding/json"
+	"context"
 	"errors"
-	"fmt"
-	"os"
-	"path/filepath"
 	"sync"
 
-	"github.com/fastclaw-ai/fastclaw/internal/config"
+	"github.com/fastclaw-ai/fastclaw/internal/store"
 )
 
 // AgentBindings maps each agent to at most one API key. Agents without a
 // binding are "admin-owned by default" — only the admin token can touch
-// them. Storage is a flat file next to apikeys.json:
-//
-//	~/.fastclaw/agent-bindings.json  →  { "<agent-id>": "<api-key-id>", ... }
+// them. Persistence goes through the configured store, so SaaS deployments
+// don't lose bindings on pod restart.
 //
 // Bindings are control-plane only; the data plane (sessions, memory,
 // workspace files) still keys purely on agent_id.
 type AgentBindings struct {
-	path string
-	mu   sync.RWMutex
-	// byAgent: agent id → owning api key id
-	byAgent map[string]string
+	store store.Store
+	mu    sync.RWMutex
+	// Local cache of the binding map. Refreshed lazily on read; mutations
+	// also update the cache in place to avoid a follow-up DB round-trip.
+	cache       map[string]string
+	cacheLoaded bool
 }
 
-// DefaultBindingsPath returns ~/.fastclaw/agent-bindings.json.
-func DefaultBindingsPath() (string, error) {
-	home, err := config.HomeDir()
-	if err != nil {
-		return "", err
+// LoadBindings returns a binding registry backed by the given store. nil
+// store is rejected — file-backed callers should pass an explicit FileStore.
+func LoadBindings(st store.Store) (*AgentBindings, error) {
+	if st == nil {
+		return nil, errors.New("users.LoadBindings: store is required")
 	}
-	return filepath.Join(home, "agent-bindings.json"), nil
+	return &AgentBindings{store: st, cache: map[string]string{}}, nil
 }
 
-// LoadBindings reads bindings from the default path, returning an empty
-// registry if the file doesn't exist yet.
-func LoadBindings() (*AgentBindings, error) {
-	path, err := DefaultBindingsPath()
-	if err != nil {
-		return nil, err
+// ensure populates the local cache from the store on first access. Called
+// under b.mu.
+func (b *AgentBindings) ensureLocked() {
+	if b.cacheLoaded {
+		return
 	}
-	return LoadBindingsFrom(path)
+	if m, err := b.store.ListAgentBindings(context.Background()); err == nil && m != nil {
+		b.cache = m
+	}
+	b.cacheLoaded = true
 }
 
-func LoadBindingsFrom(path string) (*AgentBindings, error) {
-	b := &AgentBindings{path: path, byAgent: make(map[string]string)}
-	data, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return b, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("read agent-bindings: %w", err)
-	}
-	if err := json.Unmarshal(data, &b.byAgent); err != nil {
-		return nil, fmt.Errorf("parse agent-bindings: %w", err)
-	}
-	return b, nil
-}
-
-// Save persists the current state. Callers should invoke this after every
-// mutation — bindings are small (1 line per agent) so rewriting the file
-// wholesale is cheap.
-func (b *AgentBindings) Save() error {
-	b.mu.RLock()
-	data, _ := json.MarshalIndent(b.byAgent, "", "  ")
-	b.mu.RUnlock()
-	if err := os.MkdirAll(filepath.Dir(b.path), 0o700); err != nil {
-		return err
-	}
-	return os.WriteFile(b.path, data, 0o600)
-}
+// Save is a no-op kept for backward compatibility — all mutations persist
+// immediately through the store.
+func (b *AgentBindings) Save() error { return nil }
 
 // Bind associates agentID with apiKeyID, replacing any prior binding. An
 // empty apiKeyID is treated as Unbind(agentID).
 func (b *AgentBindings) Bind(agentID, apiKeyID string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	b.ensureLocked()
 	if apiKeyID == "" {
-		delete(b.byAgent, agentID)
+		_ = b.store.DeleteAgentBinding(context.Background(), agentID)
+		delete(b.cache, agentID)
 		return
 	}
-	b.byAgent[agentID] = apiKeyID
+	if err := b.store.SetAgentBinding(context.Background(), agentID, apiKeyID); err == nil {
+		b.cache[agentID] = apiKeyID
+	}
 }
 
 // Unbind removes any binding for agentID. Safe to call even if none exists.
 func (b *AgentBindings) Unbind(agentID string) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	delete(b.byAgent, agentID)
+	b.Bind(agentID, "")
 }
 
-// OwnerOf returns the api key id that owns agentID, or "" if unbound.
+// OwnerOf returns the api key id that owns agentID, or "" if unbound. Hot
+// path on every authenticated request — served from the local cache.
 func (b *AgentBindings) OwnerOf(agentID string) string {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	return b.byAgent[agentID]
+	b.mu.Lock()
+	b.ensureLocked()
+	owner := b.cache[agentID]
+	b.mu.Unlock()
+	return owner
 }
 
 // AgentsOf returns every agent id bound to apiKeyID, in no particular order.
 func (b *AgentBindings) AgentsOf(apiKeyID string) []string {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.ensureLocked()
 	var out []string
-	for agentID, ownerID := range b.byAgent {
+	for agentID, ownerID := range b.cache {
 		if ownerID == apiKeyID {
 			out = append(out, agentID)
 		}
@@ -114,11 +96,21 @@ func (b *AgentBindings) AgentsOf(apiKeyID string) []string {
 
 // All returns the full binding map (copy, safe to mutate).
 func (b *AgentBindings) All() map[string]string {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	out := make(map[string]string, len(b.byAgent))
-	for k, v := range b.byAgent {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.ensureLocked()
+	out := make(map[string]string, len(b.cache))
+	for k, v := range b.cache {
 		out[k] = v
 	}
 	return out
+}
+
+// Refresh forces a reload from the store. Useful after operations that
+// mutate bindings outside this process (e.g. a separate pod in SaaS).
+func (b *AgentBindings) Refresh() {
+	b.mu.Lock()
+	b.cacheLoaded = false
+	b.ensureLocked()
+	b.mu.Unlock()
 }

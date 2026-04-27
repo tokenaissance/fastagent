@@ -21,24 +21,17 @@ import (
 )
 
 // loadUserConfig reads the config for the user identified by the request
-// context. For the local user it always reads from filesystem (bootstrap).
-// For cloud users it tries the Store first (DB-backed), falling back to
-// filesystem, and auto-provisions if nothing exists.
+// context. Store is the source of truth whenever it's configured —
+// saveUserConfig (post-#4) writes there exclusively, so reading anywhere
+// else gives stale data. The local fastclaw.json is only used as a
+// bootstrap when the store has nothing yet.
 func (s *Server) loadUserConfig(r *http.Request) (*config.Config, error) {
 	userID := config.UserIDFromContext(r.Context())
 
-	// Try loading from filesystem first (works for both local and file-backed cloud).
-	cfg, err := config.LoadForUser(userID)
-	if err == nil {
-		return cfg, nil
-	}
-
-	// In cloud mode the pod-local fastclaw.json is ephemeral and the
-	// watcher hot-reloads from it — provisioning a stub here writes an
-	// empty providers/default-agent blob that then blows away the DB-
-	// hydrated config on every fresh pod. Hydrate from the DB instead.
-	cloudMode := s.gatewayCfg != nil && s.gatewayCfg.Mode == "cloud"
-	if cloudMode && s.dataStore != nil {
+	// Store-first when wired. The cloud-vs-local mode flag used to gate
+	// this, but that diverged read from write — saves went to DB,
+	// subsequent reads came from a stale FS copy with empty providers.
+	if s.dataStore != nil {
 		if gc, gerr := s.dataStore.GetConfig(r.Context()); gerr == nil && gc != nil && len(gc.Data) > 0 {
 			blob, merr := json.Marshal(gc.Data)
 			if merr == nil {
@@ -48,8 +41,18 @@ func (s *Server) loadUserConfig(r *http.Request) (*config.Config, error) {
 				}
 			}
 		}
-		// Nothing in DB yet — return a zero-value config so the setup
-		// wizard can flow. Don't write anything to disk.
+	}
+
+	// Fall back to filesystem for fresh installs whose store is empty.
+	cfg, err := config.LoadForUser(userID)
+	if err == nil {
+		return cfg, nil
+	}
+
+	// Cloud mode without any config yet — return a zero-value config so
+	// the setup wizard can flow. Don't write anything to disk.
+	cloudMode := s.gatewayCfg != nil && s.gatewayCfg.Mode == "cloud"
+	if cloudMode && s.dataStore != nil {
 		return &config.Config{
 			Providers: map[string]config.ProviderConfig{},
 			Channels:  map[string]config.ChannelConfig{},
@@ -798,16 +801,15 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Bootstrap identity files for the new agent.
-	wsFiles := map[string]string{
-		"SOUL.md":      "# Soul\n\nYour personality and behavioral guidelines.\n",
-		"IDENTITY.md":  fmt.Sprintf("# Identity\n\nYou are %s, a FastClaw AI agent.\n", req.AgentName),
-		"USER.md":      "# User\n\nInformation about the user you serve.\n",
-		"TOOLS.md":     "",
-		"BOOTSTRAP.md": "",
-		"HEARTBEAT.md": "",
-		"MEMORY.md":    "",
-		"AGENTS.md":    "",
-	}
+	//
+	// DB rows are *overrides* on top of the FS base shipped with the agent
+	// definition. Writing non-empty placeholder text here would permanently
+	// shadow the on-disk SOUL.md / IDENTITY.md the repo ships, since
+	// ContextBuilder.loadFile prefers a non-empty DB row over the FS file.
+	// So we only write rows the user actually filled in (Personality), and
+	// skip the rest entirely — letting FS-based defaults win until the user
+	// explicitly customizes via the UI.
+	wsFiles := map[string]string{}
 	if req.Personality != "" {
 		wsFiles["SOUL.md"] = fmt.Sprintf("# %s\n\n%s\n", req.AgentName, req.Personality)
 	}

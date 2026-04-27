@@ -435,6 +435,35 @@ type Peer struct {
 	ID   string `json:"id,omitempty"`   // specific chat/group ID
 }
 
+// AgentFileConfigLoader is the indirection point for layer-3 agent config.
+//
+// MergedAgentConfigForUser calls it to resolve "what does this agent
+// override on top of the global defaults" — historically that was always
+// `<home>/agent.json`, but in DB-backed deployments the same data lives
+// in `agents.config`. Letting callers swap this loader at startup keeps
+// the config package free of any direct store import (which would create
+// a cycle since store imports config).
+//
+// Default behavior: read FS as before. Gateway boot replaces it with a
+// store-first / FS-fallback variant. The bool return distinguishes "loaded
+// successfully (apply overrides)" from "nothing to apply".
+var AgentFileConfigLoader func(agentID, home string) (AgentFileConfig, bool) = defaultAgentFileConfigLoader
+
+func defaultAgentFileConfigLoader(_ /* agentID */, home string) (AgentFileConfig, bool) {
+	if home == "" {
+		return AgentFileConfig{}, false
+	}
+	data, err := os.ReadFile(filepath.Join(home, "agent.json"))
+	if err != nil {
+		return AgentFileConfig{}, false
+	}
+	var cfg AgentFileConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return AgentFileConfig{}, false
+	}
+	return cfg, true
+}
+
 // AgentFileConfig is the schema for agent.json inside an agent workspace.
 type AgentFileConfig struct {
 	Model             string                     `json:"model,omitempty"`
@@ -798,12 +827,13 @@ func (cfg *Config) MergedAgentConfigForUser(entry AgentEntry, userID string) Res
 		}
 	}
 
-	// Layer 3: agent.json in the agent's home dir (not workspace — that's
-	// the user-facing content dir). Agent-level overrides shadow global.
-	agentJSON := filepath.Join(home, "agent.json")
-	if data, readErr := os.ReadFile(agentJSON); readErr == nil {
-		var fileCfg AgentFileConfig
-		if jsonErr := json.Unmarshal(data, &fileCfg); jsonErr == nil {
+	// Layer 3: per-agent overrides (agent.json shape). Sourced via the
+	// AgentFileConfigLoader hook so SaaS callers can wire a store-first /
+	// FS-fallback reader without making this package import store. The
+	// default loader preserves the legacy FS-only behavior for tests and
+	// tooling that never see a store.
+	if fileCfg, ok := AgentFileConfigLoader(entry.ID, home); ok {
+		{
 			if fileCfg.Model != "" {
 				resolved.Model = fileCfg.Model
 			}

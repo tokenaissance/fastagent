@@ -5,6 +5,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 )
 
@@ -34,7 +35,27 @@ type Store interface {
 	// Workspace files (per agent: SOUL.md, etc.)
 	GetWorkspaceFile(ctx context.Context, agentID, filename string) ([]byte, error)
 	SaveWorkspaceFile(ctx context.Context, agentID, filename string, data []byte) error
+	DeleteWorkspaceFile(ctx context.Context, agentID, filename string) error
 	ListWorkspaceFiles(ctx context.Context, agentID string) ([]string, error)
+
+	// API keys (control plane: programmatic access tokens). Storage holds the
+	// SHA256 of the token, never plaintext — callers receive the plaintext
+	// once at create/rotate and are responsible for capturing it.
+	ListAPIKeys(ctx context.Context) ([]APIKeyRecord, error)
+	GetAPIKey(ctx context.Context, id string) (*APIKeyRecord, error)
+	CreateAPIKey(ctx context.Context, ak *APIKeyRecord) error
+	DeleteAPIKey(ctx context.Context, id string) error
+	// RotateAPIKey replaces the existing key_hash + key_prefix in-place. The
+	// id stays the same; previously-issued tokens become invalid immediately.
+	RotateAPIKey(ctx context.Context, id, keyHash, keyPrefix string) error
+	// LookupAPIKeyByHash is the auth hot path. SHA256(token) → id, ok.
+	LookupAPIKeyByHash(ctx context.Context, keyHash string) (string, bool, error)
+
+	// Agent bindings (which API key owns which agent). Each agent has at
+	// most one owner; admin token bypasses this layer entirely.
+	ListAgentBindings(ctx context.Context) (map[string]string, error)
+	SetAgentBinding(ctx context.Context, agentID, ownerKeyID string) error
+	DeleteAgentBinding(ctx context.Context, agentID string) error
 
 	// Cron Jobs
 	ListCronJobs(ctx context.Context) ([]CronJobRecord, error)
@@ -73,6 +94,20 @@ type GlobalConfig struct {
 	UpdatedAt time.Time              `json:"updatedAt"`
 }
 
+// APIKeyRecord is one entry in the API key registry.
+//
+// `KeyHash` is SHA256(token) — what the auth hot path looks up. `KeyPrefix`
+// is a small slice of the plaintext (e.g. "fc_a1b2c3") kept for UI display
+// of an otherwise unrecoverable hash. The full plaintext is shown to the
+// caller exactly once at creation/rotation and never persisted.
+type APIKeyRecord struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name,omitempty"`
+	KeyHash   string    `json:"keyHash"`
+	KeyPrefix string    `json:"keyPrefix,omitempty"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
 // AgentRecord is the persisted state for one agent.
 type AgentRecord struct {
 	ID        string                 `json:"id"`
@@ -91,13 +126,15 @@ type SessionRecord struct {
 
 // SessionMessage is a single message in a session.
 type SessionMessage struct {
-	Role       string                 `json:"role"`
-	Content    string                 `json:"content"`
-	ToolCalls  interface{}            `json:"toolCalls,omitempty"`
-	ToolCallID string                 `json:"toolCallId,omitempty"`
-	Name       string                 `json:"name,omitempty"`
-	Metadata   map[string]interface{} `json:"metadata,omitempty"`
-	Timestamp  time.Time              `json:"timestamp"`
+	Role         string                 `json:"role"`
+	Content      string                 `json:"content"`
+	ToolCalls    interface{}            `json:"toolCalls,omitempty"`
+	ToolCallID   string                 `json:"toolCallId,omitempty"`
+	Name         string                 `json:"name,omitempty"`
+	Metadata     map[string]interface{} `json:"metadata,omitempty"`
+	Timestamp    time.Time              `json:"timestamp"`
+	Thinking     string                 `json:"thinking,omitempty"`
+	RawAssistant json.RawMessage        `json:"rawAssistant,omitempty"`
 }
 
 // SessionMeta is summary info for a session (for listing).

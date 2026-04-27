@@ -73,9 +73,6 @@ export function AgentSwitcher({
             </div>
             <div className="grid flex-1 text-left text-sm leading-tight">
               <span className="truncate font-medium">No agents</span>
-              <span className="truncate text-xs text-muted-foreground">
-                Agent
-              </span>
             </div>
           </SidebarMenuButton>
         </SidebarMenuItem>
@@ -98,9 +95,6 @@ export function AgentSwitcher({
             <AgentAvatar size={32} />
             <div className="grid flex-1 text-left text-sm leading-tight">
               <span className="truncate font-medium">{active.id}</span>
-              <span className="truncate text-xs text-muted-foreground">
-                Agent
-              </span>
             </div>
             <ChevronsUpDownIcon className="ml-auto" />
           </DropdownMenuTrigger>

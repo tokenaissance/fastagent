@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -189,6 +190,39 @@ func (s *DockerSandbox) Exec(ctx context.Context, command string, workdir string
 	args = append(args, id, "sh", "-c", command)
 
 	cmd := exec.CommandContext(ctx, "docker", args...)
+	output, err := cmd.CombinedOutput()
+	result := string(output)
+	if err != nil {
+		return fmt.Sprintf("%s\nError: %s", result, err.Error()), err
+	}
+	return result, nil
+}
+
+// ExecWithStdin runs a command inside the container with the given bytes
+// piped to stdin. Used for writing binary files (PNG, audio, ...) — passing
+// raw bytes through argv (as our heredoc-based WriteFile does) blows up
+// with "fork/exec: invalid argument" the moment the content contains a
+// NULL byte, because execve rejects NUL inside argv elements.
+func (s *DockerSandbox) ExecWithStdin(ctx context.Context, command string, workdir string, stdin io.Reader) (string, error) {
+	s.mu.Lock()
+	if s.containerID == "" {
+		s.mu.Unlock()
+		if err := s.Create(); err != nil {
+			return "", err
+		}
+		s.mu.Lock()
+	}
+	id := s.containerID
+	s.mu.Unlock()
+
+	args := []string{"exec", "-i"}
+	if workdir != "" {
+		args = append(args, "-w", workdir)
+	}
+	args = append(args, id, "sh", "-c", command)
+
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd.Stdin = stdin
 	output, err := cmd.CombinedOutput()
 	result := string(output)
 	if err != nil {

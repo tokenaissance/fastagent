@@ -2,11 +2,17 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -16,6 +22,7 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/daemon"
 	"github.com/fastclaw-ai/fastclaw/internal/gateway"
 	"github.com/fastclaw-ai/fastclaw/internal/setup"
+	"github.com/fastclaw-ai/fastclaw/internal/store"
 	"github.com/fastclaw-ai/fastclaw/internal/users"
 )
 
@@ -145,31 +152,36 @@ func runGateway(port int) error {
 	webSrv.SetWorkspaceStore(gw.Workspace())
 	webSrv.SetUsageMeter(gw.Usage())
 
-	// Set up OpenAI-compatible API and WebSocket gateway.
-	// In cloud mode the user registry maps bearer tokens to user IDs; in
-	// local mode it's absent and everything resolves to DefaultUserID.
+	// Set up OpenAI-compatible API and WebSocket gateway. The user registry
+	// (apikeys.json) is loaded unconditionally — empty in fresh local installs
+	// and harmless either way, but required for the admin UI's API Keys page
+	// and for any agent binding flow. The cloud-vs-local distinction only
+	// shows up downstream in canAccessAgent / data partitioning.
 	gatewayToken := cfg.Gateway.Auth.Token
-	var userReg *users.Registry
-	if cfg.Gateway.Mode == "cloud" {
-		var regErr error
-		userReg, regErr = users.Load()
-		if regErr != nil {
-			slog.Warn("failed to load user registry", "error", regErr)
-		} else {
-			slog.Info("cloud mode enabled", "users", userReg.Count())
-		}
+	userReg, regErr := users.Load(gw.Store())
+	if regErr != nil {
+		slog.Warn("failed to load user registry", "error", regErr)
+		userReg = nil
+	} else {
+		slog.Info("user registry loaded", "apikeys", userReg.Count(), "mode", cfg.Gateway.Mode)
 	}
 	apiSrv := api.NewServer(&apiResolver{gw: gw}, gatewayToken, userReg, gwCfg)
 	webSrv.SetAPIServer(apiSrv)
 	webSrv.SetAuth(gatewayToken, userReg)
 
-	// Agent ↔ API key bindings. Always loaded — file is empty {} by default
-	// so local mode just treats every agent as admin-owned.
-	if bindings, err := users.LoadBindings(); err == nil {
+	// Agent ↔ API key bindings. Empty by default, every agent admin-owned
+	// until something points at it.
+	if bindings, err := users.LoadBindings(gw.Store()); err == nil {
 		webSrv.SetAgentBindings(bindings)
 	} else {
 		slog.Warn("failed to load agent bindings", "error", err)
 	}
+
+	// Migrate legacy ~/.fastclaw/apikeys.json + agent-bindings.json into the
+	// store on first startup. Idempotent: only fires if the store is empty
+	// AND the legacy files exist. Logs each imported entry once and renames
+	// the legacy files to *.migrated.bak so a second run won't redo the work.
+	migrateLegacyAuthFiles(gw.Store(), userReg)
 
 	bindMode := gwCfg.Bind
 	if bindMode == "" {
@@ -271,5 +283,166 @@ func openBrowser(url string) {
 		return
 	}
 	cmd.Run()
+}
+
+// migrateLegacyAuthFiles imports ~/.fastclaw/apikeys.json and
+// ~/.fastclaw/agent-bindings.json into the Store on first boot, then
+// renames them to *.migrated.bak so subsequent restarts skip the work.
+//
+// Idempotent. The DBStore path needs this on the first SaaS deployment to
+// pick up keys originally created in local-file mode; FileStore deployments
+// just continue reading the same file path the Store points at, so this
+// migration is effectively a no-op there (table-already-populated check
+// keeps it from looping forever).
+//
+// Tokens in the legacy file were stored in plaintext under a `key` field.
+// We hash them on import so the at-rest format upgrades for free.
+func migrateLegacyAuthFiles(st store.Store, _ *users.Registry) {
+	if st == nil {
+		return
+	}
+	home, err := config.HomeDir()
+	if err != nil {
+		return
+	}
+
+	migrateLegacyAPIKeys(st, filepath.Join(home, "apikeys.json"))
+	migrateLegacyBindings(st, filepath.Join(home, "agent-bindings.json"))
+	migrateLegacyAgentJSON(st)
+}
+
+// migrateLegacyAgentJSON promotes per-agent overrides that were written to
+// `workspace_files['agent.json']` (the pre-store layout) into the
+// `agents.config` column where the runtime loader now reads them. Skips
+// agents whose `agents.config` is already populated — repeat runs and
+// concurrent writes through the new code path stay correct. The old
+// workspace_files row is left in place; it's harmless and serves as a
+// breadcrumb for anyone debugging an older deploy.
+func migrateLegacyAgentJSON(st store.Store) {
+	if st == nil {
+		return
+	}
+	ctx := context.Background()
+	agents, err := st.ListAgents(ctx)
+	if err != nil {
+		return
+	}
+	migrated := 0
+	for _, ag := range agents {
+		if len(ag.Config) > 0 {
+			continue // already on the new layout
+		}
+		data, err := st.GetWorkspaceFile(ctx, ag.ID, "agent.json")
+		if err != nil || len(data) == 0 {
+			continue
+		}
+		var asMap map[string]interface{}
+		if err := json.Unmarshal(data, &asMap); err != nil {
+			slog.Warn("legacy agent.json parse failed", "agent", ag.ID, "error", err)
+			continue
+		}
+		ag.Config = asMap
+		ag.UpdatedAt = time.Now().UTC()
+		if err := st.SaveAgent(ctx, &ag); err != nil {
+			slog.Warn("legacy agent.json import failed", "agent", ag.ID, "error", err)
+			continue
+		}
+		migrated++
+	}
+	if migrated > 0 {
+		slog.Info("migrated legacy agent.json into agents.config", "count", migrated)
+	}
+}
+
+func migrateLegacyAPIKeys(st store.Store, path string) {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	if err != nil {
+		slog.Warn("legacy apikeys read failed", "error", err)
+		return
+	}
+	// Skip if the store already has rows — we've migrated before, or the
+	// operator is running both file + DB modes simultaneously and wants the
+	// DB rows to win.
+	if existing, err := st.ListAPIKeys(context.Background()); err == nil && len(existing) > 0 {
+		return
+	}
+	var legacy []struct {
+		ID        string    `json:"id"`
+		Name      string    `json:"name"`
+		Key       string    `json:"key"`
+		CreatedAt time.Time `json:"createdAt"`
+	}
+	if err := json.Unmarshal(data, &legacy); err != nil {
+		slog.Warn("legacy apikeys parse failed", "error", err)
+		return
+	}
+	imported := 0
+	for _, ak := range legacy {
+		if ak.ID == "" || ak.Key == "" {
+			continue
+		}
+		sum := sha256.Sum256([]byte(ak.Key))
+		prefix := ak.Key
+		if len(prefix) > 10 {
+			prefix = prefix[:10]
+		}
+		rec := &store.APIKeyRecord{
+			ID:        ak.ID,
+			Name:      ak.Name,
+			KeyHash:   hex.EncodeToString(sum[:]),
+			KeyPrefix: prefix,
+			CreatedAt: ak.CreatedAt,
+		}
+		if rec.CreatedAt.IsZero() {
+			rec.CreatedAt = time.Now().UTC()
+		}
+		if err := st.CreateAPIKey(context.Background(), rec); err != nil {
+			slog.Warn("legacy apikey import failed", "id", ak.ID, "error", err)
+			continue
+		}
+		imported++
+	}
+	if imported > 0 {
+		slog.Info("migrated legacy apikeys.json into store", "count", imported)
+	}
+	// Rename so we don't redo the work on next boot.
+	_ = os.Rename(path, path+".migrated.bak")
+}
+
+func migrateLegacyBindings(st store.Store, path string) {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	if err != nil {
+		slog.Warn("legacy bindings read failed", "error", err)
+		return
+	}
+	if existing, err := st.ListAgentBindings(context.Background()); err == nil && len(existing) > 0 {
+		return
+	}
+	var legacy map[string]string
+	if err := json.Unmarshal(data, &legacy); err != nil {
+		slog.Warn("legacy bindings parse failed", "error", err)
+		return
+	}
+	imported := 0
+	for agentID, ownerID := range legacy {
+		if agentID == "" || ownerID == "" {
+			continue
+		}
+		if err := st.SetAgentBinding(context.Background(), agentID, ownerID); err != nil {
+			slog.Warn("legacy binding import failed", "agent", agentID, "error", err)
+			continue
+		}
+		imported++
+	}
+	if imported > 0 {
+		slog.Info("migrated legacy agent-bindings.json into store", "count", imported)
+	}
+	_ = os.Rename(path, path+".migrated.bak")
 }
 

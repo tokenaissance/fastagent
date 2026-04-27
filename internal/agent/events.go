@@ -4,7 +4,7 @@ import "context"
 
 // ChatEvent represents a real-time event emitted during the agent ReAct loop.
 type ChatEvent struct {
-	Type string         `json:"type"` // "content", "tool_call", "tool_result", "done"
+	Type string         `json:"type"` // "content", "tool_call", "tool_result", "error", "done"
 	Data map[string]any `json:"data,omitempty"`
 }
 

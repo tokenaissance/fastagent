@@ -221,6 +221,14 @@ export default function ChatPage() {
             });
             break;
           }
+          case "error": {
+            const message = evt.data?.message || "Unknown error";
+            setMessages((prev) => [
+              ...prev,
+              { id: `e-${Date.now()}`, role: "agent", content: `⚠️ ${message}`, timestamp: Date.now() },
+            ]);
+            break;
+          }
         }
       });
       loadSessions(selectedAgent);

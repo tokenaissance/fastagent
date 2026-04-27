@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -111,6 +112,33 @@ func attachSandboxToAgents(
 	return nil
 }
 
+// loadConfigStoreFirst returns a user's config with store as source of
+// truth and fastclaw.json as fallback. Mirrors handlers.loadUserConfig so
+// reads stay symmetric with writes (saveUserConfig writes only to store
+// once one is wired). Returns an empty Config if nothing exists in either
+// place — callers downstream apply env overlay + ApplyDefaults.
+func loadConfigStoreFirst(userID string, st store.Store) (*config.Config, error) {
+	if st != nil {
+		if gc, gerr := st.GetConfig(context.Background()); gerr == nil && gc != nil && len(gc.Data) > 0 {
+			blob, merr := json.Marshal(gc.Data)
+			if merr == nil {
+				var stored config.Config
+				if uerr := json.Unmarshal(blob, &stored); uerr == nil {
+					return &stored, nil
+				}
+			}
+		}
+	}
+	cfg, err := config.LoadForUser(userID)
+	if err == nil {
+		return cfg, nil
+	}
+	if os.IsNotExist(err) || strings.Contains(err.Error(), "no such file") {
+		return &config.Config{}, nil
+	}
+	return nil, err
+}
+
 // UserSpace holds the per-user state that can be multiplexed inside one
 // gateway process. Channels, cron, webhook and plugins remain global (bound
 // to the local admin user); the HTTP API multiplexes across user spaces.
@@ -126,15 +154,9 @@ type UserSpace struct {
 // The shared message bus is reused so that cross-user plumbing (typing
 // indicators, outbound routing) stays in one place.
 func loadUserSpace(userID string, mb *bus.MessageBus, st store.Store, ws workspace.Store) (*UserSpace, error) {
-	cfg, err := config.LoadForUser(userID)
+	cfg, err := loadConfigStoreFirst(userID, st)
 	if err != nil {
-		// Cloud/K8s mode: pod-local fastclaw.json may not exist. Fall back
-		// to an empty config; env overlay below still populates infra.
-		if os.IsNotExist(err) || strings.Contains(err.Error(), "no such file") {
-			cfg = &config.Config{}
-		} else {
-			return nil, fmt.Errorf("load config for user %q: %w", userID, err)
-		}
+		return nil, fmt.Errorf("load config for user %q: %w", userID, err)
 	}
 	// ALWAYS apply env overlay so infra fields (storage DSN, object store
 	// credentials, sandbox backend / API key, ...) take effect even when a
@@ -143,6 +165,15 @@ func loadUserSpace(userID string, mb *bus.MessageBus, st store.Store, ws workspa
 	// branch, which made FASTCLAW_SANDBOX_BACKEND / E2B_API_KEY silently
 	// no-op for admin users that had any on-disk config.
 	config.LoadEnv().ApplyToConfig(cfg)
+
+	// Per-user spaces (apikey-bound) have their own configs partition that
+	// is usually empty — we land here with a zero-value Config and a 0 in
+	// every defaults field. Without this call the resolved agent ends up
+	// with MaxToolIterations=0 and the very first chat turn aborts with
+	// "max tool iterations reached max=0". gateway.New() already does this
+	// for the bootstrap cfg; we mirror it for every user space load so the
+	// behavior matches between admin and apikey callers.
+	config.ApplyDefaults(cfg)
 
 	prov := newProviderFromConfig(cfg)
 

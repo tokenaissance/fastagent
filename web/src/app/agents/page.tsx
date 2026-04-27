@@ -40,8 +40,16 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Bot, Plus, Pencil, Trash2, FolderOpen } from "lucide-react";
-import { getAgents, createAgent, updateAgent, deleteAgent, type AgentDetail } from "@/lib/api";
+import { Bot, Plus, Pencil, Trash2 } from "lucide-react";
+import {
+  getAgents,
+  createAgent,
+  updateAgent,
+  deleteAgent,
+  listAgentBindings,
+  type AgentDetail,
+  type AgentBindings,
+} from "@/lib/api";
 
 const models = [
   "gpt-4o",
@@ -57,6 +65,7 @@ const models = [
 
 export default function AgentsPage() {
   const [agents, setAgents] = useState<AgentDetail[]>([]);
+  const [bindings, setBindings] = useState<AgentBindings>({});
   const [loading, setLoading] = useState(true);
   const [editAgent, setEditAgent] = useState<AgentDetail | null>(null);
   const [editOpen, setEditOpen] = useState(false);
@@ -72,9 +81,14 @@ export default function AgentsPage() {
 
   const fetchAgents = () => {
     setLoading(true);
-    getAgents()
-      .then(setAgents)
-      .catch(() => setAgents([]))
+    Promise.all([
+      getAgents().catch(() => [] as AgentDetail[]),
+      listAgentBindings().catch(() => ({} as AgentBindings)),
+    ])
+      .then(([a, b]) => {
+        setAgents(a);
+        setBindings(b);
+      })
       .finally(() => setLoading(false));
   };
 
@@ -163,7 +177,7 @@ export default function AgentsPage() {
               <TableRow className="hover:bg-transparent">
                 <TableHead>Name</TableHead>
                 <TableHead>Model</TableHead>
-                <TableHead>Workspace</TableHead>
+                <TableHead>Bound API Key</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead className="text-right">Actions</TableHead>
               </TableRow>
@@ -191,12 +205,13 @@ export default function AgentsPage() {
                     </code>
                   </TableCell>
                   <TableCell>
-                    <div className="flex items-center gap-1.5 text-muted-foreground">
-                      <FolderOpen className="h-3.5 w-3.5" />
-                      <span className="text-xs font-mono truncate max-w-48">
-                        {agent.workspace}
-                      </span>
-                    </div>
+                    {bindings[agent.id] ? (
+                      <code className="bg-muted px-2 py-0.5 rounded font-mono text-xs">
+                        {bindings[agent.id]}
+                      </code>
+                    ) : (
+                      <span className="text-xs text-muted-foreground italic">admin-only</span>
+                    )}
                   </TableCell>
                   <TableCell>
                     <Badge

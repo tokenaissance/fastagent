@@ -236,6 +236,14 @@ func New(cfg *config.Config) (*Gateway, error) {
 	// "max tool iterations reached max=0".
 	config.ApplyDefaults(cfg)
 
+	// Wire layer-3 agent config (per-agent overrides — model, providers,
+	// skills, tools, MCP) to read from the store first and only fall back
+	// to FS for legacy installs whose DB row is empty. Without this, agents
+	// table on a fresh SaaS pod has no per-agent config visible to the
+	// runtime even when admins edited it through the API. Set lazily so
+	// other packages that already imported config see the upgraded loader.
+	config.AgentFileConfigLoader = makeStoreFirstAgentFileLoader(st)
+
 	// Workspace blob store (local FS or S3). Distinct from the Store above:
 	// that one holds small structured state (sessions, identity md files);
 	// this one holds arbitrary artifacts (generated PDFs/images/audio).
@@ -712,4 +720,38 @@ func (g *Gateway) Run() error {
 
 	slog.Info("gateway stopped")
 	return nil
+}
+
+// makeStoreFirstAgentFileLoader returns a loader that reads per-agent
+// config from `agents.config` (DB-backed source of truth) and falls back
+// to `<home>/agent.json` only if the store has nothing for that agent.
+// The bool return is "true if any layer produced a parseable config" —
+// false leaves the resolved struct on layer-2 defaults.
+func makeStoreFirstAgentFileLoader(st store.Store) func(string, string) (config.AgentFileConfig, bool) {
+	return func(agentID, home string) (config.AgentFileConfig, bool) {
+		if st != nil && agentID != "" {
+			if rec, err := st.GetAgent(context.Background(), agentID); err == nil && rec != nil && len(rec.Config) > 0 {
+				blob, merr := json.Marshal(rec.Config)
+				if merr == nil {
+					var cfg config.AgentFileConfig
+					if uerr := json.Unmarshal(blob, &cfg); uerr == nil {
+						return cfg, true
+					}
+				}
+			}
+		}
+		// Fall back to FS for legacy installs / single-pod local dev.
+		if home == "" {
+			return config.AgentFileConfig{}, false
+		}
+		data, err := os.ReadFile(filepath.Join(home, "agent.json"))
+		if err != nil {
+			return config.AgentFileConfig{}, false
+		}
+		var cfg config.AgentFileConfig
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			return config.AgentFileConfig{}, false
+		}
+		return cfg, true
+	}
 }

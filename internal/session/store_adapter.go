@@ -27,11 +27,13 @@ func (a *StoreAdapter) GetSession(ctx context.Context, agentID, sessionKey strin
 	msgs := make([]provider.Message, len(rec.Messages))
 	for i, m := range rec.Messages {
 		msgs[i] = provider.Message{
-			Role:       m.Role,
-			Content:    m.Content,
-			ToolCallID: m.ToolCallID,
-			Name:       m.Name,
-			Metadata:   m.Metadata,
+			Role:         m.Role,
+			Content:      m.Content,
+			ToolCallID:   m.ToolCallID,
+			Name:         m.Name,
+			Metadata:     m.Metadata,
+			Thinking:     m.Thinking,
+			RawAssistant: m.RawAssistant,
 		}
 		// ToolCalls is stored as interface{} so JSON round-trip leaves it as
 		// []interface{} of map[string]interface{}. Re-marshal + unmarshal to
@@ -57,12 +59,14 @@ func (a *StoreAdapter) SaveSession(ctx context.Context, agentID, sessionKey stri
 	}
 	for i, m := range messages {
 		rec.Messages[i] = store.SessionMessage{
-			Role:       m.Role,
-			Content:    m.Content,
-			ToolCallID: m.ToolCallID,
-			Name:       m.Name,
-			Metadata:   m.Metadata,
-			Timestamp:  time.Now(),
+			Role:         m.Role,
+			Content:      m.Content,
+			ToolCallID:   m.ToolCallID,
+			Name:         m.Name,
+			Metadata:     m.Metadata,
+			Timestamp:    time.Now(),
+			Thinking:     m.Thinking,
+			RawAssistant: m.RawAssistant,
 		}
 		if len(m.ToolCalls) > 0 {
 			rec.Messages[i].ToolCalls = m.ToolCalls

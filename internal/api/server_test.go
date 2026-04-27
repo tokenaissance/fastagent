@@ -2,13 +2,13 @@ package api
 
 import (
 	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/fastclaw-ai/fastclaw/internal/agent"
 	"github.com/fastclaw-ai/fastclaw/internal/config"
+	"github.com/fastclaw-ai/fastclaw/internal/store"
 	"github.com/fastclaw-ai/fastclaw/internal/users"
 )
 
@@ -101,7 +101,7 @@ func TestAuthMiddleware_LocalToken(t *testing.T) {
 
 func TestAuthMiddleware_CloudRegistry(t *testing.T) {
 	tmp := t.TempDir()
-	reg, err := users.LoadFrom(fmt.Sprintf("%s/users.json", tmp))
+	reg, err := users.Load(store.NewFileStore(tmp))
 	if err != nil {
 		t.Fatal(err)
 	}

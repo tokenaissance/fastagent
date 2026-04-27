@@ -16,11 +16,10 @@ import { NavUser } from "@/components/nav-user";
 import {
   BotIcon,
   BrainIcon,
+  KeyRoundIcon,
   LayoutDashboardIcon,
   PlusIcon,
   SparklesIcon,
-  UsersIcon,
-  Wand2Icon,
 } from "lucide-react";
 import {
   getAgents,
@@ -44,13 +43,11 @@ const PLATFORM_NAV: NavItem[] = [
   { title: "Agents", url: "/agents/", icon: BotIcon },
   { title: "Models", url: "/models/", icon: BrainIcon },
   { title: "Skills", url: "/skills/", icon: SparklesIcon },
-  { title: "Users", url: "/users/", icon: UsersIcon },
+  { title: "API Keys", url: "/apikeys/", icon: KeyRoundIcon },
 ];
 
 const AGENT_NAV = (agentId: string): NavItem[] => [
   { title: "New chat", url: `/agents/${agentId}/chat/`, icon: PlusIcon },
-  { title: "Customize", url: `/agents/${agentId}/customize/`, icon: Wand2Icon },
-  { title: "Model", url: `/agents/${agentId}/models/`, icon: BrainIcon },
 ];
 
 export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {

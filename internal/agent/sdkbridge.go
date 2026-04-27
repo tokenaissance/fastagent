@@ -156,9 +156,30 @@ func (e *sdkEngine) executeToolsConcurrently(ctx context.Context, fcRegistry *to
 	responses := executor.RunTools(ctx, calls)
 	e.costTracker.AddToolDuration(time.Since(start))
 
-	// Convert SDK responses back to FastClaw format
-	results := make([]toolCallResult, len(responses))
-	for i, resp := range responses {
+	// Anthropic (and OpenAI) require a tool_result for every tool_use the
+	// model just emitted — orphaned tool_use IDs make the next API call
+	// return 400 invalid_request_error. The SDK can short-circuit and
+	// return fewer responses than requested (context cancel, executor
+	// poisoned by a sandbox-creation failure, etc.), so build the result
+	// slice keyed on toolCalls and look up by ToolUseID instead of zipping
+	// position-by-position. Missing entries become explicit failure
+	// tool_results so the conversation history stays well-formed.
+	byID := make(map[string]sdktools.ToolCallResponse, len(responses))
+	for _, resp := range responses {
+		byID[resp.ToolUseID] = resp
+	}
+	results := make([]toolCallResult, len(toolCalls))
+	for i, tc := range toolCalls {
+		resp, ok := byID[tc.ID]
+		if !ok {
+			results[i] = toolCallResult{
+				toolCallID: tc.ID,
+				toolName:   tc.Function.Name,
+				result:     "tool execution did not return a result (sandbox or executor failure — check gateway logs)",
+				err:        fmt.Errorf("no response from executor for tool_use %s", tc.ID),
+			}
+			continue
+		}
 		var resultText string
 		if resp.Result != nil {
 			if resp.Result.IsError {

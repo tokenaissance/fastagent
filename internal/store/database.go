@@ -174,6 +174,21 @@ func (d *DBStore) migrationSQL() []string {
 			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_cron_jobs_schedule ON cron_jobs (user_id, enabled, next_run)`,
+		`CREATE TABLE IF NOT EXISTS apikeys (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL DEFAULT '',
+			key_hash TEXT NOT NULL,
+			key_prefix TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
+		// key_hash is the auth hot-path lookup column; without an index every
+		// authenticated request would force a full table scan.
+		`CREATE INDEX IF NOT EXISTS idx_apikeys_key_hash ON apikeys (key_hash)`,
+		`CREATE TABLE IF NOT EXISTS agent_bindings (
+			agent_id TEXT PRIMARY KEY,
+			owner_key_id TEXT NOT NULL,
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
 	}
 }
 
@@ -432,6 +447,13 @@ func (d *DBStore) SaveWorkspaceFile(ctx context.Context, agentID, filename strin
 	return err
 }
 
+func (d *DBStore) DeleteWorkspaceFile(ctx context.Context, agentID, filename string) error {
+	_, err := d.db.ExecContext(ctx,
+		fmt.Sprintf("DELETE FROM workspace_files WHERE user_id = %s AND agent_id = %s AND filename = %s", d.ph(1), d.ph(2), d.ph(3)),
+		userIDFromCtx(ctx), agentID, filename)
+	return err
+}
+
 func (d *DBStore) ListWorkspaceFiles(ctx context.Context, agentID string) ([]string, error) {
 	rows, err := d.db.QueryContext(ctx,
 		fmt.Sprintf("SELECT filename FROM workspace_files WHERE user_id = %s AND agent_id = %s ORDER BY filename", d.ph(1), d.ph(2)),
@@ -579,6 +601,137 @@ func (d *DBStore) scanCronJobs(rows *sql.Rows) ([]CronJobRecord, error) {
 		jobs = append(jobs, j)
 	}
 	return jobs, nil
+}
+
+// --- API keys ---
+
+func (d *DBStore) ListAPIKeys(ctx context.Context) ([]APIKeyRecord, error) {
+	rows, err := d.db.QueryContext(ctx,
+		"SELECT id, name, key_hash, key_prefix, created_at FROM apikeys ORDER BY created_at")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []APIKeyRecord
+	for rows.Next() {
+		var ak APIKeyRecord
+		if err := rows.Scan(&ak.ID, &ak.Name, &ak.KeyHash, &ak.KeyPrefix, &ak.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, ak)
+	}
+	return out, rows.Err()
+}
+
+func (d *DBStore) GetAPIKey(ctx context.Context, id string) (*APIKeyRecord, error) {
+	row := d.db.QueryRowContext(ctx,
+		fmt.Sprintf("SELECT id, name, key_hash, key_prefix, created_at FROM apikeys WHERE id = %s", d.ph(1)),
+		id)
+	var ak APIKeyRecord
+	if err := row.Scan(&ak.ID, &ak.Name, &ak.KeyHash, &ak.KeyPrefix, &ak.CreatedAt); err != nil {
+		return nil, err
+	}
+	return &ak, nil
+}
+
+func (d *DBStore) CreateAPIKey(ctx context.Context, ak *APIKeyRecord) error {
+	if ak.CreatedAt.IsZero() {
+		ak.CreatedAt = time.Now().UTC()
+	}
+	_, err := d.db.ExecContext(ctx,
+		fmt.Sprintf("INSERT INTO apikeys (id, name, key_hash, key_prefix, created_at) VALUES (%s, %s, %s, %s, %s)",
+			d.ph(1), d.ph(2), d.ph(3), d.ph(4), d.ph(5)),
+		ak.ID, ak.Name, ak.KeyHash, ak.KeyPrefix, ak.CreatedAt)
+	return err
+}
+
+func (d *DBStore) DeleteAPIKey(ctx context.Context, id string) error {
+	// Delete bindings first so we don't leave orphans pointing at a missing
+	// owner. Done in a single transaction so a partial failure doesn't end up
+	// in a half-deleted state where the key is gone but its agents are still
+	// "bound" to a non-existent owner.
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx,
+		fmt.Sprintf("DELETE FROM agent_bindings WHERE owner_key_id = %s", d.ph(1)),
+		id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
+		fmt.Sprintf("DELETE FROM apikeys WHERE id = %s", d.ph(1)),
+		id); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (d *DBStore) RotateAPIKey(ctx context.Context, id, keyHash, keyPrefix string) error {
+	_, err := d.db.ExecContext(ctx,
+		fmt.Sprintf("UPDATE apikeys SET key_hash = %s, key_prefix = %s WHERE id = %s",
+			d.ph(1), d.ph(2), d.ph(3)),
+		keyHash, keyPrefix, id)
+	return err
+}
+
+func (d *DBStore) LookupAPIKeyByHash(ctx context.Context, keyHash string) (string, bool, error) {
+	row := d.db.QueryRowContext(ctx,
+		fmt.Sprintf("SELECT id FROM apikeys WHERE key_hash = %s", d.ph(1)),
+		keyHash)
+	var id string
+	if err := row.Scan(&id); err != nil {
+		if err == sql.ErrNoRows {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	return id, true, nil
+}
+
+// --- Agent bindings ---
+
+func (d *DBStore) ListAgentBindings(ctx context.Context) (map[string]string, error) {
+	rows, err := d.db.QueryContext(ctx, "SELECT agent_id, owner_key_id FROM agent_bindings")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]string)
+	for rows.Next() {
+		var agentID, ownerID string
+		if err := rows.Scan(&agentID, &ownerID); err != nil {
+			return nil, err
+		}
+		out[agentID] = ownerID
+	}
+	return out, rows.Err()
+}
+
+func (d *DBStore) SetAgentBinding(ctx context.Context, agentID, ownerKeyID string) error {
+	now := time.Now().UTC()
+	if d.dialect == "postgres" {
+		_, err := d.db.ExecContext(ctx,
+			`INSERT INTO agent_bindings (agent_id, owner_key_id, created_at)
+			 VALUES ($1, $2, $3)
+			 ON CONFLICT (agent_id) DO UPDATE SET owner_key_id = $2`,
+			agentID, ownerKeyID, now)
+		return err
+	}
+	// SQLite: ON CONFLICT (col) DO UPDATE works in 3.24+, but use the
+	// portable INSERT OR REPLACE for older builds.
+	_, err := d.db.ExecContext(ctx,
+		`INSERT OR REPLACE INTO agent_bindings (agent_id, owner_key_id, created_at) VALUES (?, ?, ?)`,
+		agentID, ownerKeyID, now)
+	return err
+}
+
+func (d *DBStore) DeleteAgentBinding(ctx context.Context, agentID string) error {
+	_, err := d.db.ExecContext(ctx,
+		fmt.Sprintf("DELETE FROM agent_bindings WHERE agent_id = %s", d.ph(1)),
+		agentID)
+	return err
 }
 
 // Ensure DBStore implements Store.

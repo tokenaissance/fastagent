@@ -1,25 +1,34 @@
 // Package users manages API keys for accessing FastClaw agents via the HTTP API.
 //
-// API keys are stored in ~/.fastclaw/apikeys.json. Each key grants access to
-// the agent API (chat, sessions, config). The gateway auth token (in fastclaw.json)
-// is the admin key — it can manage other API keys.
+// API keys are persisted through the configured `store.Store` (DB-backed in
+// SaaS, file-backed locally — same JSON format on disk so a sqlite-only dev
+// box can move to Postgres without losing keys, modulo a one-shot migration).
+// Each key grants access to the agent API (chat, sessions, config). The
+// gateway auth token (in fastclaw.json) is the admin key — it can manage
+// other API keys.
+//
+// Tokens are stored as SHA256 hashes; the plaintext is shown to the caller
+// exactly once at create/rotate. KeyPrefix (first ~10 chars of the original
+// token) is kept alongside the hash purely for UI display so list views can
+// show "fc_a1b2c3..." instead of an opaque hash.
 package users
 
 import (
+	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
-	"fmt"
-	"os"
-	"path/filepath"
 	"sync"
 	"time"
 
-	"github.com/fastclaw-ai/fastclaw/internal/config"
+	"github.com/fastclaw-ai/fastclaw/internal/store"
 )
 
-// APIKey is one entry in the registry.
+// APIKey is the public representation handed back by Registry methods. The
+// `Key` field is the masked display string ("fc_xxxx****") for list calls,
+// and the freshly-issued plaintext token for the dedicated create/rotate
+// return paths — never both.
 type APIKey struct {
 	ID        string    `json:"id"`
 	Name      string    `json:"name,omitempty"`
@@ -30,182 +39,150 @@ type APIKey struct {
 // User is kept as an alias for backward compatibility with API responses.
 type User = APIKey
 
-// Registry is an in-memory, file-backed API key store.
+// Registry is a thin facade over store.Store. It exists so callers that
+// previously held a *Registry don't need rewiring; the storage backend is
+// now pluggable and durable across pod restarts.
 type Registry struct {
-	path  string
-	mu    sync.RWMutex
-	keys  map[string]*APIKey // id -> APIKey
-	byKey map[string]string  // key -> id
+	store store.Store
+	mu    sync.Mutex
 }
 
-// DefaultPath returns ~/.fastclaw/apikeys.json.
-func DefaultPath() (string, error) {
-	home, err := config.HomeDir()
-	if err != nil {
-		return "", err
+// Load returns a Registry backed by the given store. The store must already
+// be initialized (Migrate called for DB stores). nil store is rejected —
+// callers should pass an explicit FileStore for the local-file behavior.
+func Load(st store.Store) (*Registry, error) {
+	if st == nil {
+		return nil, errors.New("users.Load: store is required")
 	}
-	return filepath.Join(home, "apikeys.json"), nil
+	return &Registry{store: st}, nil
 }
 
-func Load() (*Registry, error) {
-	path, err := DefaultPath()
-	if err != nil {
-		return nil, err
-	}
-	return LoadFrom(path)
+// hashToken returns the canonical lookup key for a plaintext token.
+func hashToken(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
 }
 
-func LoadFrom(path string) (*Registry, error) {
-	r := &Registry{
-		path:  path,
-		keys:  make(map[string]*APIKey),
-		byKey: make(map[string]string),
+// keyPrefix returns the public-display slice of a freshly-generated token.
+// We keep ~10 chars so the user can recognise "their" key in a list, while
+// staying safely below the entropy a brute-force search would need.
+func keyPrefix(token string) string {
+	if len(token) <= 10 {
+		return token
 	}
-
-	// Try new format first (apikeys.json)
-	data, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		// Try legacy users.json
-		legacyPath := filepath.Join(filepath.Dir(path), "users.json")
-		data, err = os.ReadFile(legacyPath)
-		if errors.Is(err, os.ErrNotExist) {
-			return r, nil
-		}
-	}
-	if err != nil {
-		return nil, fmt.Errorf("read apikeys: %w", err)
-	}
-
-	var list []*APIKey
-	if err := json.Unmarshal(data, &list); err != nil {
-		// Try legacy format (tokens field)
-		var legacy []struct {
-			ID     string   `json:"id"`
-			Name   string   `json:"name"`
-			Tokens []string `json:"tokens"`
-		}
-		if json.Unmarshal(data, &legacy) == nil {
-			for _, u := range legacy {
-				for _, t := range u.Tokens {
-					ak := &APIKey{ID: u.ID, Name: u.Name, Key: t, CreatedAt: time.Now()}
-					r.keys[ak.ID+"-"+t[:8]] = ak
-					r.byKey[t] = ak.ID
-				}
-			}
-			return r, nil
-		}
-		return nil, fmt.Errorf("parse apikeys: %w", err)
-	}
-
-	for _, ak := range list {
-		r.keys[ak.ID] = ak
-		r.byKey[ak.Key] = ak.ID
-	}
-	return r, nil
+	return token[:10]
 }
 
-func (r *Registry) Save() error {
-	r.mu.RLock()
-	list := make([]*APIKey, 0, len(r.keys))
-	for _, ak := range r.keys {
-		list = append(list, ak)
+func toAPIKey(rec *store.APIKeyRecord) *APIKey {
+	if rec == nil {
+		return nil
 	}
-	r.mu.RUnlock()
-
-	data, _ := json.MarshalIndent(list, "", "  ")
-	os.MkdirAll(filepath.Dir(r.path), 0o700)
-	return os.WriteFile(r.path, data, 0o600)
+	masked := rec.KeyPrefix
+	if masked == "" {
+		masked = "fc_********"
+	} else {
+		masked = masked + "****"
+	}
+	return &APIKey{
+		ID:        rec.ID,
+		Name:      rec.Name,
+		Key:       masked,
+		CreatedAt: rec.CreatedAt,
+	}
 }
 
-// Add creates a new API key and returns it.
+// Add creates a new API key with the given id and name. Returns the public
+// record (with masked key for display) and the freshly-issued plaintext
+// token, which the caller MUST capture — it is never recoverable later.
 func (r *Registry) Add(id, name string) (*APIKey, string, error) {
 	if id == "" {
 		return nil, "", errors.New("id is required")
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if _, exists := r.keys[id]; exists {
-		return nil, "", fmt.Errorf("API key %q already exists", id)
+	token, err := newToken()
+	if err != nil {
+		return nil, "", err
 	}
-	key, _ := newToken()
-	ak := &APIKey{
+	rec := &store.APIKeyRecord{
 		ID:        id,
 		Name:      name,
-		Key:       key,
+		KeyHash:   hashToken(token),
+		KeyPrefix: keyPrefix(token),
 		CreatedAt: time.Now().UTC(),
 	}
-	r.keys[id] = ak
-	r.byKey[key] = id
-	return ak, key, nil
+	if err := r.store.CreateAPIKey(context.Background(), rec); err != nil {
+		return nil, "", err
+	}
+	return toAPIKey(rec), token, nil
 }
 
-// IssueToken creates a new key for an existing entry (replaces old key).
+// IssueToken rotates the token for an existing key id, returning the new
+// plaintext. Previously-issued tokens stop working immediately.
 func (r *Registry) IssueToken(id string) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	ak, ok := r.keys[id]
-	if !ok {
-		return "", fmt.Errorf("API key %q not found", id)
+	token, err := newToken()
+	if err != nil {
+		return "", err
 	}
-	// Remove old key mapping
-	delete(r.byKey, ak.Key)
-	// Generate new key
-	key, _ := newToken()
-	ak.Key = key
-	r.byKey[key] = id
-	return key, nil
+	if err := r.store.RotateAPIKey(context.Background(), id, hashToken(token), keyPrefix(token)); err != nil {
+		return "", err
+	}
+	return token, nil
 }
 
 func (r *Registry) Remove(id string) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	ak, ok := r.keys[id]
-	if !ok {
-		return fmt.Errorf("API key %q not found", id)
-	}
-	delete(r.byKey, ak.Key)
-	delete(r.keys, id)
-	return nil
+	return r.store.DeleteAPIKey(context.Background(), id)
 }
 
 func (r *Registry) List() []*APIKey {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	out := make([]*APIKey, 0, len(r.keys))
-	for _, ak := range r.keys {
-		cp := *ak
-		out = append(out, &cp)
+	recs, err := r.store.ListAPIKeys(context.Background())
+	if err != nil {
+		return nil
+	}
+	out := make([]*APIKey, 0, len(recs))
+	for i := range recs {
+		out = append(out, toAPIKey(&recs[i]))
 	}
 	return out
 }
 
 func (r *Registry) Get(id string) (*APIKey, bool) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	ak, ok := r.keys[id]
-	if !ok {
+	rec, err := r.store.GetAPIKey(context.Background(), id)
+	if err != nil || rec == nil {
 		return nil, false
 	}
-	cp := *ak
-	return &cp, true
+	return toAPIKey(rec), true
 }
 
-// LookupByToken returns the key ID associated with a bearer token.
+// LookupByToken is the auth hot path: SHA256(token) → key id, with `ok`
+// false when the token isn't recognised. Callers must NOT log the token —
+// it's the bearer credential itself.
 func (r *Registry) LookupByToken(token string) (string, bool) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	id, ok := r.byKey[token]
+	id, ok, err := r.store.LookupAPIKeyByHash(context.Background(), hashToken(token))
+	if err != nil {
+		return "", false
+	}
 	return id, ok
 }
 
 func (r *Registry) Count() int {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return len(r.keys)
+	recs, err := r.store.ListAPIKeys(context.Background())
+	if err != nil {
+		return 0
+	}
+	return len(recs)
 }
+
+// Save is a no-op kept for backward compatibility with the old file-backed
+// implementation. Mutations now persist immediately through the store.
+func (r *Registry) Save() error { return nil }
 
 func newToken() (string, error) {
 	var buf [32]byte
-	rand.Read(buf[:])
+	if _, err := rand.Read(buf[:]); err != nil {
+		return "", err
+	}
 	return "fc_" + hex.EncodeToString(buf[:]), nil
 }

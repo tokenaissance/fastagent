@@ -138,9 +138,10 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 	// MkdirAlls the parent. So neither mode needs us to pre-create dirs.
 	_ = s.writeIdentityFile(r.Context(), req.ID, "SOUL.md", nil) // empty; agent fills during BOOTSTRAP
 	_ = s.writeIdentityFile(r.Context(), req.ID, "BOOTSTRAP.md", []byte(defaultBootstrap))
-	agentCfg := config.AgentFileConfig{Model: req.Model}
-	agentData, _ := json.MarshalIndent(agentCfg, "", "  ")
-	_ = s.writeIdentityFile(r.Context(), req.ID, "agent.json", agentData)
+
+	// Per-agent overrides (model/skills/providers/...) live in the
+	// `agents.config` column, not workspace_files — see saveAgentFileConfig.
+	_ = s.saveAgentFileConfig(r.Context(), req.ID, &config.AgentFileConfig{Model: req.Model})
 
 	// Record the agent in the Store so other pods can discover it.
 	if s.dataStore != nil {
@@ -202,15 +203,13 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 		_ = s.writeIdentityFile(r.Context(), id, "SOUL.md", []byte(req.Soul))
 	}
 
-	// Model / skills / providers live in agent.json. Read-modify-write so
-	// updating one field doesn't clobber the others (prior implementation
-	// overwrote the whole file when only `model` changed, silently dropping
+	// Model / skills / providers live in `agents.config`. Read-modify-write
+	// so updating one field doesn't clobber the others (prior implementation
+	// overwrote the whole row when only `model` changed, silently dropping
 	// skills / tools / MCP config).
 	if req.Model != "" || req.Skills != nil || req.Providers != nil {
-		var agentCfg config.AgentFileConfig
-		if existing, rerr := s.readIdentityFile(r.Context(), id, "agent.json"); rerr == nil && len(existing) > 0 {
-			_ = json.Unmarshal(existing, &agentCfg) // tolerate malformed — start fresh
-		}
+		existing, _ := s.loadAgentFileConfig(r.Context(), id)
+		agentCfg := *existing // dereference, may be zero-value
 		if req.Model != "" {
 			agentCfg.Model = req.Model
 		}
@@ -223,8 +222,7 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 			// on the client side and PUT the full map.
 			agentCfg.Providers = *req.Providers
 		}
-		agentData, _ := json.MarshalIndent(agentCfg, "", "  ")
-		_ = s.writeIdentityFile(r.Context(), id, "agent.json", agentData)
+		_ = s.saveAgentFileConfig(r.Context(), id, &agentCfg)
 	}
 
 	if s.agentProvider != nil {
@@ -250,11 +248,8 @@ func (s *Server) handleGetAgentConfig(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusNotFound, map[string]any{"ok": false, "error": "agent not found"})
 		return
 	}
-	var agentCfg config.AgentFileConfig
-	if data, rerr := s.readIdentityFile(r.Context(), id, "agent.json"); rerr == nil && len(data) > 0 {
-		_ = json.Unmarshal(data, &agentCfg)
-	}
-	jsonResponse(w, http.StatusOK, agentCfg)
+	cfg, _ := s.loadAgentFileConfig(r.Context(), id)
+	jsonResponse(w, http.StatusOK, cfg)
 }
 
 // systemFileNames is the allowlist of agent metadata files that the admin UI
@@ -272,8 +267,18 @@ var systemFileNames = map[string]bool{
 }
 
 // handleGetAgentSystemFile reads one of the agent's identity/metadata files
-// (SOUL.md, IDENTITY.md, ...) from its home dir and returns {content: "..."}.
-// This is the read side of the admin UI's Files editor.
+// (SOUL.md, IDENTITY.md, ...) and reports its source. The runtime treats DB
+// rows as overrides on top of an FS base shipped with the agent definition,
+// so the UI needs to distinguish:
+//
+//   - source="db":      a non-empty DB override exists; baseContent (if any)
+//                       is the FS file the user could revert to.
+//   - source="fs":      no DB override; content comes from the FS base.
+//   - source="default": nothing on disk or in DB; tab is empty.
+//
+// Reading both sources independently here (instead of going through
+// readIdentityFile which already does fallback) is what lets the UI render
+// "Edited" / "From repo" badges and a meaningful Revert action.
 func (s *Server) handleGetAgentSystemFile(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	name := r.PathValue("name")
@@ -285,17 +290,40 @@ func (s *Server) handleGetAgentSystemFile(w http.ResponseWriter, r *http.Request
 		http.Error(w, "unknown system file", http.StatusBadRequest)
 		return
 	}
-	data, err := s.readIdentityFile(r.Context(), id, name)
-	if err != nil {
-		// Treat not-found as empty (frontend reads every tab on load).
-		if os.IsNotExist(err) || isStoreNotFound(err) {
-			jsonResponse(w, http.StatusOK, map[string]any{"content": ""})
+
+	var dbContent, fsContent string
+
+	if s.dataStore != nil {
+		if data, err := s.dataStore.GetWorkspaceFile(r.Context(), id, name); err == nil {
+			dbContent = string(data)
+		} else if !isStoreNotFound(err) {
+			http.Error(w, "read file", http.StatusInternalServerError)
 			return
 		}
-		http.Error(w, "read file", http.StatusInternalServerError)
-		return
 	}
-	jsonResponse(w, http.StatusOK, map[string]any{"content": string(data)})
+
+	if homePath, herr := config.AgentHomeDir(id); herr == nil {
+		if data, ferr := os.ReadFile(filepath.Join(homePath, name)); ferr == nil {
+			fsContent = string(data)
+		}
+	}
+
+	resp := map[string]any{}
+	switch {
+	case dbContent != "":
+		resp["content"] = dbContent
+		resp["source"] = "db"
+		if fsContent != "" {
+			resp["baseContent"] = fsContent
+		}
+	case fsContent != "":
+		resp["content"] = fsContent
+		resp["source"] = "fs"
+	default:
+		resp["content"] = ""
+		resp["source"] = "default"
+	}
+	jsonResponse(w, http.StatusOK, resp)
 }
 
 // handlePutAgentSystemFile writes content to one of the agent's metadata files.
@@ -325,6 +353,32 @@ func (s *Server) handlePutAgentSystemFile(w http.ResponseWriter, r *http.Request
 	if s.agentProvider != nil {
 		if err := s.agentProvider.ReloadAgents(); err != nil {
 			slog.Warn("failed to reload agents after system-file write", "id", id, "file", name, "error", err)
+		}
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// handleDeleteAgentSystemFile removes the DB override row for a system file,
+// reverting the agent to whatever FS base ships with its definition. If no
+// FS base exists, the tab simply becomes empty.
+func (s *Server) handleDeleteAgentSystemFile(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	name := r.PathValue("name")
+	if !s.canAccessAgent(callerFrom(r), id) {
+		forbid(w, id)
+		return
+	}
+	if !systemFileNames[name] {
+		http.Error(w, "unknown system file", http.StatusBadRequest)
+		return
+	}
+	if err := s.deleteIdentityFile(r.Context(), id, name); err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	if s.agentProvider != nil {
+		if err := s.agentProvider.ReloadAgents(); err != nil {
+			slog.Warn("failed to reload agents after system-file revert", "id", id, "file", name, "error", err)
 		}
 	}
 	jsonResponse(w, http.StatusOK, map[string]any{"ok": true})

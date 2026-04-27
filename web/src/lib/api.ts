@@ -256,13 +256,14 @@ export interface ToolResultMetadata {
 }
 
 export interface ChatStreamEvent {
-  type: "content" | "tool_call" | "tool_result" | "done";
+  type: "content" | "tool_call" | "tool_result" | "error" | "done";
   data?: {
     content?: string;
     id?: string;
     name?: string;
     arguments?: string;
     result?: string;
+    message?: string;
     metadata?: ToolResultMetadata;
   };
 }
@@ -551,37 +552,79 @@ export async function deleteCronJob(id: string) {
   return res.json();
 }
 
-// --- Admin API ---
+// --- Admin API: API keys ---
 
-export interface AdminUser {
+// APIKey is one entry returned by GET /v1/admin/apikeys. The `key` field is
+// masked by the server for everyone except the create/rotate response, which
+// returns the freshly-issued plaintext key under a separate `key` field.
+export interface APIKey {
   id: string;
   name: string;
-  tokens: string[];
+  key: string; // masked for list responses (e.g. "fc_abcd****wxyz")
   createdAt: string;
 }
 
-export async function adminListUsers(): Promise<AdminUser[]> {
-  const res = await apiFetch("/v1/admin/users");
-  if (!res.ok) return [];
-  const data = await res.json();
-  return data.users || [];
+// Helper: pull a server-supplied {error} message out of a non-OK response so
+// callers can surface the real reason (auth failure, duplicate id, etc.)
+// instead of crashing on `.apikey` being undefined.
+async function readError(res: Response, fallback: string): Promise<string> {
+  try {
+    const body = await res.json();
+    if (body && typeof body.error === "string") return body.error;
+  } catch {}
+  return `${fallback} (HTTP ${res.status})`;
 }
 
-export async function adminCreateUser(id: string, name: string): Promise<{ user: AdminUser; token: string }> {
-  const res = await apiFetch("/v1/admin/users", {
+export async function listAPIKeys(): Promise<APIKey[]> {
+  const res = await apiFetch("/v1/admin/apikeys");
+  if (!res.ok) return [];
+  const data = await res.json();
+  return data.apikeys || [];
+}
+
+export async function createAPIKey(id: string, name: string): Promise<{ apikey: APIKey; key: string }> {
+  const res = await apiFetch("/v1/admin/apikeys", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ id, name }),
   });
-  return res.json();
-}
-
-export async function adminDeleteUser(id: string): Promise<void> {
-  await apiFetch(`/v1/admin/users/${id}`, { method: "DELETE" });
-}
-
-export async function adminIssueToken(id: string): Promise<string> {
-  const res = await apiFetch(`/v1/admin/users/${id}/token`, { method: "POST" });
+  if (!res.ok) throw new Error(await readError(res, "create API key failed"));
   const data = await res.json();
-  return data.token;
+  if (!data.apikey || !data.key) throw new Error("malformed response from server");
+  return data;
+}
+
+export async function deleteAPIKey(id: string): Promise<void> {
+  const res = await apiFetch(`/v1/admin/apikeys/${id}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(await readError(res, "delete API key failed"));
+}
+
+export async function rotateAPIKey(id: string): Promise<string> {
+  const res = await apiFetch(`/v1/admin/apikeys/${id}/rotate`, { method: "POST" });
+  if (!res.ok) throw new Error(await readError(res, "rotate API key failed"));
+  const data = await res.json();
+  if (!data.key) throw new Error("malformed response from server");
+  return data.key;
+}
+
+// --- Admin API: agent ↔ apikey bindings ---
+
+// Map of agent id → apikey id. Empty value means agent is admin-only.
+export type AgentBindings = Record<string, string>;
+
+export async function listAgentBindings(): Promise<AgentBindings> {
+  const res = await apiFetch("/api/agent-bindings");
+  if (!res.ok) return {};
+  const data = await res.json();
+  return data.bindings || {};
+}
+
+// Pass apiKeyId="" to unbind (agent returns to admin-only access).
+export async function bindAgent(agentId: string, apiKeyId: string): Promise<{ ok: boolean; error?: string }> {
+  const res = await apiFetch(`/api/agents/${agentId}/binding`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ apiKeyId }),
+  });
+  return res.json();
 }

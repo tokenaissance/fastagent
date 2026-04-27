@@ -45,10 +45,15 @@ func (d *DockerExecutor) ReadFile(ctx context.Context, path string) (string, err
 }
 
 func (d *DockerExecutor) WriteFile(ctx context.Context, path, content string) (string, error) {
-	// Create parent dirs, then write via heredoc.
-	cmd := fmt.Sprintf("mkdir -p \"$(dirname %s)\" && cat > %s << 'FASTCLAW_EOF'\n%s\nFASTCLAW_EOF",
-		shellQuote(path), shellQuote(path), content)
-	out, err := d.sb.Exec(ctx, cmd, "/workspace")
+	// Pipe content via stdin instead of argv. Heredoc-in-argv (the previous
+	// implementation) sliced bytes into the docker-exec command line, which
+	// fails with "fork/exec: invalid argument" the moment content contains
+	// a NULL byte — every PNG, audio file, or other binary blob hits this
+	// because execve rejects NULs inside argv elements. stdin sidesteps the
+	// argv limit entirely.
+	cmd := fmt.Sprintf("mkdir -p \"$(dirname %s)\" && cat > %s",
+		shellQuote(path), shellQuote(path))
+	out, err := d.sb.ExecWithStdin(ctx, cmd, "/workspace", strings.NewReader(content))
 	if err != nil {
 		return out, err
 	}

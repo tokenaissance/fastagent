@@ -289,6 +289,7 @@ func (s *Server) Run(ctx context.Context) error {
 	// Used by the admin UI Files editor; names are allowlisted.
 	mux.HandleFunc("GET /api/agents/{id}/system-files/{name}", ua(s.handleGetAgentSystemFile))
 	mux.HandleFunc("PUT /api/agents/{id}/system-files/{name}", ua(s.handlePutAgentSystemFile))
+	mux.HandleFunc("DELETE /api/agents/{id}/system-files/{name}", ua(s.handleDeleteAgentSystemFile))
 
 	// Skills (global, not per-user)
 	mux.HandleFunc("GET /api/skills", s.handleListSkills)

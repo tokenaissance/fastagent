@@ -215,6 +215,14 @@ func (f *FileStore) SaveWorkspaceFile(ctx context.Context, agentID, filename str
 	return os.WriteFile(path, data, 0o644)
 }
 
+func (f *FileStore) DeleteWorkspaceFile(ctx context.Context, agentID, filename string) error {
+	err := os.Remove(filepath.Join(f.agentDir(agentID), filename))
+	if err != nil && os.IsNotExist(err) {
+		return nil
+	}
+	return err
+}
+
 func (f *FileStore) ListWorkspaceFiles(ctx context.Context, agentID string) ([]string, error) {
 	entries, err := os.ReadDir(f.agentDir(agentID))
 	if err != nil {
@@ -322,6 +330,189 @@ func (f *FileStore) UpdateCronJobRun(ctx context.Context, jobID string, lastRun,
 		}
 	}
 	return fmt.Errorf("cron job not found: %s", jobID)
+}
+
+// --- API keys ---
+//
+// FileStore keeps API keys in ~/.fastclaw/apikeys.json. The file format
+// matches the on-disk shape used before the Store layer existed, so a
+// running install can switch between FileStore and DBStore without losing
+// keys (modulo a one-shot migration on the DB side).
+
+func (f *FileStore) apikeysPath() string {
+	return filepath.Join(f.rootDir, "apikeys.json")
+}
+
+func (f *FileStore) loadAPIKeys() ([]APIKeyRecord, error) {
+	data, err := os.ReadFile(f.apikeysPath())
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var list []APIKeyRecord
+	if err := json.Unmarshal(data, &list); err != nil {
+		return nil, fmt.Errorf("parse apikeys: %w", err)
+	}
+	return list, nil
+}
+
+func (f *FileStore) saveAPIKeys(list []APIKeyRecord) error {
+	if err := os.MkdirAll(f.rootDir, 0o700); err != nil {
+		return err
+	}
+	data, _ := json.MarshalIndent(list, "", "  ")
+	return os.WriteFile(f.apikeysPath(), data, 0o600)
+}
+
+func (f *FileStore) ListAPIKeys(ctx context.Context) ([]APIKeyRecord, error) {
+	return f.loadAPIKeys()
+}
+
+func (f *FileStore) GetAPIKey(ctx context.Context, id string) (*APIKeyRecord, error) {
+	list, err := f.loadAPIKeys()
+	if err != nil {
+		return nil, err
+	}
+	for i := range list {
+		if list[i].ID == id {
+			return &list[i], nil
+		}
+	}
+	return nil, os.ErrNotExist
+}
+
+func (f *FileStore) CreateAPIKey(ctx context.Context, ak *APIKeyRecord) error {
+	list, err := f.loadAPIKeys()
+	if err != nil {
+		return err
+	}
+	for _, existing := range list {
+		if existing.ID == ak.ID {
+			return fmt.Errorf("API key %q already exists", ak.ID)
+		}
+	}
+	if ak.CreatedAt.IsZero() {
+		ak.CreatedAt = time.Now().UTC()
+	}
+	list = append(list, *ak)
+	return f.saveAPIKeys(list)
+}
+
+func (f *FileStore) DeleteAPIKey(ctx context.Context, id string) error {
+	list, err := f.loadAPIKeys()
+	if err != nil {
+		return err
+	}
+	out := make([]APIKeyRecord, 0, len(list))
+	for _, ak := range list {
+		if ak.ID != id {
+			out = append(out, ak)
+		}
+	}
+	if err := f.saveAPIKeys(out); err != nil {
+		return err
+	}
+	// Also drop any bindings owned by this key — same anti-orphan rule
+	// DBStore enforces in its DELETE transaction.
+	bindings, err := f.loadBindings()
+	if err != nil {
+		return err
+	}
+	dirty := false
+	for agentID, owner := range bindings {
+		if owner == id {
+			delete(bindings, agentID)
+			dirty = true
+		}
+	}
+	if dirty {
+		return f.saveBindings(bindings)
+	}
+	return nil
+}
+
+func (f *FileStore) RotateAPIKey(ctx context.Context, id, keyHash, keyPrefix string) error {
+	list, err := f.loadAPIKeys()
+	if err != nil {
+		return err
+	}
+	for i := range list {
+		if list[i].ID == id {
+			list[i].KeyHash = keyHash
+			list[i].KeyPrefix = keyPrefix
+			return f.saveAPIKeys(list)
+		}
+	}
+	return fmt.Errorf("API key %q not found", id)
+}
+
+func (f *FileStore) LookupAPIKeyByHash(ctx context.Context, keyHash string) (string, bool, error) {
+	list, err := f.loadAPIKeys()
+	if err != nil {
+		return "", false, err
+	}
+	for _, ak := range list {
+		if ak.KeyHash == keyHash {
+			return ak.ID, true, nil
+		}
+	}
+	return "", false, nil
+}
+
+// --- Agent bindings ---
+
+func (f *FileStore) bindingsPath() string {
+	return filepath.Join(f.rootDir, "agent-bindings.json")
+}
+
+func (f *FileStore) loadBindings() (map[string]string, error) {
+	data, err := os.ReadFile(f.bindingsPath())
+	if os.IsNotExist(err) {
+		return map[string]string{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var m map[string]string
+	if err := json.Unmarshal(data, &m); err != nil {
+		return nil, fmt.Errorf("parse agent-bindings: %w", err)
+	}
+	if m == nil {
+		m = map[string]string{}
+	}
+	return m, nil
+}
+
+func (f *FileStore) saveBindings(m map[string]string) error {
+	if err := os.MkdirAll(f.rootDir, 0o700); err != nil {
+		return err
+	}
+	data, _ := json.MarshalIndent(m, "", "  ")
+	return os.WriteFile(f.bindingsPath(), data, 0o600)
+}
+
+func (f *FileStore) ListAgentBindings(ctx context.Context) (map[string]string, error) {
+	return f.loadBindings()
+}
+
+func (f *FileStore) SetAgentBinding(ctx context.Context, agentID, ownerKeyID string) error {
+	m, err := f.loadBindings()
+	if err != nil {
+		return err
+	}
+	m[agentID] = ownerKeyID
+	return f.saveBindings(m)
+}
+
+func (f *FileStore) DeleteAgentBinding(ctx context.Context, agentID string) error {
+	m, err := f.loadBindings()
+	if err != nil {
+		return err
+	}
+	delete(m, agentID)
+	return f.saveBindings(m)
 }
 
 var _ Store = (*FileStore)(nil)
