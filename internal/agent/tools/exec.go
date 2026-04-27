@@ -14,6 +14,7 @@ import (
 
 type execArgs struct {
 	Command string `json:"command"`
+	Stdin   string `json:"stdin,omitempty"`   // optional: piped to the command's stdin
 	Timeout int    `json:"timeout,omitempty"` // seconds, default 30
 	Sandbox bool   `json:"sandbox,omitempty"` // force sandbox for this call
 }
@@ -66,6 +67,10 @@ func registerExecFull(r *Registry, sbCfg *SandboxConfig, envProvider SkillEnvPro
 				"type":        "string",
 				"description": "The shell command to execute",
 			},
+			"stdin": map[string]interface{}{
+				"type":        "string",
+				"description": "Optional input piped to the command's stdin. Use this to feed JSON args to a skill script: command='python /skills/x/main.py', stdin='{\"prompt\":\"...\"}'.",
+			},
 			"timeout": map[string]interface{}{
 				"type":        "integer",
 				"description": "Timeout in seconds (default 30)",
@@ -110,15 +115,24 @@ func makeExecToolFull(sbCfg *SandboxConfig, envProvider SkillEnvProvider, skillD
 		execCtx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
 		defer cancel()
 
+		// If stdin was supplied, prepend a heredoc-style pipe so the
+		// existing single-string exec path delivers it. Quoting `EOF`
+		// disables variable expansion inside the heredoc body, so JSON
+		// payloads don't get accidentally rewritten.
+		command := args.Command
+		if args.Stdin != "" {
+			command = fmt.Sprintf("(cat <<'__FCSTDIN__'\n%s\n__FCSTDIN__\n) | %s", args.Stdin, args.Command)
+		}
+
 		// Use sandbox if enabled or forced
 		useSandbox := args.Sandbox || (sbCfg != nil && sbCfg.Enabled)
 		if useSandbox && sbCfg != nil && sbCfg.Pool != nil {
 			sb := sbCfg.Pool.Get(sbCfg.AgentID, sbCfg.Image, sbCfg.Workspace, sbCfg.Policy)
-			out, err := sb.Exec(execCtx, args.Command, "/workspace")
+			out, err := sb.Exec(execCtx, command, "/workspace")
 			return MetaSandboxPrefix + out, err
 		}
 
-		cmd := exec.CommandContext(execCtx, "sh", "-c", args.Command)
+		cmd := exec.CommandContext(execCtx, "sh", "-c", command)
 
 		// Inject skill-specific env vars if the command references a skill directory
 		if envProvider != nil && skillDirs != nil {
