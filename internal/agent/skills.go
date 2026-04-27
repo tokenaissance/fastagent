@@ -207,6 +207,12 @@ func (sl *SkillsLoader) LoadSkills() []Skill {
 }
 
 // BuildSkillsSummary returns an XML summary of all skills for the system prompt.
+//
+// When the agent runs in no-marketplace mode (skills.NoMarketplace=true)
+// the lazy-load / install directive is replaced with a "skills are
+// pre-loaded, call them directly" directive, AND every skill is inlined
+// in full — there's no `load_skill` tool to fetch their bodies on demand
+// when the marketplace is off.
 func (sl *SkillsLoader) BuildSkillsSummary(skills []Skill) string {
 	if len(skills) == 0 {
 		return ""
@@ -221,13 +227,20 @@ func (sl *SkillsLoader) BuildSkillsSummary(skills []Skill) string {
 	}
 
 	var sb strings.Builder
-	// Rules go OUTSIDE <skills> so weaker models don't mistake them for
-	// skill summaries and skip the enforcement.
-	sb.WriteString(skillsUsageDirective)
+	if sl.skillsCfg.NoMarketplace {
+		sb.WriteString(skillsDirectModeDirective)
+	} else {
+		sb.WriteString(skillsUsageDirective)
+	}
 	sb.WriteString("\n\n<skills>\n")
 
 	for _, skill := range skills {
-		if alwaysLoad[skill.Name] || (skill.Metadata != nil && skill.Metadata.Meta() != nil && skill.Metadata.Meta().Always) {
+		// In no-marketplace mode every skill's full content is inlined —
+		// there's no load_skill to fetch it on demand. In normal mode we
+		// only inline the always-loaded ones to keep the prompt small.
+		if sl.skillsCfg.NoMarketplace ||
+			alwaysLoad[skill.Name] ||
+			(skill.Metadata != nil && skill.Metadata.Meta() != nil && skill.Metadata.Meta().Always) {
 			fmt.Fprintf(&sb, "<skill name=%q layer=%q>\n%s\n</skill>\n", skill.Name, skill.Layer, skill.Content)
 		} else {
 			summary := skill.Description
@@ -241,6 +254,18 @@ func (sl *SkillsLoader) BuildSkillsSummary(skills []Skill) string {
 	sb.WriteString("</skills>")
 	return sb.String()
 }
+
+// skillsDirectModeDirective replaces the marketplace-oriented usage rules
+// when the agent runs in no-marketplace mode. The skills below are the
+// agent's full toolset — there is no fallback to skills.sh / clawhub —
+// so the directive tells the LLM to call them directly via exec instead
+// of going through load_skill / install_skill (which aren't registered).
+const skillsDirectModeDirective = `<skill_usage_rules>
+The skills listed below are the agent's complete pre-installed toolset.
+- Their full SKILL.md content is included inline; do NOT call load_skill (it isn't available).
+- To invoke a skill, run its main script directly through exec, passing arguments on stdin as JSON. The SKILL.md describes the args + return shape.
+- Do NOT call install_skill or search_skills — those tools are disabled in this deployment. If a needed capability isn't here, surface that to the user; don't try to install one.
+</skill_usage_rules>`
 
 // skillsUsageDirective is the set of hard rules about how skills must be
 // used. Kept terse and assertive because weaker local models (qwen3.5 etc.)

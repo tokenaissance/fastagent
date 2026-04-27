@@ -458,9 +458,20 @@ type AgentFileConfig struct {
 }
 
 // SkillsConfig controls skill loading for an agent.
+//
+// NoMarketplace disables the skill marketplace integration for product
+// agents that should only use their pre-installed skills:
+//   - Skips registering load_skill / install_skill / search_skills tools
+//   - Strips the lazy-load directive from the system prompt so the LLM
+//     calls bundled skills directly instead of going off to skills.sh /
+//     clawhub looking for an alternative
+//
+// Default false preserves the general-purpose agent behavior (skill
+// discovery + on-demand install) for ChatClaw / Claude Code-style use.
 type SkillsConfig struct {
-	Disabled   []string `json:"disabled,omitempty"`
-	AlwaysLoad []string `json:"alwaysLoad,omitempty"`
+	Disabled       []string `json:"disabled,omitempty"`
+	AlwaysLoad     []string `json:"alwaysLoad,omitempty"`
+	NoMarketplace  bool     `json:"noMarketplace,omitempty"`
 }
 
 // SkillsCfg is the top-level skills configuration (global).
