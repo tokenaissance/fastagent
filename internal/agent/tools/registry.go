@@ -54,6 +54,15 @@ type Registry struct {
 	// never be visible from the UI — so we route identity writes here
 	// when set.
 	systemFileStore SystemFileStore
+	// envProvider + skillDirs cache the skill-env injection wiring set
+	// at agent boot via RegisterExecWithSkillEnv so a later
+	// SetExecutor (per-session) can re-register the sandboxed exec
+	// closure WITH env injection. Without this, the sandboxed exec
+	// runs every skill in a bare env and FAL_KEY / REPLICATE_API_TOKEN
+	// never reach the container — skills always think no provider is
+	// configured.
+	envProvider SkillEnvProvider
+	skillDirs   []string
 }
 
 // SystemFileStore is the narrow slice of the DB store that write_file /

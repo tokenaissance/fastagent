@@ -46,11 +46,44 @@ export interface AgentDetail {
   tools?: string[];
 }
 
+export interface SkillEnvSpec {
+  name: string;
+  description?: string;
+  required?: boolean;
+  secret?: boolean;
+}
+
 export interface SkillInfo {
   name: string;
   description: string;
   location: string;
   type: string;
+  envSpec?: SkillEnvSpec[];
+}
+
+export interface SkillEntryCfg {
+  enabled?: boolean;
+  apiKey?: string;
+  env?: Record<string, string>;
+}
+
+// updateSkillEntries persists skill env / apiKey patches. When agentId
+// is set the patch lands in cfg.Skills.AgentEntries[agentId] (per-agent
+// override), otherwise in cfg.Skills.Entries (global default). The
+// runtime resolves agent-scoped first, falling back to global.
+export async function updateSkillEntries(
+  entries: Record<string, SkillEntryCfg>,
+  agentId?: string,
+) {
+  const body = agentId
+    ? { skills: { agentEntries: { [agentId]: entries } } }
+    : { skills: { entries } };
+  const res = await apiFetch("/api/config", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return res.json();
 }
 
 export interface PluginInfo {
@@ -117,6 +150,14 @@ export interface ConfigResponse {
   sandbox?: { enabled: boolean; backend?: string; image?: string; e2bKey?: string };
   hooks: { enabled: boolean; token?: string; path?: string; port?: number };
   cronJobs?: Array<Record<string, unknown>>;
+  skills?: {
+    entries?: Record<string, SkillEntryCfg>;
+    // Per-agent overrides, keyed agentID → skillName → entry. The UI
+    // surfaces these only on the agent-scoped /agents/<id>/skills page;
+    // SkillsLoader.SkillEnvVars resolves agentEntries[<agent>][<skill>]
+    // first, falling back to the global entries map.
+    agentEntries?: Record<string, Record<string, SkillEntryCfg>>;
+  };
 }
 
 // Auth token for cloud mode. Set via setAuthToken() on login; empty in local mode.
@@ -273,11 +314,14 @@ export async function sendChatStream(
   sessionId: string,
   message: string,
   onEvent: (evt: ChatStreamEvent) => void,
+  signal?: AbortSignal,
+  imageUrls?: string[],
 ): Promise<void> {
   const res = await apiFetch("/api/chat/stream", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ agentId, sessionId, message }),
+    body: JSON.stringify({ agentId, sessionId, message, imageUrls: imageUrls ?? [] }),
+    signal,
   });
   if (!res.ok || !res.body) throw new Error("stream failed");
 
@@ -301,6 +345,28 @@ export async function sendChatStream(
       } catch { /* skip */ }
     }
   }
+}
+
+export interface UploadedFile {
+  path: string;
+  size: number;
+}
+
+export async function uploadAgentFiles(
+  agentId: string,
+  sessionId: string,
+  files: File[],
+): Promise<UploadedFile[]> {
+  const fd = new FormData();
+  for (const f of files) fd.append("file", f, f.name);
+  const qs = sessionId ? `?sessionId=${encodeURIComponent(sessionId)}` : "";
+  const res = await apiFetch(`/api/agents/${encodeURIComponent(agentId)}/files${qs}`, {
+    method: "POST",
+    body: fd,
+  });
+  if (!res.ok) throw new Error(`upload failed: ${res.status}`);
+  const data = await res.json();
+  return (data.files || []) as UploadedFile[];
 }
 
 // Agents

@@ -25,8 +25,12 @@ export function LoginScreen({ onSuccess }: LoginScreenProps) {
     login(trimmed);
 
     try {
-      // Validate by calling status — a 401 means the token is invalid.
-      const res = await fetch("/api/status", {
+      // Validate against an auth-required endpoint. /api/status uses
+      // optionalUserAuth and returns 200 even with a bogus token (just
+      // without user-scoped fields), so any string would "succeed" there.
+      // /api/config requires a valid bearer and 401s on a bad token —
+      // matching the probe AuthGuard already uses post-login.
+      const res = await fetch("/api/config", {
         headers: { Authorization: `Bearer ${trimmed}` },
       });
 
@@ -37,9 +41,8 @@ export function LoginScreen({ onSuccess }: LoginScreenProps) {
         return;
       }
 
-      const status = await res.json();
-      if (status.ok === false && status.error) {
-        setError(status.error);
+      if (!res.ok) {
+        setError(`Server error (${res.status})`);
         login("");
         setLoading(false);
         return;

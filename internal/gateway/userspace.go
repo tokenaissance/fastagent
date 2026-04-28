@@ -219,7 +219,10 @@ func loadUserSpace(userID string, mb *bus.MessageBus, st store.Store, ws workspa
 			}
 		}
 	}
-	managerOpts := []agent.ManagerOption{agent.WithUserID(userID)}
+	managerOpts := []agent.ManagerOption{
+		agent.WithUserID(userID),
+		agent.WithGlobalSkillsCfg(cfg.Skills),
+	}
 	if st != nil {
 		managerOpts = append(managerOpts,
 			agent.WithSessionStore(session.NewStoreAdapter(st)),

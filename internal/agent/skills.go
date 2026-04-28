@@ -30,11 +30,18 @@ type Skill struct {
 }
 
 // SkillFrontmatter represents the YAML frontmatter of a SKILL.md file.
+//
+// Env is the ergonomic shortcut for declaring configurable environment
+// variables — equivalent to writing them under metadata.fastclaw.env
+// but spares skill authors the namespace nesting when they don't need
+// to publish their skill to a non-fastclaw runtime. The HTTP layer
+// merges both sources, top-level Env wins on conflict.
 type SkillFrontmatter struct {
-	Name        string       `yaml:"name"`
-	Description string       `yaml:"description"`
-	Homepage    string       `yaml:"homepage"`
-	Metadata    yaml.Node    `yaml:"metadata"`
+	Name        string         `yaml:"name"`
+	Description string         `yaml:"description"`
+	Homepage    string         `yaml:"homepage"`
+	Env         []SkillEnvSpec `yaml:"env"`
+	Metadata    yaml.Node      `yaml:"metadata"`
 }
 
 // SkillMetadata represents the skill metadata block.
@@ -60,7 +67,30 @@ type OpenClawMeta struct {
 	OS         []string         `json:"os"`
 	Requires   *SkillRequires   `json:"requires"`
 	PrimaryEnv string           `json:"primaryEnv"`
-	Install    json.RawMessage  `json:"install"`
+	// Env declares configurable environment variables this skill reads.
+	// Surfaced to the admin UI so operators get labeled inputs (with
+	// help text + secret masking) instead of having to grep main.py for
+	// os.environ.get() calls. PrimaryEnv stays around for the legacy
+	// "single API key" convenience path; multi-provider skills like
+	// image-tool list everything here.
+	Env     []SkillEnvSpec  `json:"env,omitempty"`
+	Install json.RawMessage `json:"install"`
+}
+
+// SkillEnvSpec describes one configurable env var. All fields except
+// Name are optional. Secret defaults to true at the UI layer when the
+// name matches /KEY|TOKEN|SECRET|PASSWORD/i so authors usually don't
+// have to set it.
+//
+// Carries both json and yaml tags so it round-trips via the
+// metadata.fastclaw.env path (yaml→generic→json→struct, json tags) AND
+// via the new top-level frontmatter.Env shortcut (yaml→struct directly,
+// yaml tags).
+type SkillEnvSpec struct {
+	Name        string `json:"name" yaml:"name"`
+	Description string `json:"description,omitempty" yaml:"description,omitempty"`
+	Required    bool   `json:"required,omitempty" yaml:"required,omitempty"`
+	Secret      bool   `json:"secret,omitempty" yaml:"secret,omitempty"`
 }
 
 // SkillRequires holds gating requirements.
@@ -234,8 +264,31 @@ The skills listed below are this agent's complete toolset. Each skill's full SKI
 
 // SkillEnvVars returns environment variables for a specific skill from global config.
 func (sl *SkillsLoader) SkillEnvVars(skillName string) map[string]string {
-	entry, ok := sl.globalCfg.Entries[skillName]
-	if !ok {
+	// Per-agent override wins. Fall back to the global entry only when
+	// the agent doesn't have its own row OR has it but it's empty (so
+	// the operator doesn't have to copy the global config to every
+	// agent just to keep the same defaults).
+	var entry config.SkillEntryCfg
+	var found bool
+	if sl.agentID != "" {
+		if agentMap, ok := sl.globalCfg.AgentEntries[sl.agentID]; ok {
+			if e, ok := agentMap[skillName]; ok && (e.APIKey != "" || len(e.Env) > 0) {
+				entry = e
+				found = true
+			}
+		}
+	}
+	if !found {
+		entry, found = sl.globalCfg.Entries[skillName]
+	}
+	slog.Info("SkillEnvVars lookup",
+		"skillName", skillName,
+		"loaderAgentID", sl.agentID,
+		"agentEntriesKeys", mapKeys(sl.globalCfg.AgentEntries),
+		"entriesKeys", entryKeys(sl.globalCfg.Entries),
+		"found", found,
+		"entryEnvCount", len(entry.Env))
+	if !found {
 		return nil
 	}
 	env := make(map[string]string, len(entry.Env)+1)
@@ -338,6 +391,53 @@ func discoverSkillsEnhanced(dir string, layer string) map[string]Skill {
 	}
 
 	return result
+}
+
+func mapKeys(m map[string]map[string]config.SkillEntryCfg) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
+func entryKeys(m map[string]config.SkillEntryCfg) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
+// SplitSkillFrontmatter is the exported entrypoint used by the HTTP
+// layer when it needs both the parsed frontmatter and the raw body
+// (e.g. to fall back to the first body line for the description on
+// frontmatter-less skills). Returns nil + raw input when there is no
+// `---` frontmatter to parse.
+func SplitSkillFrontmatter(data []byte) (*SkillFrontmatter, string) {
+	fm := parseFrontmatterFromBytes(data)
+	body := string(data)
+	if fm == nil {
+		return nil, body
+	}
+	// Strip the frontmatter block from the body so callers don't see the
+	// YAML lines when scanning for the first prose line.
+	trimmed := strings.TrimSpace(body)
+	if strings.HasPrefix(trimmed, "---") {
+		rest := trimmed[3:]
+		if end := strings.Index(rest, "\n---"); end >= 0 {
+			after := rest[end+len("\n---"):]
+			body = strings.TrimLeft(after, "\n")
+		}
+	}
+	return fm, body
+}
+
+// ParseSkillMetadata is the exported wrapper around the (yaml.Node →
+// SkillMetadata) decode path. The HTTP skill list handler uses it to
+// surface envSpec to the admin UI.
+func ParseSkillMetadata(node *yaml.Node) *SkillMetadata {
+	return parseMetadata(node)
 }
 
 // parseFrontmatter reads and parses YAML frontmatter from a SKILL.md file path.

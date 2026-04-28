@@ -4,7 +4,6 @@ import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import {
   Dialog,
@@ -24,60 +23,27 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Bot, Plus, Pencil, Trash2 } from "lucide-react";
+import { Bot, Plus, Trash2, Cpu, Key } from "lucide-react";
 import {
   getAgents,
   createAgent,
-  updateAgent,
   deleteAgent,
   listAgentBindings,
   type AgentDetail,
   type AgentBindings,
 } from "@/lib/api";
 
-const models = [
-  "gpt-4o",
-  "gpt-4o-mini",
-  "gpt-4-turbo",
-  "claude-sonnet-4-6",
-  "claude-haiku-4-5-20251001",
-  "deepseek-chat",
-  "deepseek-reasoner",
-  "llama-3.1-70b",
-  "qwen-2.5-72b",
-];
-
 export default function AgentsPage() {
   const [agents, setAgents] = useState<AgentDetail[]>([]);
   const [bindings, setBindings] = useState<AgentBindings>({});
   const [loading, setLoading] = useState(true);
-  const [editAgent, setEditAgent] = useState<AgentDetail | null>(null);
-  const [editOpen, setEditOpen] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
   const [newName, setNewName] = useState("");
   const [createError, setCreateError] = useState<string | null>(null);
-
-  const [editModel, setEditModel] = useState("");
-  const [editSoul, setEditSoul] = useState("");
 
   const fetchAgents = () => {
     setLoading(true);
@@ -111,22 +77,6 @@ export default function AgentsPage() {
     fetchAgents();
   };
 
-  const handleEdit = (agent: AgentDetail) => {
-    setEditAgent(agent);
-    setEditModel(agent.model);
-    setEditSoul(agent.soul || "");
-    setEditOpen(true);
-  };
-
-  const handleSave = async () => {
-    if (!editAgent) return;
-    setSaving(true);
-    await updateAgent(editAgent.id, { model: editModel, soul: editSoul });
-    setEditOpen(false);
-    setSaving(false);
-    fetchAgents();
-  };
-
   const handleDelete = async () => {
     if (!deleteId) return;
     await deleteAgent(deleteId);
@@ -149,14 +99,14 @@ export default function AgentsPage() {
         </Button>
       </div>
 
-      <div className="rounded-lg border border-border bg-card">
-        {loading ? (
-          <div className="p-6 space-y-3">
-            {[1, 2].map((i) => (
-              <Skeleton key={i} className="h-14 w-full" />
-            ))}
-          </div>
-        ) : agents.length === 0 ? (
+      {loading ? (
+        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+          {[1, 2, 3].map((i) => (
+            <Skeleton key={i} className="h-48" />
+          ))}
+        </div>
+      ) : agents.length === 0 ? (
+        <div className="rounded-lg border border-border bg-card">
           <div className="flex flex-col items-center justify-center py-16 text-center">
             <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-primary/10 mb-4">
               <Bot className="h-7 w-7 text-primary" />
@@ -170,90 +120,60 @@ export default function AgentsPage() {
               Create your first agent
             </Button>
           </div>
-        ) : (
-          <div className="overflow-x-auto -mx-6 px-6">
-          <Table>
-            <TableHeader>
-              <TableRow className="hover:bg-transparent">
-                <TableHead>Name</TableHead>
-                <TableHead>Model</TableHead>
-                <TableHead>Bound API Key</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead className="text-right">Actions</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {agents.map((agent) => (
-                <TableRow
-                  key={agent.id}
-                  className="cursor-pointer hover:bg-muted/50 transition-colors"
-                  onClick={() => window.location.href = `/agents/${agent.id}/chat/`}
+        </div>
+      ) : (
+        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+          {agents.map((agent) => (
+            <div
+              key={agent.id}
+              className="group rounded-lg border border-border bg-card p-5 transition-colors hover:bg-muted/50 cursor-pointer"
+              onClick={() => (window.location.href = `/agents/${agent.id}/chat/`)}
+            >
+              <div className="flex items-start justify-between mb-4">
+                <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-gradient-to-br from-violet-500 to-purple-600">
+                  <Bot className="h-6 w-6 text-white" />
+                </div>
+                <Badge
+                  variant="outline"
+                  className="bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20"
                 >
-                  <TableCell>
-                    <div className="flex items-center gap-3">
-                      <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/10">
-                        <Bot className="h-4 w-4 text-primary" />
-                      </div>
-                      <span className="font-medium">
-                        {agent.id}
-                      </span>
-                    </div>
-                  </TableCell>
-                  <TableCell>
-                    <code className="bg-muted px-2 py-0.5 rounded font-mono text-xs">
-                      {agent.model}
-                    </code>
-                  </TableCell>
-                  <TableCell>
-                    {bindings[agent.id] ? (
-                      <code className="bg-muted px-2 py-0.5 rounded font-mono text-xs">
-                        {bindings[agent.id]}
-                      </code>
-                    ) : (
-                      <span className="text-xs text-muted-foreground italic">admin-only</span>
-                    )}
-                  </TableCell>
-                  <TableCell>
-                    <Badge
-                      variant="outline"
-                      className="bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20"
-                    >
-                      Active
-                    </Badge>
-                  </TableCell>
-                  <TableCell className="text-right">
-                    <div className="flex items-center justify-end gap-1">
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-8 w-8 text-muted-foreground hover:text-foreground"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleEdit(agent);
-                        }}
-                      >
-                        <Pencil className="h-3.5 w-3.5" />
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setDeleteId(agent.id);
-                        }}
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </Button>
-                    </div>
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-          </div>
-        )}
-      </div>
+                  <span className="mr-1.5 inline-block h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                  Active
+                </Badge>
+              </div>
+              <p className="text-base font-medium mb-2">{agent.id}</p>
+              <div className="space-y-1 text-sm text-muted-foreground">
+                <div className="flex items-center gap-1.5">
+                  <Cpu className="h-3 w-3" />
+                  <span className="font-mono text-xs truncate">{agent.model || "Not set"}</span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <Key className="h-3 w-3" />
+                  {bindings[agent.id] ? (
+                    <span className="font-mono text-xs truncate">{bindings[agent.id]}</span>
+                  ) : (
+                    <span className="text-xs italic">admin-only</span>
+                  )}
+                </div>
+              </div>
+              <div className="flex items-center gap-2 mt-4 pt-3 border-t border-border">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-8 text-xs text-destructive hover:text-destructive"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setDeleteId(agent.id);
+                  }}
+                >
+                  <Trash2 className="h-3 w-3 mr-1.5" />
+                  Remove
+                </Button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* Create Dialog */}
       <Dialog open={createOpen} onOpenChange={(v) => { setCreateOpen(v); if (!v) { setCreateError(null); setNewName(""); } }}>
@@ -292,72 +212,6 @@ export default function AgentsPage() {
               disabled={!newName.trim() || saving}
             >
               {saving ? "Creating..." : "Create Agent"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* Edit Dialog */}
-      <Dialog open={editOpen} onOpenChange={setEditOpen}>
-        <DialogContent className="sm:max-w-2xl">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <Bot className="h-5 w-5 text-primary" />
-              {editAgent?.id}
-            </DialogTitle>
-            <DialogDescription>
-              Edit agent configuration
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4 py-2">
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <Label>Model</Label>
-                <Select value={editModel} onValueChange={(v) => v && setEditModel(v)}>
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {models.map((m) => (
-                      <SelectItem key={m} value={m}>
-                        {m}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="space-y-2">
-                <Label>Workspace</Label>
-                <Input
-                  value={editAgent?.workspace || ""}
-                  disabled
-                  className="font-mono text-xs opacity-60"
-                />
-              </div>
-            </div>
-            <div className="space-y-2">
-              <Label>Personality (SOUL.md)</Label>
-              <Textarea
-                value={editSoul}
-                onChange={(e) => setEditSoul(e.target.value)}
-                placeholder="Your personality and behavioral guidelines..."
-                rows={8}
-                className="resize-none font-mono text-sm min-h-[200px]"
-              />
-            </div>
-          </div>
-          <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => setEditOpen(false)}
-            >
-              Cancel
-            </Button>
-            <Button
-              onClick={handleSave}
-              disabled={saving}
-            >
-              {saving ? "Saving..." : "Save Changes"}
             </Button>
           </DialogFooter>
         </DialogContent>

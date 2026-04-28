@@ -174,6 +174,14 @@ func toAnthropicMessages(msgs []Message) (string, []anthropicMessage) {
 			}
 		} else if m.Content != "" {
 			am.Content, _ = json.Marshal(m.Content)
+		} else {
+			// Defensive: a content-less user/system message would marshal
+			// to a wire object missing the `content` field, which
+			// Anthropic rejects with "expected a string or a list". Send
+			// an empty string so it round-trips even if upstream callers
+			// produce a degenerate message (e.g. legacy session load
+			// pre-dating ContentParts persistence).
+			am.Content, _ = json.Marshal("")
 		}
 
 		out = append(out, am)

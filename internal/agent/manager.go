@@ -39,10 +39,11 @@ func providerForAgent(rc config.ResolvedAgent, shared provider.Provider) provide
 type ManagerOption func(*managerOpts)
 
 type managerOpts struct {
-	sessionStore   session.SessionStore
-	memoryStore    MemoryStore
-	workspaceStore workspace.Store
-	userID         string
+	sessionStore    session.SessionStore
+	memoryStore     MemoryStore
+	workspaceStore  workspace.Store
+	userID          string
+	globalSkillsCfg config.SkillsCfg
 }
 
 func WithSessionStore(st session.SessionStore) ManagerOption {
@@ -65,6 +66,16 @@ func WithUserID(userID string) ManagerOption {
 // shared storage instead of pod-local filesystem.
 func WithWorkspaceStore(ws workspace.Store) ManagerOption {
 	return func(o *managerOpts) { o.workspaceStore = ws }
+}
+
+// WithGlobalSkillsCfg propagates cfg.Skills (entries + agentEntries
+// holding skill apiKey/env per skill or per (agent,skill)) into agents
+// the manager constructs. Without this, buildAgent → NewAgent passes a
+// zero-value SkillsCfg and SkillsLoader.SkillEnvVars sees empty
+// entries — every skill runs without its configured FAL_KEY /
+// REPLICATE_API_TOKEN regardless of what's saved in the DB.
+func WithGlobalSkillsCfg(cfg config.SkillsCfg) ManagerOption {
+	return func(o *managerOpts) { o.globalSkillsCfg = cfg }
 }
 
 // Manager loads and manages all agent instances.
@@ -125,7 +136,12 @@ func NewManager(resolved []config.ResolvedAgent, prov provider.Provider, mb *bus
 // same DB-backed identity / memory / workspace plumbing.
 func (m *Manager) buildAgent(rc config.ResolvedAgent, prov provider.Provider, mb *bus.MessageBus) *Agent {
 	homeDir, _ := config.HomeDir()
-	ag := NewAgent(rc, providerForAgent(rc, prov), mb, homeDir)
+	// Pass the global SkillsCfg through so SkillsLoader sees the
+	// admin-UI-configured per-skill apiKey + env (and the per-agent
+	// override map). Plain NewAgent constructs the loader with a
+	// zero-value SkillsCfg, which is why FAL_KEY / REPLICATE_API_TOKEN
+	// were never reaching the sandbox.
+	ag := NewAgentWithSkillsCfg(rc, providerForAgent(rc, prov), mb, homeDir, m.opts.globalSkillsCfg)
 	ag.SetOwnerUserID(m.uid)
 	if m.opts.sessionStore != nil {
 		ag.sessions = session.NewManagerWithStoreForUser(rc.Home+"/sessions", m.opts.sessionStore, m.uid, rc.ID)

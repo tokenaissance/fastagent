@@ -125,9 +125,16 @@ type SessionRecord struct {
 }
 
 // SessionMessage is a single message in a session.
+//
+// ContentParts is persisted so multimodal user turns (text + image_url
+// blocks) survive restart. Without it, a saved-then-loaded user message
+// with an attached image collapses to {Content:"", ContentParts:nil},
+// which the provider serializer turns into a content-less wire message
+// and the upstream API rejects with "expected a string or a list".
 type SessionMessage struct {
 	Role         string                 `json:"role"`
 	Content      string                 `json:"content"`
+	ContentParts interface{}            `json:"contentParts,omitempty"`
 	ToolCalls    interface{}            `json:"toolCalls,omitempty"`
 	ToolCallID   string                 `json:"toolCallId,omitempty"`
 	Name         string                 `json:"name,omitempty"`

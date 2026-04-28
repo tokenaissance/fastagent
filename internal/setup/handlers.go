@@ -239,8 +239,20 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			configured = true
 		}
 	}
+	// env.toml alone only signals "configured" in cloud mode, where infra
+	// is operator-provisioned and per-user onboarding is handled separately
+	// (apikey + agents). In local mode env.toml carries only infra fields
+	// (port/token/storage/sandbox); providers and agents still need the
+	// onboard wizard, so check the store's configs row as the
+	// post-#7cdc49b source of truth before declaring configured.
 	if !configured && config.EnvTOMLExists() {
-		configured = true
+		if mode == "cloud" {
+			configured = true
+		} else if s.dataStore != nil {
+			if _, err := s.dataStore.GetConfig(r.Context()); err == nil {
+				configured = true
+			}
+		}
 	}
 
 	// /api/status is reachable unauthenticated so the login / onboarding UI
@@ -370,6 +382,28 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	for k, v := range cfg.Providers {
 		v.APIKey = maskAPIKey(v.APIKey)
 		masked.Providers[k] = v
+	}
+
+	// Mask skill secrets (entries[*].apiKey and entries[*].env values
+	// that look like keys/tokens). Same masking shape as providers so
+	// the UI can detect "***" and preserve on save.
+	if len(cfg.Skills.Entries) > 0 {
+		maskedEntries := make(map[string]config.SkillEntryCfg, len(cfg.Skills.Entries))
+		for k, v := range cfg.Skills.Entries {
+			maskedEntries[k] = maskSkillEntry(v)
+		}
+		masked.Skills.Entries = maskedEntries
+	}
+	if len(cfg.Skills.AgentEntries) > 0 {
+		maskedAgent := make(map[string]map[string]config.SkillEntryCfg, len(cfg.Skills.AgentEntries))
+		for agentID, agentMap := range cfg.Skills.AgentEntries {
+			inner := make(map[string]config.SkillEntryCfg, len(agentMap))
+			for k, v := range agentMap {
+				inner[k] = maskSkillEntry(v)
+			}
+			maskedAgent[agentID] = inner
+		}
+		masked.Skills.AgentEntries = maskedAgent
 	}
 
 	jsonResponse(w, http.StatusOK, masked)
@@ -506,9 +540,13 @@ func (s *Server) handleTestProvider(w http.ResponseWriter, r *http.Request) {
 }
 
 type chatRequest struct {
-	AgentID   string `json:"agentId"`
-	SessionID string `json:"sessionId"`
-	Message   string `json:"message"`
+	AgentID   string   `json:"agentId"`
+	SessionID string   `json:"sessionId"`
+	Message   string   `json:"message"`
+	// ImageURLs carries user-attached images for vision models. Frontend
+	// sends data: URLs (base64) for local single-user mode where the model
+	// can't reach the gateway directly. Empty for text-only messages.
+	ImageURLs []string `json:"imageUrls,omitempty"`
 }
 
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
@@ -556,7 +594,7 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	// Run agent in background
 	go func() {
 		defer close(events)
-		ag.HandleWebChatStream(r.Context(), req.SessionID, req.Message, events)
+		ag.HandleWebChatStream(r.Context(), req.SessionID, req.Message, req.ImageURLs, events)
 	}()
 
 	for evt := range events {
@@ -1024,9 +1062,55 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Merge skills.entries / skills.agentEntries. UI sends each touched
+	// skill's full entry; we treat the incoming object as a patch — any
+	// masked value (***) on an existing field is preserved from the
+	// current cfg so saving the form doesn't wipe a key the user
+	// couldn't see in the UI. AgentEntries are per-(agentID, skillName)
+	// overrides — the agent-scoped /agents/<id>/skills page writes here
+	// instead of `entries` so each agent can carry its own credentials.
+	if raw, ok := incoming["skills"]; ok {
+		var update struct {
+			Entries      map[string]config.SkillEntryCfg            `json:"entries"`
+			AgentEntries map[string]map[string]config.SkillEntryCfg `json:"agentEntries"`
+		}
+		if json.Unmarshal(raw, &update) == nil {
+			if cfg.Skills.Entries == nil {
+				cfg.Skills.Entries = make(map[string]config.SkillEntryCfg)
+			}
+			for skillName, in := range update.Entries {
+				cfg.Skills.Entries[skillName] = mergeSkillEntry(cfg.Skills.Entries[skillName], in)
+			}
+			if cfg.Skills.AgentEntries == nil {
+				cfg.Skills.AgentEntries = make(map[string]map[string]config.SkillEntryCfg)
+			}
+			for agentID, agentMap := range update.AgentEntries {
+				if cfg.Skills.AgentEntries[agentID] == nil {
+					cfg.Skills.AgentEntries[agentID] = make(map[string]config.SkillEntryCfg)
+				}
+				for skillName, in := range agentMap {
+					cfg.Skills.AgentEntries[agentID][skillName] =
+						mergeSkillEntry(cfg.Skills.AgentEntries[agentID][skillName], in)
+				}
+			}
+		}
+	}
+
 	if err := s.saveUserConfig(r, cfg); err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
+	}
+
+	// Trigger full hot-reload: settings-page changes (provider rotation,
+	// sandbox toggle, model defaults) need to take effect on the running
+	// gateway without a restart. handleSaveConfig (onboarding) does the
+	// same; this used to no-op, so toggling sandbox on in the UI looked
+	// "saved" but the in-memory cfg + executor pool kept the boot-time
+	// state and exec silently fell back to the host shell.
+	if s.agentProvider != nil {
+		if err := s.agentProvider.ReloadAgents(); err != nil {
+			slog.Warn("failed to reload after config update", "error", err)
+		}
 	}
 
 	jsonResponse(w, http.StatusOK, map[string]any{"ok": true})
@@ -1060,6 +1144,71 @@ func formatDuration(d time.Duration) string {
 	days := hours / 24
 	hours = hours % 24
 	return fmt.Sprintf("%dd %dh", days, hours)
+}
+
+// looksLikeSecret returns true when an env-var name suggests a credential
+// — used to decide whether the GET /api/config response should mask its
+// value. Keep the name list narrow so we don't accidentally mask
+// non-secret config (e.g. LOG_LEVEL).
+func looksLikeSecret(name string) bool {
+	upper := strings.ToUpper(name)
+	for _, marker := range []string{"KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL"} {
+		if strings.Contains(upper, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// isMaskedSecret detects values that came back from a previous GET in
+// masked form — used by the update path to preserve the underlying
+// value instead of overwriting the stored secret with literal "***".
+func isMaskedSecret(s string) bool {
+	if s == "" {
+		return false
+	}
+	return s == "****" || strings.Contains(s, "****")
+}
+
+// maskSkillEntry returns a copy of v safe for inclusion in a public GET
+// response — apiKey is masked unconditionally and env values whose key
+// looks like a secret marker (KEY/TOKEN/SECRET/...) are also masked.
+func maskSkillEntry(v config.SkillEntryCfg) config.SkillEntryCfg {
+	out := config.SkillEntryCfg{Enabled: v.Enabled, APIKey: maskAPIKey(v.APIKey)}
+	if len(v.Env) > 0 {
+		out.Env = make(map[string]string, len(v.Env))
+		for ek, ev := range v.Env {
+			if looksLikeSecret(ek) {
+				out.Env[ek] = maskAPIKey(ev)
+			} else {
+				out.Env[ek] = ev
+			}
+		}
+	}
+	return out
+}
+
+// mergeSkillEntry produces the new persisted entry given the existing
+// stored value and the patch coming from the UI. Masked-secret fields
+// (apiKey or env values still showing "***") fall back to the existing
+// value so a save that doesn't touch a credential leaves it untouched.
+func mergeSkillEntry(existing, in config.SkillEntryCfg) config.SkillEntryCfg {
+	out := config.SkillEntryCfg{
+		Enabled: in.Enabled,
+		APIKey:  in.APIKey,
+		Env:     in.Env,
+	}
+	if isMaskedSecret(out.APIKey) {
+		out.APIKey = existing.APIKey
+	}
+	if out.Env != nil {
+		for k, v := range out.Env {
+			if isMaskedSecret(v) {
+				out.Env[k] = existing.Env[k]
+			}
+		}
+	}
+	return out
 }
 
 // generateRandomToken generates a cryptographically random hex token.

@@ -35,16 +35,25 @@ func (a *StoreAdapter) GetSession(ctx context.Context, agentID, sessionKey strin
 			Thinking:     m.Thinking,
 			RawAssistant: m.RawAssistant,
 		}
-		// ToolCalls is stored as interface{} so JSON round-trip leaves it as
-		// []interface{} of map[string]interface{}. Re-marshal + unmarshal to
-		// recover the typed provider.ToolCall slice — otherwise the chat
-		// history endpoint sees len(ToolCalls)==0 and the UI renders no
-		// tool-group bubble after refresh.
+		// ToolCalls / ContentParts are stored as interface{} so a
+		// JSON round-trip leaves them as []interface{} / map nests.
+		// Re-marshal + unmarshal to recover the typed slice — without
+		// this, a refreshed history loses tool-group bubbles AND the
+		// next provider call sends a multimodal user turn with no
+		// content (ContentParts dropped → Content "" → API rejects).
 		if m.ToolCalls != nil {
 			if raw, err := json.Marshal(m.ToolCalls); err == nil {
 				var tcs []provider.ToolCall
 				if json.Unmarshal(raw, &tcs) == nil {
 					msgs[i].ToolCalls = tcs
+				}
+			}
+		}
+		if m.ContentParts != nil {
+			if raw, err := json.Marshal(m.ContentParts); err == nil {
+				var parts []provider.ContentPart
+				if json.Unmarshal(raw, &parts) == nil {
+					msgs[i].ContentParts = parts
 				}
 			}
 		}
@@ -70,6 +79,9 @@ func (a *StoreAdapter) SaveSession(ctx context.Context, agentID, sessionKey stri
 		}
 		if len(m.ToolCalls) > 0 {
 			rec.Messages[i].ToolCalls = m.ToolCalls
+		}
+		if len(m.ContentParts) > 0 {
+			rec.Messages[i].ContentParts = m.ContentParts
 		}
 	}
 	return a.st.SaveSession(ctx, agentID, sessionKey, rec)

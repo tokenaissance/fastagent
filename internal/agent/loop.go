@@ -78,8 +78,20 @@ type Agent struct {
 // onboarding flips sandbox on. The pool is consulted by bindSession at
 // the start of every chat turn — there's no eager Get at boot anymore
 // because session IDs only exist once a chat starts.
+//
+// Also flips the context builder's sandbox flag so the system prompt's
+// "Working Directory" / filesystem-layout description matches reality.
+// Without this, an agent whose rc.Sandbox.Enabled=false but who got a
+// pool reference (attachSandboxToAgents wires the pool to ALL agents
+// once any one of them wants sandbox) ends up with exec routed through
+// the container while the prompt still advertises host paths — model
+// dutifully writes `/Users/.../workspaces/<id>/foo` which 404s inside
+// the container. The two states must agree.
 func (a *Agent) SetSandboxPool(p sandbox.ExecutorPool) {
 	a.sandboxPool = p
+	if a.ctxBuilder != nil {
+		a.ctxBuilder.sandboxEnabled = p != nil
+	}
 }
 
 // bindSession wires per-turn session state into the tool registry: the
@@ -140,6 +152,7 @@ func NewAgentWithFullCfg(rc config.ResolvedAgent, prov provider.Provider, mb *bu
 			model = rc.Model
 		}
 		learnerLoader := NewSkillsLoaderWithGlobal(homeDir, rc.Home, "", rc.Skills, fullCfg.Skills)
+		learnerLoader.agentID = rc.ID
 		ag.skillsLearner = NewSkillsLearner(rc.Home, prov, model, learnerLoader.AllSkillDirs()...)
 		if fullCfg.SkillsLearner.MinToolCalls > 0 {
 			ag.skillsLearner.minToolCalls = fullCfg.SkillsLearner.MinToolCalls
@@ -179,12 +192,22 @@ func NewAgentWithSkillsCfg(rc config.ResolvedAgent, prov provider.Provider, mb *
 	// wiring to refresh the summary with OSS-hosted skills, and runOnce
 	// re-hydrates on every turn to pick up later uploads.
 	loader := NewSkillsLoaderWithGlobal(homeDir, rc.Home, "", rc.Skills, globalSkillsCfg)
+	loader.agentID = rc.ID
 	skills := loader.LoadSkills()
 	skillsSummary := loader.BuildSkillsSummary(skills)
 
-	// Set up skill env injection for exec tool
+	// Set up skill env injection for exec tool. Pass an sbCfg carrying
+	// just the Enabled flag so the host-mode closure (used until
+	// bindSession swaps in a sandboxed executor on session start) knows
+	// sandbox was REQUIRED for this agent — without that signal an
+	// executor-pool failure would silently fall through to /bin/sh on the
+	// host, defeating the security boundary the user asked for.
 	skillDirs := loader.AllSkillDirs()
-	tools.RegisterExecWithSkillEnv(registry, nil, loader.SkillEnvVars, skillDirs)
+	var sbCfg *tools.SandboxConfig
+	if rc.Sandbox.Enabled {
+		sbCfg = &tools.SandboxConfig{Enabled: true}
+	}
+	tools.RegisterExecWithSkillEnv(registry, sbCfg, loader.SkillEnvVars, skillDirs)
 
 	if len(skills) > 0 {
 		slog.Info("loaded skills", "agent", rc.ID, "count", len(skills))
@@ -282,17 +305,21 @@ func (a *Agent) HandleWebChat(ctx context.Context, sessionId, text string) strin
 }
 
 // HandleWebChatStream handles a web chat message with real-time event streaming.
-func (a *Agent) HandleWebChatStream(ctx context.Context, sessionId, text string, events chan<- ChatEvent) string {
+// imageURLs carries any user-attached images (data URLs or fetchable HTTPS
+// links) so vision-capable models receive them as image_url content parts on
+// the user message.
+func (a *Agent) HandleWebChatStream(ctx context.Context, sessionId, text string, imageURLs []string, events chan<- ChatEvent) string {
 	if sessionId == "" {
 		sessionId = "web-ui"
 	}
 	ctx = ContextWithChatEvents(ctx, events)
 	msg := bus.InboundMessage{
-		Channel:  "web",
-		ChatID:   sessionId,
-		UserID:   "web-user",
-		Text:     text,
-		PeerKind: "dm",
+		Channel:   "web",
+		ChatID:    sessionId,
+		UserID:    "web-user",
+		Text:      text,
+		PeerKind:  "dm",
+		PhotoURLs: imageURLs,
 	}
 	return a.HandleMessage(ctx, msg)
 }
@@ -469,14 +496,24 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	// Hook: AfterSystemPrompt
 	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: AfterSystemPrompt, UserID: a.ownerUserID})
 
-	// Store the raw user message
+	// Store the raw user message. Images may arrive via the legacy
+	// PhotoURL (single, used by IM bridges) or PhotoURLs (multi, used by
+	// the web chat upload path); flatten both into one content-parts
+	// slice so the provider sees `[text, image, image, …]`.
 	userMsg := provider.Message{Role: "user", Content: msg.Text}
+	imageURLs := msg.PhotoURLs
 	if msg.PhotoURL != "" {
+		imageURLs = append([]string{msg.PhotoURL}, imageURLs...)
+	}
+	if len(imageURLs) > 0 {
 		userMsg.Content = ""
-		userMsg.ContentParts = []provider.ContentPart{
-			{Type: "text", Text: msg.Text},
-			{Type: "image_url", ImageURL: &provider.ImageURL{URL: msg.PhotoURL, Detail: "auto"}},
+		parts := []provider.ContentPart{{Type: "text", Text: msg.Text}}
+		for _, u := range imageURLs {
+			parts = append(parts, provider.ContentPart{
+				Type: "image_url", ImageURL: &provider.ImageURL{URL: u, Detail: "auto"},
+			})
 		}
+		userMsg.ContentParts = parts
 	}
 	sess.Append(userMsg)
 
@@ -778,14 +815,21 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 	systemPrompt := a.ctxBuilder.BuildSystemPrompt()
 	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: AfterSystemPrompt, UserID: a.ownerUserID})
 
-	// Store raw user message
+	// Store raw user message — same multi-image flatten as HandleMessage.
 	userMsg := provider.Message{Role: "user", Content: msg.Text}
+	imageURLs := msg.PhotoURLs
 	if msg.PhotoURL != "" {
+		imageURLs = append([]string{msg.PhotoURL}, imageURLs...)
+	}
+	if len(imageURLs) > 0 {
 		userMsg.Content = ""
-		userMsg.ContentParts = []provider.ContentPart{
-			{Type: "text", Text: msg.Text},
-			{Type: "image_url", ImageURL: &provider.ImageURL{URL: msg.PhotoURL, Detail: "auto"}},
+		parts := []provider.ContentPart{{Type: "text", Text: msg.Text}}
+		for _, u := range imageURLs {
+			parts = append(parts, provider.ContentPart{
+				Type: "image_url", ImageURL: &provider.ImageURL{URL: u, Detail: "auto"},
+			})
 		}
+		userMsg.ContentParts = parts
 	}
 	sess.Append(userMsg)
 

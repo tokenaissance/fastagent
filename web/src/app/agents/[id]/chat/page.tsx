@@ -4,8 +4,8 @@ import { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { getChatHistory, getChatSessions, listAgentFiles, renameChatSession, sendChatStream, getAuthToken, getSkills, type ChatHistoryMessage, type ChatStreamEvent, type SkillInfo, type ToolResultMetadata } from "@/lib/api";
-import { Bot, Send, Copy, Check, Pencil, Wrench, ChevronDown, ChevronRight, Download, X, File, FileText, Image as ImageIcon, FileCode, Film, Music, Puzzle, SlidersHorizontal, ShieldCheck } from "lucide-react";
+import { getChatHistory, getChatSessions, listAgentFiles, renameChatSession, sendChatStream, uploadAgentFiles, getAuthToken, getSkills, type ChatHistoryMessage, type ChatStreamEvent, type SkillInfo, type ToolResultMetadata } from "@/lib/api";
+import { Bot, Send, Copy, Check, Pencil, Wrench, ChevronDown, ChevronRight, Download, X, File, FileText, Image as ImageIcon, FileCode, Film, Music, Puzzle, SlidersHorizontal, ShieldCheck, Paperclip, Square } from "lucide-react";
 import Link from "next/link";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -23,15 +23,19 @@ function urlTransform(url: string, key: string): string {
 // `/workspace/<name>` paths to the authenticated file API URL for the
 // active agent. Skills that produce a file return a sandbox path like
 // /workspace/img_xxx.png; the LLM puts that in `![](/workspace/...)`.
-// Without rewriting, the browser tries to fetch
-// http://host:port/workspace/... (404). Use this in chat messages that
-// belong to a known agent.
-function makeUrlTransform(agentId: string) {
+// The docker bind-mount is session-scoped (host:
+// ~/.fastclaw/workspaces/<agent>/sessions/<sid>/ ↔ container:/workspace),
+// so the workspace.Store sees the file at sessions/<sid>/<name>. We
+// must prepend that prefix or the file API resolves against the agent
+// root and 404s.
+function makeUrlTransform(agentId: string, sessionId: string) {
   return (url: string, key: string): string => {
     if (key === "src") {
       if (url.startsWith("data:image/")) return url;
       if (url.startsWith("/workspace/")) {
-        return fileUrl(agentId, url.slice("/workspace/".length), false);
+        const rel = url.slice("/workspace/".length);
+        const scoped = sessionId ? `sessions/${sessionId}/${rel}` : rel;
+        return fileUrl(agentId, scoped, false);
       }
     }
     return defaultUrlTransform(url);
@@ -124,6 +128,14 @@ interface ProducedFile {
   size?: number;
 }
 
+interface UserAttachment {
+  name: string;
+  isImage: boolean;
+  // Local blob URL for instant in-bubble preview without a server round-trip.
+  // Only set on the live-send turn; reloaded history won't carry it.
+  previewUrl?: string;
+}
+
 interface ChatMessage {
   id: string;
   role: "user" | "agent" | "tool-group";
@@ -131,6 +143,7 @@ interface ChatMessage {
   timestamp: number;
   toolCalls?: { id: string; name: string; arguments: string; result?: string; metadata?: ToolResultMetadata }[];
   files?: ProducedFile[];
+  attachments?: UserAttachment[];
 }
 
 // Single-segment identity filenames that route to the agent's home dir
@@ -236,8 +249,13 @@ export default function AgentChatPage() {
   const [sending, setSending] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [sessionTitle, setSessionTitle] = useState<string>("");
+  const [attachments, setAttachments] = useState<File[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  // AbortController for the in-flight chat stream so the Stop button can
+  // cancel both the upload and the SSE connection. Reset on every new turn.
+  const abortRef = useRef<AbortController | null>(null);
 
   // Slash-command menu state. The menu opens when the textarea holds a
   // token beginning with `/` at the caret; selecting a skill swaps that
@@ -384,16 +402,37 @@ export default function AgentChatPage() {
   );
   usePageHeader(headerSlot, [headerSlot]);
 
-  // Load history when session changes
+  // Load history when session changes. After rebuilding messages from
+  // server history we also re-attach this session's workspace files to
+  // the trailing assistant bubble so the "Your files" panel survives a
+  // refresh — server history doesn't carry per-turn file diffs, so we
+  // approximate by listing everything under sessions/<sid>/ once and
+  // hanging it off the last agent message.
   useEffect(() => {
     if (!selectedAgent || !sessionId) return;
     getChatHistory(selectedAgent, sessionId)
-      .then((history) => {
+      .then(async (history) => {
         if (!history || history.length === 0) {
           setMessages([]);
           return;
         }
-        setMessages(buildChatMessages(history));
+        const built = buildChatMessages(history);
+        try {
+          const allFiles = await listAgentFiles(selectedAgent);
+          const sessionPrefix = `sessions/${sessionId}/`;
+          const sessionFiles: ProducedFile[] = allFiles
+            .filter((f) => f.path.startsWith(sessionPrefix) && !isSystemFile(f.path))
+            .map((f) => ({ path: f.path, size: f.size }));
+          if (sessionFiles.length > 0) {
+            for (let i = built.length - 1; i >= 0; i--) {
+              if (built[i].role === "agent" || built[i].role === "tool-group") {
+                built[i] = { ...built[i], files: sessionFiles };
+                break;
+              }
+            }
+          }
+        } catch { /* listing failed — fall back to no panel */ }
+        setMessages(built);
       })
       .catch(() => setMessages([]));
   }, [selectedAgent, sessionId]);
@@ -412,7 +451,8 @@ export default function AgentChatPage() {
 
   const handleSend = useCallback(async () => {
     const text = input.trim();
-    if (!text || !selectedAgent || sending) return;
+    // Allow sending with attachments only (no text), but require at least one.
+    if ((!text && attachments.length === 0) || !selectedAgent || sending) return;
 
     // Pin the sessionId into the URL on the first send so a refresh keeps
     // the user in the same conversation. Use history.replaceState (not
@@ -422,12 +462,72 @@ export default function AgentChatPage() {
       window.history.replaceState(null, "", `/agents/${selectedAgent}/chat/?session=${sessionId}`);
     }
 
+    // Upload attachments first so the agent can read them by name on its
+    // first turn. Files land at sessions/<sid>/<basename> in the workspace
+    // store, which is the same dir the docker sandbox bind-mounts as
+    // /workspace. We also (a) build user-bubble preview metadata so images
+    // render inline in the user's bubble without waiting on the server
+    // round-trip, and (b) read images as data URLs so vision-capable
+    // models receive them as image_url content parts.
+    const filesToUpload = attachments;
+    setAttachments([]);
+
+    let userBubbleAttachments: UserAttachment[] = [];
+    let imageDataUrls: string[] = [];
+    let attachmentNote = "";
+
+    if (filesToUpload.length > 0) {
+      userBubbleAttachments = filesToUpload.map((f) => ({
+        name: f.name,
+        isImage: f.type.startsWith("image/"),
+        previewUrl: f.type.startsWith("image/") ? URL.createObjectURL(f) : undefined,
+      }));
+
+      try {
+        await uploadAgentFiles(selectedAgent, sessionId, filesToUpload);
+      } catch (err) {
+        setMessages((prev) => [
+          ...prev,
+          { id: `e-${Date.now()}`, role: "agent", content: `File upload failed: ${err instanceof Error ? err.message : "unknown error"}`, timestamp: Date.now() },
+        ]);
+        return;
+      }
+
+      // Read each image as a base64 data URL. We do this AFTER upload —
+      // upload only needs the File object; data URL conversion is for the
+      // provider call. Done in parallel for snappy UX on multi-attach.
+      imageDataUrls = (
+        await Promise.all(
+          filesToUpload.map(async (f) => {
+            if (!f.type.startsWith("image/")) return null;
+            return await new Promise<string | null>((resolve) => {
+              const reader = new FileReader();
+              reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : null);
+              reader.onerror = () => resolve(null);
+              reader.readAsDataURL(f);
+            });
+          }),
+        )
+      ).filter((s): s is string => !!s);
+
+      const names = filesToUpload.map((f) => f.name).join(", ");
+      attachmentNote = `[Attached: ${names}]\n`;
+    }
+    const fullText = attachmentNote + text;
+
     setInput("");
     setMessages((prev) => [
       ...prev,
-      { id: `u-${Date.now()}`, role: "user", content: text, timestamp: Date.now() },
+      {
+        id: `u-${Date.now()}`,
+        role: "user",
+        content: text, // bubble shows text only; attachments rendered separately above
+        timestamp: Date.now(),
+        attachments: userBubbleAttachments.length > 0 ? userBubbleAttachments : undefined,
+      },
     ]);
     setSending(true);
+    abortRef.current = new AbortController();
 
     // Snapshot the workspace before the turn so we can diff at `done` and
     // attach newly-created / modified files (PDFs, images, …) to the
@@ -455,7 +555,7 @@ export default function AgentChatPage() {
     startNewGroup();
 
     try {
-      await sendChatStream(selectedAgent, sessionId, text, (evt: ChatStreamEvent) => {
+      await sendChatStream(selectedAgent, sessionId, fullText, (evt: ChatStreamEvent) => {
         switch (evt.type) {
           case "content": {
             const content = evt.data?.content || "";
@@ -548,8 +648,20 @@ export default function AgentChatPage() {
             });
             break;
           }
+          case "error": {
+            // Surface backend errors as a chat bubble. Without this the
+            // turn just hangs — the model failed (provider 4xx/5xx,
+            // serialization mismatch, etc.) and the only signal was a
+            // gateway log line the user can't see.
+            const msg = evt.data?.message || "Unknown error";
+            setMessages((prev) => [
+              ...prev,
+              { id: `e-${Date.now()}`, role: "agent", content: `Error: ${msg}`, timestamp: Date.now() },
+            ]);
+            break;
+          }
         }
-      });
+      }, abortRef.current.signal, imageDataUrls);
       // Diff the workspace against the pre-turn snapshot so files
       // produced by *exec* (e.g. a Python script that saves PDFs) get
       // surfaced too — `turnFiles` only catches write_file tool calls
@@ -566,12 +678,34 @@ export default function AgentChatPage() {
         diffFiles.push({ path: f.path, size: f.size });
       }
       const allFiles = [...turnFiles, ...diffFiles];
+      // Diagnostic: when sandbox-exec produces a file but the Files
+      // panel doesn't show, we need to know whether the API returned
+      // the file at all and where the diff dropped it. Cheap to keep.
+      if (typeof console !== "undefined") {
+        console.log("[chat] post-turn files diff", {
+          agent: selectedAgent,
+          sessionId,
+          preSnapSize: preSnap.size,
+          postTurnCount: postTurnFiles.length,
+          postTurnPaths: postTurnFiles.map((f) => f.path),
+          turnFiles,
+          diffFiles,
+          attached: allFiles.length,
+        });
+      }
       if (allFiles.length > 0) {
         setMessages((prev) => {
           if (prev.length === 0) return prev;
           const updated = [...prev];
           const last = updated[updated.length - 1];
           updated[updated.length - 1] = { ...last, files: allFiles };
+          if (typeof console !== "undefined") {
+            console.log("[chat] attached files to last message", {
+              lastId: last.id,
+              lastRole: last.role,
+              files: allFiles,
+            });
+          }
           return updated;
         });
       }
@@ -586,16 +720,48 @@ export default function AgentChatPage() {
           }),
         );
       }
-    } catch {
+    } catch (err) {
+      // AbortError from the user clicking Stop is expected — surface a
+      // brief "Stopped" line so they see the cancellation took effect,
+      // not a generic failure message.
+      const isAbort = err instanceof DOMException && err.name === "AbortError";
       setMessages((prev) => [
         ...prev,
-        { id: `e-${Date.now()}`, role: "agent", content: "Failed to get a response. Is the gateway running?", timestamp: Date.now() },
+        {
+          id: `e-${Date.now()}`,
+          role: "agent",
+          content: isAbort ? "(Stopped)" : "Failed to get a response. Is the gateway running?",
+          timestamp: Date.now(),
+        },
       ]);
     } finally {
+      abortRef.current = null;
       setSending(false);
       textareaRef.current?.focus();
     }
-  }, [input, selectedAgent, sessionId, sending, loadSessions]);
+  }, [input, attachments, selectedAgent, sessionId, sending, loadSessions]);
+
+  const handleStop = useCallback(() => {
+    abortRef.current?.abort();
+  }, []);
+
+  const handleFilePick = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const picked = e.target.files;
+    if (!picked || picked.length === 0) return;
+    // Snapshot the FileList into a stable File[] BEFORE we reset the
+    // input. FileList is tied to the input element — setting value=""
+    // empties it. Under StrictMode React invokes the setState updater
+    // twice for purity checks; if the closure references the live
+    // FileList, the second invocation sees an empty list and the state
+    // ends up empty even though the user picked a file.
+    const newFiles = Array.from(picked);
+    e.target.value = "";
+    setAttachments((prev) => [...prev, ...newFiles]);
+  }, []);
+
+  const removeAttachment = useCallback((idx: number) => {
+    setAttachments((prev) => prev.filter((_, i) => i !== idx));
+  }, []);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     // Don't submit while an IME composition is active — Enter in that state
@@ -723,7 +889,7 @@ export default function AgentChatPage() {
               return messages.map((msg) =>
               msg.role === "tool-group" ? (
                 <div key={msg.id}>
-                  <ToolCallGroup msg={msg} surfacedSrcs={surfacedSrcs} agentId={selectedAgent} />
+                  <ToolCallGroup msg={msg} surfacedSrcs={surfacedSrcs} agentId={selectedAgent} sessionId={sessionId} />
                   {msg.files && msg.files.length > 0 && (
                     <FilesPanel agentId={selectedAgent} files={msg.files} />
                   )}
@@ -761,17 +927,42 @@ export default function AgentChatPage() {
                           </div>
                         ) : null;
                       })()}
-                      <div className="text-[15px] leading-relaxed prose prose-sm dark:prose-invert max-w-none prose-p:my-1 prose-pre:my-2 prose-ul:my-1 prose-ol:my-1">
-                        {renderContentWithDataImages(
-                          msg.content,
-                          surfacedSrcs,
-                          (attachedImages.get(msg.id)?.length ?? 0) > 0,
-                        ) ?? (
-                          <ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={makeUrlTransform(selectedAgent)}>
-                            {msg.content}
-                          </ReactMarkdown>
-                        )}
-                      </div>
+                      {msg.role === "user" && msg.attachments && msg.attachments.length > 0 && (
+                        <div className="space-y-2 mb-2">
+                          {msg.attachments.map((att, i) =>
+                            att.isImage && att.previewUrl ? (
+                              // eslint-disable-next-line @next/next/no-img-element
+                              <img
+                                key={i}
+                                src={att.previewUrl}
+                                alt={att.name}
+                                className="rounded-lg max-w-full h-auto"
+                              />
+                            ) : (
+                              <div
+                                key={i}
+                                className="flex items-center gap-2 rounded-md bg-primary-foreground/10 px-2 py-1.5 text-xs"
+                              >
+                                <Paperclip className="h-3 w-3 opacity-70" />
+                                <span className="truncate">{att.name}</span>
+                              </div>
+                            ),
+                          )}
+                        </div>
+                      )}
+                      {msg.content && (
+                        <div className="text-[15px] leading-relaxed prose prose-sm dark:prose-invert max-w-none prose-p:my-1 prose-pre:my-2 prose-ul:my-1 prose-ol:my-1">
+                          {renderContentWithDataImages(
+                            msg.content,
+                            surfacedSrcs,
+                            (attachedImages.get(msg.id)?.length ?? 0) > 0,
+                          ) ?? (
+                            <ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={makeUrlTransform(selectedAgent, sessionId)}>
+                              {msg.content}
+                            </ReactMarkdown>
+                          )}
+                        </div>
+                      )}
                     </div>
                     {msg.files && msg.files.length > 0 && (
                       <FilesPanel agentId={selectedAgent} files={msg.files} />
@@ -833,31 +1024,84 @@ export default function AgentChatPage() {
                 onSelect={selectSkill}
               />
             )}
-            <div className="flex items-end gap-2 rounded-xl border border-border bg-card px-4 py-3 focus-within:ring-2 focus-within:ring-ring/20 transition-shadow">
-              <textarea
-                ref={textareaRef}
-                value={input}
-                onChange={handleInputChange}
-                onKeyDown={handleKeyDown}
-                onBlur={() => setTimeout(() => setSlashOpen(false), 120)}
-                placeholder={
-                  selectedAgent
-                    ? `Message ${selectedAgent}... ("/" to pick a skill)`
-                    : "Select an agent first"
-                }
-                disabled={!selectedAgent || sending}
-                rows={1}
-                className="flex-1 resize-none bg-transparent text-[15px] placeholder:text-muted-foreground/50 outline-none disabled:opacity-50"
-                style={{ maxHeight: 200, minHeight: 24 }}
-              />
-              <Button
-                onClick={handleSend}
-                disabled={!input.trim() || !selectedAgent || sending}
-                size="icon"
-                className="h-8 w-8 shrink-0 rounded-lg"
-              >
-                <Send className="h-4 w-4" />
-              </Button>
+            <div className="rounded-xl border border-border bg-card px-4 py-3 focus-within:ring-2 focus-within:ring-ring/20 transition-shadow">
+              {attachments.length > 0 && (
+                <div className="flex flex-wrap gap-1.5 mb-2 pb-2 border-b border-border/60">
+                  {attachments.map((f, i) => (
+                    <div
+                      key={`${f.name}-${i}`}
+                      className="flex items-center gap-1.5 rounded-md bg-muted/60 pl-2 pr-1 py-1 text-xs"
+                    >
+                      <Paperclip className="h-3 w-3 text-muted-foreground" />
+                      <span className="max-w-[160px] truncate">{f.name}</span>
+                      <button
+                        type="button"
+                        onClick={() => removeAttachment(i)}
+                        className="p-0.5 rounded hover:bg-muted-foreground/15 text-muted-foreground hover:text-foreground"
+                        aria-label="Remove attachment"
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div className="flex items-end gap-2">
+                <label
+                  className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors ${
+                    !selectedAgent || sending
+                      ? "opacity-50 cursor-not-allowed"
+                      : "hover:bg-muted hover:text-foreground cursor-pointer"
+                  }`}
+                  aria-label="Attach files"
+                >
+                  <Paperclip className="h-4 w-4" />
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    multiple
+                    className="sr-only"
+                    onChange={handleFilePick}
+                    disabled={!selectedAgent || sending}
+                  />
+                </label>
+                <textarea
+                  ref={textareaRef}
+                  value={input}
+                  onChange={handleInputChange}
+                  onKeyDown={handleKeyDown}
+                  onBlur={() => setTimeout(() => setSlashOpen(false), 120)}
+                  placeholder={
+                    selectedAgent
+                      ? `Message ${selectedAgent}... ("/" to pick a skill)`
+                      : "Select an agent first"
+                  }
+                  disabled={!selectedAgent || sending}
+                  rows={1}
+                  className="flex-1 resize-none bg-transparent text-[15px] placeholder:text-muted-foreground/50 outline-none disabled:opacity-50"
+                  style={{ maxHeight: 200, minHeight: 24 }}
+                />
+                {sending ? (
+                  <Button
+                    onClick={handleStop}
+                    size="icon"
+                    className="h-8 w-8 shrink-0 rounded-lg"
+                    aria-label="Stop generating"
+                  >
+                    <Square className="h-3.5 w-3.5 fill-current" />
+                  </Button>
+                ) : (
+                  <Button
+                    onClick={handleSend}
+                    disabled={(!input.trim() && attachments.length === 0) || !selectedAgent}
+                    size="icon"
+                    className="h-8 w-8 shrink-0 rounded-lg"
+                    aria-label="Send message"
+                  >
+                    <Send className="h-4 w-4" />
+                  </Button>
+                )}
+              </div>
             </div>
             <p className="text-center text-[11px] text-muted-foreground/50 mt-2">
               Enter to send, Shift+Enter for new line
@@ -942,7 +1186,7 @@ function ChatHeaderTitle({ title, fallback, onSave }: ChatHeaderTitleProps) {
 }
 
 /** Renders a group of tool calls as a collapsible summary. */
-function ToolCallGroup({ msg, surfacedSrcs, agentId }: { msg: ChatMessage; surfacedSrcs?: ReadonlySet<string>; agentId: string }) {
+function ToolCallGroup({ msg, surfacedSrcs, agentId, sessionId }: { msg: ChatMessage; surfacedSrcs?: ReadonlySet<string>; agentId: string; sessionId: string }) {
   const [groupOpen, setGroupOpen] = useState(false);
   const [expandedTool, setExpandedTool] = useState<Record<string, boolean>>({});
 
@@ -961,7 +1205,7 @@ function ToolCallGroup({ msg, surfacedSrcs, agentId }: { msg: ChatMessage; surfa
           <div className="bg-muted rounded-2xl rounded-bl-md px-4 py-2.5">
             <div className="text-[15px] leading-relaxed prose prose-sm dark:prose-invert max-w-none prose-p:my-1">
               {renderContentWithDataImages(msg.content, surfacedSrcs) ?? (
-                <ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={makeUrlTransform(agentId)}>
+                <ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={makeUrlTransform(agentId, sessionId)}>
                   {msg.content}
                 </ReactMarkdown>
               )}

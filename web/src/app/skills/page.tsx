@@ -22,27 +22,42 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Sparkles, FolderOpen, Trash2, Download, Search, Loader2, Check, ExternalLink } from "lucide-react";
+import { Sparkles, Trash2, Download, Search, Loader2, Check, ExternalLink, Settings } from "lucide-react";
 import {
   getSkills,
   deleteSkill,
   searchSkills,
   installSkill,
+  getConfig,
   type SkillInfo,
   type SkillSearchResult,
 } from "@/lib/api";
+import { ConfigureSkillDialog, type SkillEntryView } from "@/components/configure-skill-dialog";
 
 export default function SkillsPage() {
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
   const [installOpen, setInstallOpen] = useState(false);
+  const [configureTarget, setConfigureTarget] = useState<SkillInfo | null>(null);
+  // Per-skill saved entries (apiKey/env values come back masked from
+  // GET /api/config — the dialog renders them as placeholders so the
+  // user can tell something is configured, and POST preserves any field
+  // that's still masked on save).
+  const [skillEntries, setSkillEntries] = useState<Record<string, SkillEntryView>>({});
 
   const fetchSkills = () => {
     setLoading(true);
-    getSkills()
-      .then(setSkills)
-      .catch(() => setSkills([]))
+    Promise.all([
+      getSkills().catch(() => [] as SkillInfo[]),
+      getConfig().catch(() => null),
+    ])
+      .then(([list, cfg]) => {
+        setSkills(list);
+        const entries =
+          (cfg?.skills as { entries?: Record<string, SkillEntryView> } | undefined)?.entries || {};
+        setSkillEntries(entries);
+      })
       .finally(() => setLoading(false));
   };
 
@@ -112,24 +127,36 @@ export default function SkillsPage() {
                     </Badge>
                   </div>
                 </div>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="h-7 w-7 text-muted-foreground hover:text-destructive opacity-0 group-hover:opacity-100 transition-opacity"
-                  onClick={() => setDeleteTarget(skill.name)}
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                </Button>
+                <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-7 w-7 text-muted-foreground hover:text-foreground"
+                    onClick={() => setConfigureTarget(skill)}
+                    title="Configure env / API keys"
+                  >
+                    <Settings className="h-3.5 w-3.5" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-7 w-7 text-muted-foreground hover:text-destructive"
+                    onClick={() => setDeleteTarget(skill.name)}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
               </div>
-              <p className="text-sm text-muted-foreground line-clamp-2 mb-3">
+              <p className="text-sm text-muted-foreground line-clamp-2">
                 {skill.description || "No description"}
               </p>
-              <div className="flex items-center gap-1.5 text-muted-foreground/60">
-                <FolderOpen className="h-3 w-3" />
-                <span className="text-[11px] font-mono truncate">
-                  {skill.location}
-                </span>
-              </div>
+              {(skillEntries[skill.name]?.apiKey ||
+                Object.keys(skillEntries[skill.name]?.env || {}).length > 0) && (
+                <div className="mt-2 inline-flex items-center gap-1 text-[10px] text-emerald-500">
+                  <Check className="h-3 w-3" />
+                  configured
+                </div>
+              )}
             </div>
           ))}
         </div>
@@ -164,9 +191,20 @@ export default function SkillsPage() {
         }}
         installedNames={new Set(skills.map((s) => s.name))}
       />
+
+      <ConfigureSkillDialog
+        skill={configureTarget}
+        existing={configureTarget ? skillEntries[configureTarget.name] : undefined}
+        onClose={() => setConfigureTarget(null)}
+        onSaved={() => {
+          setConfigureTarget(null);
+          fetchSkills();
+        }}
+      />
     </div>
   );
 }
+
 
 function InstallSkillDialog({
   open,

@@ -25,7 +25,7 @@ import (
 type AgentHandle interface {
 	Name() string
 	HandleWebChat(ctx context.Context, sessionId, text string) string
-	HandleWebChatStream(ctx context.Context, sessionId, text string, events chan<- agent.ChatEvent) string
+	HandleWebChatStream(ctx context.Context, sessionId, text string, imageURLs []string, events chan<- agent.ChatEvent) string
 	WebChatHistory(sessionId string) []map[string]any
 	WebChatSessions() []session.WebSession
 	DeleteWebChatSession(sessionId string) error
@@ -284,6 +284,7 @@ func (s *Server) Run(ctx context.Context) error {
 	// Sandbox-checked to stay inside the agent's workspace root.
 	mux.HandleFunc("GET /api/agents/{id}/files", ua(s.handleAgentFileList))
 	mux.HandleFunc("GET /api/agents/{id}/files/{path...}", ua(s.handleAgentFile))
+	mux.HandleFunc("POST /api/agents/{id}/files", ua(s.handleAgentFileUpload))
 
 	// Agent identity/metadata files (SOUL.md, IDENTITY.md, ...) in the home dir.
 	// Used by the admin UI Files editor; names are allowlisted.

@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -128,6 +129,24 @@ func (g *Gateway) reloadConfig() {
 	// DB). Env overlay keeps infra fields correct.
 	newCfg := config.LoadOrEmpty()
 	config.LoadEnv().ApplyToConfig(newCfg)
+
+	// Mirror gateway.New's DB overlay: post-#7cdc49b the store is the
+	// source of truth for product fields (providers, agents.defaults,
+	// channels, sandbox via mergeCloudConfig). Without this overlay a
+	// settings-page save lands in the DB but the in-memory cfg keeps the
+	// boot-time view, so sandbox toggles / provider rotations don't take
+	// effect until restart.
+	if g.store != nil {
+		if gc, err := g.store.GetConfig(context.Background()); err == nil && gc != nil && len(gc.Data) > 0 {
+			if blob, merr := json.Marshal(gc.Data); merr == nil {
+				var stored config.Config
+				if uerr := json.Unmarshal(blob, &stored); uerr == nil {
+					mergeCloudConfig(newCfg, &stored)
+				}
+			}
+		}
+	}
+	config.ApplyDefaults(newCfg)
 
 	// 1. Update LLM provider if changed
 	g.reloadProvider(newCfg)
@@ -303,21 +322,19 @@ func ensureAgentHome(rc config.ResolvedAgent) {
 	}
 }
 
-// ReloadAgents is the public entrypoint used by the HTTP API after an agent
-// is created / updated / deleted via the web UI. It reloads the local user's
-// config and syncs the in-memory agent manager with disk.
+// ReloadAgents is the public entrypoint used by the HTTP API after a
+// config write via the web UI (settings page, onboarding wizard, agent
+// CRUD). The name is historical — it now runs the FULL hot-reload
+// pipeline (provider, agents, sandbox, bindings, cron, teams), not just
+// agents. We kept the name to avoid touching every caller; treat it as
+// "reload everything from disk + env + DB".
 //
-// In cloud/K8s mode there may be no fastclaw.json on the pod's filesystem —
-// infra comes from FASTCLAW_* env vars and agent state from the DB store.
-// Use LoadOrEmpty so a missing file doesn't block reload; env overlay via
-// LoadEnv/ApplyToConfig keeps infra fields correct.
+// Calling reloadConfig (instead of just reloadAgents) is what makes a
+// settings-page sandbox toggle take effect without a restart: the
+// pipeline calls reloadSandbox which bootstraps the executor pool when
+// the new cfg flips Enabled on.
 func (g *Gateway) ReloadAgents() error {
-	newCfg := config.LoadOrEmpty()
-	config.LoadEnv().ApplyToConfig(newCfg)
-	g.reloadAgents(newCfg)
-	g.mu.Lock()
-	g.config = newCfg
-	g.mu.Unlock()
+	g.reloadConfig()
 	return nil
 }
 

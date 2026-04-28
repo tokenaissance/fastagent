@@ -13,7 +13,8 @@ type InboundMessage struct {
 	SenderName   string   // display name of the sender
 	Mentions     []string // @usernames mentioned in the message
 	IsBotMessage bool     // true if the message was sent by a bot
-	PhotoURL     string   // URL of attached photo (if any)
+	PhotoURL     string   // URL of attached photo (if any) — single-image legacy field
+	PhotoURLs    []string // URLs of attached photos. Independent of PhotoURL so old single-image callers (Telegram bridge etc.) keep working untouched; new web-chat path uses this for multi-image attachments.
 	ReplyToMsgID string   // message ID being replied to
 }
 

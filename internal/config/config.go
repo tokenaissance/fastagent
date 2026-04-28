@@ -498,11 +498,19 @@ type SkillsConfig struct {
 }
 
 // SkillsCfg is the top-level skills configuration (global).
+//
+// AgentEntries holds per-(agent, skill) overrides — the runtime
+// resolves env vars by checking AgentEntries[agentID][skillName] first
+// and falling back to Entries[skillName] when nothing is set there.
+// This lets multi-tenant deployments give each agent its own FAL_KEY
+// without forking the skill, while single-tenant installs that don't
+// touch AgentEntries continue to work exactly as before.
 type SkillsCfg struct {
-	Install    SkillsInstallCfg         `json:"install,omitempty"`
-	Entries    map[string]SkillEntryCfg `json:"entries,omitempty"`
-	Load       SkillsLoadCfg            `json:"load,omitempty"`
-	AlwaysLoad []string                 `json:"alwaysLoad,omitempty"`
+	Install      SkillsInstallCfg                    `json:"install,omitempty"`
+	Entries      map[string]SkillEntryCfg            `json:"entries,omitempty"`
+	AgentEntries map[string]map[string]SkillEntryCfg `json:"agentEntries,omitempty"`
+	Load         SkillsLoadCfg                       `json:"load,omitempty"`
+	AlwaysLoad   []string                            `json:"alwaysLoad,omitempty"`
 }
 
 // SkillsInstallCfg configures skill installation behavior.

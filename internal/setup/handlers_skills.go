@@ -35,42 +35,12 @@ func (s *Server) handleListSkills(w http.ResponseWriter, r *http.Request) {
 			slog.Warn("failed to hydrate global skills from object store", "error", err)
 		}
 	}
-	entries, err := os.ReadDir(skillsDir)
-	if err != nil {
+	out := scanSkillsDir(skillsDir)
+	if out == nil {
 		jsonResponse(w, http.StatusOK, []any{})
 		return
 	}
-
-	var skills []map[string]string
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
-		desc := ""
-		skillPath := filepath.Join(skillsDir, name, "SKILL.md")
-		if data, readErr := os.ReadFile(skillPath); readErr == nil {
-			lines := strings.SplitN(string(data), "\n", 3)
-			for _, line := range lines {
-				line = strings.TrimSpace(line)
-				if line != "" && !strings.HasPrefix(line, "#") {
-					desc = line
-					break
-				}
-			}
-		}
-		skills = append(skills, map[string]string{
-			"name":        name,
-			"description": desc,
-			"location":    filepath.Join(skillsDir, name),
-			"type":        "skill",
-		})
-	}
-	if skills == nil {
-		jsonResponse(w, http.StatusOK, []any{})
-		return
-	}
-	jsonResponse(w, http.StatusOK, skills)
+	jsonResponse(w, http.StatusOK, out)
 }
 
 func (s *Server) handleDeleteSkill(w http.ResponseWriter, r *http.Request) {
@@ -120,41 +90,71 @@ func (s *Server) handleListAgentSkills(w http.ResponseWriter, r *http.Request) {
 				"agent", id, "error", err)
 		}
 	}
-	entries, err := os.ReadDir(skillsDir)
-	if err != nil {
-		jsonResponse(w, http.StatusOK, []any{})
-		return
-	}
-
-	var out []map[string]string
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
-		desc := ""
-		skillPath := filepath.Join(skillsDir, name, "SKILL.md")
-		if data, readErr := os.ReadFile(skillPath); readErr == nil {
-			for _, line := range strings.SplitN(string(data), "\n", 3) {
-				line = strings.TrimSpace(line)
-				if line != "" && !strings.HasPrefix(line, "#") {
-					desc = line
-					break
-				}
-			}
-		}
-		out = append(out, map[string]string{
-			"name":        name,
-			"description": desc,
-			"location":    filepath.Join(skillsDir, name),
-			"type":        "skill",
-		})
-	}
+	out := scanSkillsDir(skillsDir)
 	if out == nil {
 		jsonResponse(w, http.StatusOK, []any{})
 		return
 	}
 	jsonResponse(w, http.StatusOK, out)
+}
+
+// scanSkillsDir reads every SKILL.md under dir and returns the list of
+// {name, description, location, type, envSpec?} entries the admin UI
+// renders. Shared between the global /api/skills and the per-agent
+// /api/agents/{id}/skills paths so frontmatter parsing (description,
+// envSpec) stays consistent — earlier the two handlers drifted, with
+// the agent-scoped one falling back to "first non-# line" which then
+// surfaced the literal `---` frontmatter delimiter as the description.
+func scanSkillsDir(dir string) []map[string]any {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var out []map[string]any
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		skillPath := filepath.Join(dir, name, "SKILL.md")
+		desc := ""
+		var envSpec []agent.SkillEnvSpec
+		if data, readErr := os.ReadFile(skillPath); readErr == nil {
+			fm, body := agent.SplitSkillFrontmatter(data)
+			if fm != nil {
+				if fm.Description != "" {
+					desc = fm.Description
+				}
+				// Top-level `env:` shortcut wins; fall back to the
+				// namespaced metadata.fastclaw|openclaw.env form.
+				if len(fm.Env) > 0 {
+					envSpec = fm.Env
+				} else if meta := agent.ParseSkillMetadata(&fm.Metadata); meta != nil && meta.Meta() != nil {
+					envSpec = meta.Meta().Env
+				}
+			}
+			if desc == "" {
+				for _, line := range strings.SplitN(body, "\n", 5) {
+					line = strings.TrimSpace(line)
+					if line != "" && !strings.HasPrefix(line, "#") {
+						desc = line
+						break
+					}
+				}
+			}
+		}
+		entryOut := map[string]any{
+			"name":        name,
+			"description": desc,
+			"location":    filepath.Join(dir, name),
+			"type":        "skill",
+		}
+		if len(envSpec) > 0 {
+			entryOut["envSpec"] = envSpec
+		}
+		out = append(out, entryOut)
+	}
+	return out
 }
 
 // handleDeleteAgentSkill removes a skill from an agent's own home dir

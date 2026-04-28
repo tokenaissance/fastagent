@@ -90,6 +90,27 @@ func mergeCloudConfig(dst, src *config.Config) {
 	if src.Heartbeat.IntervalMinutes > 0 {
 		dst.Heartbeat = src.Heartbeat
 	}
+	// Sandbox is technically infra but the onboarding wizard / settings
+	// page persists it through the same store path as product fields, so
+	// pull it back on reload — otherwise toggling sandbox in the UI is
+	// lost across restarts in deployments that don't ship a fastclaw.json.
+	// Only adopt when src actually carries a backend, so an empty stored
+	// row doesn't clobber an env.toml-provided default.
+	if src.Sandbox.Enabled || src.Sandbox.Backend != "" {
+		dst.Sandbox = src.Sandbox
+	}
+	// Skills entries (per-skill apiKey + env, plus per-(agent, skill)
+	// overrides) live in the same store row. Without this overlay, env
+	// values saved through the admin UI vanish on every restart and
+	// agents fall back to "X_KEY not configured". DB wins because the
+	// UI is the canonical place to set these — disk fastclaw.json is
+	// only the fallback for installs that pre-date the store.
+	if len(src.Skills.Entries) > 0 {
+		dst.Skills.Entries = src.Skills.Entries
+	}
+	if len(src.Skills.AgentEntries) > 0 {
+		dst.Skills.AgentEntries = src.Skills.AgentEntries
+	}
 }
 
 // registerAgentToolChains wires every provider-backed tool category onto the
@@ -303,7 +324,18 @@ func New(cfg *config.Config) (*Gateway, error) {
 		}
 	}
 	resolved := config.ResolveAgentsWithExtra(cfg, "", storeAgents)
-	managerOpts := []agent.ManagerOption{agent.WithUserID(config.DefaultUserID)}
+	// Ensure each agent's home dir layout exists on this pod's local FS.
+	// Agents discovered via the store may not have a home dir yet (the
+	// pod that handled the create request mkdir'd it on its own emptyDir);
+	// without this the config watcher logs "failed to watch agent home"
+	// and identity-file hot-reload silently breaks until the dir appears.
+	for _, rc := range resolved {
+		ensureAgentHome(rc)
+	}
+	managerOpts := []agent.ManagerOption{
+		agent.WithUserID(config.DefaultUserID),
+		agent.WithGlobalSkillsCfg(cfg.Skills),
+	}
 	if st != nil {
 		managerOpts = append(managerOpts,
 			agent.WithSessionStore(session.NewStoreAdapter(st)),

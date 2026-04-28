@@ -20,8 +20,8 @@ import {
   LayoutDashboardIcon,
   PlusIcon,
   SettingsIcon,
-  SlidersHorizontalIcon,
   SparklesIcon,
+  Wand2Icon,
 } from "lucide-react";
 import {
   getAgents,
@@ -51,7 +51,8 @@ const PLATFORM_NAV: NavItem[] = [
 
 const AGENT_NAV = (agentId: string): NavItem[] => [
   { title: "New chat", url: `/agents/${agentId}/chat/`, icon: PlusIcon },
-  { title: "Customize", url: `/agents/${agentId}/customize/`, icon: SlidersHorizontalIcon },
+  { title: "Customize", url: `/agents/${agentId}/customize/`, icon: Wand2Icon },
+  { title: "Skills", url: `/agents/${agentId}/skills/`, icon: SparklesIcon },
 ];
 
 export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {

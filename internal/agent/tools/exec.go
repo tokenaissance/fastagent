@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -55,7 +57,13 @@ func registerExecWithSandbox(r *Registry, sbCfg *SandboxConfig) {
 }
 
 // RegisterExecWithSkillEnv registers the exec tool with skill environment injection support.
+// Caches envProvider + skillDirs on the Registry so a later SetExecutor
+// (per-session sandbox bind) can re-apply env injection when it
+// re-registers the exec closure — otherwise skills like image-tool run
+// in the container without their FAL_KEY / REPLICATE_API_TOKEN.
 func RegisterExecWithSkillEnv(r *Registry, sbCfg *SandboxConfig, envProvider SkillEnvProvider, skillDirs []string) {
+	r.envProvider = envProvider
+	r.skillDirs = skillDirs
 	registerExecFull(r, sbCfg, envProvider, skillDirs)
 }
 
@@ -131,6 +139,16 @@ func makeExecToolFull(sbCfg *SandboxConfig, envProvider SkillEnvProvider, skillD
 			out, err := sb.Exec(execCtx, command, "/workspace")
 			return MetaSandboxPrefix + out, err
 		}
+		// Sandbox was requested but no executor is wired — refuse rather
+		// than running on the host shell. SetExecutor swaps this closure
+		// for the sandboxed variant on successful session bind, so we
+		// only land here when the executor pool failed (docker daemon
+		// down, image pull failed, container start error). Returning a
+		// clear error gives the model a chance to surface it instead of
+		// the user seeing host-shell `command not found` mysteries.
+		if useSandbox {
+			return "", fmt.Errorf("sandbox required but no executor available — check that the sandbox backend (docker / e2b) is reachable and the configured image (%q) can start", sbCfgImage(sbCfg))
+		}
 
 		cmd := exec.CommandContext(execCtx, "sh", "-c", command)
 
@@ -153,13 +171,32 @@ func makeExecToolFull(sbCfg *SandboxConfig, envProvider SkillEnvProvider, skillD
 	}
 }
 
+// sbCfgImage returns the sandbox image name for diagnostic error messages.
+// Returns "<unset>" so the user immediately sees that no image was even
+// configured (vs. configured-but-unreachable).
+func sbCfgImage(sbCfg *SandboxConfig) string {
+	if sbCfg == nil || sbCfg.Image == "" {
+		return "<unset>"
+	}
+	return sbCfg.Image
+}
+
 // resolveSkillEnv checks if the command path references a skill directory
 // and returns the skill's configured env vars.
+//
+// Two matching paths:
+//  1. host paths from skillDirs (e.g. "/Users/.../agents/<id>/skills") —
+//     used when exec runs on the host shell.
+//  2. sandbox-internal "/skills/<name>" prefix — every skill is mounted
+//     into the docker container at that location regardless of where it
+//     lives on the host, so commands the model writes inside the
+//     sandbox use this form. Without this branch, env injection
+//     silently broke for ALL sandbox calls (the host paths in
+//     skillDirs never appear in /workspace-cd'd commands).
 func resolveSkillEnv(command string, envProvider SkillEnvProvider, skillDirs []string) map[string]string {
-	// Check if any skill directory appears in the command
+	// 1. host paths
 	for _, dir := range skillDirs {
 		if strings.Contains(command, dir) {
-			// Extract skill name from the path after the skill dir
 			rest := command[strings.Index(command, dir)+len(dir):]
 			if len(rest) > 0 && rest[0] == '/' {
 				rest = rest[1:]
@@ -169,6 +206,16 @@ func resolveSkillEnv(command string, envProvider SkillEnvProvider, skillDirs []s
 				if env := envProvider(parts[0]); env != nil {
 					return env
 				}
+			}
+		}
+	}
+	// 2. sandbox /skills/<name>/... — fixed mount layout
+	if idx := strings.Index(command, "/skills/"); idx >= 0 {
+		rest := command[idx+len("/skills/"):]
+		parts := strings.SplitN(rest, "/", 2)
+		if len(parts) > 0 && parts[0] != "" {
+			if env := envProvider(parts[0]); env != nil {
+				return env
 			}
 		}
 	}
@@ -200,14 +247,25 @@ func mergeEnv(base []string, additional map[string]string) []string {
 }
 
 // registerSandboxedExec re-registers the exec tool so it delegates to a
-// sandbox.Executor instead of running on the host.
+// sandbox.Executor instead of running on the host. Skill env vars
+// (FAL_KEY, REPLICATE_API_TOKEN, etc.) configured via the admin UI are
+// injected into the container by prepending POSIX `export` statements
+// to the command — sandbox.Executor.Exec only accepts a single command
+// string so we can't pass env via process attribute the way the host
+// path does.
 func registerSandboxedExec(r *Registry, ex sandbox.Executor) {
+	envProvider := r.envProvider
+	skillDirs := r.skillDirs
 	r.Register("exec", "Execute a shell command in the sandbox and return stdout/stderr. For binary or image output (PNG, JPEG, PDF, audio, video), write the file into the workspace (e.g. ./out.png) and reference it by relative path in your reply — do NOT base64-encode it into stdout, and do NOT inline data: URLs in your response. The workspace file will be surfaced to the user via the Files panel.", map[string]interface{}{
 		"type": "object",
 		"properties": map[string]interface{}{
 			"command": map[string]interface{}{
 				"type":        "string",
 				"description": "The shell command to execute",
+			},
+			"stdin": map[string]interface{}{
+				"type":        "string",
+				"description": "Optional input piped to the command's stdin.",
 			},
 			"timeout": map[string]interface{}{
 				"type":        "integer",
@@ -227,7 +285,57 @@ func registerSandboxedExec(r *Registry, ex sandbox.Executor) {
 		if args.Timeout > 0 {
 			timeout = args.Timeout
 		}
-		out, err := ex.Exec(ctx, args.Command, time.Duration(timeout)*time.Second)
+		command := args.Command
+		// Stdin via heredoc (mirror the host path) so callers can pipe
+		// JSON args to a skill script.
+		if args.Stdin != "" {
+			command = fmt.Sprintf("(cat <<'__FCSTDIN__'\n%s\n__FCSTDIN__\n) | %s", args.Stdin, args.Command)
+		}
+		// Inject the configured env for whichever skill the command
+		// references (SK skill dirs may be host paths or the
+		// container-internal /skills/<name> mount — resolveSkillEnv
+		// matches both).
+		injected := []string{}
+		if envProvider != nil {
+			skillEnv := resolveSkillEnv(args.Command, envProvider, skillDirs)
+			if len(skillEnv) > 0 {
+				var sb strings.Builder
+				for k, v := range skillEnv {
+					sb.WriteString("export ")
+					sb.WriteString(k)
+					sb.WriteString("=")
+					sb.WriteString(shellQuote(v))
+					sb.WriteString("; ")
+					if v == "" {
+						injected = append(injected, k+"=<empty>")
+					} else {
+						injected = append(injected, k+"=<set "+strconv.Itoa(len(v))+"chars>")
+					}
+				}
+				sb.WriteString(command)
+				command = sb.String()
+			}
+		}
+		slog.Info("sandboxed exec",
+			"envProviderSet", envProvider != nil,
+			"skillDirsCount", len(skillDirs),
+			"injected", injected,
+			"cmdHead", firstN(args.Command, 80))
+		out, err := ex.Exec(ctx, command, time.Duration(timeout)*time.Second)
 		return MetaSandboxPrefix + out, err
 	})
+}
+
+func firstN(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
+}
+
+// shellQuote single-quote-escapes a value for safe interpolation into
+// a POSIX shell command. Used by sandboxed exec to prepend env vars
+// without exposing the unescaped value to shell metacharacters.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }

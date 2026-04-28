@@ -536,6 +536,88 @@ func (s *Server) serveFileFromWorkspaceStore(w http.ResponseWriter, r *http.Requ
 	_, _ = io.Copy(w, rc)
 }
 
+// handleAgentFileUpload accepts a multipart/form-data POST and stores the
+// file(s) in the agent's workspace under a session-scoped path so the chat
+// UI can attach files to a turn. Frontend passes ?sessionId=<sid> so the
+// upload lands in the same dir the docker sandbox bind-mounts as
+// /workspace — the model can then `read_file <name>` immediately.
+//
+// Form fields:
+//   - file: one or more files (multipart File parts)
+//
+// Path layout in the workspace store:
+//   - sessions/<sid>/<basename>  when sessionId is provided (the normal case)
+//   - <basename>                 when not (admin one-off uploads)
+//
+// Returns {"files": [{"path": "...", "size": ...}]}.
+func (s *Server) handleAgentFileUpload(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !s.canAccessAgent(callerFrom(r), id) {
+		forbid(w, id)
+		return
+	}
+	if s.workspaceStore == nil {
+		http.Error(w, "workspace store not configured", http.StatusServiceUnavailable)
+		return
+	}
+	sessionID := r.URL.Query().Get("sessionId")
+
+	// 50MB cap per request. Bigger uploads should go straight to object
+	// storage via a signed URL — the gateway pod isn't a CDN.
+	if err := r.ParseMultipartForm(50 << 20); err != nil {
+		http.Error(w, "parse multipart: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	files := r.MultipartForm.File["file"]
+	if len(files) == 0 {
+		http.Error(w, "no files", http.StatusBadRequest)
+		return
+	}
+
+	type uploaded struct {
+		Path string `json:"path"`
+		Size int64  `json:"size"`
+	}
+	results := make([]uploaded, 0, len(files))
+
+	for _, fh := range files {
+		// Take only the basename — multipart filenames can contain path
+		// segments on some clients, and we never want a "../" escape.
+		base := filepath.Base(fh.Filename)
+		if base == "" || base == "." || base == "/" {
+			http.Error(w, "invalid filename", http.StatusBadRequest)
+			return
+		}
+		var key string
+		if sessionID != "" {
+			key = "sessions/" + sessionID + "/" + base
+		} else {
+			key = base
+		}
+
+		f, err := fh.Open()
+		if err != nil {
+			http.Error(w, "open upload: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		// Pass through to the workspace store with sessionID="" so the
+		// path we build above lands at the agent root verbatim — the
+		// store's resolvePath joins agentID + "" + key, giving us
+		// workspaces/<agent>/sessions/<sid>/<base> on local FS, which
+		// is exactly the dir the docker bind-mount sees as /workspace.
+		err = s.workspaceStore.Put(r.Context(), id, "", key, f, fh.Size, fh.Header.Get("Content-Type"))
+		f.Close()
+		if err != nil {
+			http.Error(w, "store: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		results = append(results, uploaded{Path: key, Size: fh.Size})
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]any{"ok": true, "files": results})
+}
+
 func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if !s.canAccessAgent(callerFrom(r), id) {
