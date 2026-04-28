@@ -19,6 +19,8 @@ import {
   KeyRoundIcon,
   LayoutDashboardIcon,
   PlusIcon,
+  SettingsIcon,
+  SlidersHorizontalIcon,
   SparklesIcon,
 } from "lucide-react";
 import {
@@ -44,10 +46,12 @@ const PLATFORM_NAV: NavItem[] = [
   { title: "Models", url: "/models/", icon: BrainIcon },
   { title: "Skills", url: "/skills/", icon: SparklesIcon },
   { title: "API Keys", url: "/apikeys/", icon: KeyRoundIcon },
+  { title: "Settings", url: "/settings/", icon: SettingsIcon },
 ];
 
 const AGENT_NAV = (agentId: string): NavItem[] => [
   { title: "New chat", url: `/agents/${agentId}/chat/`, icon: PlusIcon },
+  { title: "Customize", url: `/agents/${agentId}/customize/`, icon: SlidersHorizontalIcon },
 ];
 
 export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {

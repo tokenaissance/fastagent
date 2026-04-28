@@ -89,14 +89,13 @@ func attachSandboxToAgents(
 		pool = lp
 		slog.Info("sandbox lifecycle pool enabled",
 			"user", userID, "idleTTL", idle, "hydrate", ws != nil)
+		// Sandbox executors are now created per-(agent, session) on the
+		// first tool call of a chat, not eagerly here. The agent loop
+		// pulls a session-scoped executor from the pool at the start of
+		// each turn (see Agent.bindSession), so all we do here is hand
+		// every agent a reference to the pool.
 		for _, ag := range agentMgr.All() {
-			ex, err := pool.Get(context.Background(), ag.Name())
-			if err != nil {
-				slog.Warn("sandbox executor creation failed",
-					"user", userID, "agent", ag.Name(), "error", err)
-				continue
-			}
-			ag.ToolRegistry().SetExecutor(ex)
+			ag.SetSandboxPool(pool)
 		}
 		return pool
 	}

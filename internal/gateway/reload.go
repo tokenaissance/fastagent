@@ -135,19 +135,62 @@ func (g *Gateway) reloadConfig() {
 	// 2. Update agent configs (model, temperature, etc.)
 	g.reloadAgents(newCfg)
 
-	// 3. Update bindings
+	// 3. Sandbox: bootstrap a pool if onboarding just turned sandbox on,
+	//    and enroll any newly-added agents into an existing pool.
+	g.reloadSandbox(newCfg)
+
+	// 4. Update bindings
 	g.mu.Lock()
 	g.bindings = newCfg.Bindings
 	g.config = newCfg
 	g.mu.Unlock()
 
-	// 4. Update cron jobs
+	// 5. Update cron jobs
 	g.reloadCron(newCfg)
 
-	// 5. Update teams and group context
+	// 6. Update teams and group context
 	g.reloadTeams(newCfg)
 
 	slog.Info("hot-reload complete ✅")
+}
+
+// reloadSandbox handles sandbox-related changes during hot-reload.
+//
+// Cases:
+//   - Pool exists, new agents were added → enroll new agents into the
+//     existing pool (Get is keyed on agentID, idempotent for existing).
+//   - No pool yet, fresh config wants sandbox → bootstrap via
+//     attachSandboxToAgents (this is the path the onboard wizard hits:
+//     gateway booted with no fastclaw.json, then user enabled sandbox).
+//   - No pool, no sandbox wanted → attachSandboxToAgents falls back to
+//     path-only restriction so newly-added agents still can't escape.
+//
+// Backend / image flips (docker→e2b, image change) are NOT handled here
+// — those need a tear-down + rebuild and are rare enough that "restart
+// the gateway" is fine for now.
+func (g *Gateway) reloadSandbox(newCfg *config.Config) {
+	g.mu.RLock()
+	pool := g.localSpace.SandboxPool
+	g.mu.RUnlock()
+
+	if pool != nil {
+		// Pool already exists from boot. New agents added via this reload
+		// just need a pool reference; per-(agent,session) executors are
+		// fetched lazily by the loop on the first tool call of a chat.
+		for _, ag := range g.agents.All() {
+			ag.SetSandboxPool(pool)
+		}
+		return
+	}
+
+	resolved := config.ResolveAgents(newCfg)
+	newPool := attachSandboxToAgents(config.DefaultUserID, resolved, g.agents, g.workspace)
+	if newPool != nil {
+		g.mu.Lock()
+		g.localSpace.SandboxPool = newPool
+		g.mu.Unlock()
+		slog.Info("hot-reload: sandbox pool created")
+	}
 }
 
 // resolveProviderCfg picks the active provider config from a Config.

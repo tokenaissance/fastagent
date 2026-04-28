@@ -357,24 +357,26 @@ func NewE2BExecutorPool(apiKey, template string, timeout time.Duration) *E2BExec
 	}
 }
 
-func (p *E2BExecutorPool) Get(ctx context.Context, userID string) (Executor, error) {
+func (p *E2BExecutorPool) Get(ctx context.Context, agentID, sessionID string) (Executor, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if ex, ok := p.executors[userID]; ok {
+	key := poolKey(agentID, sessionID)
+	if ex, ok := p.executors[key]; ok {
 		return ex, nil
 	}
 	ex, err := newE2BExecutor(ctx, p.apiKey, p.template, p.timeout)
 	if err != nil {
 		return nil, err
 	}
-	p.executors[userID] = ex
+	p.executors[key] = ex
 	return ex, nil
 }
 
-func (p *E2BExecutorPool) Release(userID string) error {
+func (p *E2BExecutorPool) Release(agentID, sessionID string) error {
 	p.mu.Lock()
-	ex, ok := p.executors[userID]
-	delete(p.executors, userID)
+	key := poolKey(agentID, sessionID)
+	ex, ok := p.executors[key]
+	delete(p.executors, key)
 	p.mu.Unlock()
 	if ok {
 		return ex.Close()

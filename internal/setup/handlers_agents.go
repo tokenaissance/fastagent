@@ -403,7 +403,10 @@ func (s *Server) handleAgentFileList(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{"files": []any{}})
 		return
 	}
-	objs, err := s.workspaceStore.List(r.Context(), id)
+	// Admin browse: list everything under the agent regardless of session
+	// (sessionID=""). Paths come back with "sessions/<id>/" prefixes for
+	// session-scoped artifacts; the UI groups by that prefix.
+	objs, err := s.workspaceStore.List(r.Context(), id, "")
 	if err != nil {
 		http.Error(w, "list workspace: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -493,12 +496,16 @@ func (s *Server) handleAgentFile(w http.ResponseWriter, r *http.Request) {
 // the bucket, sparing the gateway pod bandwidth. Otherwise stream the body.
 func (s *Server) serveFileFromWorkspaceStore(w http.ResponseWriter, r *http.Request, agentID, path string) {
 	ctx := r.Context()
-	// Try a signed URL first; browsers can handle the 302 and go direct.
-	if url, err := s.workspaceStore.SignedURL(ctx, agentID, path, 10*time.Minute); err == nil {
+	// Path may be agent-shared (e.g. "skills/foo/main.py") or session-
+	// scoped (e.g. "sessions/<sid>/report.png"). Either way the path the
+	// admin sees in List() is fully qualified relative to the agent root,
+	// so an empty sessionID lets resolvePath / scopePrefix reconstruct
+	// the correct on-disk / S3 location verbatim.
+	if url, err := s.workspaceStore.SignedURL(ctx, agentID, "", path, 10*time.Minute); err == nil {
 		http.Redirect(w, r, url, http.StatusFound)
 		return
 	}
-	info, err := s.workspaceStore.Stat(ctx, agentID, path)
+	info, err := s.workspaceStore.Stat(ctx, agentID, "", path)
 	if err != nil {
 		if err == workspace.ErrNotFound {
 			http.Error(w, "not found", http.StatusNotFound)
@@ -507,7 +514,7 @@ func (s *Server) serveFileFromWorkspaceStore(w http.ResponseWriter, r *http.Requ
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	rc, err := s.workspaceStore.Get(ctx, agentID, path)
+	rc, err := s.workspaceStore.Get(ctx, agentID, "", path)
 	if err != nil {
 		if err == workspace.ErrNotFound {
 			http.Error(w, "not found", http.StatusNotFound)

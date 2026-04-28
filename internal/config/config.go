@@ -71,11 +71,11 @@ type HeartbeatCfg struct {
 	IntervalMinutes int `json:"intervalMinutes,omitempty"` // default 30
 }
 
-// StorageCfg configures the storage backend.
-// Default: file-based. For cloud multi-tenant: "postgres" or "sqlite".
+// StorageCfg configures the storage backend. Written by the onboard
+// wizard; env.toml / FASTCLAW_STORAGE_* override at boot.
 type StorageCfg struct {
-	Type        string `json:"type,omitempty"`        // "file" (default), "postgres", "sqlite"
-	DSN         string `json:"dsn,omitempty"`          // database connection string
+	Type        string `json:"type,omitempty"`        // "sqlite" (default), "postgres", or "file" (legacy single-user)
+	DSN         string `json:"dsn,omitempty"`         // sqlite empty → ~/.fastclaw/fastclaw.db; postgres needs a real DSN
 	AutoMigrate bool   `json:"autoMigrate,omitempty"` // auto-create tables on startup
 }
 

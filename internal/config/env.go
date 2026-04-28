@@ -55,25 +55,15 @@ type EnvLog struct {
 //	FASTCLAW_STORAGE_TYPE, FASTCLAW_STORAGE_DSN,
 //	FASTCLAW_SANDBOX_BACKEND, E2B_API_KEY
 func LoadEnv() *EnvConfig {
-	cfg := &EnvConfig{
-		Gateway: EnvGateway{
-			Port: 18953,
-			Mode: "local",
-			Bind: "loopback",
-		},
-		Storage: EnvStorage{
-			// SQLite is the zero-config default: one .db file under
-			// ~/.fastclaw/, no external service to run, and the same
-			// schema/code path as Postgres so cloud upgrades are a DSN
-			// swap. Empty DSN means "the factory picks it" — see
-			// store.New for the resolved location.
-			Type:        "sqlite",
-			AutoMigrate: true,
-		},
-		Log: EnvLog{
-			Level: "info",
-		},
-	}
+	// No zero-config defaults — fastclaw.json (written by the onboard
+	// wizard) is the source of truth for storage / sandbox / gateway
+	// fields. EnvConfig only carries values the operator explicitly set
+	// in env.toml or FASTCLAW_* env vars; ApplyToConfig then overlays
+	// them on top of the JSON so deployment-specific overrides win.
+	// Defaults for the truly-empty case (no JSON, no TOML, no env vars)
+	// live where they belong — port at the CLI flag, storage at
+	// store.New's zero-value fallback to sqlite.
+	cfg := &EnvConfig{}
 
 	// Try loading from file
 	for _, path := range envSearchPaths() {
@@ -182,7 +172,12 @@ func (e *EnvConfig) ApplyToConfig(cfg *Config) {
 	if e.Storage.DSN != "" {
 		cfg.Storage.DSN = e.Storage.DSN
 	}
-	cfg.Storage.AutoMigrate = e.Storage.AutoMigrate
+	// Env can turn AutoMigrate on but not off — disabling is a fastclaw.json
+	// concern. Unconditional assignment used to clobber the JSON value with
+	// the (now removed) zero-config default.
+	if e.Storage.AutoMigrate {
+		cfg.Storage.AutoMigrate = true
+	}
 	if e.Sandbox.Enabled {
 		cfg.Sandbox.Enabled = true
 		if e.Sandbox.Backend != "" {
@@ -223,4 +218,18 @@ func envSearchPaths() []string {
 
 	paths = append(paths, "/etc/fastclaw/env.toml")
 	return paths
+}
+
+// EnvTOMLExists reports whether an env.toml file is present in any of
+// the search locations LoadEnv consults. The setup status check uses
+// this so operator-provisioned deployments (env.toml carrying the
+// gateway token + storage DSN) don't drop into the onboarding wizard
+// just because no per-user fastclaw.json has been written yet.
+func EnvTOMLExists() bool {
+	for _, path := range envSearchPaths() {
+		if _, err := os.Stat(path); err == nil {
+			return true
+		}
+	}
+	return false
 }

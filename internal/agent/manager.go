@@ -71,6 +71,13 @@ func WithWorkspaceStore(ws workspace.Store) ManagerOption {
 type Manager struct {
 	agents       map[string]*Agent
 	defaultAgent *Agent
+	// opts is retained so AddAgent (hot-reload after onboard / agent
+	// create) can apply the same store wiring the constructor did.
+	// Without this the freshly-added agent's tool registry never gets
+	// SetSystemFileStore, so read_file falls through to host FS and
+	// 404s on identity files (SOUL/IDENTITY/...) that live only in DB.
+	opts managerOpts
+	uid  string
 }
 
 // NewManager creates agents from resolved configs.
@@ -78,51 +85,20 @@ func NewManager(resolved []config.ResolvedAgent, prov provider.Provider, mb *bus
 	m := &Manager{
 		agents: make(map[string]*Agent),
 	}
-	var mopt managerOpts
 	for _, o := range opts {
-		o(&mopt)
+		o(&m.opts)
 	}
 
-	homeDir, err := config.HomeDir()
-	if err != nil {
+	if _, err := config.HomeDir(); err != nil {
 		return nil, err
 	}
 
-	uid := mopt.userID
-	if uid == "" {
-		uid = config.DefaultUserID
+	m.uid = m.opts.userID
+	if m.uid == "" {
+		m.uid = config.DefaultUserID
 	}
 	for _, rc := range resolved {
-		ag := NewAgent(rc, providerForAgent(rc, prov), mb, homeDir)
-		ag.SetOwnerUserID(uid)
-		// Inject store-backed session manager if available
-		if mopt.sessionStore != nil {
-			ag.sessions = session.NewManagerWithStoreForUser(rc.Home+"/sessions", mopt.sessionStore, uid, rc.ID)
-		}
-		if mopt.memoryStore != nil {
-			ag.memory = NewMemoryWithStoreForUser(rc.Home, mopt.memoryStore, uid, rc.ID)
-			ag.ctxBuilder.store = mopt.memoryStore
-			ag.ctxBuilder.agentID = rc.ID
-			ag.ctxBuilder.userID = uid
-			ag.memoryStore = mopt.memoryStore
-			// Identity files (SOUL/IDENTITY/USER/...) share the same DB
-			// store as memory so write_file from the agent ends up in
-			// the same rows the admin UI's Customize page reads.
-			ag.registry.SetSystemFileStore(mopt.memoryStore, rc.ID)
-		}
-		if mopt.workspaceStore != nil {
-			ag.registry.SetWorkspaceStore(mopt.workspaceStore, rc.ID)
-			// Also make the store available to SkillsLoader so object-store
-			// skills (global + per-agent) are hydrated on every turn. Without
-			// this, pods that didn't handle the original upload will never
-			// see a new skill.
-			ag.workspaceStore = mopt.workspaceStore
-			ag.agentID = rc.ID
-			// Refresh skills now that workspaceStore is wired — the initial
-			// NewAgent pass loaded only the filesystem, missing anything that
-			// lives only in OSS.
-			ag.ReloadWorkspaceFiles()
-		}
+		ag := m.buildAgent(rc, prov, mb)
 		m.agents[rc.ID] = ag
 
 		slog.Info("loaded agent",
@@ -143,14 +119,50 @@ func NewManager(resolved []config.ResolvedAgent, prov provider.Provider, mb *bus
 	return m, nil
 }
 
+// buildAgent constructs an Agent and wires every store the Manager
+// was configured with. Shared between NewManager's bootstrap loop and
+// AddAgent's hot-reload path so a freshly-onboarded agent picks up the
+// same DB-backed identity / memory / workspace plumbing.
+func (m *Manager) buildAgent(rc config.ResolvedAgent, prov provider.Provider, mb *bus.MessageBus) *Agent {
+	homeDir, _ := config.HomeDir()
+	ag := NewAgent(rc, providerForAgent(rc, prov), mb, homeDir)
+	ag.SetOwnerUserID(m.uid)
+	if m.opts.sessionStore != nil {
+		ag.sessions = session.NewManagerWithStoreForUser(rc.Home+"/sessions", m.opts.sessionStore, m.uid, rc.ID)
+	}
+	if m.opts.memoryStore != nil {
+		ag.memory = NewMemoryWithStoreForUser(rc.Home, m.opts.memoryStore, m.uid, rc.ID)
+		ag.ctxBuilder.store = m.opts.memoryStore
+		ag.ctxBuilder.agentID = rc.ID
+		ag.ctxBuilder.userID = m.uid
+		ag.memoryStore = m.opts.memoryStore
+		// Identity files (SOUL/IDENTITY/USER/...) share the same DB
+		// store as memory so write_file from the agent ends up in
+		// the same rows the admin UI's Customize page reads.
+		ag.registry.SetSystemFileStore(m.opts.memoryStore, rc.ID)
+	}
+	if m.opts.workspaceStore != nil {
+		ag.registry.SetWorkspaceStore(m.opts.workspaceStore, rc.ID)
+		// Also make the store available to SkillsLoader so object-store
+		// skills (global + per-agent) are hydrated on every turn. Without
+		// this, pods that didn't handle the original upload will never
+		// see a new skill.
+		ag.workspaceStore = m.opts.workspaceStore
+		ag.agentID = rc.ID
+		// Refresh skills now that workspaceStore is wired — the initial
+		// NewAgent pass loaded only the filesystem, missing anything that
+		// lives only in OSS.
+		ag.ReloadWorkspaceFiles()
+	}
+	return ag
+}
+
 // AddAgent creates and registers a new agent dynamically (for hot-reload).
 func (m *Manager) AddAgent(rc config.ResolvedAgent, prov provider.Provider, mb *bus.MessageBus) error {
 	if _, exists := m.agents[rc.ID]; exists {
 		return fmt.Errorf("agent %q already exists", rc.ID)
 	}
-	homeDir, _ := config.HomeDir()
-	ag := NewAgent(rc, providerForAgent(rc, prov), mb, homeDir)
-	m.agents[rc.ID] = ag
+	m.agents[rc.ID] = m.buildAgent(rc, prov, mb)
 	slog.Info("agent added dynamically", "id", rc.ID, "model", rc.Model)
 	return nil
 }

@@ -45,9 +45,9 @@ func (c *countingReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-func (m *Metered) Put(ctx context.Context, agentID, path string, r io.Reader, size int64, contentType string) error {
+func (m *Metered) Put(ctx context.Context, agentID, sessionID, path string, r io.Reader, size int64, contentType string) error {
 	cr := &countingReader{r: r}
-	if err := m.inner.Put(ctx, agentID, path, cr, size, contentType); err != nil {
+	if err := m.inner.Put(ctx, agentID, sessionID, path, cr, size, contentType); err != nil {
 		return err
 	}
 	// Prefer the caller's size when it's reliable; otherwise fall back
@@ -61,24 +61,24 @@ func (m *Metered) Put(ctx context.Context, agentID, path string, r io.Reader, si
 	return nil
 }
 
-func (m *Metered) Get(ctx context.Context, agentID, path string) (io.ReadCloser, error) {
-	return m.inner.Get(ctx, agentID, path)
+func (m *Metered) Get(ctx context.Context, agentID, sessionID, path string) (io.ReadCloser, error) {
+	return m.inner.Get(ctx, agentID, sessionID, path)
 }
 
-func (m *Metered) Stat(ctx context.Context, agentID, path string) (*ObjectInfo, error) {
-	return m.inner.Stat(ctx, agentID, path)
+func (m *Metered) Stat(ctx context.Context, agentID, sessionID, path string) (*ObjectInfo, error) {
+	return m.inner.Stat(ctx, agentID, sessionID, path)
 }
 
-func (m *Metered) List(ctx context.Context, agentID string) ([]ObjectInfo, error) {
-	return m.inner.List(ctx, agentID)
+func (m *Metered) List(ctx context.Context, agentID, sessionID string) ([]ObjectInfo, error) {
+	return m.inner.List(ctx, agentID, sessionID)
 }
 
-func (m *Metered) Delete(ctx context.Context, agentID, path string) error {
-	return m.inner.Delete(ctx, agentID, path)
+func (m *Metered) Delete(ctx context.Context, agentID, sessionID, path string) error {
+	return m.inner.Delete(ctx, agentID, sessionID, path)
 }
 
-func (m *Metered) SignedURL(ctx context.Context, agentID, path string, ttl time.Duration) (string, error) {
-	return m.inner.SignedURL(ctx, agentID, path, ttl)
+func (m *Metered) SignedURL(ctx context.Context, agentID, sessionID, path string, ttl time.Duration) (string, error) {
+	return m.inner.SignedURL(ctx, agentID, sessionID, path, ttl)
 }
 
 // Compile-time check.

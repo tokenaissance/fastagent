@@ -25,32 +25,31 @@ import (
 // Paths are agent-relative (e.g. "report.pdf", "images/cover.png"). Absolute
 // paths are never passed in. Implementations are free to add their own
 // namespacing (bucket prefix, directory tree, ...) below the agent scope.
+//
+// sessionID isolates artifacts produced inside a single chat session so
+// concurrent sessions of the same agent don't clobber each other's
+// outputs. Pass an empty string for agent-shared artifacts (skills,
+// admin uploads, anything that should outlive a single session). On
+// disk this maps to:
+//
+//	sessionID == ""   →  <root>/<agentID>/<path>
+//	sessionID == "x"  →  <root>/<agentID>/sessions/x/<path>
+//
+// List(agentID, "") returns EVERY object under the agent regardless of
+// session — used by the admin file browser. List(agentID, "x") returns
+// only files in session x.
 type Store interface {
-	// Put writes all bytes from r to the object at <agentID>/<path>. Any
-	// prior object at that path is overwritten. If size is unknown pass -1.
-	Put(ctx context.Context, agentID, path string, r io.Reader, size int64, contentType string) error
+	Put(ctx context.Context, agentID, sessionID, path string, r io.Reader, size int64, contentType string) error
 
-	// Get returns a reader for <agentID>/<path>. Caller MUST Close it.
-	// Returns ErrNotFound when the object doesn't exist.
-	Get(ctx context.Context, agentID, path string) (io.ReadCloser, error)
+	Get(ctx context.Context, agentID, sessionID, path string) (io.ReadCloser, error)
 
-	// Stat returns metadata (size, content type, last modified) for an
-	// object, or ErrNotFound.
-	Stat(ctx context.Context, agentID, path string) (*ObjectInfo, error)
+	Stat(ctx context.Context, agentID, sessionID, path string) (*ObjectInfo, error)
 
-	// List enumerates every object under <agentID>/. Returns an empty slice
-	// (not an error) when the agent has never written anything.
-	List(ctx context.Context, agentID string) ([]ObjectInfo, error)
+	List(ctx context.Context, agentID, sessionID string) ([]ObjectInfo, error)
 
-	// Delete removes a single object. No-op when it doesn't exist.
-	Delete(ctx context.Context, agentID, path string) error
+	Delete(ctx context.Context, agentID, sessionID, path string) error
 
-	// SignedURL returns a time-limited URL that lets the holder GET the
-	// object over HTTPS without going through the gateway. Used by the
-	// chat UI's download button to avoid streaming big blobs through the
-	// gateway pod. Implementations that can't produce signed URLs (local
-	// filesystem) return ErrSignedURLUnsupported.
-	SignedURL(ctx context.Context, agentID, path string, ttl time.Duration) (string, error)
+	SignedURL(ctx context.Context, agentID, sessionID, path string, ttl time.Duration) (string, error)
 }
 
 // ObjectInfo describes one stored object. Fields not known by a particular

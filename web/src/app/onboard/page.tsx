@@ -67,12 +67,19 @@ interface OnboardConfig {
   agentName: string;
   personality: string;
   gatewayToken: string; // returned after save, for display + auto-login
+  storageType: string;
+  storageDSN: string;
+  sandboxEnabled: boolean;
+  sandboxBackend: string;
+  sandboxImage: string;
+  sandboxE2BKey: string;
 }
 
 const STEP_LABELS = [
   "Welcome",
   "LLM Provider",
   "Gateway",
+  "Storage & Sandbox",
   "Launch",
 ];
 
@@ -134,6 +141,12 @@ export default function OnboardPage() {
     personality:
       "You are a helpful, friendly AI assistant. You respond concisely and accurately.",
     gatewayToken: "",
+    storageType: "sqlite",
+    storageDSN: "",
+    sandboxEnabled: false,
+    sandboxBackend: "docker",
+    sandboxImage: "",
+    sandboxE2BKey: "",
   });
   const [testStatus, setTestStatus] = useState<
     "idle" | "testing" | "success" | "error"
@@ -170,7 +183,7 @@ export default function OnboardPage() {
   // holds it to have reached this page, so generating another one would
   // overwrite their working bearer on launch.
   useEffect(() => {
-    if (step === 3 && !config.gatewayToken && !isCloud) {
+    if (step === 4 && !config.gatewayToken && !isCloud) {
       const chars = "abcdef0123456789";
       let token = "";
       for (let i = 0; i < 64; i++) {
@@ -253,6 +266,21 @@ export default function OnboardPage() {
       case 2:
         return config.agentName.length > 0 && config.port > 0;
       case 3:
+        // Storage type is always set (defaults to sqlite). Postgres needs a
+        // DSN; sqlite/file are happy empty.
+        if (config.storageType === "postgres" && !config.storageDSN.trim()) {
+          return false;
+        }
+        // Sandbox: enabled + e2b backend needs a key
+        if (
+          config.sandboxEnabled &&
+          config.sandboxBackend === "e2b" &&
+          !config.sandboxE2BKey.trim()
+        ) {
+          return false;
+        }
+        return true;
+      case 4:
         return true;
       default:
         return false;
@@ -620,6 +648,151 @@ export default function OnboardPage() {
         )}
 
         {step === 3 && (
+          <Card className="backdrop-blur-sm">
+            <CardHeader>
+              <CardTitle className="text-xl">Storage & Sandbox</CardTitle>
+              <CardDescription>
+                Pick where FastClaw persists state and whether it should
+                execute tools in an isolated sandbox.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-5">
+              <div className="space-y-2">
+                <Label>Storage Backend</Label>
+                <Select
+                  value={config.storageType}
+                  onValueChange={(v) => v && updateConfig({ storageType: v })}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="sqlite">SQLite (recommended)</SelectItem>
+                    <SelectItem value="postgres">PostgreSQL</SelectItem>
+                    <SelectItem value="file">File system (legacy)</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  {config.storageType === "sqlite" &&
+                    "One .db file under ~/.fastclaw/. Zero-config, no external service."}
+                  {config.storageType === "postgres" &&
+                    "Multi-tenant production deployments. DSN required."}
+                  {config.storageType === "file" &&
+                    "Plain JSON files. Single-user only — no concurrent writers."}
+                </p>
+              </div>
+
+              {config.storageType !== "file" && (
+                <div className="space-y-2">
+                  <Label>
+                    Connection String (DSN){" "}
+                    {config.storageType === "sqlite" && (
+                      <span className="text-xs text-muted-foreground">
+                        — leave blank to use ~/.fastclaw/fastclaw.db
+                      </span>
+                    )}
+                  </Label>
+                  <Input
+                    value={config.storageDSN}
+                    onChange={(e) => updateConfig({ storageDSN: e.target.value })}
+                    placeholder={
+                      config.storageType === "postgres"
+                        ? "postgres://user:pass@host:5432/fastclaw"
+                        : "Optional: file:custom.db?_journal=WAL"
+                    }
+                    className="font-mono text-sm"
+                  />
+                </div>
+              )}
+
+              <Separator />
+
+              <div className="flex items-center justify-between">
+                <div>
+                  <Label className="text-base">Sandbox</Label>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    Run tool calls in an isolated environment.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={config.sandboxEnabled}
+                  onClick={() =>
+                    updateConfig({ sandboxEnabled: !config.sandboxEnabled })
+                  }
+                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                    config.sandboxEnabled ? "bg-primary" : "bg-muted"
+                  }`}
+                >
+                  <span
+                    className={`inline-block h-4 w-4 transform rounded-full bg-background transition-transform ${
+                      config.sandboxEnabled ? "translate-x-6" : "translate-x-1"
+                    }`}
+                  />
+                </button>
+              </div>
+
+              {config.sandboxEnabled && (
+                <>
+                  <div className="space-y-2">
+                    <Label>Sandbox Backend</Label>
+                    <Select
+                      value={config.sandboxBackend}
+                      onValueChange={(v) => v && updateConfig({ sandboxBackend: v })}
+                    >
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="docker">Docker</SelectItem>
+                        <SelectItem value="e2b">E2B (cloud)</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  {config.sandboxBackend === "docker" && (
+                    <div className="space-y-2">
+                      <Label>
+                        Docker Image{" "}
+                        <span className="text-xs text-muted-foreground">
+                          (optional)
+                        </span>
+                      </Label>
+                      <Input
+                        value={config.sandboxImage}
+                        onChange={(e) => updateConfig({ sandboxImage: e.target.value })}
+                        placeholder="python:3.12-slim"
+                        className="font-mono text-sm"
+                      />
+                    </div>
+                  )}
+
+                  {config.sandboxBackend === "e2b" && (
+                    <div className="space-y-2">
+                      <Label>E2B API Key</Label>
+                      <Input
+                        type="password"
+                        value={config.sandboxE2BKey}
+                        onChange={(e) => updateConfig({ sandboxE2BKey: e.target.value })}
+                        placeholder="e2b_..."
+                        className="font-mono text-sm"
+                      />
+                    </div>
+                  )}
+                </>
+              )}
+
+              <NavigationButtons
+                step={step}
+                setStep={setStep}
+                canProceed={canProceed()}
+              />
+            </CardContent>
+          </Card>
+        )}
+
+        {step === 4 && (
           <Card className="backdrop-blur-sm animate-pulse-glow">
             <CardHeader>
               <CardTitle className="text-xl">
@@ -679,6 +852,29 @@ export default function OnboardPage() {
                         mono
                       />
                     )}
+                    <Separator />
+                    <SummaryRow label="Storage" value={config.storageType} mono />
+                    {config.storageType !== "file" && config.storageDSN && (
+                      <SummaryRow
+                        label="DSN"
+                        value={
+                          config.storageType === "postgres"
+                            ? "********"
+                            : config.storageDSN
+                        }
+                        mono
+                      />
+                    )}
+                    <SummaryRow
+                      label="Sandbox"
+                      value={
+                        config.sandboxEnabled
+                          ? config.sandboxBackend
+                          : "Disabled"
+                      }
+                      mono={config.sandboxEnabled}
+                      capitalize={!config.sandboxEnabled}
+                    />
                   </div>
 
                   {!isCloud && (

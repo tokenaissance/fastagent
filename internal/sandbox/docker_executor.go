@@ -118,14 +118,25 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
-// DockerExecutorPool manages per-user DockerExecutor instances.
+// DockerExecutorPool manages per-(agent,session) DockerExecutor instances.
 type DockerExecutorPool struct {
 	mu        sync.Mutex
-	executors map[string]*DockerExecutor
+	executors map[string]*DockerExecutor // key = poolKey(agentID, sessionID)
 	image     string
 	policy    *Policy
-	// workspaceRoot is the base dir; each user gets workspaceRoot/{userID}/
+	// workspaceRoot is FASTCLAW_HOME — each session gets a private mount
+	// rooted at workspaceRoot/workspaces/<agentID>/sessions/<sessionID>/.
 	workspaceRoot string
+}
+
+// poolKey is the composite map key used by the executor pools. Empty
+// sessionID is treated as the agent-shared sandbox slot so legacy
+// callers that haven't been migrated still work.
+func poolKey(agentID, sessionID string) string {
+	if sessionID == "" {
+		return agentID
+	}
+	return agentID + ":" + sessionID
 }
 
 // NewDockerExecutorPool creates a pool of Docker-backed executors.
@@ -141,21 +152,25 @@ func NewDockerExecutorPool(image, workspaceRoot string, policy *Policy) *DockerE
 	}
 }
 
-func (p *DockerExecutorPool) Get(ctx context.Context, agentID string) (Executor, error) {
+func (p *DockerExecutorPool) Get(ctx context.Context, agentID, sessionID string) (Executor, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	if ex, ok := p.executors[agentID]; ok {
+	key := poolKey(agentID, sessionID)
+	if ex, ok := p.executors[key]; ok {
 		return ex, nil
 	}
 
-	// workspaceRoot is FASTCLAW_HOME (~/.fastclaw or env override). The
-	// per-agent workspace lives under workspaces/<agentID>/, NOT at the
-	// root + agentID — that earlier path mounted runtime/imgany into
-	// the container, which doesn't exist, instead of
-	// runtime/workspaces/imgany which is where the agent runtime
-	// actually writes files.
+	// Session-scoped mount keeps parallel sessions of the same agent from
+	// stepping on each other's /workspace files. workspace.LocalFS uses
+	// the same on-disk layout (workspaces/<agent>/sessions/<sid>/), so
+	// the sandbox sees exactly what the workspace store wrote and vice
+	// versa. Empty sessionID falls back to the legacy agent root, used
+	// by tools that don't carry a session yet (admin shell, fixtures).
 	workspace := filepath.Join(p.workspaceRoot, "workspaces", agentID)
+	if sessionID != "" {
+		workspace = filepath.Join(workspace, "sessions", sessionID)
+	}
 	if err := os.MkdirAll(workspace, 0o755); err != nil {
 		return nil, fmt.Errorf("create workspace dir %s: %w", workspace, err)
 	}
@@ -170,15 +185,16 @@ func (p *DockerExecutorPool) Get(ctx context.Context, agentID string) (Executor,
 		return nil, fmt.Errorf("create docker sandbox: %w", err)
 	}
 	ex := &DockerExecutor{sb: sb}
-	p.executors[agentID] = ex
+	p.executors[key] = ex
 	return ex, nil
 }
 
-func (p *DockerExecutorPool) Release(userID string) error {
+func (p *DockerExecutorPool) Release(agentID, sessionID string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if ex, ok := p.executors[userID]; ok {
-		delete(p.executors, userID)
+	key := poolKey(agentID, sessionID)
+	if ex, ok := p.executors[key]; ok {
+		delete(p.executors, key)
 		return ex.Close()
 	}
 	return nil
@@ -187,9 +203,9 @@ func (p *DockerExecutorPool) Release(userID string) error {
 func (p *DockerExecutorPool) CloseAll() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	for uid, ex := range p.executors {
+	for k, ex := range p.executors {
 		ex.Close()
-		delete(p.executors, uid)
+		delete(p.executors, k)
 	}
 }
 

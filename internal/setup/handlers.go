@@ -223,27 +223,24 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		mode = s.gatewayCfg.Mode
 	}
 
-	// Post-#4, the store is the source of truth for "configured" in BOTH
-	// local and cloud modes — saveUserConfig stops writing fastclaw.json
-	// the moment a store is wired. The previous "mode == cloud" gate
-	// was too narrow and made local-mode onboarding bounce back to
-	// /onboard forever (status reports configured=false → page.tsx
-	// redirects → save again → still false → loop).
+	// "configured" gates the onboard wizard. The on-disk fastclaw.json
+	// under $FASTCLAW_HOME is the canonical signal — handleSaveConfig
+	// writes it on first save in local mode, and main.go reads it back
+	// at next gateway start to recover the admin token before the store
+	// opens. The DB alone is no longer enough: a fresh install with
+	// stray rows in other tables (e.g. apikeys from a prior aborted run)
+	// should still drop into onboarding. env.toml's presence covers
+	// operator-provisioned deployments (cloud mode, infra in TOML, user
+	// config in DB) where pod-local FS is ephemeral and fastclaw.json
+	// is intentionally never written.
 	configured := false
-	if s.dataStore != nil {
-		if gc, err := s.dataStore.GetConfig(r.Context()); err == nil && gc != nil && len(gc.Data) > 0 {
+	if configPath, err := config.GlobalConfigPath(); err == nil {
+		if _, statErr := os.Stat(configPath); statErr == nil {
 			configured = true
 		}
 	}
-	if !configured {
-		// Back-compat fallback: legacy single-user installs that still
-		// only have fastclaw.json on disk. Once they save anything via
-		// the UI, the store row appears and this branch stops firing.
-		if configPath, err := config.GlobalConfigPath(); err == nil {
-			if _, statErr := os.Stat(configPath); statErr == nil {
-				configured = true
-			}
-		}
+	if !configured && config.EnvTOMLExists() {
+		configured = true
 	}
 
 	// /api/status is reachable unauthenticated so the login / onboarding UI
@@ -682,6 +679,17 @@ type saveConfigRequest struct {
 	AgentName       string `json:"agentName"`
 	Personality     string `json:"personality"`
 	GatewayToken    string `json:"gatewayToken"`
+
+	// Storage + sandbox come from the wizard so fastclaw.json reflects
+	// what the user actually picked. LoadEnv no longer ships zero-config
+	// defaults, so an empty StorageType here genuinely means "not set"
+	// — we fall back to sqlite to keep the gateway runnable.
+	StorageType    string `json:"storageType"`
+	StorageDSN     string `json:"storageDSN"`
+	SandboxEnabled bool   `json:"sandboxEnabled"`
+	SandboxBackend string `json:"sandboxBackend"`
+	SandboxImage   string `json:"sandboxImage"`
+	SandboxE2BKey  string `json:"sandboxE2BKey"`
 }
 
 func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
@@ -714,8 +722,35 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 		},
 		Channels: map[string]config.ChannelConfig{},
 		Bindings: []config.Binding{},
-		Storage:  config.StorageCfg{Type: "file"},
-		Sandbox:  config.SandboxCfg{Enabled: false},
+	}
+
+	// Storage: prefer the wizard's choice, default to sqlite when the
+	// request omits it (legacy clients, smoke tests). AutoMigrate is on
+	// for db backends so a fresh sqlite/postgres comes up with schema
+	// — "file" needs nothing.
+	storageType := req.StorageType
+	if storageType == "" {
+		storageType = "sqlite"
+	}
+	cfg.Storage = config.StorageCfg{
+		Type:        storageType,
+		DSN:         req.StorageDSN,
+		AutoMigrate: storageType != "file",
+	}
+
+	// Sandbox: explicit fields from the wizard. Empty Backend on an
+	// enabled sandbox falls through to the gateway's "docker" default
+	// at construction time, but persisting "" here would leave the
+	// settings page showing a blank backend, so keep it explicit.
+	sandboxBackend := req.SandboxBackend
+	if req.SandboxEnabled && sandboxBackend == "" {
+		sandboxBackend = "docker"
+	}
+	cfg.Sandbox = config.SandboxCfg{
+		Enabled: req.SandboxEnabled,
+		Backend: sandboxBackend,
+		Image:   req.SandboxImage,
+		E2BKey:  req.SandboxE2BKey,
 	}
 
 	// Provider + model (optional — can be configured later per agent)
@@ -778,12 +813,14 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	// In store-primary mode (the path post-#4) the global config lives in
-	// the configs row written below — no fastclaw.json. Store-less mode
-	// (the wizard process before #5 merges it into the gateway) still
-	// needs the file because the next process restart reads it back to
-	// learn the gateway token / storage DSN before the store is open.
-	if s.dataStore == nil {
+	// fastclaw.json is the on-disk "configured" sentinel that handleStatus
+	// checks and the bootstrap config the next gateway start reads to
+	// recover the admin token before the store opens. Write it whenever
+	// FS is durable — i.e. local mode. In cloud mode pod-local FS is
+	// ephemeral and env.toml carries the same role (storage DSN, gateway
+	// token), so skip the write and let the configs row below be the
+	// only persistent record.
+	if !cloudMode {
 		if _, err := config.EnsureUserDir(); err != nil {
 			jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 			return

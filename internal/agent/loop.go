@@ -18,6 +18,7 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/mcp"
 	"github.com/fastclaw-ai/fastclaw/internal/privacy"
 	"github.com/fastclaw-ai/fastclaw/internal/provider"
+	"github.com/fastclaw-ai/fastclaw/internal/sandbox"
 	"github.com/fastclaw-ai/fastclaw/internal/session"
 	"github.com/fastclaw-ai/fastclaw/internal/store"
 	"github.com/fastclaw-ai/fastclaw/internal/toolproviders"
@@ -64,6 +65,43 @@ type Agent struct {
 	engine         *sdkEngine
 	costTracker    *costtracker.Tracker
 	agentID        string
+	// sandboxPool is the per-user (agent + session) sandbox pool. Set
+	// once at boot/hot-reload by attachSandboxToAgents; bindSession
+	// pulls a session-scoped executor from it at the top of every turn
+	// so concurrent sessions of the same agent get isolated containers
+	// + isolated /workspace mounts.
+	sandboxPool sandbox.ExecutorPool
+}
+
+// SetSandboxPool wires the per-(agent,session) executor pool. Called by
+// attachSandboxToAgents on boot and by hot-reload's reloadSandbox after
+// onboarding flips sandbox on. The pool is consulted by bindSession at
+// the start of every chat turn — there's no eager Get at boot anymore
+// because session IDs only exist once a chat starts.
+func (a *Agent) SetSandboxPool(p sandbox.ExecutorPool) {
+	a.sandboxPool = p
+}
+
+// bindSession wires per-turn session state into the tool registry: the
+// session-scoped sandbox executor (when a pool is configured) and the
+// sessionID workspace.Store calls use to namespace artifacts. Called at
+// the top of HandleMessage / HandleMessageStream before any tool runs.
+//
+// Mutating the shared registry across concurrent chats would race, but
+// the current invariant is one chat-in-flight per agent — the gateway
+// serializes per-agent turns. Documenting it here in case that changes.
+func (a *Agent) bindSession(ctx context.Context, sessionID string) {
+	a.registry.SetSessionID(sessionID)
+	if a.sandboxPool == nil {
+		return
+	}
+	ex, err := a.sandboxPool.Get(ctx, a.name, sessionID)
+	if err != nil {
+		slog.Warn("sandbox executor unavailable",
+			"agent", a.name, "session", sessionID, "error", err)
+		return
+	}
+	a.registry.SetExecutor(ex)
 }
 
 // NewAgent creates a new Agent from a resolved config.
@@ -417,6 +455,11 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 
 	a.refreshSkillsFromStore()
 	sess := a.sessions.Get(msg.Channel, msg.ChatID)
+	// Bind the registry to this chat's session so workspace.Store reads
+	// + writes get session-scoped paths and (when a sandbox pool is
+	// wired) the executor used by exec/read_file/list_dir is tied to a
+	// session-private container.
+	a.bindSession(ctx, msg.ChatID)
 
 	// Hook: BeforeSystemPrompt
 	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: BeforeSystemPrompt, UserID: a.ownerUserID})
@@ -730,6 +773,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 
 	a.refreshSkillsFromStore()
 	sess := a.sessions.Get(msg.Channel, msg.ChatID)
+	a.bindSession(ctx, msg.ChatID)
 	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: BeforeSystemPrompt, UserID: a.ownerUserID})
 	systemPrompt := a.ctxBuilder.BuildSystemPrompt()
 	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: AfterSystemPrompt, UserID: a.ownerUserID})
@@ -945,6 +989,15 @@ func (a *Agent) UpdateConfig(rc config.ResolvedAgent) {
 	a.maxTokens = rc.MaxTokens
 	a.temperature = rc.Temperature
 	a.maxToolIterations = rc.MaxToolIterations
+	// Sandbox flags drive the system prompt's "Working Directory" / "home
+	// dir" description and the sandbox-capabilities block. Without this
+	// propagation an agent that existed before sandbox was enabled keeps
+	// telling the LLM its home is the host absolute path, even after the
+	// executor itself has been swapped to Docker — model dutifully calls
+	// list_dir /Users/idoubi/.fastclaw/agents/<id>/agent and 404s in the
+	// container.
+	a.ctxBuilder.sandboxEnabled = rc.Sandbox.Enabled
+	a.ctxBuilder.sandboxBackend = rc.Sandbox.Backend
 }
 
 // refreshSkillsFromStore mirrors OSS-hosted skills (global and per-agent)

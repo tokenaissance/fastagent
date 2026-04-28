@@ -61,31 +61,52 @@ func NewS3(cfg S3Config) (*S3, error) {
 	}, nil
 }
 
-// key is <prefix>/<agentID>/<path>, always with forward slashes.
-func (s *S3) key(agentID, p string) string {
+// key is <prefix>/<agentID>[/sessions/<sessionID>]/<path>, always with
+// forward slashes. Empty session keeps the legacy layout so skills and
+// admin uploads survive the per-session refactor without migration.
+func (s *S3) key(agentID, sessionID, p string) string {
 	parts := []string{}
 	if s.prefix != "" {
 		parts = append(parts, s.prefix)
 	}
-	parts = append(parts, agentID, path.Clean("/"+p)[1:])
+	parts = append(parts, agentID)
+	if sessionID != "" {
+		parts = append(parts, "sessions", sessionID)
+	}
+	parts = append(parts, path.Clean("/"+p)[1:])
 	return strings.Join(parts, "/")
 }
 
-func (s *S3) Put(ctx context.Context, agentID, p string, r io.Reader, size int64, contentType string) error {
+// scopePrefix returns the listing prefix for an (agent, session) scope.
+// Empty session lists the whole agent subtree (useful for the admin file
+// browser); set session lists just that session's subtree.
+func (s *S3) scopePrefix(agentID, sessionID string) string {
+	parts := []string{}
+	if s.prefix != "" {
+		parts = append(parts, s.prefix)
+	}
+	parts = append(parts, agentID)
+	if sessionID != "" {
+		parts = append(parts, "sessions", sessionID)
+	}
+	return strings.Join(parts, "/") + "/"
+}
+
+func (s *S3) Put(ctx context.Context, agentID, sessionID, p string, r io.Reader, size int64, contentType string) error {
 	if contentType == "" {
 		contentType = mime.TypeByExtension(filepath.Ext(p))
 		if contentType == "" {
 			contentType = "application/octet-stream"
 		}
 	}
-	_, err := s.client.PutObject(ctx, s.bucket, s.key(agentID, p), r, size, minio.PutObjectOptions{
+	_, err := s.client.PutObject(ctx, s.bucket, s.key(agentID, sessionID, p), r, size, minio.PutObjectOptions{
 		ContentType: contentType,
 	})
 	return err
 }
 
-func (s *S3) Get(ctx context.Context, agentID, p string) (io.ReadCloser, error) {
-	obj, err := s.client.GetObject(ctx, s.bucket, s.key(agentID, p), minio.GetObjectOptions{})
+func (s *S3) Get(ctx context.Context, agentID, sessionID, p string) (io.ReadCloser, error) {
+	obj, err := s.client.GetObject(ctx, s.bucket, s.key(agentID, sessionID, p), minio.GetObjectOptions{})
 	if err != nil {
 		return nil, mapS3Err(err)
 	}
@@ -98,8 +119,8 @@ func (s *S3) Get(ctx context.Context, agentID, p string) (io.ReadCloser, error) 
 	return obj, nil
 }
 
-func (s *S3) Stat(ctx context.Context, agentID, p string) (*ObjectInfo, error) {
-	info, err := s.client.StatObject(ctx, s.bucket, s.key(agentID, p), minio.StatObjectOptions{})
+func (s *S3) Stat(ctx context.Context, agentID, sessionID, p string) (*ObjectInfo, error) {
+	info, err := s.client.StatObject(ctx, s.bucket, s.key(agentID, sessionID, p), minio.StatObjectOptions{})
 	if err != nil {
 		return nil, mapS3Err(err)
 	}
@@ -111,12 +132,8 @@ func (s *S3) Stat(ctx context.Context, agentID, p string) (*ObjectInfo, error) {
 	}, nil
 }
 
-func (s *S3) List(ctx context.Context, agentID string) ([]ObjectInfo, error) {
-	prefix := s.key(agentID, "")
-	// PrefixSlash ensures we only match under the agent's subtree.
-	if !strings.HasSuffix(prefix, "/") {
-		prefix += "/"
-	}
+func (s *S3) List(ctx context.Context, agentID, sessionID string) ([]ObjectInfo, error) {
+	prefix := s.scopePrefix(agentID, sessionID)
 	var out []ObjectInfo
 	for obj := range s.client.ListObjects(ctx, s.bucket, minio.ListObjectsOptions{
 		Prefix:    prefix,
@@ -140,8 +157,8 @@ func (s *S3) List(ctx context.Context, agentID string) ([]ObjectInfo, error) {
 	return out, nil
 }
 
-func (s *S3) Delete(ctx context.Context, agentID, p string) error {
-	err := s.client.RemoveObject(ctx, s.bucket, s.key(agentID, p), minio.RemoveObjectOptions{})
+func (s *S3) Delete(ctx context.Context, agentID, sessionID, p string) error {
+	err := s.client.RemoveObject(ctx, s.bucket, s.key(agentID, sessionID, p), minio.RemoveObjectOptions{})
 	if err != nil && !isS3NotFound(err) {
 		return err
 	}
@@ -151,9 +168,9 @@ func (s *S3) Delete(ctx context.Context, agentID, p string) error {
 // SignedURL is the main reason we want S3 for cloud deployments: download
 // requests can bypass the gateway entirely. TTL is typically a few minutes;
 // the browser uses the URL once and discards it.
-func (s *S3) SignedURL(ctx context.Context, agentID, p string, ttl time.Duration) (string, error) {
+func (s *S3) SignedURL(ctx context.Context, agentID, sessionID, p string, ttl time.Duration) (string, error) {
 	reqParams := url.Values{}
-	u, err := s.client.PresignedGetObject(ctx, s.bucket, s.key(agentID, p), ttl, reqParams)
+	u, err := s.client.PresignedGetObject(ctx, s.bucket, s.key(agentID, sessionID, p), ttl, reqParams)
 	if err != nil {
 		return "", err
 	}

@@ -40,6 +40,11 @@ type Registry struct {
 	// builder still reads them via the separate small-state Store.
 	workspaceStore workspace.Store
 	agentID        string
+	// sessionID scopes workspace.Store reads/writes so concurrent sessions
+	// of the same agent don't collide on `report.md` etc. Set per-turn by
+	// the agent loop via SetSessionID; an empty value falls back to
+	// agent-shared scope (admin uploads, fixtures, tests).
+	sessionID string
 	// systemFileStore is the optional durable store for identity files
 	// (SOUL.md, IDENTITY.md, USER.md, MEMORY.md, ...). In cloud/K8s
 	// deployments Server.readIdentityFile / writeIdentityFile go through
@@ -79,6 +84,14 @@ func (r *Registry) SetSystemFileStore(s SystemFileStore, agentID string) {
 	if agentID != "" {
 		r.agentID = agentID
 	}
+}
+
+// SetSessionID scopes the registry's workspace.Store calls (write_file /
+// read_file / list_dir) to a single chat session. The agent loop calls
+// this at the top of each turn with msg.ChatID. An empty session falls
+// back to the agent-shared scope (no session isolation).
+func (r *Registry) SetSessionID(sessionID string) {
+	r.sessionID = sessionID
 }
 
 type registeredTool struct {

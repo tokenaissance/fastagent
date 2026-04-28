@@ -68,14 +68,37 @@ func toAnthropicMessages(msgs []Message) (string, []anthropicMessage) {
 
 		am := anthropicMessage{Role: m.Role}
 
-		// Tool results become role "user" with tool_result content block
+		// Tool results become role "user" with tool_result content blocks.
+		// Anthropic requires every tool_result for a parallel tool_use batch
+		// to live in the SAME user message — separate user messages, even
+		// back-to-back, get rejected with "tool_use ids ... without tool_result
+		// blocks immediately after". So coalesce consecutive tool messages
+		// into a single user message containing one tool_result block each.
 		if m.Role == "tool" {
-			am.Role = "user"
 			block := map[string]interface{}{
 				"type":        "tool_result",
 				"tool_use_id": m.ToolCallID,
 				"content":     m.Content,
 			}
+			if n := len(out); n > 0 && out[n-1].Role == "user" {
+				var existing []interface{}
+				if err := json.Unmarshal(out[n-1].Content, &existing); err == nil && len(existing) > 0 {
+					allToolResults := true
+					for _, eb := range existing {
+						mp, ok := eb.(map[string]interface{})
+						if !ok || mp["type"] != "tool_result" {
+							allToolResults = false
+							break
+						}
+					}
+					if allToolResults {
+						existing = append(existing, block)
+						out[n-1].Content, _ = json.Marshal(existing)
+						continue
+					}
+				}
+			}
+			am.Role = "user"
 			am.Content, _ = json.Marshal([]interface{}{block})
 			out = append(out, am)
 			continue

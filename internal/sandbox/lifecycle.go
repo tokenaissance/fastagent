@@ -32,12 +32,18 @@ type LifecyclePool struct {
 	idleTTL time.Duration
 	sweep   time.Duration
 
-	mu       sync.Mutex
-	lastUsed map[string]time.Time // agentID → last activity timestamp
-	// hydrated tracks whether we've already copied workspace.Store contents
-	// into this agent's sandbox. Drops back to false on eviction so the
-	// next lazy-creation re-hydrates from the durable store.
+	mu sync.Mutex
+	// Both maps are keyed on poolKey(agentID, sessionID) so per-session
+	// sandboxes are tracked independently. lastUsed drives idle eviction;
+	// hydrated tracks whether we've already copied workspace.Store
+	// contents into this sandbox (drops to false on eviction so the next
+	// lazy-creation re-hydrates from the durable store).
+	lastUsed map[string]time.Time
 	hydrated map[string]bool
+	// scopes maps the same composite key back to (agentID, sessionID) so
+	// flush + release paths can talk to the right workspace scope without
+	// re-parsing the key.
+	scopes map[string]sandboxScope
 
 	// workspace is the optional blob store that bootstraps /workspace on
 	// sandbox creation. When nil, sandboxes start empty and rely on
@@ -47,6 +53,14 @@ type LifecyclePool struct {
 
 	stopCh chan struct{}
 	done   chan struct{}
+}
+
+// sandboxScope is the (agentID, sessionID) tuple a sandbox belongs to.
+// Stored alongside the composite map key so lifecycle code can call back
+// into ExecutorPool.Get/Release with the right scope without re-parsing.
+type sandboxScope struct {
+	agentID   string
+	sessionID string
 }
 
 // NewLifecyclePool wraps inner with idle tracking. idleTTL=0 disables
@@ -61,6 +75,7 @@ func NewLifecyclePool(inner ExecutorPool, idleTTL, sweep time.Duration) *Lifecyc
 		sweep:    sweep,
 		lastUsed: make(map[string]time.Time),
 		hydrated: make(map[string]bool),
+		scopes:   make(map[string]sandboxScope),
 		stopCh:   make(chan struct{}),
 		done:     make(chan struct{}),
 	}
@@ -102,33 +117,35 @@ func (p *LifecyclePool) loop() {
 func (p *LifecyclePool) evictIdle() {
 	cutoff := time.Now().Add(-p.idleTTL)
 	p.mu.Lock()
-	toEvict := make([]string, 0)
-	for agentID, t := range p.lastUsed {
+	toEvict := make([]sandboxScope, 0)
+	for k, t := range p.lastUsed {
 		if t.Before(cutoff) {
-			toEvict = append(toEvict, agentID)
+			toEvict = append(toEvict, p.scopes[k])
 		}
 	}
-	// Remove from map under lock so a racing Get doesn't mistake an
-	// evicted sandbox for a live one. Also clear hydrated flag: the next
-	// lazy-creation will re-sync from the workspace store.
-	for _, id := range toEvict {
-		delete(p.lastUsed, id)
-		delete(p.hydrated, id)
+	// Remove from maps under lock so a racing Get doesn't mistake an
+	// evicted sandbox for a live one. Clear hydrated too so the next
+	// lazy-creation re-syncs from the workspace store.
+	for _, sc := range toEvict {
+		k := poolKey(sc.agentID, sc.sessionID)
+		delete(p.lastUsed, k)
+		delete(p.hydrated, k)
+		delete(p.scopes, k)
 	}
 	p.mu.Unlock()
 
-	for _, id := range toEvict {
+	for _, sc := range toEvict {
 		// Best-effort flush: if the executor implements
 		// WorkspaceSnapshotter and we have a workspace store, upload
 		// anything the sandbox wrote (that wasn't already written via
 		// write_file) before destroying it.
-		p.flushIfSupported(id)
+		p.flushIfSupported(sc)
 
-		if err := p.inner.Release(id); err != nil {
-			slog.Warn("sandbox evict failed", "agent", id, "error", err)
+		if err := p.inner.Release(sc.agentID, sc.sessionID); err != nil {
+			slog.Warn("sandbox evict failed", "agent", sc.agentID, "session", sc.sessionID, "error", err)
 			continue
 		}
-		slog.Info("sandbox evicted (idle)", "agent", id, "idleTTL", p.idleTTL)
+		slog.Info("sandbox evicted (idle)", "agent", sc.agentID, "session", sc.sessionID, "idleTTL", p.idleTTL)
 	}
 }
 
@@ -136,11 +153,11 @@ func (p *LifecyclePool) evictIdle() {
 // that isn't already in the durable store. Skips silently when the backend
 // doesn't implement WorkspaceSnapshotter (E2B / future backends) or when
 // no workspace.Store is configured.
-func (p *LifecyclePool) flushIfSupported(agentID string) {
+func (p *LifecyclePool) flushIfSupported(sc sandboxScope) {
 	if p.workspace == nil {
 		return
 	}
-	ex, err := p.inner.Get(context.Background(), agentID)
+	ex, err := p.inner.Get(context.Background(), sc.agentID, sc.sessionID)
 	if err != nil {
 		return
 	}
@@ -150,7 +167,7 @@ func (p *LifecyclePool) flushIfSupported(agentID string) {
 	}
 	files, err := snapper.SnapshotWorkspace(context.Background())
 	if err != nil {
-		slog.Warn("sandbox flush: snapshot failed", "agent", agentID, "error", err)
+		slog.Warn("sandbox flush: snapshot failed", "agent", sc.agentID, "session", sc.sessionID, "error", err)
 		return
 	}
 	written := 0
@@ -159,17 +176,17 @@ func (p *LifecyclePool) flushIfSupported(agentID string) {
 		// avoids rewriting every file every eviction when nothing
 		// changed. Content equality would be stricter but requires a
 		// full round-trip per file; size is usually enough.
-		if info, err := p.workspace.Stat(context.Background(), agentID, path); err == nil && info.Size == int64(len(data)) {
+		if info, err := p.workspace.Stat(context.Background(), sc.agentID, sc.sessionID, path); err == nil && info.Size == int64(len(data)) {
 			continue
 		}
-		if err := p.workspace.Put(context.Background(), agentID, path, bytesReader(data), int64(len(data)), ""); err != nil {
-			slog.Warn("sandbox flush: put failed", "agent", agentID, "path", path, "error", err)
+		if err := p.workspace.Put(context.Background(), sc.agentID, sc.sessionID, path, bytesReader(data), int64(len(data)), ""); err != nil {
+			slog.Warn("sandbox flush: put failed", "agent", sc.agentID, "session", sc.sessionID, "path", path, "error", err)
 			continue
 		}
 		written++
 	}
 	if written > 0 {
-		slog.Info("sandbox flushed to workspace store", "agent", agentID, "files", written)
+		slog.Info("sandbox flushed to workspace store", "agent", sc.agentID, "session", sc.sessionID, "files", written)
 	}
 }
 
@@ -178,18 +195,21 @@ func (p *LifecyclePool) flushIfSupported(agentID string) {
 // needed) and tick the last-used timestamp.
 //
 // Contract matches ExecutorPool.Get so LifecyclePool is a drop-in wrapper.
-func (p *LifecyclePool) Get(ctx context.Context, agentID string) (Executor, error) {
-	return &lazyExecutor{pool: p, agentID: agentID}, nil
+func (p *LifecyclePool) Get(ctx context.Context, agentID, sessionID string) (Executor, error) {
+	return &lazyExecutor{pool: p, scope: sandboxScope{agentID: agentID, sessionID: sessionID}}, nil
 }
 
 // Release forwards to the inner pool and drops the lastUsed entry. Useful
 // for explicit teardown (agent deletion) — normal flow relies on idle
 // eviction.
-func (p *LifecyclePool) Release(agentID string) error {
+func (p *LifecyclePool) Release(agentID, sessionID string) error {
+	k := poolKey(agentID, sessionID)
 	p.mu.Lock()
-	delete(p.lastUsed, agentID)
+	delete(p.lastUsed, k)
+	delete(p.hydrated, k)
+	delete(p.scopes, k)
 	p.mu.Unlock()
-	return p.inner.Release(agentID)
+	return p.inner.Release(agentID, sessionID)
 }
 
 // CloseAll stops the sweeper and tears down every live sandbox. Called on
@@ -207,15 +227,7 @@ func (p *LifecyclePool) CloseAll() {
 	p.mu.Lock()
 	p.lastUsed = make(map[string]time.Time)
 	p.hydrated = make(map[string]bool)
-	p.mu.Unlock()
-}
-
-// touch updates the last-used timestamp for agentID. Kept for external use;
-// internal getInner now touches directly so it can batch the update with
-// the hydrated-flag check under one lock.
-func (p *LifecyclePool) touch(agentID string) {
-	p.mu.Lock()
-	p.lastUsed[agentID] = time.Now()
+	p.scopes = make(map[string]sandboxScope)
 	p.mu.Unlock()
 }
 
@@ -224,25 +236,27 @@ func (p *LifecyclePool) touch(agentID string) {
 // creation (either fresh or post-eviction) it hydrates /workspace from the
 // configured workspace.Store so exec'd commands see the files that
 // write_file has produced in previous sessions.
-func (p *LifecyclePool) getInner(ctx context.Context, agentID string) (Executor, error) {
+func (p *LifecyclePool) getInner(ctx context.Context, sc sandboxScope) (Executor, error) {
+	k := poolKey(sc.agentID, sc.sessionID)
 	p.mu.Lock()
-	needsHydrate := !p.hydrated[agentID]
-	p.lastUsed[agentID] = time.Now()
+	needsHydrate := !p.hydrated[k]
+	p.lastUsed[k] = time.Now()
+	p.scopes[k] = sc
 	if needsHydrate {
-		p.hydrated[agentID] = true // set eagerly so a concurrent second call doesn't double-hydrate
+		p.hydrated[k] = true // set eagerly so a concurrent second call doesn't double-hydrate
 	}
 	p.mu.Unlock()
 
-	ex, err := p.inner.Get(ctx, agentID)
+	ex, err := p.inner.Get(ctx, sc.agentID, sc.sessionID)
 	if err != nil {
 		// Roll back the hydrated flag so a retry will try again.
 		p.mu.Lock()
-		p.hydrated[agentID] = false
+		p.hydrated[k] = false
 		p.mu.Unlock()
 		return nil, err
 	}
 	if needsHydrate && p.workspace != nil {
-		hydrateWorkspace(ctx, p.workspace, ex, agentID, defaultSandboxRoot)
+		hydrateWorkspace(ctx, p.workspace, ex, sc.agentID, sc.sessionID, defaultSandboxRoot)
 	}
 	return ex, nil
 }
@@ -251,12 +265,12 @@ func (p *LifecyclePool) getInner(ctx context.Context, agentID string) (Executor,
 // pool.getInner which (a) refreshes the idle timer and (b) lazily creates
 // the real sandbox if this is the first call since last eviction.
 type lazyExecutor struct {
-	pool    *LifecyclePool
-	agentID string
+	pool  *LifecyclePool
+	scope sandboxScope
 }
 
 func (l *lazyExecutor) Exec(ctx context.Context, command string, timeout time.Duration) (string, error) {
-	ex, err := l.pool.getInner(ctx, l.agentID)
+	ex, err := l.pool.getInner(ctx, l.scope)
 	if err != nil {
 		return "", err
 	}
@@ -264,7 +278,7 @@ func (l *lazyExecutor) Exec(ctx context.Context, command string, timeout time.Du
 }
 
 func (l *lazyExecutor) ReadFile(ctx context.Context, path string) (string, error) {
-	ex, err := l.pool.getInner(ctx, l.agentID)
+	ex, err := l.pool.getInner(ctx, l.scope)
 	if err != nil {
 		return "", err
 	}
@@ -272,7 +286,7 @@ func (l *lazyExecutor) ReadFile(ctx context.Context, path string) (string, error
 }
 
 func (l *lazyExecutor) WriteFile(ctx context.Context, path, content string) (string, error) {
-	ex, err := l.pool.getInner(ctx, l.agentID)
+	ex, err := l.pool.getInner(ctx, l.scope)
 	if err != nil {
 		return "", err
 	}
@@ -280,7 +294,7 @@ func (l *lazyExecutor) WriteFile(ctx context.Context, path, content string) (str
 }
 
 func (l *lazyExecutor) ListDir(ctx context.Context, path string) (string, error) {
-	ex, err := l.pool.getInner(ctx, l.agentID)
+	ex, err := l.pool.getInner(ctx, l.scope)
 	if err != nil {
 		return "", err
 	}
