@@ -38,8 +38,11 @@ detect_platform() {
   esac
 
   PLATFORM="${OS}_${ARCH}"
-  EXT="tar.gz"
-  [ "$OS" = "windows" ] && EXT="zip"
+  if [ "$OS" = "windows" ]; then
+    EXT="zip"
+  else
+    EXT="tar.gz"
+  fi
 }
 
 # ── Decide install dir (no sudo, no password) ───────────────────────────────
