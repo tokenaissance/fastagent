@@ -19,6 +19,7 @@ import {
   KeyRoundIcon,
   LayoutDashboardIcon,
   PlusIcon,
+  RadioIcon,
   SettingsIcon,
   SparklesIcon,
   UsersIcon,
@@ -39,7 +40,7 @@ import {
 // index keeps the Platform nav instead of flipping to Agent nav.
 function extractAgentId(pathname: string): string | null {
   const match = pathname.match(
-    /^\/agents\/([^/]+)\/(chat|customize|skills|models|sessions)/,
+    /^\/agents\/([^/]+)\/(chat|customize|skills|models|sessions|channels|chats)/,
   );
   return match ? match[1] : null;
 }
@@ -83,7 +84,9 @@ const AGENT_NAV = (
       active: onChatRoute && !hasSession,
     },
     { title: "Customize", url: `/agents/${agentId}/customize/`, icon: Wand2Icon },
+    { title: "Models", url: `/agents/${agentId}/models/`, icon: BrainIcon },
     { title: "Skills", url: `/agents/${agentId}/skills/`, icon: SparklesIcon },
+    { title: "Channels", url: `/agents/${agentId}/channels/`, icon: RadioIcon },
   ];
 };
 

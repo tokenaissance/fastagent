@@ -25,17 +25,30 @@ type OutboundButton struct {
 	URL          string
 }
 
+// MediaItem is an attachment whose bytes are already resolved (read
+// from workspace.Store / sandbox snapshot / wherever) by the time the
+// message lands on the bus. Channels that can't access the host
+// filesystem (e2b path) still need to upload to Telegram/Discord/etc.,
+// so we ship the bytes inline rather than asking each channel adapter
+// to hold a workspace.Store reference.
+type MediaItem struct {
+	Filename    string // for content-type sniffing + display in IM
+	ContentType string // optional override; channels can sniff if empty
+	Bytes       []byte
+}
+
 // OutboundMessage represents a message to be sent to a channel.
 type OutboundMessage struct {
-	Channel      string              // target channel type
-	AccountID    string              // target account within the channel
-	ChatID       string              // target chat identifier
-	Text         string              // message text
-	ReplyToMsgID string              // reply to specific message
-	ParseMode    string              // "MarkdownV2", "HTML", ""
-	Buttons      [][]OutboundButton  // inline keyboard rows
-	EditMsgID    string              // edit existing message instead of sending new
-	MediaPaths   []string            // file paths to attach (from MEDIA: protocol)
+	Channel      string             // target channel type
+	AccountID    string             // target account within the channel
+	ChatID       string             // target chat identifier
+	Text         string             // message text
+	ReplyToMsgID string             // reply to specific message
+	ParseMode    string             // "MarkdownV2", "HTML", ""
+	Buttons      [][]OutboundButton // inline keyboard rows
+	EditMsgID    string             // edit existing message instead of sending new
+	MediaPaths   []string           // file paths to attach (from MEDIA: protocol; host-mounted backends only)
+	MediaItems   []MediaItem        // pre-resolved attachments — channel uploads bytes directly
 }
 
 // MessageBus is an async message queue backed by Go channels.

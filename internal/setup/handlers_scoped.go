@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 
 	"github.com/fastclaw-ai/fastclaw/internal/auth"
@@ -325,6 +326,11 @@ func (s *Server) handleCreateScopedChannel(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	s.invalidateScope(sc, scopeID)
+	if req.Enabled {
+		if rec, _ := s.dataStore.LookupChannelByCredential(r.Context(), req.Type, credKey); rec != nil {
+			s.hotRegisterChannel(*rec)
+		}
+	}
 	jsonResponse(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -369,6 +375,11 @@ func (s *Server) handleUpdateScopedChannel(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	s.invalidateScope(rec.Scope, rec.ScopeID)
+	if enabled {
+		if updated, _ := s.dataStore.LookupChannelByCredential(r.Context(), rec.Name, credKey); updated != nil {
+			s.hotRegisterChannel(*updated)
+		}
+	}
 	jsonResponse(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -390,7 +401,28 @@ func (s *Server) handleDeleteScopedChannel(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	s.invalidateScope(rec.Scope, rec.ScopeID)
+	// Best-effort: stop the bot adapter from receiving outbound routes.
+	// We don't know its accountID without decoding rec, so derive from
+	// the row we just looked up (rec is still valid here).
+	cc := decodeChannelConfigFromRecord(rec)
+	for accountID := range cc.Accounts {
+		s.hotUnregisterChannel(rec.Name, accountID)
+	}
+	if len(cc.Accounts) == 0 {
+		s.hotUnregisterChannel(rec.Name, "")
+	}
 	jsonResponse(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// decodeChannelConfigFromRecord — local mirror of gateway.decodeChannelConfig
+// so this package doesn't need to import gateway.
+func decodeChannelConfigFromRecord(rec *store.ConfigRecord) config.ChannelConfig {
+	cc := config.ChannelConfig{Enabled: rec.Enabled}
+	if blob, err := json.Marshal(rec.Data); err == nil && len(blob) > 0 {
+		_ = json.Unmarshal(blob, &cc)
+	}
+	cc.Enabled = rec.Enabled
+	return cc
 }
 
 // assertChannelCredentialUnique enforces the soft uniqueness invariant the
@@ -442,5 +474,38 @@ func (s *Server) invalidateScope(sc, scopeID string) {
 				}
 			}
 		}
+	}
+}
+
+// hotRegisterChannel asks the gateway to start the channel adapter for
+// `rec` immediately. Best-effort — no-op when the resolver doesn't
+// implement the hook (e.g. in tests with a stub resolver).
+func (s *Server) hotRegisterChannel(rec store.ConfigRecord) {
+	if s.userResolver == nil {
+		return
+	}
+	type chanRegistrar interface {
+		RegisterChannelFromConfig(rec store.ConfigRecord) error
+	}
+	if r, ok := s.userResolver.(chanRegistrar); ok {
+		if err := r.RegisterChannelFromConfig(rec); err != nil {
+			// Don't fail the request — the row is saved, the next
+			// process restart will pick it up. But surface the error
+			// in logs so an obviously-broken bot token is debuggable.
+			slog.Warn("hot-register channel failed", "type", rec.Name, "error", err)
+		}
+	}
+}
+
+// hotUnregisterChannel — paired with hotRegisterChannel for delete paths.
+func (s *Server) hotUnregisterChannel(channelType, accountID string) {
+	if s.userResolver == nil {
+		return
+	}
+	type chanUnregistrar interface {
+		UnregisterChannel(channelType, accountID string)
+	}
+	if r, ok := s.userResolver.(chanUnregistrar); ok {
+		r.UnregisterChannel(channelType, accountID)
 	}
 }

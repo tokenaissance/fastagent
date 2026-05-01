@@ -1119,12 +1119,31 @@ func (d *DBStore) ListAgentFiles(ctx context.Context, agentID, userID string) ([
 
 // --- Scoped configs (providers + channels + settings) ---
 
+// ListConfigs returns all rows of the given (kind, scope) tuple. When
+// scopeID is empty, it matches any scope_id within the scope — used by
+// boot-time enumeration paths (registerChannelsFromStore) that want
+// "every agent's channels" across all users without enumerating users
+// first. Existing callers that pass a real scopeID continue to get
+// exact-match semantics. System rows have scope_id="" anyway so
+// system-scope queries are unaffected by this widening.
 func (d *DBStore) ListConfigs(ctx context.Context, kind, scope, scopeID string) ([]ConfigRecord, error) {
-	rows, err := d.db.QueryContext(ctx,
-		fmt.Sprintf(`SELECT id, kind, scope, scope_id, name, enabled, credential_key, data, created_at, updated_at
-			FROM configs WHERE kind = %s AND scope = %s AND scope_id = %s ORDER BY name`,
-			d.ph(1), d.ph(2), d.ph(3)),
-		kind, scope, scopeID)
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if scopeID == "" {
+		rows, err = d.db.QueryContext(ctx,
+			fmt.Sprintf(`SELECT id, kind, scope, scope_id, name, enabled, credential_key, data, created_at, updated_at
+				FROM configs WHERE kind = %s AND scope = %s ORDER BY name`,
+				d.ph(1), d.ph(2)),
+			kind, scope)
+	} else {
+		rows, err = d.db.QueryContext(ctx,
+			fmt.Sprintf(`SELECT id, kind, scope, scope_id, name, enabled, credential_key, data, created_at, updated_at
+				FROM configs WHERE kind = %s AND scope = %s AND scope_id = %s ORDER BY name`,
+				d.ph(1), d.ph(2), d.ph(3)),
+			kind, scope, scopeID)
+	}
 	if err != nil {
 		return nil, err
 	}

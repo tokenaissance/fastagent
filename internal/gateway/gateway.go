@@ -5,12 +5,17 @@ package gateway
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -262,14 +267,98 @@ func New(env *config.EnvConfig) (*Gateway, error) {
 				}
 			}
 		}()
-		reply := ag.HandleMessage(ctx, task.Message)
+
+		// IM progress relay: forward the agent loop's tool_call events
+		// to the channel as short status messages so users on long
+		// tool runs (image-tool taking 30s+) see something happening
+		// instead of staring at a typing dot. We only react to
+		// tool_call (the start signal) and skip tool_result / content
+		// — final reply already comes through the Outbound below.
+		// Content/text events would otherwise duplicate the final
+		// answer.
+		eventsCh := make(chan agent.ChatEvent, 64)
+		eventsDone := make(chan struct{})
+		go func() {
+			defer close(eventsDone)
+			seen := make(map[string]bool) // dedupe per-turn
+			for evt := range eventsCh {
+				if evt.Type != "tool_call" {
+					continue
+				}
+				name, _ := evt.Data["name"].(string)
+				if name == "" || seen[name] {
+					continue
+				}
+				seen[name] = true
+				progress := bus.OutboundMessage{
+					Channel:   task.Message.Channel,
+					AccountID: task.AccountID,
+					ChatID:    task.Message.ChatID,
+					Text:      "🛠 calling `" + name + "`…",
+					ParseMode: "Markdown",
+				}
+				// Non-blocking enqueue: progress messages are
+				// best-effort, dropping one is fine. A blocking
+				// `mb.Outbound <- progress` deadlocked the task
+				// when routeOutbound stalled on a slow Telegram
+				// API call — the goroutine couldn't exit because
+				// it never saw close(eventsCh), the main flow
+				// waited on <-eventsDone forever, the taskQueue
+				// slot stayed held, and every subsequent inbound
+				// from this user piled up unanswered.
+				select {
+				case mb.Outbound <- progress:
+				case <-ctx.Done():
+					return
+				default:
+					slog.Debug("outbound full, dropping progress event", "tool", name)
+				}
+			}
+		}()
+		// Record turn start. After ag.HandleMessage returns we list the
+		// workspace and attach every image whose ModTime >= turnStart —
+		// works regardless of whether the LLM's reply contains a usable
+		// markdown ref. Time-based is more robust than path-diff
+		// (pre-turn snapshot timing, store backends that don't preserve
+		// path stability, files overwritten in place, etc.).
+		turnStart := time.Now()
+
+		ctxWithEvents := agent.ContextWithChatEvents(ctx, eventsCh)
+		reply := ag.HandleMessage(ctxWithEvents, task.Message)
 		close(typingDone)
-		mb.Outbound <- bus.OutboundMessage{
+		close(eventsCh)
+		<-eventsDone
+		// Extract `![alt](workspace/relative/path)` markdown image refs
+		// from the agent's reply, resolve their bytes via the
+		// workspace.Store, and ship them as MediaItems so IM channels
+		// can upload as photos. The textual placeholders are stripped
+		// from the body so users don't see the raw `![](...)` syntax.
+		text, items := splitMediaFromReply(ctx, g.workspace, task.AgentID, task.Message.ChatID, reply)
+		// Workspace fallback: list the session's files and attach
+		// every image whose mtime falls in this turn's window. Catches
+		// the case where the LLM emits a broken data URL (with
+		// truncated base64 / literal "..." placeholders) but
+		// image-tool already saved the real file to /workspace. Dedupe
+		// by filename so we don't double-send anything
+		// splitMediaFromReply already resolved.
+		items = appendRecentWorkspaceImages(ctx, g.workspace, task.AgentID, task.Message.ChatID, turnStart, items)
+		out := bus.OutboundMessage{
 			Channel:      task.Message.Channel,
 			AccountID:    task.AccountID,
 			ChatID:       task.Message.ChatID,
-			Text:         reply,
+			Text:         text,
 			ReplyToMsgID: task.Message.MessageID,
+			ParseMode:    "Markdown",
+			MediaItems:   items,
+		}
+		// Bounded enqueue. If routeOutbound is wedged the task
+		// shouldn't sit on its taskQueue slot forever — let ctx's
+		// task-timeout serve as the upper bound and drop the reply
+		// rather than blocking the next inbound from this user.
+		select {
+		case mb.Outbound <- out:
+		case <-ctx.Done():
+			slog.Warn("outbound enqueue cancelled", "agent", task.AgentID, "chat", task.Message.ChatID)
 		}
 		return reply, nil
 	})
@@ -497,7 +586,7 @@ func registerChannelsFromStore(st store.Store, mb *bus.MessageBus, chanMgr *chan
 		if !r.Enabled {
 			continue
 		}
-		if err := registerChannelInstance(r, mb, chanMgr); err != nil {
+		if err := registerChannelInstance(r, mb, chanMgr, false); err != nil {
 			slog.Warn("register channel failed",
 				"type", r.Name, "scope", r.Scope, "scope_id", r.ScopeID, "error", err)
 		}
@@ -515,4 +604,300 @@ func allChannelRows(st store.Store) ([]store.ConfigRecord, error) {
 		out = append(out, rows...)
 	}
 	return out, nil
+}
+
+// imgRefRegex matches markdown image references `![alt](path)`. We
+// keep capture groups for both alt and path so the helper below can
+// reuse them when building MediaItems and stripping the marker from
+// the chat body.
+var imgRefRegex = regexp.MustCompile(`!\[([^\]]*)\]\(([^)]+)\)`)
+
+// splitMediaFromReply pulls every `![alt](src)` ref out of `reply` and
+// turns it into a MediaItem the IM channel can upload directly:
+//
+//   - data:image/...;base64,…   → decode bytes inline, strip from text
+//   - /workspace/foo or foo     → fetch via workspace.Store, strip from text
+//   - http:// or https://       → left in place (some IMs auto-embed URLs)
+//
+// Refs whose bytes can't be resolved still get **stripped** from the
+// output (otherwise a 200KB base64 data URL or a broken
+// `![alt](missing)` lands as raw text in the chat — caused the
+// "telegram dumps base64" report). When we strip, alt text is dropped
+// too because the agent's prose around it usually stands on its own.
+//
+// sessionID = msgChatID since the gateway routes one chat per session.
+func splitMediaFromReply(ctx context.Context, ws workspace.Store, agentID, sessionID, reply string) (string, []bus.MediaItem) {
+	if reply == "" {
+		return reply, nil
+	}
+	matches := imgRefRegex.FindAllStringSubmatchIndex(reply, -1)
+	if len(matches) == 0 {
+		return reply, nil
+	}
+	var items []bus.MediaItem
+	var out strings.Builder
+	cursor := 0
+	for _, m := range matches {
+		path := reply[m[4]:m[5]]
+
+		// Remote URLs: keep the markdown ref intact so the IM client
+		// can render its own preview. Don't strip, don't fetch.
+		if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
+			continue
+		}
+
+		var bytes []byte
+		var filename string
+
+		if strings.HasPrefix(path, "data:") {
+			b, name, err := decodeDataURL(path)
+			if err != nil {
+				// Common case: LLM hallucinates a data URL with a
+				// truncated/abbreviated base64 ("...", placeholders,
+				// random fake bytes). Expected — log at Debug and
+				// rely on the workspace fallback to still deliver
+				// the real file. Don't spam Warn for this.
+				head := path
+				if len(head) > 80 {
+					head = head[:80] + "…"
+				}
+				slog.Debug("data URL decode failed (LLM-fabricated bytes are expected — workspace fallback covers it)",
+					"agent", agentID, "error", err, "len", len(path), "head", head)
+			} else {
+				bytes = b
+				filename = name
+			}
+		} else if ws != nil {
+			key := strings.TrimPrefix(path, "/workspace/")
+			key = strings.TrimPrefix(key, "workspace/")
+			key = strings.TrimPrefix(key, "/")
+			if key != "" {
+				rc, err := ws.Get(ctx, agentID, sessionID, key)
+				if err != nil {
+					slog.Warn("split media: workspace get failed", "agent", agentID, "session", sessionID, "key", key, "error", err)
+				} else {
+					data, rerr := io.ReadAll(rc)
+					rc.Close()
+					if rerr != nil {
+						slog.Warn("split media: read failed", "key", key, "error", rerr)
+					} else {
+						bytes = data
+						filename = filepath.Base(key)
+					}
+				}
+			}
+		}
+
+		if len(bytes) > 0 {
+			items = append(items, bus.MediaItem{Filename: filename, Bytes: bytes})
+		}
+
+		// Strip the `![alt](src)` either way — leaving an unresolvable
+		// ref in the chat body just shows raw markdown / a base64 blob.
+		out.WriteString(reply[cursor:m[0]])
+		cursor = m[1]
+		// Drop the trailing newline after the image ref if one
+		// follows — keeps the body tidy when the LLM put the ref on
+		// its own line.
+		if cursor < len(reply) && reply[cursor] == '\n' {
+			cursor++
+		}
+	}
+	out.WriteString(reply[cursor:])
+	return strings.TrimSpace(out.String()), items
+}
+
+// decodeDataURL parses `data:image/png;base64,...` style URLs into raw
+// bytes. Returns (bytes, suggested filename, error). Extension is
+// derived from the MIME so IMs that sniff content-type by filename
+// (Telegram does for documents) get a sensible default.
+func decodeDataURL(dataURL string) ([]byte, string, error) {
+	if !strings.HasPrefix(dataURL, "data:") {
+		return nil, "", fmt.Errorf("not a data URL")
+	}
+	rest := dataURL[len("data:"):]
+	commaIdx := strings.IndexByte(rest, ',')
+	if commaIdx < 0 {
+		return nil, "", fmt.Errorf("data URL missing payload")
+	}
+	meta := rest[:commaIdx]
+	payload := rest[commaIdx+1:]
+	mimeType := "application/octet-stream"
+	isBase64 := false
+	for _, part := range strings.Split(meta, ";") {
+		switch {
+		case part == "base64":
+			isBase64 = true
+		case strings.Contains(part, "/"):
+			mimeType = part
+		}
+	}
+	var raw []byte
+	if isBase64 {
+		// LLMs frequently soft-wrap long base64 payloads, putting
+		// whitespace mid-string that stock StdEncoding rejects with
+		// "illegal base64 data". Strip whitespace before decode and
+		// fall through alternative alphabets / paddings so the
+		// agent's markdown survives any of the common variants:
+		// standard, URL-safe, with or without padding.
+		clean := stripWhitespace(payload)
+		decoded, err := decodeBase64Tolerant(clean)
+		if err != nil {
+			return nil, "", fmt.Errorf("base64 decode: %w", err)
+		}
+		raw = decoded
+	} else {
+		// URL-encoded text payload — rare for images but handle it.
+		u, err := url.QueryUnescape(payload)
+		if err != nil {
+			return nil, "", fmt.Errorf("url unescape: %w", err)
+		}
+		raw = []byte(u)
+	}
+	return raw, "media" + mimeExt(mimeType), nil
+}
+
+func stripWhitespace(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch r {
+		case ' ', '\t', '\n', '\r':
+			continue
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+func decodeBase64Tolerant(s string) ([]byte, error) {
+	// Try the std-alphabet variants first (LLM-emitted base64 almost
+	// always uses `+/`). URL-alphabet variants are kept as long-shot
+	// fallbacks but listed last so the reported error is the
+	// std-alphabet failure (much more informative — URL alphabets
+	// fail at byte 0 the moment they hit a `/` character, which is
+	// useless for diagnosis).
+	candidates := []struct {
+		name string
+		enc  *base64.Encoding
+	}{
+		{"std", base64.StdEncoding},
+		{"raw_std", base64.RawStdEncoding},
+		{"url", base64.URLEncoding},
+		{"raw_url", base64.RawURLEncoding},
+	}
+	var errs []string
+	for _, c := range candidates {
+		if data, err := c.enc.DecodeString(s); err == nil {
+			return data, nil
+		} else {
+			errs = append(errs, c.name+": "+err.Error())
+		}
+	}
+	return nil, fmt.Errorf("all base64 encodings failed (%s)", strings.Join(errs, "; "))
+}
+
+// appendRecentWorkspaceImages lists the session's workspace and
+// attaches every image file modified at or after `turnStart`. This is
+// the IM-side guarantee that "if image-tool wrote a file this turn,
+// the user receives it" — independent of whether the LLM's reply
+// markdown referenced it correctly (broken data URLs, missing refs,
+// hallucinated filenames all bypass this path).
+//
+// Filter rules:
+//   - extension is one of .png/.jpg/.jpeg/.webp/.gif/.svg
+//   - ModTime >= turnStart (use a 1-second back-buffer for stores
+//     whose mtime granularity is coarse — better to over-send than
+//     drop a borderline file)
+//   - filename not already in `existing` (dedupe)
+//
+// Logs counts at every filter stage so a future "no image attached"
+// report can be diagnosed from logs alone.
+func appendRecentWorkspaceImages(ctx context.Context, ws workspace.Store, agentID, sessionID string, turnStart time.Time, existing []bus.MediaItem) []bus.MediaItem {
+	if ws == nil {
+		return existing
+	}
+	objs, err := ws.List(ctx, agentID, sessionID)
+	if err != nil {
+		slog.Warn("workspace list failed for media fallback",
+			"agent", agentID, "session", sessionID, "error", err)
+		return existing
+	}
+
+	have := make(map[string]bool, len(existing))
+	for _, it := range existing {
+		have[it.Filename] = true
+	}
+
+	// 1-second back-buffer: some store backends round mtime to
+	// whole seconds, which can leave a file written 0.4s into the
+	// turn with a mtime stamp 0.6s before turnStart.
+	cutoff := turnStart.Add(-1 * time.Second)
+
+	imageCount := 0
+	recentCount := 0
+	attached := 0
+	for _, obj := range objs {
+		if !looksLikeImage(obj.Path) {
+			continue
+		}
+		imageCount++
+		if obj.ModTime.Before(cutoff) {
+			continue
+		}
+		recentCount++
+		base := filepath.Base(obj.Path)
+		if have[base] {
+			continue
+		}
+		rc, gerr := ws.Get(ctx, agentID, sessionID, obj.Path)
+		if gerr != nil {
+			slog.Warn("workspace get failed for media fallback",
+				"path", obj.Path, "error", gerr)
+			continue
+		}
+		data, rerr := io.ReadAll(rc)
+		rc.Close()
+		if rerr != nil || len(data) == 0 {
+			continue
+		}
+		existing = append(existing, bus.MediaItem{Filename: base, Bytes: data})
+		have[base] = true
+		attached++
+	}
+	slog.Info("workspace media fallback",
+		"agent", agentID, "session", sessionID,
+		"total_objs", len(objs), "images_total", imageCount,
+		"images_recent", recentCount, "attached", attached,
+		"turn_start", turnStart.Format(time.RFC3339Nano))
+	return existing
+}
+
+func looksLikeImage(p string) bool {
+	ext := strings.ToLower(filepath.Ext(p))
+	switch ext {
+	case ".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg":
+		return true
+	}
+	return false
+}
+
+// mimeExt picks a filename extension from a MIME type — minimal table
+// covering what image-tool / replicate / OpenAI image gen actually
+// emit. Falls back to .bin for anything unknown.
+func mimeExt(mime string) string {
+	switch mime {
+	case "image/png":
+		return ".png"
+	case "image/jpeg", "image/jpg":
+		return ".jpg"
+	case "image/webp":
+		return ".webp"
+	case "image/gif":
+		return ".gif"
+	case "image/svg+xml":
+		return ".svg"
+	}
+	return ".bin"
 }

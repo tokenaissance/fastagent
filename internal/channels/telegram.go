@@ -260,19 +260,91 @@ func (t *Telegram) SendMessage(msg bus.OutboundMessage) error {
 		return t.editMessage(id, msg)
 	}
 
-	// Split long messages at paragraph boundaries
-	chunks := splitTelegramMessage(msg.Text)
+	// Default to legacy Markdown — Telegram's MarkdownV2 is too strict
+	// (every special char needs escaping), and our agents emit standard
+	// GFM. The legacy "Markdown" parse mode renders *bold*, _italic_,
+	// `code`, ```fenced```, and [links](url) without making us escape
+	// every brace/bracket. Headers and tables don't render in either
+	// mode, so we strip ###/## prefixes pre-send. Caller can still
+	// override via msg.ParseMode.
+	if msg.ParseMode == "" {
+		msg.ParseMode = "Markdown"
+	}
+	body := convertMarkdownForTelegram(msg.Text, msg.ParseMode)
 
-	for i, chunk := range chunks {
-		if err := t.sendSingleMessage(id, chunk, msg, i == 0); err != nil {
-			return err
+	// Send the text body first (chunked if long).
+	if body != "" {
+		chunks := splitTelegramMessage(body)
+		for i, chunk := range chunks {
+			if err := t.sendSingleMessage(id, chunk, msg, i == 0); err != nil {
+				slog.Warn("telegram send chunk failed", "i", i, "error", err)
+			}
+			if i < len(chunks)-1 {
+				time.Sleep(100 * time.Millisecond)
+			}
 		}
-		// Small delay between split messages
-		if i < len(chunks)-1 {
-			time.Sleep(100 * time.Millisecond)
+	}
+
+	// Then upload any pre-resolved attachments (image-tool output etc.).
+	// Photo APIs accept raw bytes via FileBytes; tgbotapi sniffs the
+	// content type from the filename's extension.
+	for _, item := range msg.MediaItems {
+		photo := tgbotapi.NewPhoto(id, tgbotapi.FileBytes{
+			Name:  item.Filename,
+			Bytes: item.Bytes,
+		})
+		if _, err := t.bot.Send(photo); err != nil {
+			slog.Warn("telegram photo upload failed", "filename", item.Filename, "error", err)
 		}
 	}
 	return nil
+}
+
+// convertMarkdownForTelegram does a lightweight pass over GFM text so
+// the legacy `Markdown` parse mode at least renders something useful:
+//   - `### header` / `## header` / `# header` → `*header*` (bold)
+//   - `**bold**` → `*bold*` (legacy mode uses single asterisk)
+//   - tables and other GFM-only syntax fall through unchanged (Telegram
+//     just shows them as plain text)
+//
+// MarkdownV2 callers get the existing escaper applied later.
+func convertMarkdownForTelegram(text, mode string) string {
+	if text == "" {
+		return text
+	}
+	if mode == "MarkdownV2" {
+		// V2 path: caller's existing escaper does the work. Pre-strip
+		// header markers though so they don't end up as literal `\#\#\#`.
+		text = stripMarkdownHeaders(text)
+		text = strings.ReplaceAll(text, "**", "*")
+		return text
+	}
+	if mode != "Markdown" {
+		return text
+	}
+	text = stripMarkdownHeaders(text)
+	// Legacy Markdown bold is `*X*`, not `**X**`. Convert paired `**`.
+	text = strings.ReplaceAll(text, "**", "*")
+	return text
+}
+
+// stripMarkdownHeaders rewrites lines that start with `### `, `## `, or
+// `# ` (with any leading whitespace) into bold lines. Telegram doesn't
+// have heading support in either parse mode; bolding the line is the
+// closest approximation.
+func stripMarkdownHeaders(text string) string {
+	lines := strings.Split(text, "\n")
+	for i, ln := range lines {
+		trimmed := strings.TrimLeft(ln, " \t")
+		for _, prefix := range []string{"### ", "## ", "# "} {
+			if strings.HasPrefix(trimmed, prefix) {
+				rest := strings.TrimPrefix(trimmed, prefix)
+				lines[i] = "*" + rest + "*"
+				break
+			}
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (t *Telegram) sendSingleMessage(chatID int64, text string, msg bus.OutboundMessage, isFirst bool) error {

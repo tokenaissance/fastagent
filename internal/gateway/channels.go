@@ -13,17 +13,34 @@ import (
 // row in configs. The row's credential_key is what processInbound
 // reverse-looks up via Store.LookupChannelByCredential to find the owner —
 // keep it stable (e.g. tail of bot token, app id).
-func registerChannelInstance(rec store.ConfigRecord, mb *bus.MessageBus, chanMgr *channels.Manager) error {
+//
+// `hot` controls whether the bot adapter's polling goroutine is launched
+// immediately. Boot-time registration uses Register (Manager.Start
+// fans out everything in one go); dashboard mutations use
+// RegisterAndStart so a freshly-saved bot starts receiving updates
+// without restarting the process.
+func registerChannelInstance(rec store.ConfigRecord, mb *bus.MessageBus, chanMgr *channels.Manager, hot bool) error {
 	cc := decodeChannelConfig(rec)
 	switch rec.Name {
 	case "telegram":
-		return registerTelegramChannels(cc, mb, chanMgr)
+		return registerTelegramChannels(cc, mb, chanMgr, hot)
 	case "discord":
-		return registerDiscordChannels(cc, mb, chanMgr)
+		return registerDiscordChannels(cc, mb, chanMgr, hot)
 	case "slack":
-		return registerSlackChannels(cc, mb, chanMgr)
+		return registerSlackChannels(cc, mb, chanMgr, hot)
 	}
 	return nil
+}
+
+// register adds an adapter to the manager via the appropriate path
+// (boot-time Register vs hot RegisterAndStart). Keeps the per-channel
+// case branches tidy.
+func register(chanMgr *channels.Manager, ch channels.Channel, hot bool) {
+	if hot {
+		chanMgr.RegisterAndStart(ch)
+		return
+	}
+	chanMgr.Register(ch)
 }
 
 func decodeChannelConfig(rec store.ConfigRecord) config.ChannelConfig {
@@ -35,13 +52,13 @@ func decodeChannelConfig(rec store.ConfigRecord) config.ChannelConfig {
 	return cc
 }
 
-func registerTelegramChannels(chCfg config.ChannelConfig, mb *bus.MessageBus, chanMgr *channels.Manager) error {
+func registerTelegramChannels(chCfg config.ChannelConfig, mb *bus.MessageBus, chanMgr *channels.Manager, hot bool) error {
 	if len(chCfg.Accounts) == 0 {
 		tg, err := channels.NewTelegram(chCfg.BotToken, "", mb)
 		if err != nil {
 			return err
 		}
-		chanMgr.Register(tg)
+		register(chanMgr, tg, hot)
 		return nil
 	}
 	for accountID, acct := range chCfg.Accounts {
@@ -53,18 +70,18 @@ func registerTelegramChannels(chCfg config.ChannelConfig, mb *bus.MessageBus, ch
 		if err != nil {
 			return err
 		}
-		chanMgr.Register(tg)
+		register(chanMgr, tg, hot)
 	}
 	return nil
 }
 
-func registerDiscordChannels(chCfg config.ChannelConfig, mb *bus.MessageBus, chanMgr *channels.Manager) error {
+func registerDiscordChannels(chCfg config.ChannelConfig, mb *bus.MessageBus, chanMgr *channels.Manager, hot bool) error {
 	if len(chCfg.Accounts) == 0 {
 		dc, err := channels.NewDiscord(chCfg.BotToken, "", mb)
 		if err != nil {
 			return err
 		}
-		chanMgr.Register(dc)
+		register(chanMgr, dc, hot)
 		return nil
 	}
 	for accountID, acct := range chCfg.Accounts {
@@ -76,18 +93,18 @@ func registerDiscordChannels(chCfg config.ChannelConfig, mb *bus.MessageBus, cha
 		if err != nil {
 			return err
 		}
-		chanMgr.Register(dc)
+		register(chanMgr, dc, hot)
 	}
 	return nil
 }
 
-func registerSlackChannels(chCfg config.ChannelConfig, mb *bus.MessageBus, chanMgr *channels.Manager) error {
+func registerSlackChannels(chCfg config.ChannelConfig, mb *bus.MessageBus, chanMgr *channels.Manager, hot bool) error {
 	if len(chCfg.Accounts) == 0 {
 		sl, err := channels.NewSlack(chCfg.BotToken, chCfg.AppToken, "", mb)
 		if err != nil {
 			return err
 		}
-		chanMgr.Register(sl)
+		register(chanMgr, sl, hot)
 		return nil
 	}
 	for accountID, acct := range chCfg.Accounts {
@@ -99,7 +116,7 @@ func registerSlackChannels(chCfg config.ChannelConfig, mb *bus.MessageBus, chanM
 		if err != nil {
 			return err
 		}
-		chanMgr.Register(sl)
+		register(chanMgr, sl, hot)
 	}
 	return nil
 }

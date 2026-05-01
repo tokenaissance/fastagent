@@ -1,6 +1,7 @@
 package channels
 
 import (
+	"bytes"
 	"context"
 	"log/slog"
 	"regexp"
@@ -93,9 +94,80 @@ func (d *Discord) Send(chatID string, text string) error {
 	return nil
 }
 
-// SendMessage sends a rich outbound message. Discord uses plain text with basic fallback.
+// SendMessage delivers text + any pre-resolved MediaItems to Discord.
+// Discord renders standard markdown natively (bold/italic/code/lists),
+// so msg.Text goes through unchanged. MediaItems upload as message
+// attachments — Discord auto-renders images inline. Single
+// ChannelMessageSendComplex call carries both, but if there's a long
+// body that needs chunking we send the body chunked first and the
+// files on the last chunk.
 func (d *Discord) SendMessage(msg bus.OutboundMessage) error {
-	return d.Send(msg.ChatID, msg.Text)
+	if msg.Text != "" {
+		// Discord 2000-char per-message limit. Send N-1 chunks
+		// without files, then the final chunk with files attached so
+		// the embedded preview lands at the end of the conversation.
+		chunks := splitDiscordMessage(msg.Text)
+		for i, chunk := range chunks {
+			if i < len(chunks)-1 || len(msg.MediaItems) == 0 {
+				if _, err := d.session.ChannelMessageSend(msg.ChatID, chunk); err != nil {
+					slog.Warn("discord chunk send failed", "i", i, "error", err)
+				}
+				continue
+			}
+			if err := d.sendWithFiles(msg.ChatID, chunk, msg.MediaItems); err != nil {
+				slog.Warn("discord final chunk+files failed", "error", err)
+			}
+		}
+		return nil
+	}
+	if len(msg.MediaItems) > 0 {
+		return d.sendWithFiles(msg.ChatID, "", msg.MediaItems)
+	}
+	return nil
+}
+
+func (d *Discord) sendWithFiles(chatID, text string, items []bus.MediaItem) error {
+	files := make([]*discordgo.File, 0, len(items))
+	for _, it := range items {
+		ct := it.ContentType
+		if ct == "" {
+			ct = "application/octet-stream"
+		}
+		files = append(files, &discordgo.File{
+			Name:        it.Filename,
+			ContentType: ct,
+			Reader:      bytes.NewReader(it.Bytes),
+		})
+	}
+	_, err := d.session.ChannelMessageSendComplex(chatID, &discordgo.MessageSend{
+		Content: text,
+		Files:   files,
+	})
+	return err
+}
+
+func splitDiscordMessage(text string) []string {
+	if len(text) <= 2000 {
+		return []string{text}
+	}
+	var out []string
+	for len(text) > 0 {
+		if len(text) <= 2000 {
+			out = append(out, text)
+			break
+		}
+		// Prefer a paragraph break so we don't tear sentences apart.
+		cut := strings.LastIndex(text[:2000], "\n\n")
+		if cut < 1000 {
+			cut = strings.LastIndex(text[:2000], "\n")
+		}
+		if cut < 1000 {
+			cut = 2000
+		}
+		out = append(out, text[:cut])
+		text = strings.TrimLeft(text[cut:], "\n")
+	}
+	return out
 }
 
 // SendTyping sends a typing indicator to the Discord channel.

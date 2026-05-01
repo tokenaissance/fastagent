@@ -3,6 +3,8 @@ package gateway
 import (
 	"context"
 	"log/slog"
+
+	"github.com/fastclaw-ai/fastclaw/internal/store"
 )
 
 // InvalidateUser drops a user's cached UserSpace so the next access reloads
@@ -34,4 +36,27 @@ func (g *Gateway) ReloadAgents() error {
 // after a single user mutates their own agents.
 func (g *Gateway) reloadAgentForUser(_ context.Context, userID string) {
 	g.InvalidateUser(userID)
+}
+
+// RegisterChannelFromConfig hot-starts a channel adapter for a freshly-
+// saved configs row without restarting the process. Called by the
+// dashboard's per-agent channel handlers after a successful save so a
+// new Telegram bot starts polling immediately. Idempotent at the
+// chanMgr level — a re-save of the same accountID swaps the adapter.
+func (g *Gateway) RegisterChannelFromConfig(rec store.ConfigRecord) error {
+	if g.chanMgr == nil || g.bus == nil {
+		return nil
+	}
+	return registerChannelInstance(rec, g.bus, g.chanMgr, true)
+}
+
+// UnregisterChannel removes a channel from the routing table. Note:
+// the bot's polling goroutine is left to die when the root ctx ends —
+// see channels.Manager.Unregister for why. Inbound messages stop
+// routing to the agent the moment the binding row is deleted.
+func (g *Gateway) UnregisterChannel(channelType, accountID string) {
+	if g.chanMgr == nil {
+		return
+	}
+	g.chanMgr.Unregister(channelType, accountID)
 }

@@ -22,7 +22,6 @@ FastClaw is an **Agent Factory** — it creates, manages, and runs AI agents. Ea
 ```bash
 # Install and run
 curl -fsSL https://raw.githubusercontent.com/fastclaw-ai/fastclaw/main/install.sh | bash
-fastclaw    # Opens setup wizard at http://localhost:18953
 ```
 
 ## Quick Start
@@ -51,7 +50,8 @@ Click an agent to enter its management panel:
 - **Chat** — Talk to the agent (debug/test)
 - **Files** — Edit SOUL.md, IDENTITY.md, MEMORY.md, etc.
 - **Skills** — Agent-private skills
-- **Models** — Agent-specific model overrides
+- **Models** — Agent-specific provider + model overrides (shadow system entries by name; agent-scope `agents.defaults.model` overrides the system default)
+- **Channels** — Connect IM bots (Telegram, Discord, Slack) so end-users can chat with the agent on their platform of choice
 - **Sessions** — Conversation history
 
 ## Architecture
@@ -97,8 +97,13 @@ Click an agent to enter its management panel:
 
 ### LLM Providers
 - OpenAI, Anthropic, Ollama, OpenRouter, Groq, DeepSeek, Mistral, and any OpenAI-compatible API
-- Per-agent model override
+- Per-agent provider + model override (agent-scope shadows system by name)
 - Prompt cache support (RawAssistant preservation)
+
+### Channels
+- Per-agent Telegram / Discord / Slack bot bindings — end-users chat with the agent on their platform
+- Tokens validated before save (Telegram `getMe`, Discord `/users/@me`, Slack `auth.test`)
+- Sessions are isolated per channel + chatID, so a user's Telegram thread and Discord thread stay separate
 
 ### Tools & Sandbox
 - Built-in: exec, read_file, write_file, list_dir, web_fetch, web_search, memory_search

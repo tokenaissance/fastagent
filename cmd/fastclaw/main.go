@@ -17,6 +17,7 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/daemon"
 	"github.com/fastclaw-ai/fastclaw/internal/gateway"
 	"github.com/fastclaw-ai/fastclaw/internal/setup"
+	"github.com/fastclaw-ai/fastclaw/internal/store"
 )
 
 // apiResolver adapts *gateway.Gateway to api.UserResolver.
@@ -52,6 +53,17 @@ func (a *apiResolver) EnsureAgent(ctx context.Context, userID, agentID string) e
 // save snapshot, surfacing as "model is empty" mysteries on the next
 // chat turn.
 func (a *apiResolver) ReloadAgents() error { return a.gw.ReloadAgents() }
+
+// RegisterChannelFromConfig hot-starts a freshly-saved channel row.
+// Called by setup handlers after they persist a new bot config so the
+// adapter starts polling without a process restart.
+func (a *apiResolver) RegisterChannelFromConfig(rec store.ConfigRecord) error {
+	return a.gw.RegisterChannelFromConfig(rec)
+}
+
+func (a *apiResolver) UnregisterChannel(channelType, accountID string) {
+	a.gw.UnregisterChannel(channelType, accountID)
+}
 
 func main() {
 	rootCmd := &cobra.Command{

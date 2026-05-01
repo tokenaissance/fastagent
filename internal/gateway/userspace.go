@@ -371,6 +371,28 @@ func loadUserSpace(ctx context.Context, userID string, mb *bus.MessageBus, st st
 	for _, ar := range agentRecords {
 		entries = append(entries, config.AgentEntry{ID: ar.ID, UserID: ar.UserID})
 	}
+
+	// Bindings live as one agent-scope `bindings` row per agent (each
+	// row's data is `{"list":[…]}`). assembleConfig with agentID="" only
+	// merges system+user scopes, so without this fan-out the IM
+	// Channels page's freshly-saved binding never reaches
+	// space.Config.Bindings and inbound messages get dropped with
+	// "no agent matched for DM". Concat across the user's agents here.
+	for _, ar := range agentRecords {
+		rec, err := st.GetConfigByName(ctx, store.KindSetting, store.ScopeAgent, ar.ID, "bindings")
+		if err != nil || rec == nil || len(rec.Data) == 0 {
+			continue
+		}
+		blob, _ := json.Marshal(rec.Data)
+		var wrap struct {
+			List []config.Binding `json:"list"`
+		}
+		if err := json.Unmarshal(blob, &wrap); err != nil {
+			slog.Warn("decode bindings row", "agent", ar.ID, "error", err)
+			continue
+		}
+		cfg.Bindings = append(cfg.Bindings, wrap.List...)
+	}
 	resolved := config.ResolveAgents(cfg, entries)
 	for _, rc := range resolved {
 		// Layer the agent-scope agents.defaults on top of the

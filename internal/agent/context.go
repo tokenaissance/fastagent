@@ -147,9 +147,19 @@ The exec tool runs commands through /bin/sh, NOT bash. Specifically:
 ## Delivering Files to the User
 When the user asks you to create a file (document, script, data, etc.):
 - For **text files** (md, txt, csv, json, py, etc.): output the full content directly in your reply using a code block. The user can copy it.
-- For **binary files** (images, pdf, zip, etc.): output as a base64 download link:
-  exec: python3 -c "import base64; data=open('/tmp/file.pdf','rb').read(); print(f'[Download file.pdf](data:application/pdf;base64,{base64.b64encode(data).decode()})')"
-- NEVER just say "file saved" without showing content or providing a download link.
+- For **binary files written to /workspace/** (images, pdf, zip, etc.):
+  reference them by path with markdown — **never** inline base64. The
+  runtime resolves /workspace/<file> paths into actual uploads for
+  whatever channel the user is on (Telegram, web UI, etc.). Examples:
+    ![generated logo](/workspace/logo.png)
+    [download report.pdf](/workspace/report.pdf)
+- NEVER fabricate or hand-construct data:image/...;base64,... URLs.
+  You don't have access to the actual bytes from inside your reply,
+  and made-up base64 (with placeholders, ellipses, or partial data)
+  shows up as garbage in the chat. Always reference the real file
+  path that the tool returned in its "file" field.
+- NEVER just say "file saved" without showing content or referencing
+  the workspace path.
 
 ## Important: Multi-line Scripts
 For multi-line code, ALWAYS use write_file first, then exec:
@@ -166,23 +176,24 @@ The sandbox is a **headless** environment (no display). For visual tasks:
 - **Drawing/charts/plots**: Use matplotlib with Agg backend.
 - **Image generation/manipulation**: Use PIL/Pillow. Install first: pip install -q pillow
 - **NEVER use turtle, tkinter, pygame or any GUI library** — they will fail.
-- After generating an image, output as inline base64 so the user sees it:
+- Save the image to **/workspace/** (NOT /tmp/) and reference it by
+  path — the runtime takes care of delivering the file to whatever
+  channel the user is on. Do NOT base64-inline the bytes into your
+  reply.
 
 Example (write to file then exec):
   write_file(path="/tmp/draw.py", content="""
 import subprocess
 subprocess.check_call(["pip", "install", "-q", "pillow"])
 from PIL import Image, ImageDraw
-import base64
 img = Image.new('RGB', (400, 300), 'white')
 draw = ImageDraw.Draw(img)
 draw.ellipse([100, 50, 300, 250], fill='pink', outline='black')
-img.save('/tmp/output.png')
-with open('/tmp/output.png', 'rb') as f:
-    b64 = base64.b64encode(f.read()).decode()
-    print(f'![image](data:image/png;base64,{b64})')
+img.save('/workspace/output.png')
+print('done')
 """)
-  exec(command="python3 /tmp/draw.py")`
+  exec(command="python3 /tmp/draw.py")
+Then in your final reply, write: ![](/workspace/output.png)`
 		if cb.sandboxBackend == "e2b" {
 			sandboxPrompt += "\n- The sandbox is a cloud-hosted E2B environment with network access."
 		} else {

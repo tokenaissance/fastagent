@@ -1,6 +1,7 @@
 package channels
 
 import (
+	"bytes"
 	"context"
 	"log/slog"
 	"regexp"
@@ -83,9 +84,27 @@ func (s *Slack) Send(chatID string, text string) error {
 	return err
 }
 
-// SendMessage sends a rich outbound message. Slack uses plain text.
+// SendMessage delivers text + MediaItems to Slack. Text uses Slack's
+// mrkdwn (auto-renders *bold* / _italic_ / `code` / lists). MediaItems
+// upload as files via files.uploadV2 — Slack auto-previews images.
+// Send text first so it appears above the file preview in the channel.
 func (s *Slack) SendMessage(msg bus.OutboundMessage) error {
-	return s.Send(msg.ChatID, msg.Text)
+	if msg.Text != "" {
+		if err := s.Send(msg.ChatID, msg.Text); err != nil {
+			slog.Warn("slack text send failed", "error", err)
+		}
+	}
+	for _, item := range msg.MediaItems {
+		params := slack.UploadFileParameters{
+			Channel:  msg.ChatID,
+			Filename: item.Filename,
+			Reader:   bytes.NewReader(item.Bytes),
+		}
+		if _, err := s.client.UploadFile(params); err != nil {
+			slog.Warn("slack file upload failed", "filename", item.Filename, "error", err)
+		}
+	}
+	return nil
 }
 
 // SendTyping sends a typing indicator. Slack Socket Mode does not support this directly.

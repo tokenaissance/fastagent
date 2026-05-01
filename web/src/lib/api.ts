@@ -1030,3 +1030,70 @@ export async function bindAgent(agentId: string, apiKeyId: string): Promise<{ ok
   });
   return res.json();
 }
+
+// --- Per-agent IM channels (Telegram, ...) ---
+
+export interface AgentChannel {
+  type: string;        // "telegram"
+  accountId: string;   // bot username for Telegram
+  botUsername?: string;
+  botToken: string;    // server-masked
+  enabled: boolean;
+  updatedAt?: string;
+}
+
+export async function listAgentChannels(agentId: string): Promise<AgentChannel[]> {
+  const res = await apiFetch(`/api/agents/${agentId}/channels`);
+  if (!res.ok) return [];
+  const data = await res.json();
+  return data.channels || [];
+}
+
+export async function connectAgentTelegram(
+  agentId: string,
+  botToken: string,
+): Promise<{ ok: boolean; botUsername?: string; error?: string }> {
+  const res = await apiFetch(`/api/agents/${agentId}/channels/telegram`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ botToken }),
+  });
+  return res.json();
+}
+
+export async function connectAgentDiscord(
+  agentId: string,
+  botToken: string,
+): Promise<{ ok: boolean; botUsername?: string; botUserId?: string; error?: string }> {
+  const res = await apiFetch(`/api/agents/${agentId}/channels/discord`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ botToken }),
+  });
+  return res.json();
+}
+
+export async function connectAgentSlack(
+  agentId: string,
+  botToken: string,
+  appToken: string,
+): Promise<{ ok: boolean; teamName?: string; teamId?: string; botUserId?: string; error?: string }> {
+  const res = await apiFetch(`/api/agents/${agentId}/channels/slack`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ botToken, appToken }),
+  });
+  return res.json();
+}
+
+export async function disconnectAgentChannel(
+  agentId: string,
+  type: string,
+  accountId: string,
+): Promise<{ ok: boolean; error?: string }> {
+  const res = await apiFetch(
+    `/api/agents/${agentId}/channels/${encodeURIComponent(type)}/${encodeURIComponent(accountId)}`,
+    { method: "DELETE" },
+  );
+  return res.json();
+}
