@@ -309,7 +309,7 @@ func (s *Server) handleGetAgentSystemFile(w http.ResponseWriter, r *http.Request
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "filename not allowed"})
 		return
 	}
-	data, err := s.dataStore.GetAgentFile(r.Context(), id, s.systemFileUserScope(r), name)
+	data, err := s.dataStore.GetAgentFileExact(r.Context(), id, s.systemFileUserScope(r), name)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			jsonResponse(w, http.StatusOK, map[string]any{"content": ""})

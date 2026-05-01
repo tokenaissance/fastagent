@@ -143,6 +143,7 @@ func runGateway(port int) error {
 	webSrv.SetWorkspaceStore(gw.Workspace())
 	webSrv.SetUsageMeter(gw.Usage())
 	webSrv.SetAuth(authResolver)
+	webSrv.SetWebChannel(gw.WebChannel())
 
 	apiSrv := api.NewServer(&apiResolver{gw: gw}, authResolver, gwCfg)
 	webSrv.SetAPIServer(apiSrv)

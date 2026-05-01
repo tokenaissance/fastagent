@@ -1042,6 +1042,61 @@ export interface AgentChannel {
   updatedAt?: string;
 }
 
+// AgentCronJob mirrors store.CronJobRecord. Returned by GET
+// /api/agents/{id}/cron — covers both jobs the agent scheduled itself
+// via create_cron_job AND any seeded by other paths (config, future
+// admin UI). lastRun / nextRun are RFC3339 strings or absent.
+export interface AgentCronJob {
+  id: string;
+  agentId: string;
+  name: string;
+  type: string;        // "cron" | "interval" | "once"
+  schedule: string;
+  message: string;
+  channel: string;
+  chatId: string;
+  accountId?: string;
+  timezone: string;
+  enabled: boolean;
+  lastRun?: string;
+  nextRun?: string;
+  createdAt: string;
+}
+
+export async function listAgentCronJobs(agentId: string): Promise<AgentCronJob[]> {
+  const res = await apiFetch(`/api/agents/${agentId}/cron`);
+  if (!res.ok) return [];
+  const data = await res.json();
+  return data.jobs || [];
+}
+
+export async function deleteAgentCronJob(
+  agentId: string,
+  jobId: string,
+): Promise<{ ok: boolean; error?: string }> {
+  const res = await apiFetch(
+    `/api/agents/${agentId}/cron/${encodeURIComponent(jobId)}`,
+    { method: "DELETE" },
+  );
+  return res.json();
+}
+
+export async function toggleAgentCronJob(
+  agentId: string,
+  jobId: string,
+  enabled: boolean,
+): Promise<{ ok: boolean; job?: AgentCronJob; error?: string }> {
+  const res = await apiFetch(
+    `/api/agents/${agentId}/cron/${encodeURIComponent(jobId)}`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    },
+  );
+  return res.json();
+}
+
 export async function listAgentChannels(agentId: string): Promise<AgentChannel[]> {
   const res = await apiFetch(`/api/agents/${agentId}/channels`);
   if (!res.ok) return [];

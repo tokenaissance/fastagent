@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import { useAgentIdFromURL } from "@/hooks/use-agent-id";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { getAgent, getChatHistory, getChatSessions, listAgentFiles, renameChatSession, sendChatStream, uploadAgentFiles, getAuthToken, getSkills, type ChatHistoryMessage, type ChatStreamEvent, type SkillInfo, type ToolResultMetadata } from "@/lib/api";
@@ -256,16 +257,15 @@ function buildChatMessages(history: ChatHistoryMessage[]): ChatMessage[] {
   return msgs;
 }
 
-function getAgentIdFromURL(): string {
-  if (typeof window === "undefined") return "default";
-  const match = window.location.pathname.match(/\/agents\/([^/]+)\//);
-  return match ? match[1] : "default";
-}
-
 export default function AgentChatPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const [selectedAgent] = useState(() => getAgentIdFromURL());
+  // Reactive: re-derives from pathname so switching agents (sidebar
+  // dropdown, browser back/forward) immediately updates downstream
+  // fetches. The previous useState(() => ...) flavor froze the id at
+  // mount, so background loads kept hitting the old agent and the
+  // panel showed stale history under the new URL.
+  const selectedAgent = useAgentIdFromURL();
   const [agentName, setAgentName] = useState<string>("");
   const [sessionId, setSessionId] = useState<string>(() => searchParams.get("session") || generateSessionId());
   const [sessions, setSessions] = useState<ChatSession[]>([]);
@@ -312,6 +312,24 @@ export default function AgentChatPage() {
   useEffect(() => {
     getSkills().then(setSkills).catch(() => setSkills([]));
   }, []);
+
+  // Reset chat-pane state when the active agent changes. Without
+  // this, switching agents from the sidebar would briefly render the
+  // previous agent's history / sessions / title under the new URL
+  // until the load effects below replaced them. Clearing eagerly is
+  // cheaper than threading a "loading" flag through every render.
+  // We deliberately keep `input` so a half-typed message survives an
+  // accidental agent switch.
+  const lastAgentRef = useRef(selectedAgent);
+  useEffect(() => {
+    if (lastAgentRef.current === selectedAgent) return;
+    lastAgentRef.current = selectedAgent;
+    setMessages([]);
+    setSessions([]);
+    setSessionTitle("");
+    setAgentName("");
+    setAttachments([]);
+  }, [selectedAgent]);
 
   // Resolve the agent's display name once. The chat title and any
   // future header bits should show "Chat with My Helper", not the
@@ -390,6 +408,44 @@ export default function AgentChatPage() {
     if (!selectedAgent) return;
     loadSessions(selectedAgent);
   }, [selectedAgent, loadSessions]);
+
+  // Live subscription for cron-fired (and other async) replies. The
+  // server's WebChannel fans out every outbound bus message routed to
+  // (agent, session) here as an SSE event; we append it to messages so
+  // the user sees scheduled jokes / reminders without reloading.
+  // Re-runs whenever (agent, session) changes — closing the previous
+  // EventSource so we don't double-receive after switching sessions.
+  useEffect(() => {
+    if (!selectedAgent || !sessionId) return;
+    const url = `/api/chat/subscribe?agentId=${encodeURIComponent(selectedAgent)}&sessionId=${encodeURIComponent(sessionId)}`;
+    const es = new EventSource(url, { withCredentials: true });
+    es.onmessage = (ev) => {
+      try {
+        const data = JSON.parse(ev.data) as { text?: string };
+        const text = data.text || "";
+        if (!text) return;
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `async-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+            role: "agent",
+            content: text,
+            timestamp: Date.now(),
+          },
+        ]);
+      } catch {
+        // ignore malformed events
+      }
+    };
+    es.onerror = () => {
+      // EventSource auto-reconnects on transient errors; only close on
+      // unmount. A persistent 404 (session removed, agent gone) will
+      // keep flapping but is harmless.
+    };
+    return () => {
+      es.close();
+    };
+  }, [selectedAgent, sessionId]);
 
   // Sync URL's ?session= back into local state. Without this, navigating
   // between sessions / to "New chat" from the sidebar (router.push of the
