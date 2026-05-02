@@ -171,6 +171,30 @@ func (s *Server) requireAgentOwner(w http.ResponseWriter, r *http.Request, agent
 	return rec
 }
 
+// requireAgentReadable allows access when the caller is the owner OR the
+// caller's identity is granted access via the apikey ACL (CanAccessAgent).
+// This is the same gate /api/chat/history uses, so app_user requests
+// proxied through an integration with X-Fastclaw-End-User can read agent
+// artifacts (files, file list, zip) for sessions they own without
+// 403'ing on the strict ownership check.
+func (s *Server) requireAgentReadable(w http.ResponseWriter, r *http.Request, agentID string) bool {
+	rec, err := s.dataStore.GetAgent(r.Context(), agentID)
+	if err != nil || rec == nil {
+		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "not found"})
+		return false
+	}
+	uid := s.effectiveUserID(r)
+	ident, _ := auth.FromContext(r.Context())
+	if rec.UserID == uid || ident.Role == users.RoleSuperAdmin {
+		return true
+	}
+	if ident.CanAccessAgent(agentID) {
+		return true
+	}
+	jsonResponse(w, http.StatusForbidden, map[string]any{"error": "not your agent"})
+	return false
+}
+
 func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 	if !s.requireWritable(w, r) {
 		return
@@ -383,7 +407,7 @@ func (s *Server) handleAgentFileList(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusOK, map[string]any{"files": []any{}})
 		return
 	}
-	if rec := s.requireAgentOwner(w, r, id); rec == nil {
+	if !s.requireAgentReadable(w, r, id) {
 		return
 	}
 	// Always List with sessionID="" so returned paths stay agent-relative
@@ -423,7 +447,7 @@ func (s *Server) handleAgentFilesZip(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no workspace store", http.StatusServiceUnavailable)
 		return
 	}
-	if rec := s.requireAgentOwner(w, r, id); rec == nil {
+	if !s.requireAgentReadable(w, r, id) {
 		return
 	}
 	objects, err := s.workspaceStore.List(r.Context(), id, "")
@@ -488,7 +512,7 @@ func (s *Server) handleAgentFile(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "path required"})
 		return
 	}
-	if rec := s.requireAgentOwner(w, r, id); rec == nil {
+	if !s.requireAgentReadable(w, r, id) {
 		return
 	}
 	if s.workspaceStore != nil {
