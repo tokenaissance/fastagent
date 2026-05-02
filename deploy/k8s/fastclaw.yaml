@@ -49,6 +49,9 @@ stringData:
   OBJECT_STORE_ACCESSKEY: "REPLACE_WITH_ACCESS_KEY"
   OBJECT_STORE_SECRETKEY: "REPLACE_WITH_SECRET_KEY"
 
+  # 启用沙箱时填这里,deployment 里取消 E2B_API_KEY env 的注释。
+  # E2B_API_KEY: "REPLACE_WITH_E2B_KEY"
+
 ---
 # ==================== 改这里(object store provider) ==============
 # 选 ONE 个 provider,取消对应块的注释,其他保留注释。
@@ -108,8 +111,11 @@ data:
   # 可选:多环境共享一个 bucket 时分前缀
   # FASTCLAW_OBJECT_STORE_PREFIX: "prod"
 
-  # Sandbox(可选)
+  # ─── Sandbox(可选) ───
+  # k8s pod 没有 docker daemon,沙箱只能选 E2B(远端)或留空(沙箱关闭).
+  # 选 E2B 时把 secret 里的 E2B_API_KEY 启用,并取消下方注释。
   # FASTCLAW_SANDBOX_BACKEND: "e2b"
+  # FASTCLAW_SANDBOX_IMAGE: "fastclaw/sandbox:latest"   # E2B custom template 时用
 
 ---
 # =================== 应用层(通常不动) ===========================
@@ -158,10 +164,15 @@ spec:
             requests: { cpu: "100m", memory: "128Mi" }
             limits:   { cpu: "1",    memory: "512Mi" }
           lifecycle:
+            # 给 SSE / WebSocket 长连接留出排空时间。terminationGracePeriod=30s,
+            # preStop 占 15s,剩下的留给 Go 的优雅 shutdown。
             preStop:
-              exec: { command: ["sh", "-c", "sleep 5"] }
+              exec: { command: ["sh", "-c", "sleep 15"] }
       terminationGracePeriodSeconds: 30
       volumes:
+        # /data/.fastclaw 仅承载 pod-local 临时态(沙箱缓存等)。
+        # workspace artifacts 走对象存储(FASTCLAW_OBJECT_STORE_*),
+        # 跨 pod 共享、生产可水平扩。
         - { name: data, emptyDir: {} }
 
 ---
@@ -173,6 +184,13 @@ metadata:
 spec:
   type: ClusterIP
   selector: { app: fastclaw }
+  # SSE / WebSocket 连接需要粘到同一 pod 直至断开。
+  # Ingress 走 cookie affinity,这里再兜底一层 ClientIP,
+  # 避免某些 LB 直连 Service 时 /api/chat/subscribe 反复重连。
+  sessionAffinity: ClientIP
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 3600
   ports:
     - { name: http, port: 80, targetPort: http }
 
@@ -213,6 +231,17 @@ metadata:
   annotations:
     cert-manager.io/cluster-issuer: letsencrypt-prod
     nginx.ingress.kubernetes.io/proxy-body-size: "32m"
+    # SSE (/api/chat/subscribe) + WebSocket (/ws) 是长连接 — 默认 60s 超时
+    # 会被频繁断开。读写都拉到 1h,buffering 关闭以便 token 实时下发。
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    # 多副本时让客户端粘到同一 pod —— SSE/WS 不能跨 pod 续连。
+    nginx.ingress.kubernetes.io/affinity: "cookie"
+    nginx.ingress.kubernetes.io/session-cookie-name: "fastclaw-affinity"
+    nginx.ingress.kubernetes.io/session-cookie-max-age: "86400"
+    # 阿里云 ACK 默认走 nginx-ingress;若用 ALB Ingress 把上面 annotation
+    # 换成 alb.ingress.kubernetes.io/* 对应字段,语义一致。
 spec:
   ingressClassName: nginx
   tls:
