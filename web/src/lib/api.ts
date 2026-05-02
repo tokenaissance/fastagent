@@ -529,8 +529,12 @@ export interface WorkspaceFile {
   modTime: number;
 }
 
-export async function listAgentFiles(agentId: string): Promise<WorkspaceFile[]> {
-  const res = await apiFetch(`/api/agents/${encodeURIComponent(agentId)}/files`);
+export async function listAgentFiles(
+  agentId: string,
+  sessionId?: string,
+): Promise<WorkspaceFile[]> {
+  const qs = sessionId ? `?sessionId=${encodeURIComponent(sessionId)}` : "";
+  const res = await apiFetch(`/api/agents/${encodeURIComponent(agentId)}/files${qs}`);
   if (!res.ok) return [];
   const data = await res.json();
   return (data.files || []) as WorkspaceFile[];

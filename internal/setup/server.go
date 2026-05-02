@@ -201,6 +201,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("DELETE /api/agents/{id}", auth(s.handleDeleteAgent))
 
 	mux.HandleFunc("GET /api/agents/{id}/files", auth(s.handleAgentFileList))
+	mux.HandleFunc("GET /api/agents/{id}/files.zip", auth(s.handleAgentFilesZip))
 	mux.HandleFunc("GET /api/agents/{id}/files/{path...}", auth(s.handleAgentFile))
 	mux.HandleFunc("POST /api/agents/{id}/files", auth(s.handleAgentFileUpload))
 
