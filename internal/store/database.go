@@ -252,7 +252,7 @@ func (d *DBStore) migrateSkillsAgentEntriesSplit(ctx context.Context) error {
 				return fmt.Errorf("check existing per-agent row: %w", err)
 			}
 			insert := fmt.Sprintf(`INSERT INTO configs (id, kind, scope, scope_id, name, enabled, credential_key, data, created_at, updated_at)
-				VALUES (%s, 'setting', 'agent', %s, 'skills.entries', 1, '', %s, %s, %s)`,
+				VALUES (%s, 'setting', 'agent', %s, 'skills.entries', TRUE, '', %s, %s, %s)`,
 				d.ph(1), d.ph(2), d.ph(3), d.ph(4), d.ph(5))
 			if _, err := d.db.ExecContext(ctx, insert, cid, agentID, string(innerBlob), now, now); err != nil {
 				return fmt.Errorf("insert per-agent row for %s: %w", agentID, err)
@@ -314,7 +314,7 @@ func (d *DBStore) migrateAgentsDropModel(ctx context.Context) error {
 		cid := configRowID("setting", "agent", r.id, "agents.defaults")
 		blob, _ := json.Marshal(map[string]string{"model": r.model})
 		insertSQL := fmt.Sprintf(`INSERT INTO configs (id, kind, scope, scope_id, name, enabled, credential_key, data, created_at, updated_at)
-			VALUES (%s, 'setting', 'agent', %s, 'agents.defaults', 1, '', %s, %s, %s)`,
+			VALUES (%s, 'setting', 'agent', %s, 'agents.defaults', TRUE, '', %s, %s, %s)`,
 			d.ph(1), d.ph(2), d.ph(3), d.ph(4), d.ph(5))
 		if _, err := d.db.ExecContext(ctx, insertSQL, cid, r.id, string(blob), now, now); err != nil {
 			return fmt.Errorf("relocate model for agent %s: %w", r.id, err)
@@ -539,7 +539,7 @@ func (d *DBStore) migrationSQL() []string {
 			scope TEXT NOT NULL,
 			scope_id TEXT NOT NULL DEFAULT '',
 			name TEXT NOT NULL,
-			enabled BOOLEAN NOT NULL DEFAULT 1,
+			enabled BOOLEAN NOT NULL DEFAULT TRUE,
 			credential_key TEXT NOT NULL DEFAULT '',
 			data TEXT NOT NULL DEFAULT '{}',
 			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -559,7 +559,7 @@ func (d *DBStore) migrationSQL() []string {
 			chat_id TEXT NOT NULL,
 			account_id TEXT NOT NULL DEFAULT '',
 			timezone TEXT NOT NULL DEFAULT 'UTC',
-			enabled BOOLEAN NOT NULL DEFAULT 1,
+			enabled BOOLEAN NOT NULL DEFAULT TRUE,
 			last_run TIMESTAMP,
 			next_run TIMESTAMP,
 			locked_by TEXT,
