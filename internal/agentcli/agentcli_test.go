@@ -74,6 +74,33 @@ func TestInitCreatesAgentAndOwner(t *testing.T) {
 	}
 }
 
+func TestInitProviderPreflightRunsBeforeWrites(t *testing.T) {
+	st := freshStore(t)
+	t.Setenv("OPENAI_API_KEY", "")
+
+	_, err := Init(context.Background(), st, "alpha", InitOptions{
+		Provider:  "openai",
+		Model:     "openai/gpt-4o-mini",
+		APIKeyEnv: "OPENAI_API_KEY",
+	})
+	if err == nil || !strings.Contains(err.Error(), "OPENAI_API_KEY") {
+		t.Fatalf("expected missing API key env error, got %v", err)
+	}
+	if n, err := st.CountUsers(context.Background()); err != nil || n != 0 {
+		t.Fatalf("preflight failure must not create users: n=%d err=%v", n, err)
+	}
+	agents, err := st.ListAllAgents(context.Background())
+	if err != nil {
+		t.Fatalf("list agents: %v", err)
+	}
+	if len(agents) != 0 {
+		t.Fatalf("preflight failure must not create agents: %#v", agents)
+	}
+	if rec, err := st.GetConfigByName(context.Background(), store.KindProvider, scope.System, "", "openai"); err == nil || rec != nil {
+		t.Fatalf("preflight failure must not save provider config: rec=%#v err=%v", rec, err)
+	}
+}
+
 func TestInitReuseByName(t *testing.T) {
 	st := freshStore(t)
 
@@ -93,6 +120,25 @@ func TestInitReuseByName(t *testing.T) {
 	}
 	if res2.Agent.Config["description"] != "second" {
 		t.Fatalf("description not updated: %#v", res2.Agent.Config)
+	}
+}
+
+func TestInitExplicitMissingIDDoesNotFallbackToName(t *testing.T) {
+	st := freshStore(t)
+
+	if _, err := Init(context.Background(), st, "alpha", InitOptions{}); err != nil {
+		t.Fatalf("seed alpha: %v", err)
+	}
+	_, err := Init(context.Background(), st, "alpha", InitOptions{AgentID: "agt_missing"})
+	if err == nil || !strings.Contains(err.Error(), `agent id "agt_missing" not found`) {
+		t.Fatalf("expected missing id error, got %v", err)
+	}
+	agents, err := st.ListAllAgents(context.Background())
+	if err != nil {
+		t.Fatalf("list agents: %v", err)
+	}
+	if len(agents) != 1 || agents[0].Name != "alpha" {
+		t.Fatalf("missing --id must not create or update by name: %#v", agents)
 	}
 }
 
@@ -337,14 +383,14 @@ func TestResolveAmbiguousName(t *testing.T) {
 
 func TestParseValueTypes(t *testing.T) {
 	cases := map[string]interface{}{
-		`true`:           true,
-		`false`:          false,
-		`0.5`:            0.5,
-		`8192`:           float64(8192),
-		`"hello"`:        "hello",
-		`{"a":1}`:        map[string]interface{}{"a": float64(1)},
-		"plain-string":   "plain-string",
-		`openai/gpt-4o`:  "openai/gpt-4o",
+		`true`:          true,
+		`false`:         false,
+		`0.5`:           0.5,
+		`8192`:          float64(8192),
+		`"hello"`:       "hello",
+		`{"a":1}`:       map[string]interface{}{"a": float64(1)},
+		"plain-string":  "plain-string",
+		`openai/gpt-4o`: "openai/gpt-4o",
 	}
 	for raw, want := range cases {
 		got := parseValue(raw)
@@ -397,5 +443,11 @@ func TestSettingKeyRouting(t *testing.T) {
 	}
 	if _, _, _, err := settingKey("bogus"); err == nil {
 		t.Error("expected error for unknown key")
+	}
+	if _, _, _, err := settingKey("bindings"); err == nil {
+		t.Error("bindings must not be exposed through generic config set")
+	}
+	if _, _, _, err := settingKey("bindings.list"); err == nil {
+		t.Error("bindings.* must not be exposed through generic config set")
 	}
 }

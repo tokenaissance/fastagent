@@ -249,7 +249,7 @@ System-wide (saved at `scope=system`):
 - `plugins`, `plugins.<name>`
 - `skills.install`, `skills.entries`, `skillsLearner`
 - `tools.providers`, `tools.categories`
-- `objectstore`, `taskqueue`, `heartbeat`, `memory`, `privacy`, `hooks`, `teams`, `bindings`
+- `objectstore`, `taskqueue`, `heartbeat`, `memory`, `privacy`, `hooks`, `teams`
 
 Provider configs live in `scope=system` and are addressed as
 `provider.<name>.<field>`:

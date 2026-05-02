@@ -75,6 +75,26 @@ func Init(ctx context.Context, st store.Store, name string, opts InitOptions) (*
 	}
 	displayName := strings.TrimSpace(name)
 
+	var (
+		providerName string
+		fullModel    string
+		pcfg         config.ProviderConfig
+		saveProvider bool
+	)
+	if opts.Provider != "" || opts.Model != "" {
+		var modelID string
+		var err error
+		providerName, modelID, fullModel, err = normalizeProviderModel(opts.Provider, opts.Model)
+		if err != nil {
+			return nil, err
+		}
+		pcfg, err = providerConfigFromOptions(ctx, st, providerName, modelID, opts)
+		if err != nil {
+			return nil, err
+		}
+		saveProvider = true
+	}
+
 	existing, err := lookupAgent(ctx, st, displayName, opts)
 	if err != nil {
 		return nil, err
@@ -111,15 +131,7 @@ func Init(ctx context.Context, st store.Store, name string, opts InitOptions) (*
 		GeneratedPassword: generatedPassword,
 	}
 
-	if opts.Provider != "" || opts.Model != "" {
-		providerName, modelID, fullModel, err := normalizeProviderModel(opts.Provider, opts.Model)
-		if err != nil {
-			return nil, err
-		}
-		pcfg, err := providerConfigFromOptions(ctx, st, providerName, modelID, opts)
-		if err != nil {
-			return nil, err
-		}
+	if saveProvider {
 		if err := scope.SaveProvider(ctx, st, scope.System, "", providerName, pcfg); err != nil {
 			return nil, err
 		}
@@ -189,12 +201,13 @@ func ensureOwner(ctx context.Context, st store.Store, opts InitOptions) (*users.
 func lookupAgent(ctx context.Context, st store.Store, displayName string, opts InitOptions) (*store.AgentRecord, error) {
 	if opts.AgentID != "" {
 		rec, err := st.GetAgent(ctx, opts.AgentID)
-		if err != nil && !errors.Is(err, store.ErrNotFound) {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, fmt.Errorf("agent id %q not found", opts.AgentID)
+		}
+		if err != nil {
 			return nil, err
 		}
-		if rec != nil {
-			return rec, nil
-		}
+		return rec, nil
 	}
 	return findAgentByName(ctx, st, displayName)
 }
@@ -637,7 +650,6 @@ var systemSettingNamespaces = []string{
 	"privacy",
 	"hooks",
 	"teams",
-	"bindings",
 }
 
 // settingKey resolves a CLI key to (namespace, path-into-data, scope).
