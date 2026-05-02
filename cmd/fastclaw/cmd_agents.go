@@ -9,8 +9,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/fastclaw-ai/fastclaw/internal/agentcli"
+	"github.com/fastclaw-ai/fastclaw/internal/config"
 	"github.com/fastclaw-ai/fastclaw/internal/daemon"
-	"github.com/fastclaw-ai/fastclaw/internal/store"
 )
 
 // agentsCmd is a thin CLI front-end for the same agent CRUD the
@@ -60,6 +60,28 @@ func notifyGatewayReload() {
 		return
 	}
 	fmt.Fprintf(os.Stderr, "Reloaded gateway (PID %d).\n", st.PID)
+}
+
+// ensureGatewayRunning is the post-`agents init` hook that turns a fresh
+// agent record into something the user can immediately chat with. If the
+// gateway is already up, we send SIGHUP so it picks up the new agent.
+// Otherwise we launch it in the background (same path as
+// `fastclaw daemon start`) and print the URL.
+func ensureGatewayRunning() {
+	st, _ := daemon.GetStatus()
+	if st != nil && st.Running {
+		notifyGatewayReload()
+		return
+	}
+	port := config.LoadEnv().Gateway.Port
+	if port <= 0 {
+		port = 18953
+	}
+	if err := daemon.Start(port); err != nil {
+		fmt.Fprintf(os.Stderr, "Note: failed to auto-start gateway: %v. Start it with `fastclaw daemon start`.\n", err)
+		return
+	}
+	fmt.Printf("URL:      http://localhost:%d\n", port)
 }
 
 func agentsListCmd() *cobra.Command {
@@ -128,9 +150,9 @@ func agentsInitCmd() *cobra.Command {
 				}
 			}
 			if res.OwnerCreated && res.GeneratedPassword != "" {
-				fmt.Printf("Generated admin password: %s\n", res.GeneratedPassword)
+				fmt.Printf("Created user %q with password: %s\n", res.OwnerUsername, res.GeneratedPassword)
 			}
-			notifyGatewayReload()
+			ensureGatewayRunning()
 			return nil
 		},
 	}
@@ -142,9 +164,9 @@ func agentsInitCmd() *cobra.Command {
 	cmd.Flags().StringVar(&opts.APIBase, "api-base", "", "provider API base URL")
 	cmd.Flags().StringVar(&opts.APIType, "api-type", "", "provider API type (default from provider preset)")
 	cmd.Flags().StringVar(&opts.AuthType, "auth-type", "", "provider auth type (default from provider preset)")
-	cmd.Flags().StringVar(&opts.Username, "username", "", "owner username (default: existing agent owner, or first super_admin)")
-	cmd.Flags().StringVar(&opts.Email, "email", "", "admin email when the local DB has no users")
-	cmd.Flags().StringVar(&opts.Password, "password", "", "admin password when the local DB has no users (default: generate)")
+	cmd.Flags().StringVar(&opts.Username, "username", "", `owner username (default: "admin")`)
+	cmd.Flags().StringVar(&opts.Email, "email", "", "owner email when the user is being created")
+	cmd.Flags().StringVar(&opts.Password, "password", "", "owner password when the user is being created (default: generate)")
 	cmd.Flags().StringVar(&opts.DisplayName, "display-name", "", "admin display name")
 	return cmd
 }
@@ -326,8 +348,3 @@ func printValue(value interface{}) error {
 	}
 	return nil
 }
-
-// Compile-time check that the imported store package is referenced.
-// (We only use store.Store via openStoreFromEnv's return type, but the
-// type appears in agentcli's signatures.)
-var _ = func() store.Store { return nil }

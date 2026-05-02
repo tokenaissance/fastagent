@@ -13,9 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/fastclaw-ai/fastclaw/internal/config"
@@ -24,18 +22,12 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/users"
 )
 
-// validName limits the user-visible agent name to the same charset the
-// dashboard accepts for display names. Resolution by name happens at
-// every CLI entry, so this is a sanity check on shell input.
-var validName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_. -]{0,62}$`)
-
+// validateName mirrors the dashboard's only check: non-empty after trim.
+// Anything stricter would reject agent names the web UI accepts and break
+// the "CLI ≡ dashboard" contract.
 func validateName(name string) error {
-	name = strings.TrimSpace(name)
-	if name == "" {
+	if strings.TrimSpace(name) == "" {
 		return errors.New("agent name is required")
-	}
-	if !validName.MatchString(name) {
-		return fmt.Errorf("invalid agent name %q: use letters, numbers, dot, dash, underscore, or space", name)
 	}
 	return nil
 }
@@ -66,6 +58,7 @@ type InitOptions struct {
 // InitResult describes what Init created or updated.
 type InitResult struct {
 	Agent             store.AgentRecord
+	OwnerUsername     string
 	Created           bool
 	OwnerCreated      bool
 	GeneratedPassword string
@@ -82,18 +75,37 @@ func Init(ctx context.Context, st store.Store, name string, opts InitOptions) (*
 	}
 	displayName := strings.TrimSpace(name)
 
-	owner, ownerCreated, generatedPassword, err := ensureOwner(ctx, st, opts)
+	existing, err := lookupAgent(ctx, st, displayName, opts)
 	if err != nil {
 		return nil, err
 	}
 
-	rec, created, err := upsertAgent(ctx, st, displayName, owner, opts)
+	// Re-initing an existing agent without an explicit --username preserves
+	// the current owner instead of trying to look up the default admin
+	// (which may not be the agent's owner).
+	var owner *users.Account
+	var ownerCreated bool
+	var generatedPassword string
+	if existing != nil && opts.Username == "" {
+		owner, err = loadAccount(ctx, st, existing.UserID)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		owner, ownerCreated, generatedPassword, err = ensureOwner(ctx, st, opts)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	rec, created, err := writeAgent(ctx, st, existing, displayName, owner, opts)
 	if err != nil {
 		return nil, err
 	}
 
 	res := &InitResult{
 		Agent:             *rec,
+		OwnerUsername:     owner.Username,
 		Created:           created,
 		OwnerCreated:      ownerCreated,
 		GeneratedPassword: generatedPassword,
@@ -113,7 +125,14 @@ func Init(ctx context.Context, st store.Store, name string, opts InitOptions) (*
 		}
 		res.ProviderSaved = true
 		if fullModel != "" {
-			if err := setAgentScopeSetting(ctx, st, rec.ID, "agents.defaults", []string{"model"}, fullModel); err != nil {
+			data := map[string]interface{}{}
+			if cur, err := st.GetConfigByName(ctx, store.KindSetting, scope.Agent, rec.ID, "agents.defaults"); err == nil && cur != nil && cur.Data != nil {
+				data = cur.Data
+			} else if err != nil && !errors.Is(err, store.ErrNotFound) {
+				return nil, err
+			}
+			data["model"] = fullModel
+			if err := scope.SaveSetting(ctx, st, scope.Agent, rec.ID, "agents.defaults", data); err != nil {
 				return nil, err
 			}
 			res.ModelSaved = true
@@ -123,82 +142,67 @@ func Init(ctx context.Context, st store.Store, name string, opts InitOptions) (*
 }
 
 // ensureOwner picks (or creates) the user account the agent belongs to.
-// Rules mirror the dashboard's first-run wizard:
-//   - explicit --username with a missing user fails loudly
-//   - existing super_admin wins
-//   - empty DB creates an admin and returns the generated password
+// Rules: --username pins the lookup; otherwise we look for "admin". If
+// the named user doesn't exist we create them when the DB is empty (and
+// surface the generated password for first-run UX), or fail loudly when
+// other users already exist.
 func ensureOwner(ctx context.Context, st store.Store, opts InitOptions) (*users.Account, bool, string, error) {
 	accts, err := users.NewAccounts(st)
 	if err != nil {
 		return nil, false, "", err
 	}
+	username := defaultStr(opts.Username, "admin")
+
+	rec, err := st.GetUserByLogin(ctx, username)
+	if err == nil {
+		acct, err := accts.Get(ctx, rec.ID)
+		return acct, false, "", err
+	}
+	if !errors.Is(err, store.ErrNotFound) {
+		return nil, false, "", err
+	}
+
 	count, err := st.CountUsers(ctx)
 	if err != nil {
 		return nil, false, "", err
 	}
-	if opts.Username != "" {
-		rec, err := st.GetUserByLogin(ctx, opts.Username)
-		if err == nil {
-			acct, err := accts.Get(ctx, rec.ID)
-			return acct, false, "", err
-		}
-		if !errors.Is(err, store.ErrNotFound) {
-			return nil, false, "", err
-		}
-		if count > 0 {
-			return nil, false, "", fmt.Errorf("user %q not found", opts.Username)
-		}
-	}
 	if count > 0 {
-		list, err := accts.List(ctx)
-		if err != nil {
-			return nil, false, "", err
-		}
-		for _, a := range list {
-			if a.Role == users.RoleSuperAdmin {
-				return a, false, "", nil
-			}
-		}
-		if len(list) > 0 {
-			return list[0], false, "", nil
-		}
+		return nil, false, "", fmt.Errorf("user %q not found; pass --username to pick an existing user", username)
 	}
-	username := defaultStr(opts.Username, "admin")
-	email := defaultStr(opts.Email, "admin@local.fastclaw")
+
 	password := opts.Password
 	generated := ""
 	if password == "" {
-		var err error
 		password, err = randomPassword()
 		if err != nil {
 			return nil, false, "", err
 		}
 		generated = password
 	}
+	email := defaultStr(opts.Email, username+"@local.fastclaw")
 	acct, err := accts.Create(ctx, username, email, password, opts.DisplayName, users.RoleSuperAdmin)
 	return acct, err == nil, generated, err
 }
 
-// upsertAgent finds the existing agent by id (when opts.AgentID is set)
-// or by display name, and updates it. Otherwise it creates a new agent
-// with a random id, matching what the dashboard does on POST /agents.
-func upsertAgent(ctx context.Context, st store.Store, displayName string, owner *users.Account, opts InitOptions) (*store.AgentRecord, bool, error) {
-	var existing *store.AgentRecord
+// lookupAgent finds an existing agent record by --id or by display name.
+// Returns (nil, nil) when no match exists.
+func lookupAgent(ctx context.Context, st store.Store, displayName string, opts InitOptions) (*store.AgentRecord, error) {
 	if opts.AgentID != "" {
 		rec, err := st.GetAgent(ctx, opts.AgentID)
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
-			return nil, false, err
+			return nil, err
 		}
-		existing = rec
-	}
-	if existing == nil {
-		match, err := findAgentByName(ctx, st, displayName)
-		if err != nil {
-			return nil, false, err
+		if rec != nil {
+			return rec, nil
 		}
-		existing = match
 	}
+	return findAgentByName(ctx, st, displayName)
+}
 
+// writeAgent updates the existing agent or creates a new one with a
+// random id. Re-init refuses a silent owner switch when --username
+// points at a different account.
+func writeAgent(ctx context.Context, st store.Store, existing *store.AgentRecord, displayName string, owner *users.Account, opts InitOptions) (*store.AgentRecord, bool, error) {
 	if existing != nil {
 		if existing.UserID != "" && existing.UserID != owner.ID && opts.Username != "" {
 			return nil, false, fmt.Errorf("agent %q is owned by user %s; pass a matching --username or rename the agent first", displayName, existing.UserID)
@@ -218,7 +222,6 @@ func upsertAgent(ctx context.Context, st store.Store, displayName string, owner 
 		}
 		return existing, false, nil
 	}
-
 	id, err := generateAgentID()
 	if err != nil {
 		return nil, false, err
@@ -236,6 +239,16 @@ func upsertAgent(ctx context.Context, st store.Store, displayName string, owner 
 		return nil, false, err
 	}
 	return rec, true, nil
+}
+
+// loadAccount reads the user account for an existing agent. Used on
+// re-init so we can preserve the owner without going through ensureOwner.
+func loadAccount(ctx context.Context, st store.Store, userID string) (*users.Account, error) {
+	accts, err := users.NewAccounts(st)
+	if err != nil {
+		return nil, err
+	}
+	return accts.Get(ctx, userID)
 }
 
 // Resolve looks an agent up by its agt_ id (when name has the prefix)
@@ -423,25 +436,6 @@ func ListFiles(ctx context.Context, st store.Store, agentID, userID string) ([]s
 		}
 	}
 	return out, nil
-}
-
-func setAgentScopeSetting(ctx context.Context, st store.Store, agentID, namespace string, path []string, value interface{}) error {
-	data := map[string]interface{}{}
-	if rec, err := st.GetConfigByName(ctx, store.KindSetting, scope.Agent, agentID, namespace); err == nil && rec != nil && rec.Data != nil {
-		data = rec.Data
-	} else if err != nil && !errors.Is(err, store.ErrNotFound) {
-		return err
-	}
-	if len(path) == 0 {
-		obj, ok := value.(map[string]interface{})
-		if !ok {
-			return fmt.Errorf("namespace %q expects a JSON object value", namespace)
-		}
-		data = obj
-	} else {
-		setNested(data, path, value)
-	}
-	return scope.SaveSetting(ctx, st, scope.Agent, agentID, namespace, data)
 }
 
 func normalizeProviderModel(providerName, model string) (string, string, string, error) {
@@ -772,18 +766,12 @@ func getNested(data map[string]interface{}, path []string) interface{} {
 }
 
 // parseValue turns a raw CLI string into a typed JSON value where
-// possible. JSON parses bools/numbers/objects; everything else falls
-// through as a string.
+// possible. JSON handles bools/numbers/objects; unquoted strings
+// fall through as the raw string.
 func parseValue(raw string) interface{} {
 	var v interface{}
 	if err := json.Unmarshal([]byte(raw), &v); err == nil {
 		return v
-	}
-	if b, err := strconv.ParseBool(raw); err == nil {
-		return b
-	}
-	if f, err := strconv.ParseFloat(raw, 64); err == nil {
-		return f
 	}
 	return raw
 }

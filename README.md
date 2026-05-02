@@ -182,7 +182,9 @@ UI and vice-versa — there's only ever one fastclaw deployment per
 `FASTCLAW_HOME`.
 
 ```bash
-# Create an agent (or update an existing one with the same name).
+# Zero to a chattable agent in one command. On a fresh install this
+# creates an `admin` user (random password printed once) and starts
+# the gateway daemon if it isn't already running.
 fastclaw agents init alpha \
   --provider openai \
   --model openai/gpt-4o-mini \
@@ -206,12 +208,19 @@ fastclaw agents rm alpha
 ```
 
 The CLI opens the operator's store directly (sqlite at
-`~/.fastclaw/fastclaw.db`, or whatever `FASTCLAW_STORAGE_DSN` points
-at). It does not require the gateway to be running. When the gateway
-**is** running, the CLI sends `SIGHUP` to the daemon PID and the
-gateway hot-reloads its in-memory caches before the next request — no
-restart needed. On Windows, where `SIGHUP` isn't deliverable, the CLI
-falls back to a hint reminding you to run `fastclaw daemon restart`.
+`~/.fastclaw/fastclaw.db`, or whatever `FASTCLAW_STORAGE_DSN` points at)
+and writes through the same code paths the gateway uses. It does not
+require the gateway to be running — but `agents init` will spin one up
+in the background so a fresh agent is immediately reachable at
+`http://localhost:18953`. Subsequent CLI writes (`config set`,
+`files put`, `rm`, `init` re-runs) send `SIGHUP` to the running gateway
+so it hot-reloads without restart. Windows lacks `SIGHUP` delivery, so
+the CLI falls back to a hint asking you to run `fastclaw daemon restart`.
+
+The default owner is the `admin` user. On an empty database
+`agents init` creates that account with a generated password (printed
+once); on a populated database it expects `admin` to exist or
+`--username` to point at an existing user.
 
 #### Resolving agents
 

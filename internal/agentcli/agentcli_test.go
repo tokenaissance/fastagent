@@ -140,6 +140,46 @@ func TestEnsureOwnerRejectsMissingExplicitUser(t *testing.T) {
 	}
 }
 
+func TestInitDefaultsToAdmin(t *testing.T) {
+	st := freshStore(t)
+
+	res, err := Init(context.Background(), st, "alpha", InitOptions{})
+	if err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	if !res.OwnerCreated {
+		t.Fatal("expected admin to be created on first init of empty DB")
+	}
+
+	accts, _ := users.NewAccounts(st)
+	acct, err := accts.Get(context.Background(), res.Agent.UserID)
+	if err != nil {
+		t.Fatalf("get account: %v", err)
+	}
+	if acct.Username != "admin" {
+		t.Fatalf("default owner should be admin, got %q", acct.Username)
+	}
+	if acct.Role != users.RoleSuperAdmin {
+		t.Fatalf("default admin should be super_admin, got %q", acct.Role)
+	}
+}
+
+func TestInitFailsWhenDefaultAdminMissing(t *testing.T) {
+	st := freshStore(t)
+
+	// Seed alice as the only user (no admin in the DB).
+	if _, err := Init(context.Background(), st, "alpha", InitOptions{Username: "alice"}); err != nil {
+		t.Fatalf("seed alice: %v", err)
+	}
+
+	// New agent with no --username defaults to admin, which does not
+	// exist; the CLI must surface that rather than silently fall back.
+	_, err := Init(context.Background(), st, "beta", InitOptions{})
+	if err == nil || !strings.Contains(err.Error(), `"admin"`) {
+		t.Fatalf("expected admin-not-found error, got %v", err)
+	}
+}
+
 func TestSetGetConfigAgentScope(t *testing.T) {
 	st := freshStore(t)
 	res, err := Init(context.Background(), st, "alpha", InitOptions{})
