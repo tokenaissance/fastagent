@@ -227,7 +227,10 @@ once); on a populated database it expects `admin` to exist or
 CLI commands accept either a display name or an `agt_…` id:
 
 - `fastclaw agents config alpha get` — by display name (must be unique)
-- `fastclaw agents config agt_d3c4a5… get` — by id (always unambiguous)
+- `fastclaw agents config agt_d3c4a5… get` — by id
+
+If the same text matches one agent's id and a different agent's display
+name, the CLI reports an ambiguity instead of guessing.
 
 When you create an agent via `agents init <name>`, the name is the
 display name and the id is auto-generated. To update an agent that was
