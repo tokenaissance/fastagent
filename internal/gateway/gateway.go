@@ -410,16 +410,34 @@ func (g *Gateway) EnsureAgent(ctx context.Context, userID, agentID string) error
 func (g *Gateway) IsCloudMode() bool { return true }
 
 // Run starts the gateway and blocks until the process gets SIGINT/SIGTERM.
+// On Unix, SIGHUP triggers a hot reload of every cached UserSpace so the
+// next request picks up store mutations made by the CLI or another peer.
 func (g *Gateway) Run() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	stopCh := make(chan os.Signal, 1)
+	signal.Notify(stopCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
-		sig := <-sigCh
+		sig := <-stopCh
 		slog.Info("received signal, shutting down", "signal", sig)
 		cancel()
+	}()
+
+	reloadCh := make(chan os.Signal, 1)
+	notifyReloadSignal(reloadCh)
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-reloadCh:
+				slog.Info("received reload signal, reloading agents")
+				if err := g.ReloadAgents(); err != nil {
+					slog.Warn("agent reload failed", "error", err)
+				}
+			}
+		}
 	}()
 
 	var wg sync.WaitGroup

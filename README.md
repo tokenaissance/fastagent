@@ -208,8 +208,10 @@ fastclaw agents rm alpha
 The CLI opens the operator's store directly (sqlite at
 `~/.fastclaw/fastclaw.db`, or whatever `FASTCLAW_STORAGE_DSN` points
 at). It does not require the gateway to be running. When the gateway
-**is** running, the CLI prints a hint reminding you to restart it for
-the new state to apply (`fastclaw daemon restart`).
+**is** running, the CLI sends `SIGHUP` to the daemon PID and the
+gateway hot-reloads its in-memory caches before the next request — no
+restart needed. On Windows, where `SIGHUP` isn't deliverable, the CLI
+falls back to a hint reminding you to run `fastclaw daemon restart`.
 
 #### Resolving agents
 

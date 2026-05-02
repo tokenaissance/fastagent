@@ -45,14 +45,21 @@ func silenceTree(cmd *cobra.Command) {
 	}
 }
 
-// noteGatewayRunning prints a hint when the operator's gateway is
-// currently running. CLI writes do not hot-reload the gateway; the
-// operator needs to restart it to pick up changes.
-func noteGatewayRunning() {
+// notifyGatewayReload signals the running gateway (if any) so it picks
+// up store mutations the CLI just made. On Unix it sends SIGHUP to the
+// daemon PID; the gateway's reload handler invalidates every cached
+// UserSpace. On Windows it falls back to a hint, since SIGHUP isn't
+// delivered there.
+func notifyGatewayReload() {
 	st, err := daemon.GetStatus()
-	if err == nil && st != nil && st.Running {
-		fmt.Fprintf(os.Stderr, "Note: gateway is running (PID %d). Restart it with `fastclaw daemon restart` for changes to take effect.\n", st.PID)
+	if err != nil || st == nil || !st.Running {
+		return
 	}
+	if err := daemon.SignalReload(st.PID); err != nil {
+		fmt.Fprintf(os.Stderr, "Note: gateway is running (PID %d) but reload signal failed: %v. Restart it with `fastclaw daemon restart` for changes to take effect.\n", st.PID, err)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "Reloaded gateway (PID %d).\n", st.PID)
 }
 
 func agentsListCmd() *cobra.Command {
@@ -123,7 +130,7 @@ func agentsInitCmd() *cobra.Command {
 			if res.OwnerCreated && res.GeneratedPassword != "" {
 				fmt.Printf("Generated admin password: %s\n", res.GeneratedPassword)
 			}
-			noteGatewayRunning()
+			notifyGatewayReload()
 			return nil
 		},
 	}
@@ -159,7 +166,7 @@ func agentsRemoveCmd() *cobra.Command {
 				return err
 			}
 			fmt.Printf("Agent %q (%s) removed\n", rec.Name, rec.ID)
-			noteGatewayRunning()
+			notifyGatewayReload()
 			return nil
 		},
 	}
@@ -204,7 +211,7 @@ func agentsConfigCmd() *cobra.Command {
 					return err
 				}
 				fmt.Printf("Set %s\n", args[2])
-				noteGatewayRunning()
+				notifyGatewayReload()
 				return nil
 			default:
 				return fmt.Errorf("unknown config action %q; use get or set", args[1])
@@ -267,7 +274,7 @@ func agentsFilesCmd() *cobra.Command {
 				return err
 			}
 			fmt.Printf("Wrote %s\n", args[1])
-			noteGatewayRunning()
+			notifyGatewayReload()
 			return nil
 		},
 	})
