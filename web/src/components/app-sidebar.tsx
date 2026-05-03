@@ -47,15 +47,17 @@ function extractAgentId(pathname: string): string | null {
 }
 
 // Platform nav for regular users — non-admins see what they can do for
-// themselves. Models lets them configure their own (user-scoped)
-// providers — separate from any shared providers admin set up. Settings
-// gives them Account (password, avatar) and General (theme); the
-// Runtime sub-page inside Settings is gated to super_admin.
-// Skills / Users remain admin-only platform plumbing.
+// themselves. API Keys lets them issue type=user/agent tokens for their
+// own integrations (admin keys remain super_admin only). Models lets
+// them configure their own user-scope providers; Settings covers
+// Account + General (Runtime is hidden inside the layout for non-admin).
+// Skills/Users stay admin-only — Skills currently has no user-scope
+// install path so a sidebar entry would just dead-end on 403s.
 const USER_NAV: NavItem[] = [
   { title: "Overview", url: "/overview/", icon: LayoutDashboardIcon },
   { title: "Agents", url: "/agents/", icon: BotIcon },
   { title: "Models", url: "/models/", icon: BrainIcon },
+  { title: "API Keys", url: "/apikeys/", icon: KeyRoundIcon },
   { title: "Settings", url: "/settings/", icon: SettingsIcon },
 ];
 

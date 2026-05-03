@@ -449,7 +449,25 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		masked.Skills.AgentEntries = ma
 	}
-	jsonResponse(w, http.StatusOK, masked)
+	// Compute the system-only resolution of agents.defaults so the
+	// dashboard can tell apart "inheriting from system" vs "overriding
+	// at my user scope" — `cfg` already merges user over system, so
+	// without this hint the UI sees the same value either way and
+	// can't render an Inheriting/Override badge.
+	sysDefaults := config.AgentsConfig{}.Defaults
+	if s.dataStore != nil {
+		_ = scope.SettingInto(r.Context(), s.dataStore, "agents.defaults", "", "", "", &sysDefaults)
+	}
+	// Marshal-then-extend keeps the response shape compatible (existing
+	// callers ignore the extra `meta` key) without forcing a refactor of
+	// config.Config to carry presentation metadata.
+	blob, _ := json.Marshal(masked)
+	out := map[string]any{}
+	_ = json.Unmarshal(blob, &out)
+	out["meta"] = map[string]any{
+		"systemDefaultModel": sysDefaults.Model,
+	}
+	jsonResponse(w, http.StatusOK, out)
 }
 
 func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {

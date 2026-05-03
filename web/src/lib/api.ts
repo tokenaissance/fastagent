@@ -164,6 +164,14 @@ export interface ConfigResponse {
     // first, falling back to the global entries map.
     agentEntries?: Record<string, Record<string, SkillEntryCfg>>;
   };
+  // Presentation hints the dashboard needs to render inheritance state
+  // without re-resolving the scope chain client-side. systemDefaultModel
+  // is the value `agents.defaults.model` would resolve to from system
+  // scope alone — compare against `agents.defaults.model` (the merged
+  // value) to know whether the caller has overridden at user scope.
+  meta?: {
+    systemDefaultModel?: string;
+  };
 }
 
 // Auth token for cloud mode. Set via setAuthToken() on login; empty in local mode.

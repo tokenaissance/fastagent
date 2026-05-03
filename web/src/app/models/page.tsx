@@ -107,6 +107,11 @@ function emptyModel(): ModelEntry {
 export default function ModelsPage() {
   const [providers, setProviders] = useState<ProviderEntry[]>([]);
   const [model, setModel] = useState("");
+  // System-only resolution from /api/config?meta. For super_admin this
+  // equals `model` always (they ARE system); for regular users it's the
+  // value they'd inherit if their user-scope override were cleared. Used
+  // only for the Inheriting/Override badge + caption.
+  const [systemDefault, setSystemDefault] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -217,6 +222,7 @@ export default function ModelsPage() {
           ];
       setProviders(entries);
       setModel(cfg?.agents?.defaults?.model || "");
+      setSystemDefault(cfg?.meta?.systemDefaultModel || "");
     } finally {
       setLoading(false);
     }
@@ -478,6 +484,23 @@ export default function ModelsPage() {
     try {
       await updateConfig({ agents: { defaults: { model: value.trim() } } });
       flashSaved();
+      // Refresh so Inheriting/Override badge reflects the new state.
+      await fetchConfig(isSuperAdmin, me?.id || "");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // Clear the user-scope agents.defaults.model override so the agent
+  // runtime falls back to the system default. Writing an empty string
+  // just stores "" at user scope which still wins the merge — instead
+  // we send a null/undefined which the backend treats as "delete row".
+  const handleClearOverride = async () => {
+    setSaving(true);
+    try {
+      await updateConfig({ agents: { defaults: { model: "" } } });
+      flashSaved();
+      await fetchConfig(isSuperAdmin, me?.id || "");
     } finally {
       setSaving(false);
     }
@@ -528,16 +551,41 @@ export default function ModelsPage() {
         </div>
       </div>
 
-      {/* Default Model */}
+      {/* Default Model — for non-admin we surface inheritance state the
+          same way the agent Models page does, so users can see what
+          they'd get for free vs what they've overridden. Super_admin is
+          the system source of truth, so the badges are noise for them. */}
+      {(() => {
+        const inheriting = !isSuperAdmin && (!model.trim() || model === systemDefault);
+        const overridden = !isSuperAdmin && !inheriting;
+        return (
       <div className="rounded-lg border border-border bg-card p-5">
-        <div className="flex items-center gap-2 mb-3">
-          <Cpu className="h-4 w-4 text-primary" />
-          <h3 className="font-medium">Default Model</h3>
+        <div className="flex items-center justify-between gap-2 mb-3">
+          <div className="flex items-center gap-2">
+            <Cpu className="h-4 w-4 text-primary" />
+            <h3 className="font-medium">Default Model</h3>
+            {!isSuperAdmin && (inheriting ? (
+              <Badge variant="outline" className="text-[10px]">Inheriting</Badge>
+            ) : (
+              <Badge className="bg-primary/10 text-primary hover:bg-primary/10 text-[10px]">Override</Badge>
+            ))}
+          </div>
+          {overridden && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 text-xs"
+              onClick={handleClearOverride}
+              disabled={saving}
+            >
+              Clear override
+            </Button>
+          )}
         </div>
         {allModelOptions.length > 0 ? (
-          <Select value={model} onValueChange={(v: string | null) => v && handleDefaultModelChange(v)}>
+          <Select value={inheriting ? "" : model} onValueChange={(v: string | null) => v && handleDefaultModelChange(v)}>
             <SelectTrigger className="font-mono text-sm max-w-md">
-              <SelectValue placeholder="Select a model" />
+              <SelectValue placeholder={inheriting ? `Inherit (${systemDefault || "no system default"})` : "Select a model"} />
             </SelectTrigger>
             {/* Default `w-(--anchor-width)` locks the popup to the
                 trigger's max-w-md. Long ids like
@@ -554,16 +602,32 @@ export default function ModelsPage() {
           </Select>
         ) : (
           <Input
-            value={model}
+            value={inheriting ? "" : model}
             onChange={(e) => setModel(e.target.value)}
-            placeholder="e.g. openai/gpt-4o"
+            placeholder={inheriting ? (systemDefault ? `Inherit (${systemDefault})` : "e.g. openai/gpt-4o") : "e.g. openai/gpt-4o"}
             className="font-mono text-sm max-w-md"
           />
         )}
         <p className="text-xs text-muted-foreground mt-2">
-          Used by agents unless overridden in agent config
+          {isSuperAdmin ? (
+            <>Used by agents unless overridden in agent config.</>
+          ) : inheriting ? (
+            <>
+              Using system default
+              {systemDefault ? (
+                <>: <code className="text-[11px]">{systemDefault}</code></>
+              ) : (
+                <> (none configured)</>
+              )}
+              . Pick a model above to override for your agents only.
+            </>
+          ) : (
+            <>Override applies to your agents only. Format <code className="text-[11px]">provider/modelId</code>.</>
+          )}
         </p>
       </div>
+        );
+      })()}
 
       {/* Providers Grid */}
       {providers.length === 0 ? (

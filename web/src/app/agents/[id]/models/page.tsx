@@ -31,6 +31,7 @@ import {
 } from "@/components/ui/table";
 import { Brain, Plus, Pencil, Trash2, Check, Cpu, Loader2 } from "lucide-react";
 import {
+  getAgent,
   getConfig,
   listProviders,
   createProvider,
@@ -92,6 +93,12 @@ interface ProviderEntry {
   apiType: string;
   authType: string;
   models: ModelEntry[];
+  // Inheritance source. Only "agent" rows are editable on this page;
+  // "user" and "system" rows are read-only views of the chain that
+  // resolves at runtime. Two same-name rows in different scopes can
+  // coexist (lower scope shadows higher) — looking up by id avoids
+  // the collision the old name-keyed lookups had.
+  scope: "agent" | "user" | "system";
 }
 
 function emptyModel(): ModelEntry {
@@ -121,6 +128,10 @@ export default function AgentModelsPage() {
   // Dialog state — mirrors the admin page exactly.
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingName, setEditingName] = useState<string | null>(null);
+  // editingId: with the merged view, two rows can share `name` across
+  // scopes (e.g. agent's "openai" override + system's "openai"). Lookups
+  // for edit / test must use id.
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [formPreset, setFormPreset] = useState("openrouter");
   const [formName, setFormName] = useState("");
   const [formApiBase, setFormApiBase] = useState("");
@@ -139,17 +150,24 @@ export default function AgentModelsPage() {
     cleanModelRows.length === 0 ||
     cleanModelRows.every((t) => modelTests[t.idx]?.status === "success");
 
-  // Dropdown only lists agent-scoped models. System providers stay
-  // reachable via the free-text fallback (`provider/id`) — listing them
-  // here would require model rows we don't get from /api/config.
+  // Dropdown lists models from every scope the agent will resolve at
+  // runtime — agent overrides shadow user, user overrides system. We
+  // dedupe on `provider/modelId` so a same-name override doesn't show
+  // twice; the lower-scope row wins (agent > user > system) because it's
+  // what would actually be chosen.
   const allModelOptions: { value: string; label: string }[] = useMemo(() => {
+    const seen = new Set<string>();
+    const order: ProviderEntry["scope"][] = ["agent", "user", "system"];
     const out: { value: string; label: string }[] = [];
-    for (const p of providers) {
-      for (const m of p.models) {
-        out.push({
-          value: `${p.name}/${m.id}`,
-          label: `${p.name}/${m.name || m.id}`,
-        });
+    for (const sc of order) {
+      for (const p of providers) {
+        if (p.scope !== sc) continue;
+        for (const m of p.models) {
+          const value = `${p.name}/${m.id}`;
+          if (seen.has(value)) continue;
+          seen.add(value);
+          out.push({ value, label: `${p.name}/${m.name || m.id}` });
+        }
       }
     }
     return out;
@@ -159,16 +177,30 @@ export default function AgentModelsPage() {
     if (!agentId) return;
     setLoading(true);
     try {
-      const [prov, cfg] = await Promise.all([
+      // We need the agent's owner to fetch user-scope inherited rows.
+      // Pull agent record + all three provider scopes in parallel. The
+      // user-scope call gets bound to the owner only after agentRec
+      // resolves; doing the user list lazily here keeps things flat
+      // without an awkward two-stage fetch.
+      const [agentRec, agentScopeRes, sysScopeRes, cfg] = await Promise.all([
+        getAgent(agentId).catch(() => null),
         listProviders("agent", agentId).catch(() => null),
+        listProviders("system", "").catch(() => null),
         // /api/config may 403 for non-admins; if it does, we just lose
         // the "inheriting system default: X" hint, which is fine.
         getConfig().catch(() => null),
       ]);
-      const rows: ProviderRow[] = (prov && Array.isArray(prov.providers))
-        ? (prov.providers as ProviderRow[])
-        : [];
-      const entries: ProviderEntry[] = rows.map((r) => ({
+      const ownerId = agentRec?.userId || "";
+      // user-scope inheritance only applies if we know the owner;
+      // anonymous fall-through means no user layer (rare — agents
+      // without an owner shouldn't exist post-onboarding).
+      const userScopeRes = ownerId
+        ? await listProviders("user", ownerId).catch(() => null)
+        : null;
+
+      const toRows = (res: { providers?: ProviderRow[] } | null): ProviderRow[] =>
+        res && Array.isArray(res.providers) ? (res.providers as ProviderRow[]) : [];
+      const toEntry = (r: ProviderRow, sc: ProviderEntry["scope"]): ProviderEntry => ({
         id: r.id,
         name: r.name,
         apiBase: r.apiBase || "",
@@ -177,10 +209,16 @@ export default function AgentModelsPage() {
         apiType: r.apiType || "openai-chat",
         authType: r.authType || "bearer-token",
         models: r.models || [],
-      }));
-      setProviders(entries);
+        scope: sc,
+      });
+      const merged: ProviderEntry[] = [
+        ...toRows(agentScopeRes).map((r) => toEntry(r, "agent")),
+        ...toRows(userScopeRes).map((r) => toEntry(r, "user")),
+        ...toRows(sysScopeRes).map((r) => toEntry(r, "system")),
+      ];
+      setProviders(merged);
       setSystemDefault(cfg?.agents?.defaults?.model || "");
-      setSystemProviders(cfg?.providers ? Object.keys(cfg.providers) : []);
+      setSystemProviders(toRows(sysScopeRes).map((r) => r.name));
       // The agent's own model override comes from the merged
       // /api/config row for this agent (agents.list).
       const own = cfg?.agents?.list?.find((a) => a.id === agentId);
@@ -201,6 +239,7 @@ export default function AgentModelsPage() {
 
   const openAddDialog = () => {
     setEditingName(null);
+    setEditingId(null);
     setFormPreset("openai");
     setFormName("openai");
     setFormApiBase(PROVIDER_PRESETS["openai"].apiBase);
@@ -214,6 +253,7 @@ export default function AgentModelsPage() {
 
   const openEditDialog = (provider: ProviderEntry) => {
     setEditingName(provider.name);
+    setEditingId(provider.id);
     const preset = Object.keys(PROVIDER_PRESETS).includes(provider.name) ? provider.name : "custom";
     setFormPreset(preset);
     setFormName(provider.name);
@@ -259,8 +299,8 @@ export default function AgentModelsPage() {
       .map((m, idx) => ({ idx, id: m.id.trim() }))
       .filter((t) => t.id);
     if (targets.length === 0) return;
-    const editingRow = editingName
-      ? providers.find((p) => p.name === editingName)
+    const editingRow = editingId
+      ? providers.find((p) => p.id === editingId)
       : undefined;
     const useStoredKey = !!editingRow && !formApiKey.trim();
     setBatchTesting(true);
@@ -342,8 +382,8 @@ export default function AgentModelsPage() {
     const name = formName.toLowerCase().trim().replace(/\s+/g, "-");
     if (!name) return;
     const cleanedModels = formModels.filter((m) => m.id.trim());
-    const editingRow = editingName
-      ? providers.find((p) => p.name === editingName)
+    const editingRow = editingId
+      ? providers.find((p) => p.id === editingId)
       : undefined;
 
     setSaving(true);
@@ -376,16 +416,14 @@ export default function AgentModelsPage() {
     await fetchAll();
   };
 
-  const handleDeleteProvider = async (name: string) => {
-    const row = providers.find((p) => p.name === name);
-    if (!row) return;
+  const handleDeleteProvider = async (row: ProviderEntry) => {
     setSaving(true);
     try {
       await deleteProvider(row.id);
       // If the active model came from this provider, the override is
-      // now dangling — clear it so the agent falls back to the system
-      // default at runtime.
-      if (model.startsWith(`${name}/`)) {
+      // now dangling — clear it so the agent falls back through the
+      // chain at runtime.
+      if (model.startsWith(`${row.name}/`)) {
         await updateAgent(agentId, { model: "" });
       }
       flashSaved();
@@ -539,11 +577,12 @@ export default function AgentModelsPage() {
               <Brain className="h-7 w-7 text-amber-500" />
             </div>
             <p className="text-sm text-muted-foreground mb-1">
-              No agent-scoped providers configured
+              No providers available
             </p>
             <p className="text-xs text-muted-foreground/60 mb-4 max-w-md text-center">
-              This agent will use system providers. Add one here to give it its
-              own credentials or override a system entry by name.
+              No agent / user / system providers are configured. Add one here to
+              give this agent credentials, or configure shared ones from the
+              top-level Models page.
             </p>
             <Button variant="outline" size="sm" onClick={openAddDialog}>
               <Plus className="h-4 w-4 mr-2" />
@@ -560,17 +599,25 @@ export default function AgentModelsPage() {
                 <TableHead>API Base</TableHead>
                 <TableHead>API Key</TableHead>
                 <TableHead>Models</TableHead>
-                <TableHead>Status</TableHead>
+                <TableHead>Source</TableHead>
                 <TableHead className="text-right">Actions</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {providers.map((provider) => (
-                <TableRow key={provider.name}>
+              {providers.map((provider) => {
+                const editable = provider.scope === "agent";
+                const sourceLabel =
+                  provider.scope === "agent"
+                    ? "Mine (agent)"
+                    : provider.scope === "user"
+                    ? "Inherited from owner"
+                    : "Inherited from admin";
+                return (
+                <TableRow key={`${provider.scope}:${provider.id}`}>
                   <TableCell className="font-medium">
                     <div className="flex items-center gap-2">
                       {provider.name}
-                      {systemProviders.includes(provider.name) && (
+                      {editable && systemProviders.includes(provider.name) && (
                         <Badge variant="outline" className="text-[10px]">
                           shadows system
                         </Badge>
@@ -591,13 +638,18 @@ export default function AgentModelsPage() {
                     {provider.models.length}
                   </TableCell>
                   <TableCell>
-                    <Badge
-                      variant="outline"
-                      className="bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20"
-                    >
-                      <span className="mr-1.5 inline-block h-1.5 w-1.5 rounded-full bg-emerald-500" />
-                      Active
-                    </Badge>
+                    {editable ? (
+                      <Badge
+                        variant="outline"
+                        className="bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20"
+                      >
+                        {sourceLabel}
+                      </Badge>
+                    ) : (
+                      <Badge variant="outline" className="text-muted-foreground" title="Read-only — owner / admin owns this row">
+                        {sourceLabel}
+                      </Badge>
+                    )}
                   </TableCell>
                   <TableCell className="text-right">
                     <div className="flex justify-end gap-1">
@@ -605,7 +657,8 @@ export default function AgentModelsPage() {
                         size="icon"
                         variant="ghost"
                         onClick={() => openEditDialog(provider)}
-                        title="Edit"
+                        title={editable ? "Edit" : "Read-only — inherited row"}
+                        disabled={!editable}
                       >
                         <Pencil className="size-4" />
                       </Button>
@@ -613,15 +666,16 @@ export default function AgentModelsPage() {
                         size="icon"
                         variant="ghost"
                         className="text-destructive hover:text-destructive"
-                        onClick={() => handleDeleteProvider(provider.name)}
-                        title="Remove"
+                        onClick={() => handleDeleteProvider(provider)}
+                        title={editable ? "Remove" : "Read-only — inherited row"}
+                        disabled={!editable}
                       >
                         <Trash2 className="size-4" />
                       </Button>
                     </div>
                   </TableCell>
                 </TableRow>
-              ))}
+              );})}
             </TableBody>
           </Table>
         </div>
@@ -694,7 +748,7 @@ export default function AgentModelsPage() {
                 placeholder={
                   editingName
                     ? (() => {
-                        const row = providers.find((p) => p.name === editingName);
+                        const row = providers.find((p) => p.id === editingId);
                         return row?.maskedKey || "sk-…";
                       })()
                     : "sk-…"

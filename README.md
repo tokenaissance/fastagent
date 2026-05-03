@@ -5,11 +5,10 @@
 A lightweight AI Agent runtime written in Go.
 
 [![Go](https://img.shields.io/badge/Go-1.25+-00ADD8?style=flat&logo=go)](https://go.dev)
-[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 **Single binary - Any LLM - Multi-agent - Sandbox - Cloud-ready**
 
-[Install](#install) - [Quick Start](#quick-start) - [Architecture](#architecture) - [Features](#features)
+[Quick Start](#quick-start) - [Architecture](#architecture) - [Features](#features) - [License](#license)
 
 </div>
 
@@ -41,7 +40,13 @@ Open `http://localhost:18953` and login with your admin token.
 - **Agents** — Create and manage agents, each with its own personality and model
 - **Skills** — Install shared skills from ClawHub or GitHub
 - **Models** — Configure LLM providers (OpenAI, Anthropic, Ollama, OpenRouter, etc.)
-- **Settings** — Storage, sandbox, gateway configuration
+- **API Keys** — Issue programmatic credentials (admin / user / agent tiers)
+- **Settings** — General (theme), Account (profile + password), Runtime (sandbox config; admin only)
+
+> Non-admin users get scoped access to **Models**, **API Keys**, and
+> **Settings (General + Account)** out of the box. They see admin-shared
+> resources as `Inherited` and can layer their own private overlays on
+> top — same inheritance pattern the agent runtime uses.
 
 ### 3. Agent Management
 
@@ -59,38 +64,26 @@ Click an agent to enter its management panel:
 
 ```
 ~/.fastclaw/
-  fastclaw.json              # Global config (gateway, storage, providers, defaults)
-  apikeys.json               # API keys for external access
+  fastclaw.json              # Bootstrap config (gateway port, storage DSN)
+  fastclaw.db                # SQLite default — users, agents, sessions,
+                             # apikeys, configs, agent_files all live here
   skills/                    # Shared skills (bundled + installed)
   agents/
-    default/agent/           # Agent workspace
-      agent.json             # Agent config (model override)
-      SOUL.md                # Personality
-      MEMORY.md              # Long-term memory
-      sessions/              # Conversation history
-      skills/                # Agent-private skills
-    my-coder/agent/
-      ...
+    <agentId>/skills/        # Agent-private skills (filesystem only)
 ```
 
-### Storage
-
-| Data | `storage: "file"` | `storage: "postgres"` |
-|------|-------------------|-----------------------|
-| Global config | File (always) | File (bootstrap) |
-| Sessions | JSONL files | DB |
-| Memory / SOUL.md | Files | DB |
-| Agent config | Files | DB |
-| Skills | Files (always) | Files (always) |
+The database is the source of truth for everything except skill folders
+on disk. SQLite is the default; point `FASTCLAW_STORAGE_DSN` at Postgres
+for multi-pod deployments.
 
 ### What FastClaw Stores
 
-| Data | Belongs to | Storage |
-|------|-----------|---------|
-| SOUL.md, IDENTITY.md | Agent | FastClaw |
-| MEMORY.md | Agent | FastClaw |
-| Skills | Agent / Global | FastClaw |
-| Sessions | Agent | FastClaw |
+| Data | Belongs to | Backing store |
+|------|-----------|---------------|
+| Agent records, SOUL.md / IDENTITY.md / MEMORY.md / agent.json | Agent | DB (`agent_files` table) |
+| Sessions (chat history) | Agent × user | DB (`sessions` table) |
+| API keys, users, scoped configs (providers/channels/settings) | Platform | DB |
+| Skills | Agent / Global | Filesystem (`skills/`, `agents/<id>/skills/`) |
 | User accounts, billing | Application | Your app (ChatClaw, etc.) |
 | Output files | Application | Your app / S3 |
 
@@ -131,7 +124,7 @@ Click an agent to enter its management panel:
 - Per-agent scheduler `/api/agents/{id}/cron` (list / toggle / delete)
 - Provider management `/api/config`
 - Skill install `/api/skills/install` (ClawHub + GitHub)
-- API key management `/v1/admin/apikeys`
+- API key management `/api/apikeys` (per-user; tiers: admin / user / agent)
 - App-user provisioning `POST /v1/users` — third-party apps mint a stable fastclaw user_id per end-user, idempotent on `(api_key, external_id)`. Or pass `user` on `/v1/chat/completions` (or `X-Fastclaw-End-User` header) for lazy mint on first call
 
 ## Configuration
@@ -319,4 +312,15 @@ go build -o fastclaw ./cmd/fastclaw
 
 ## License
 
-MIT
+FastClaw is **source-available** under the [FastClaw Community License](LICENSE),
+based on Apache License 2.0 with additional conditions.
+
+**TL;DR:**
+- ✅ Use it commercially as a backend for your own product
+- ✅ Internal deployment within your organization
+- ❌ Hosting FastClaw as a multi-tenant SaaS for unrelated organizations
+  (without a commercial license)
+- ❌ Removing or modifying the FastClaw branding in the dashboard UI
+
+The full Apache 2.0 text is reproduced inside the [LICENSE](LICENSE) file
+under the addendum. For commercial licensing inquiries: support@thinkany.ai.
