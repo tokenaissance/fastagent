@@ -56,6 +56,7 @@ type Account struct {
 	Status      string    `json:"status"`
 	APIKeyID    string    `json:"apikeyId,omitempty"`
 	ExternalID  string    `json:"externalId,omitempty"`
+	AvatarURL   string    `json:"avatarUrl,omitempty"`
 	CreatedAt   time.Time `json:"createdAt"`
 	UpdatedAt   time.Time `json:"updatedAt"`
 }
@@ -202,6 +203,41 @@ func (a *Accounts) Update(ctx context.Context, id, displayName, role, status str
 	return toAccount(rec), nil
 }
 
+// UpdateProfile applies self-service edits — display name and avatar
+// only. Role/status changes go through Update (admin-only). avatarURL
+// is stored verbatim; the handler is responsible for shape and size
+// validation. Pass an explicit empty string to clear the avatar.
+func (a *Accounts) UpdateProfile(ctx context.Context, id, displayName, avatarURL string) (*Account, error) {
+	rec, err := a.store.GetUser(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	rec.DisplayName = displayName
+	rec.AvatarURL = avatarURL
+	if err := a.store.UpdateUser(ctx, rec); err != nil {
+		return nil, err
+	}
+	return toAccount(rec), nil
+}
+
+// VerifyPassword checks a plaintext password against the stored hash for
+// id. Returns ErrInvalidCredentials on mismatch (or for accounts with no
+// password, e.g. app_user). Used by /api/me/password to gate self-service
+// password change behind the current password.
+func (a *Accounts) VerifyPassword(ctx context.Context, id, password string) error {
+	rec, err := a.store.GetUser(ctx, id)
+	if err != nil {
+		return ErrInvalidCredentials
+	}
+	if rec.PasswordHash == "" {
+		return ErrInvalidCredentials
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(rec.PasswordHash), []byte(password)); err != nil {
+		return ErrInvalidCredentials
+	}
+	return nil
+}
+
 // SetPassword rotates an account's password. Caller is responsible for
 // permission checks (self vs. super_admin).
 func (a *Accounts) SetPassword(ctx context.Context, id, newPassword string) error {
@@ -311,6 +347,7 @@ func toAccount(r *store.UserRecord) *Account {
 		Status:      r.Status,
 		APIKeyID:    r.APIKeyID,
 		ExternalID:  r.ExternalID,
+		AvatarURL:   r.AvatarURL,
 		CreatedAt:   r.CreatedAt,
 		UpdatedAt:   r.UpdatedAt,
 	}

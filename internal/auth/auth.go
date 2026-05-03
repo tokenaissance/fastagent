@@ -38,12 +38,16 @@ type Identity struct {
 	// AuthMethod is "session" or "apikey".
 	AuthMethod string
 
-	// APIKeyID is set when AuthMethod=="apikey". The auth-bound agent
-	// access list lives on APIKeyAgents (nil = unlimited within the
-	// owner's agents, which we never grant — the agent set is always
-	// explicit when an apikey is created).
-	APIKeyID      string
-	APIKeyAgents  []string
+	// APIKeyID is set when AuthMethod=="apikey". APIKeyType is one of
+	// users.APIKeyType{Admin,User,Agent}. APIKeyAgents is the agent
+	// scope resolved at auth time:
+	//   - type=admin: empty (the agent gate short-circuits on type)
+	//   - type=user:  every agent owned by the apikey owner at the
+	//     moment of the request (resolved fresh per request)
+	//   - type=agent: the explicit ACL from apikey_agents
+	APIKeyID     string
+	APIKeyType   string
+	APIKeyAgents []string
 
 	// ActAsUserID is non-empty when a super_admin is browsing another
 	// user's resources read-only via ?actAs=. Mutating handlers MUST
@@ -72,15 +76,18 @@ func (i Identity) ReadOnly() bool {
 }
 
 // CanAccessAgent answers "is this caller authorized for agentID?"
-//   - super_admin: yes, on any agent (read-only when in actAs mode)
-//   - apikey: only if agentID ∈ APIKeyAgents
-//   - session user: agent must belong to UserID (verified by the caller
-//     querying agents table; we don't carry that list on Identity)
+//   - super_admin (session): yes, on any agent (read-only when actAs)
+//   - apikey type=admin: yes, on any agent
+//   - apikey type=user/agent: only if agentID ∈ APIKeyAgents (the list
+//     is pre-resolved at auth time per type — see Resolved.Agents)
+//   - session user (non-admin): agent must belong to UserID (verified by
+//     the caller querying agents table; we don't carry that list on
+//     Identity)
 func (i Identity) CanAccessAgent(agentID string) bool {
-	if i.Role == users.RoleSuperAdmin {
-		return true
-	}
 	if i.AuthMethod == "apikey" {
+		if i.APIKeyType == users.APIKeyTypeAdmin {
+			return true
+		}
 		for _, a := range i.APIKeyAgents {
 			if a == agentID {
 				return true
@@ -88,8 +95,33 @@ func (i Identity) CanAccessAgent(agentID string) bool {
 		}
 		return false
 	}
+	if i.Role == users.RoleSuperAdmin {
+		return true
+	}
 	// session caller: agent ownership check happens in the handler
 	// after reading the agent row (cheap M:1 lookup, no list scan).
+	return true
+}
+
+// CanAdminPlatform answers "may this caller hit /api/admin/* and other
+// platform-wide mutating endpoints?" Only super_admin sessions and
+// type=admin apikeys qualify. Distinct from CanAccessAgent because a
+// super_admin's type=user/agent apikey deliberately downgrades them to
+// the narrower scope they signed it for.
+func (i Identity) CanAdminPlatform() bool {
+	if i.AuthMethod == "apikey" {
+		return i.APIKeyType == users.APIKeyTypeAdmin
+	}
+	return i.Role == users.RoleSuperAdmin
+}
+
+// CanCreateAgent answers "may this caller create new agents?"
+// type=agent keys explicitly cannot — they're sandboxed to a fixed list.
+// Everyone else (sessions and admin/user keys) can.
+func (i Identity) CanCreateAgent() bool {
+	if i.AuthMethod == "apikey" && i.APIKeyType == users.APIKeyTypeAgent {
+		return false
+	}
 	return true
 }
 
@@ -215,6 +247,7 @@ func (r *Resolver) ResolveBearer(ctx context.Context, token string) (Identity, e
 		Role:         res.Account.Role,
 		AuthMethod:   "apikey",
 		APIKeyID:     res.APIKey.ID,
+		APIKeyType:   res.APIKey.Type,
 		APIKeyAgents: append([]string(nil), res.Agents...),
 	}, nil
 }
@@ -341,11 +374,39 @@ done:
 
 // RequireSuperAdmin returns a middleware that 403s any non-super-admin
 // caller. Wraps another middleware (typically the auth Middleware).
+//
+// This is the strictest gate: it requires the live caller's identity to
+// be super_admin regardless of how they authenticated. A super_admin
+// using a type=user apikey is rejected — that's the deliberate downgrade
+// the user signed up for when they issued the narrower key. For routes
+// that should accept either path (admin session OR type=admin apikey),
+// use RequirePlatformAdmin instead.
 func RequireSuperAdmin(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
 		ident, ok := FromContext(req.Context())
 		if !ok || ident.Role != users.RoleSuperAdmin {
 			writeForbidden(w, "super_admin required")
+			return
+		}
+		// Apikey callers must additionally hold a type=admin key — a
+		// super_admin's type=user key is intentionally narrower.
+		if ident.AuthMethod == "apikey" && ident.APIKeyType != users.APIKeyTypeAdmin {
+			writeForbidden(w, "admin apikey required")
+			return
+		}
+		next(w, req)
+	}
+}
+
+// RequirePlatformAdmin gates handlers that should accept any platform
+// admin — session super_admin OR type=admin apikey. Same authority as
+// RequireSuperAdmin in terms of what's allowed; just doesn't require the
+// session path.
+func RequirePlatformAdmin(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, req *http.Request) {
+		ident, ok := FromContext(req.Context())
+		if !ok || !ident.CanAdminPlatform() {
+			writeForbidden(w, "platform admin required")
 			return
 		}
 		next(w, req)

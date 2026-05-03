@@ -17,16 +17,28 @@ import (
 // Scope-aware CRUD for providers + channels (and a generic settings
 // endpoint). Authorization:
 //
-//   scope=system → super_admin only
+//   scope=system → READ: any authenticated user (system providers are
+//                  designed to be inheritable; api keys are masked on
+//                  the way out). WRITE: super_admin only.
 //   scope=user   → super_admin OR scopeId == caller's user_id
 //   scope=agent  → super_admin OR caller owns the agent
 //
 // All four routes share the same gating helper so the rules stay aligned.
 
-// authorizeScope returns true if the request is allowed to read or write
-// rows at (scope, scopeID). Mutating callers should additionally check
-// `requireWritable` (which already rejects super_admin actAs mode).
-func (s *Server) authorizeScope(w http.ResponseWriter, r *http.Request, sc, scopeID string) bool {
+// scopeOp distinguishes read vs mutating access for authorizeScope. The
+// only place this matters today is system scope: regular users may list
+// inherited system providers but never edit them.
+type scopeOp int
+
+const (
+	scopeRead scopeOp = iota
+	scopeWrite
+)
+
+// authorizeScope returns true if the request is allowed at (scope, scopeID)
+// for the given op. Mutating callers should additionally pass through
+// `requireWritable` (which rejects super_admin actAs mode).
+func (s *Server) authorizeScope(w http.ResponseWriter, r *http.Request, sc, scopeID string, op scopeOp) bool {
 	ident, ok := auth.FromContext(r.Context())
 	if !ok {
 		jsonResponse(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": "unauthorized"})
@@ -37,7 +49,15 @@ func (s *Server) authorizeScope(w http.ResponseWriter, r *http.Request, sc, scop
 	}
 	switch sc {
 	case scope.System:
-		jsonResponse(w, http.StatusForbidden, map[string]any{"ok": false, "error": "super_admin required for system scope"})
+		// System scope is broadcast: every agent inherits from it. Reads
+		// are open so the dashboard can show a non-admin which providers
+		// they're inheriting and the runtime can resolve them. Writes
+		// stay locked to super_admin (the upstream business reason for
+		// the gate hasn't changed).
+		if op == scopeRead {
+			return true
+		}
+		jsonResponse(w, http.StatusForbidden, map[string]any{"ok": false, "error": "super_admin required to mutate system scope"})
 		return false
 	case scope.User:
 		if scopeID != ident.UserID {
@@ -96,7 +116,7 @@ func scopeFromQuery(r *http.Request) (string, string) {
 
 func (s *Server) handleListProviders(w http.ResponseWriter, r *http.Request) {
 	sc, scopeID := scopeFromQuery(r)
-	if !s.authorizeScope(w, r, sc, scopeID) {
+	if !s.authorizeScope(w, r, sc, scopeID, scopeRead) {
 		return
 	}
 	rows, err := s.dataStore.ListConfigs(r.Context(), store.KindProvider, sc, scopeID)
@@ -154,7 +174,7 @@ func (s *Server) handleCreateProvider(w http.ResponseWriter, r *http.Request) {
 	if sc == "" {
 		sc, scopeID = scopeFromQuery(r)
 	}
-	if !s.authorizeScope(w, r, sc, scopeID) {
+	if !s.authorizeScope(w, r, sc, scopeID, scopeWrite) {
 		return
 	}
 	pcfg := config.ProviderConfig{
@@ -182,7 +202,7 @@ func (s *Server) handleUpdateProvider(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "not found"})
 		return
 	}
-	if !s.authorizeScope(w, r, rec.Scope, rec.ScopeID) {
+	if !s.authorizeScope(w, r, rec.Scope, rec.ScopeID, scopeWrite) {
 		return
 	}
 	var req writeProviderRequest
@@ -231,7 +251,7 @@ func (s *Server) handleDeleteProvider(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "not found"})
 		return
 	}
-	if !s.authorizeScope(w, r, rec.Scope, rec.ScopeID) {
+	if !s.authorizeScope(w, r, rec.Scope, rec.ScopeID, scopeWrite) {
 		return
 	}
 	if err := s.dataStore.DeleteConfig(r.Context(), id); err != nil {
@@ -246,7 +266,7 @@ func (s *Server) handleDeleteProvider(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleListScopedChannels(w http.ResponseWriter, r *http.Request) {
 	sc, scopeID := scopeFromQuery(r)
-	if !s.authorizeScope(w, r, sc, scopeID) {
+	if !s.authorizeScope(w, r, sc, scopeID, scopeRead) {
 		return
 	}
 	rows, err := s.dataStore.ListConfigs(r.Context(), store.KindChannel, sc, scopeID)
@@ -319,7 +339,7 @@ func (s *Server) handleCreateScopedChannel(w http.ResponseWriter, r *http.Reques
 	if sc == "" {
 		sc, scopeID = scopeFromQuery(r)
 	}
-	if !s.authorizeScope(w, r, sc, scopeID) {
+	if !s.authorizeScope(w, r, sc, scopeID, scopeWrite) {
 		return
 	}
 	credKey := credentialKeyFor(req.Type, req.BotToken, req.CredentialKey)
@@ -355,7 +375,7 @@ func (s *Server) handleUpdateScopedChannel(w http.ResponseWriter, r *http.Reques
 		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "not found"})
 		return
 	}
-	if !s.authorizeScope(w, r, rec.Scope, rec.ScopeID) {
+	if !s.authorizeScope(w, r, rec.Scope, rec.ScopeID, scopeWrite) {
 		return
 	}
 	var req writeChannelRequest
@@ -404,7 +424,7 @@ func (s *Server) handleDeleteScopedChannel(w http.ResponseWriter, r *http.Reques
 		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "not found"})
 		return
 	}
-	if !s.authorizeScope(w, r, rec.Scope, rec.ScopeID) {
+	if !s.authorizeScope(w, r, rec.Scope, rec.ScopeID, scopeWrite) {
 		return
 	}
 	if err := s.dataStore.DeleteConfig(r.Context(), id); err != nil {

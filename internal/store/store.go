@@ -138,8 +138,13 @@ type UserRecord struct {
 	Status       string    `json:"status"` // "active" | "disabled"
 	APIKeyID     string    `json:"apikeyId,omitempty"`
 	ExternalID   string    `json:"externalId,omitempty"`
-	CreatedAt    time.Time `json:"createdAt"`
-	UpdatedAt    time.Time `json:"updatedAt"`
+	// AvatarURL is a self-contained data: URL ("data:image/png;base64,...")
+	// stored inline to avoid a separate blob path. Cap is enforced by the
+	// handler at write time (256KB by default). Empty means "no avatar"
+	// — UI falls back to initials.
+	AvatarURL string    `json:"avatarUrl,omitempty"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
 }
 
 // WebSessionRecord backs cookie-based login state.
@@ -152,12 +157,20 @@ type WebSessionRecord struct {
 
 // APIKeyRecord is one row of the apikeys table. KeyHash is SHA256(token);
 // the plaintext is shown to the caller exactly once at create/rotate.
+//
+// Type is the key's authority tier:
+//   - "admin": full platform — issues users, manages providers/models/skills
+//   - "user":  the apikey owner's own resources — can create agents,
+//     access every agent owned by the apikey owner (resolved at auth time)
+//   - "agent": locked to the explicit list in apikey_agents — cannot
+//     create agents
 type APIKeyRecord struct {
 	ID        string    `json:"id"`
 	UserID    string    `json:"userId"`
 	Name      string    `json:"name,omitempty"`
 	KeyHash   string    `json:"-"`
 	KeyPrefix string    `json:"keyPrefix,omitempty"`
+	Type      string    `json:"type"`
 	CreatedAt time.Time `json:"createdAt"`
 }
 

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/fastclaw-ai/fastclaw/internal/auth"
 	"github.com/fastclaw-ai/fastclaw/internal/config"
@@ -76,6 +77,92 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		"actAsUserId": ident.ActAsUserID,
 		"readOnly":    ident.ReadOnly(),
 	})
+}
+
+// --- Self-service profile ---
+
+// maxAvatarBytes caps the size of a base64-encoded avatar payload. ~256KB
+// is enough for a reasonable square (e.g. 256×256 PNG); anything larger
+// pushes the users row into TOAST territory on Postgres and slows /api/me.
+// Frontend should resize/compress before upload — this is just the wall.
+const maxAvatarBytes = 256 * 1024
+
+type updateMeReq struct {
+	DisplayName string `json:"displayName"`
+	AvatarURL   string `json:"avatarUrl"`
+}
+
+// handleUpdateMe lets the logged-in user edit their own display name and
+// avatar. Avatar must be empty (clears) or a data: URL — full-blown HTTP
+// URLs would let a malicious paste exfiltrate user data via referer when
+// rendered, so we constrain to inline images only.
+func (s *Server) handleUpdateMe(w http.ResponseWriter, r *http.Request) {
+	ident, ok := auth.FromContext(r.Context())
+	if !ok || ident.ReadOnly() {
+		jsonResponse(w, http.StatusForbidden, map[string]any{"ok": false, "error": "read-only"})
+		return
+	}
+	var req updateMeReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid request"})
+		return
+	}
+	if req.AvatarURL != "" {
+		if !strings.HasPrefix(req.AvatarURL, "data:image/") {
+			jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "avatar must be a data:image/* URL"})
+			return
+		}
+		if len(req.AvatarURL) > maxAvatarBytes {
+			jsonResponse(w, http.StatusRequestEntityTooLarge, map[string]any{"ok": false, "error": "avatar too large (max 256KB)"})
+			return
+		}
+	}
+	acct, err := s.accounts.UpdateProfile(r.Context(), ident.UserID, req.DisplayName, req.AvatarURL)
+	if err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{"ok": true, "user": acct})
+}
+
+type changePasswordReq struct {
+	OldPassword string `json:"oldPassword"`
+	NewPassword string `json:"newPassword"`
+}
+
+// handleChangeMyPassword is the self-service variant of admin's password
+// reset — requires the current password before accepting a new one. Min
+// length matches the implicit default elsewhere; we don't enforce strong
+// rules because the install is single-tenant and we don't want to be
+// the place that rejects "correcthorse" with a regex.
+func (s *Server) handleChangeMyPassword(w http.ResponseWriter, r *http.Request) {
+	ident, ok := auth.FromContext(r.Context())
+	if !ok || ident.ReadOnly() {
+		jsonResponse(w, http.StatusForbidden, map[string]any{"ok": false, "error": "read-only"})
+		return
+	}
+	if ident.Role == users.RoleAppUser {
+		jsonResponse(w, http.StatusForbidden, map[string]any{"ok": false, "error": "app_user has no password"})
+		return
+	}
+	var req changePasswordReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid request"})
+		return
+	}
+	if req.NewPassword == "" {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "new password required"})
+		return
+	}
+	if err := s.accounts.VerifyPassword(r.Context(), ident.UserID, req.OldPassword); err != nil {
+		jsonResponse(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": "current password incorrect"})
+		return
+	}
+	if err := s.accounts.SetPassword(r.Context(), ident.UserID, req.NewPassword); err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 // --- Onboard ---
@@ -356,6 +443,7 @@ func (s *Server) handleAdminListAgents(w http.ResponseWriter, r *http.Request) {
 
 type createAPIKeyReq struct {
 	Name     string   `json:"name"`
+	Type     string   `json:"type,omitempty"` // "admin" | "user" | "agent"; default "agent"
 	AgentIDs []string `json:"agentIds,omitempty"`
 }
 
@@ -372,12 +460,19 @@ func (s *Server) handleListAPIKeys(w http.ResponseWriter, r *http.Request) {
 	}
 	enriched := make([]map[string]any, 0, len(list))
 	for _, ak := range list {
-		agents, _ := s.apikeys.Agents(r.Context(), ak.ID)
+		// Only type=agent keys carry an explicit agent list; user/admin
+		// derive scope from ownership at auth time, so an empty array
+		// here means "the tier defines the scope, not the row."
+		var agents []string
+		if ak.Type == users.APIKeyTypeAgent {
+			agents, _ = s.apikeys.Agents(r.Context(), ak.ID)
+		}
 		enriched = append(enriched, map[string]any{
 			"id":        ak.ID,
 			"userId":    ak.UserID,
 			"name":      ak.Name,
 			"key":       ak.Key,
+			"type":      ak.Type,
 			"agents":    agents,
 			"createdAt": ak.CreatedAt,
 		})
@@ -385,10 +480,23 @@ func (s *Server) handleListAPIKeys(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, map[string]any{"apikeys": enriched})
 }
 
+// handleCreateAPIKey enforces the role × type policy:
+//   - super_admin may issue admin / user / agent keys
+//   - regular user may issue user / agent keys (only for their own agents)
+//   - app_user (provisioned via apikey) may not issue keys at all
+//
+// type=agent additionally requires that every agentId resolves to an
+// agent the caller is allowed to bind — owners can bind their own,
+// super_admins can bind anyone's. This is the authoritative gate; the
+// users package only validates shape, not policy.
 func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 	ident, ok := auth.FromContext(r.Context())
 	if !ok || ident.ReadOnly() {
 		jsonResponse(w, http.StatusForbidden, map[string]any{"ok": false, "error": "read-only"})
+		return
+	}
+	if ident.Role == users.RoleAppUser {
+		jsonResponse(w, http.StatusForbidden, map[string]any{"ok": false, "error": "app_user cannot issue api keys"})
 		return
 	}
 	var req createAPIKeyReq
@@ -396,7 +504,35 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid request"})
 		return
 	}
-	ak, token, err := s.apikeys.Create(r.Context(), ident.UserID, req.Name, req.AgentIDs)
+	if req.Type == "" {
+		req.Type = users.APIKeyTypeAgent
+	}
+	if !users.IsAPIKeyType(req.Type) {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid type"})
+		return
+	}
+	if req.Type == users.APIKeyTypeAdmin && ident.Role != users.RoleSuperAdmin {
+		jsonResponse(w, http.StatusForbidden, map[string]any{"ok": false, "error": "only super_admin may issue admin keys"})
+		return
+	}
+	if req.Type == users.APIKeyTypeAgent {
+		if len(req.AgentIDs) == 0 {
+			jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "type=agent requires at least one agentId"})
+			return
+		}
+		// Bind only agents the caller controls. Super_admin can bind
+		// anyone's; everyone else must own each one.
+		if ident.Role != users.RoleSuperAdmin {
+			for _, aid := range req.AgentIDs {
+				rec, err := s.dataStore.GetAgent(r.Context(), aid)
+				if err != nil || rec == nil || rec.UserID != ident.UserID {
+					jsonResponse(w, http.StatusForbidden, map[string]any{"ok": false, "error": "cannot bind agent " + aid})
+					return
+				}
+			}
+		}
+	}
+	ak, token, err := s.apikeys.Create(r.Context(), ident.UserID, req.Name, req.Type, req.AgentIDs)
 	if err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 		return
@@ -477,8 +613,17 @@ func (s *Server) handleSetAPIKeyAgents(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid request"})
 		return
 	}
+	if ident.Role != users.RoleSuperAdmin {
+		for _, aid := range req.AgentIDs {
+			ar, err := s.dataStore.GetAgent(r.Context(), aid)
+			if err != nil || ar == nil || ar.UserID != ident.UserID {
+				jsonResponse(w, http.StatusForbidden, map[string]any{"ok": false, "error": "cannot bind agent " + aid})
+				return
+			}
+		}
+	}
 	if err := s.apikeys.SetAgents(r.Context(), id, req.AgentIDs); err != nil {
-		jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
 	jsonResponse(w, http.StatusOK, map[string]any{"ok": true})

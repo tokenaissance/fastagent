@@ -503,7 +503,7 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 				jsonResponse(w, http.StatusNotFound, map[string]any{"ok": false, "error": "agent not found: " + agentID})
 				return
 			}
-			if !s.authorizeScope(w, r, scope.Agent, agentID) {
+			if !s.authorizeScope(w, r, scope.Agent, agentID, scopeWrite) {
 				return
 			}
 			if err := saveAgentSkillEntries(r.Context(), s.dataStore, agentID, entries); err != nil {
@@ -567,7 +567,10 @@ func (s *Server) handleTestStoredProvider(w http.ResponseWriter, r *http.Request
 		jsonResponse(w, http.StatusNotFound, map[string]any{"ok": false, "error": "not found"})
 		return
 	}
-	if !s.authorizeScope(w, r, rec.Scope, rec.ScopeID) {
+	// Test = read-equivalent: any user that can read the row can verify
+	// it works. They'll be using it via their agent runtime anyway, so a
+	// dashboard-side dry run shouldn't be more restrictive.
+	if !s.authorizeScope(w, r, rec.Scope, rec.ScopeID, scopeRead) {
 		return
 	}
 	var body struct {

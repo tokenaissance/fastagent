@@ -46,12 +46,17 @@ function extractAgentId(pathname: string): string | null {
   return match ? match[1] : null;
 }
 
-// Platform nav for regular users — kept minimal so non-admins only see
-// what they can actually do (chat with their agents). Models / Skills /
-// API Keys / Settings are admin-only platform plumbing.
+// Platform nav for regular users — non-admins see what they can do for
+// themselves. Models lets them configure their own (user-scoped)
+// providers — separate from any shared providers admin set up. Settings
+// gives them Account (password, avatar) and General (theme); the
+// Runtime sub-page inside Settings is gated to super_admin.
+// Skills / Users remain admin-only platform plumbing.
 const USER_NAV: NavItem[] = [
   { title: "Overview", url: "/overview/", icon: LayoutDashboardIcon },
   { title: "Agents", url: "/agents/", icon: BotIcon },
+  { title: "Models", url: "/models/", icon: BrainIcon },
+  { title: "Settings", url: "/settings/", icon: SettingsIcon },
 ];
 
 const ADMIN_NAV: NavItem[] = [

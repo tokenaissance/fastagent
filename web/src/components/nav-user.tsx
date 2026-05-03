@@ -33,7 +33,7 @@ export function NavUser({
   subtitle?: string;
 }) {
   const { isMobile } = useSidebar();
-  const { theme, toggleTheme } = useTheme();
+  const { resolvedTheme, toggleTheme } = useTheme();
 
   const initials = name.slice(0, 2).toUpperCase();
 
@@ -88,8 +88,8 @@ export function NavUser({
                 toggleTheme();
               }}
             >
-              {theme === "dark" ? <SunIcon /> : <MoonIcon />}
-              <span>{theme === "dark" ? "Light mode" : "Dark mode"}</span>
+              {resolvedTheme === "dark" ? <SunIcon /> : <MoonIcon />}
+              <span>{resolvedTheme === "dark" ? "Light mode" : "Dark mode"}</span>
             </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem

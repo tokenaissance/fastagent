@@ -147,9 +147,14 @@ func (s *Server) optionalAuth(next http.HandlerFunc) http.HandlerFunc {
 	return s.authResolver.Optional(next)
 }
 
-// requireSuperAdmin gates handlers behind a super_admin role check.
+// requireSuperAdmin gates handlers behind platform-admin authority:
+// either a super_admin session or a type=admin apikey. Despite the name,
+// this accepts both — the apikey path is the only way a programmatic
+// admin client can hit /api/admin/* without a browser cookie. Use
+// auth.RequireSuperAdmin directly for the rare cases that need the
+// session-only flavor.
 func (s *Server) requireSuperAdmin(next http.HandlerFunc) http.HandlerFunc {
-	return s.authMiddleware(auth.RequireSuperAdmin(next))
+	return s.authMiddleware(auth.RequirePlatformAdmin(next))
 }
 
 // Run starts the HTTP server and blocks until the context is canceled.
@@ -174,6 +179,8 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("POST /api/login", s.handleLogin)
 	mux.HandleFunc("POST /api/logout", auth(s.handleLogout))
 	mux.HandleFunc("GET /api/me", auth(s.handleMe))
+	mux.HandleFunc("PUT /api/me", auth(s.handleUpdateMe))
+	mux.HandleFunc("POST /api/me/password", auth(s.handleChangeMyPassword))
 	mux.HandleFunc("POST /api/test-provider", opt(s.handleTestProvider))
 	mux.HandleFunc("POST /api/onboard", s.handleOnboard)
 

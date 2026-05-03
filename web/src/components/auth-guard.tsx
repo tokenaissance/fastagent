@@ -12,12 +12,14 @@ interface AuthGuardProps {
 // Routes that require an admin (super_admin) role. Server APIs enforce this
 // authoritatively; the client gate just stops non-admins from landing on a
 // page that would render an empty / 403'd shell.
+//
+// /settings and /models are intentionally NOT here — both pages branch
+// internally on role (settings hides Runtime; models lists user-scope
+// providers for non-admins, system-scope for admins).
 const ADMIN_PATH_PREFIXES = [
   "/admin/",
-  "/models",
   "/skills",
   "/apikeys",
-  "/settings",
   "/providers",
   "/channels",
   "/channels-config",

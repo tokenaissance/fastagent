@@ -33,6 +33,7 @@ import { Brain, Plus, Pencil, Trash2, Check, Cpu, Loader2 } from "lucide-react";
 import {
   getConfig,
   updateConfig,
+  getMe,
   testProvider,
   testStoredProvider,
   listProviders,
@@ -84,6 +85,11 @@ interface ProviderEntry {
   apiType: string;
   authType: string;
   models: ModelEntry[];
+  // scope tells the row apart from the inherited (system) ones a regular
+  // user is allowed to see but not mutate. "system" rows render with an
+  // Inherited badge and disabled edit/delete actions; "user" rows are
+  // the caller's own and fully editable.
+  scope: "system" | "user";
 }
 
 function emptyModel(): ModelEntry {
@@ -105,9 +111,24 @@ export default function ModelsPage() {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
 
+  // Caller identity drives which scope this page reads/writes:
+  //   - super_admin → system scope (shared across all users)
+  //   - regular user → user scope (private to themselves)
+  // No UI toggle — admins who want a private provider should configure it
+  // outside the admin role; users can't see system providers from here
+  // because the backend rejects the read for non-admins anyway.
+  const [me, setMe] = useState<{ id: string; role: string } | null>(null);
+  const isSuperAdmin = me?.role === "super_admin";
+  const writeScope: "system" | "user" = isSuperAdmin ? "system" : "user";
+  const writeScopeId = isSuperAdmin ? "" : (me?.id || "");
+
   // Dialog state
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingName, setEditingName] = useState<string | null>(null);
+  // editingId disambiguates rows when admin's "shared" provider and a
+  // user's "private" override happen to share the same name. The find()
+  // helpers always match by id; editingName remains for display only.
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [formPreset, setFormPreset] = useState("openrouter");
   const [formName, setFormName] = useState("");
   const [formApiBase, setFormApiBase] = useState("");
@@ -152,17 +173,32 @@ export default function ModelsPage() {
   // written back through the same endpoint. Keep the two writes split so
   // an empty default-model field doesn't blow away provider rows, and a
   // provider mutation doesn't accidentally clear the default model.
-  const fetchConfig = async () => {
+  const fetchConfig = async (
+    asAdmin: boolean,
+    userId: string,
+  ) => {
     setLoading(true);
     try {
-      const [cfg, prov] = await Promise.all([
+      // Admin: their own scope (system) is the source of truth for them.
+      // Regular user: pull system AND user — system rows surface as
+      // "Inherited" so the user can see what their agents are getting
+      // for free, plus their own private overlay.
+      const requests: Array<Promise<{ providers?: ProviderRow[] } | null>> = [];
+      requests.push(listProviders("system", "").catch(() => null));
+      if (!asAdmin) {
+        requests.push(listProviders("user", userId).catch(() => null));
+      }
+      const [cfg, sysRes, userRes] = await Promise.all([
         getConfig().catch(() => null),
-        listProviders("system", "").catch(() => null),
+        ...requests,
       ]);
-      const rows: ProviderRow[] = (prov && Array.isArray(prov.providers))
-        ? (prov.providers as ProviderRow[])
+      const sysRows: ProviderRow[] = (sysRes && Array.isArray(sysRes.providers))
+        ? (sysRes.providers as ProviderRow[])
         : [];
-      const entries: ProviderEntry[] = rows.map((r) => ({
+      const userRows: ProviderRow[] = (userRes && Array.isArray(userRes.providers))
+        ? (userRes.providers as ProviderRow[])
+        : [];
+      const toEntry = (r: ProviderRow, sc: "system" | "user"): ProviderEntry => ({
         id: r.id,
         name: r.name,
         apiBase: r.apiBase || "",
@@ -171,7 +207,14 @@ export default function ModelsPage() {
         apiType: r.apiType || "openai-chat",
         authType: r.authType || "bearer-token",
         models: r.models || [],
-      }));
+        scope: sc,
+      });
+      const entries: ProviderEntry[] = asAdmin
+        ? sysRows.map((r) => toEntry(r, "system"))
+        : [
+            ...sysRows.map((r) => toEntry(r, "system")),
+            ...userRows.map((r) => toEntry(r, "user")),
+          ];
       setProviders(entries);
       setModel(cfg?.agents?.defaults?.model || "");
     } finally {
@@ -179,12 +222,20 @@ export default function ModelsPage() {
     }
   };
 
+  // Resolve identity first, then fetch — admin gets system only, regular
+  // user gets the union (system inherited + own user-scope rows).
   useEffect(() => {
-    fetchConfig();
+    getMe().then((m) => {
+      if (!m?.user) return;
+      const meRec = { id: m.user.id, role: m.user.role };
+      setMe(meRec);
+      fetchConfig(meRec.role === "super_admin", meRec.id);
+    });
   }, []);
 
   const openAddDialog = () => {
     setEditingName(null);
+    setEditingId(null);
     setFormPreset("openai");
     setFormName("openai");
     setFormApiBase(PROVIDER_PRESETS["openai"].apiBase);
@@ -198,6 +249,7 @@ export default function ModelsPage() {
 
   const openEditDialog = (provider: ProviderEntry) => {
     setEditingName(provider.name);
+    setEditingId(provider.id);
     const preset = Object.keys(PROVIDER_PRESETS).includes(provider.name) ? provider.name : "custom";
     setFormPreset(preset);
     setFormName(provider.name);
@@ -264,8 +316,8 @@ export default function ModelsPage() {
       .map((m, idx) => ({ idx, id: m.id.trim() }))
       .filter((t) => t.id);
     if (targets.length === 0) return;
-    const editingRow = editingName
-      ? providers.find((p) => p.name === editingName)
+    const editingRow = editingId
+      ? providers.find((p) => p.id === editingId)
       : undefined;
     const useStoredKey = !!editingRow && !formApiKey.trim();
     setBatchTesting(true);
@@ -355,8 +407,8 @@ export default function ModelsPage() {
     const name = formName.toLowerCase().trim().replace(/\s+/g, "-");
     if (!name) return;
     const cleanedModels = formModels.filter((m) => m.id.trim());
-    const editingRow = editingName
-      ? providers.find((p) => p.name === editingName)
+    const editingRow = editingId
+      ? providers.find((p) => p.id === editingId)
       : undefined;
 
     setSaving(true);
@@ -373,8 +425,8 @@ export default function ModelsPage() {
         });
       } else {
         await createProvider({
-          scope: "system",
-          scopeId: "",
+          scope: writeScope,
+          scopeId: writeScopeId,
           name,
           apiBase: formApiBase,
           apiKey: formApiKey,
@@ -388,12 +440,10 @@ export default function ModelsPage() {
       setSaving(false);
     }
     setDialogOpen(false);
-    await fetchConfig();
+    await fetchConfig(isSuperAdmin, me?.id || "");
   };
 
-  const handleDeleteProvider = async (name: string) => {
-    const row = providers.find((p) => p.name === name);
-    if (!row) return;
+  const handleDeleteProvider = async (row: ProviderEntry) => {
     setSaving(true);
     try {
       await deleteProvider(row.id);
@@ -401,7 +451,7 @@ export default function ModelsPage() {
     } finally {
       setSaving(false);
     }
-    await fetchConfig();
+    await fetchConfig(isSuperAdmin, me?.id || "");
   };
 
   // Save button at the top only persists the default-model setting. We
@@ -541,13 +591,20 @@ export default function ModelsPage() {
                 <TableHead>API Base</TableHead>
                 <TableHead>API Key</TableHead>
                 <TableHead>Models</TableHead>
-                <TableHead>Status</TableHead>
+                <TableHead>Source</TableHead>
                 <TableHead className="text-right">Actions</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {providers.map((provider) => (
-                <TableRow key={provider.name}>
+              {providers.map((provider) => {
+                // A row is editable if it's at the caller's own scope.
+                // For super_admin that's "system"; for everyone else
+                // it's "user". Inherited rows render read-only.
+                const editable = isSuperAdmin
+                  ? provider.scope === "system"
+                  : provider.scope === "user";
+                return (
+                <TableRow key={`${provider.scope}:${provider.name}`}>
                   <TableCell className="font-medium">{provider.name}</TableCell>
                   <TableCell>
                     <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs">
@@ -563,13 +620,18 @@ export default function ModelsPage() {
                     {provider.models.length}
                   </TableCell>
                   <TableCell>
-                    <Badge
-                      variant="outline"
-                      className="bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20"
-                    >
-                      <span className="mr-1.5 inline-block h-1.5 w-1.5 rounded-full bg-emerald-500" />
-                      Active
-                    </Badge>
+                    {editable ? (
+                      <Badge
+                        variant="outline"
+                        className="bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20"
+                      >
+                        Mine
+                      </Badge>
+                    ) : (
+                      <Badge variant="outline" className="text-muted-foreground" title="Configured by an admin and shared with all users">
+                        Inherited
+                      </Badge>
+                    )}
                   </TableCell>
                   <TableCell className="text-right">
                     <div className="flex justify-end gap-1">
@@ -577,7 +639,8 @@ export default function ModelsPage() {
                         size="icon"
                         variant="ghost"
                         onClick={() => openEditDialog(provider)}
-                        title="Edit"
+                        title={editable ? "Edit" : "Read-only — admin owns this row"}
+                        disabled={!editable}
                       >
                         <Pencil className="size-4" />
                       </Button>
@@ -585,15 +648,16 @@ export default function ModelsPage() {
                         size="icon"
                         variant="ghost"
                         className="text-destructive hover:text-destructive"
-                        onClick={() => handleDeleteProvider(provider.name)}
-                        title="Remove"
+                        onClick={() => handleDeleteProvider(provider)}
+                        title={editable ? "Remove" : "Read-only — admin owns this row"}
+                        disabled={!editable}
                       >
                         <Trash2 className="size-4" />
                       </Button>
                     </div>
                   </TableCell>
                 </TableRow>
-              ))}
+              );})}
             </TableBody>
           </Table>
         </div>
@@ -671,7 +735,7 @@ export default function ModelsPage() {
                 placeholder={
                   editingName
                     ? (() => {
-                        const row = providers.find((p) => p.name === editingName);
+                        const row = providers.find((p) => p.id === editingId);
                         return row?.maskedKey || "sk-…";
                       })()
                     : "sk-…"

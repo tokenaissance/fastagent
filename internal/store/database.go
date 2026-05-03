@@ -84,6 +84,50 @@ func (d *DBStore) Migrate(ctx context.Context) error {
 	if err := d.migrateUsersAppUserCols(ctx); err != nil {
 		return fmt.Errorf("migrate users app_user cols: %w", err)
 	}
+	if err := d.migrateAPIKeysAddType(ctx); err != nil {
+		return fmt.Errorf("migrate apikeys.type: %w", err)
+	}
+	if err := d.migrateUsersAvatarURL(ctx); err != nil {
+		return fmt.Errorf("migrate users.avatar_url: %w", err)
+	}
+	return nil
+}
+
+// migrateUsersAvatarURL retrofits the avatar_url column onto pre-feature
+// installs. Stored as a data: URL so the file lives inline with the row
+// — no separate blob store path or cleanup. Empty string means "no
+// avatar"; the UI falls back to initials.
+func (d *DBStore) migrateUsersAvatarURL(ctx context.Context) error {
+	has, err := d.tableHasColumn(ctx, "users", "avatar_url")
+	if err != nil {
+		return err
+	}
+	if has {
+		return nil
+	}
+	if _, err := d.db.ExecContext(ctx,
+		`ALTER TABLE users ADD COLUMN avatar_url TEXT NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("add avatar_url: %w", err)
+	}
+	return nil
+}
+
+// migrateAPIKeysAddType retrofits the `type` column onto apikeys for
+// pre-tier installs. Every legacy row was an explicit-agent-list key, so
+// backfilling DEFAULT 'agent' preserves behavior — admin/user tiers can
+// only be created from this point forward.
+func (d *DBStore) migrateAPIKeysAddType(ctx context.Context) error {
+	has, err := d.tableHasColumn(ctx, "apikeys", "type")
+	if err != nil {
+		return err
+	}
+	if has {
+		return nil
+	}
+	if _, err := d.db.ExecContext(ctx,
+		`ALTER TABLE apikeys ADD COLUMN type TEXT NOT NULL DEFAULT 'agent'`); err != nil {
+		return fmt.Errorf("add type: %w", err)
+	}
 	return nil
 }
 
@@ -462,6 +506,7 @@ func (d *DBStore) migrationSQL() []string {
 			status TEXT NOT NULL DEFAULT 'active',
 			apikey_id TEXT NOT NULL DEFAULT '',
 			external_id TEXT NOT NULL DEFAULT '',
+			avatar_url TEXT NOT NULL DEFAULT '',
 			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
@@ -478,12 +523,18 @@ func (d *DBStore) migrationSQL() []string {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_web_sessions_user ON web_sessions (user_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_web_sessions_expires ON web_sessions (expires_at)`,
+		// type values: "admin" | "user" | "agent". The default 'agent'
+		// preserves the pre-tier behavior on existing rows — every legacy
+		// key was implicitly an "agent-scoped" key (explicit list in
+		// apikey_agents), so the migration can backfill blindly. See
+		// migrateAPIKeysAddType for the ALTER on existing installs.
 		`CREATE TABLE IF NOT EXISTS apikeys (
 			id TEXT PRIMARY KEY,
 			user_id TEXT NOT NULL,
 			name TEXT NOT NULL DEFAULT '',
 			key_hash TEXT NOT NULL,
 			key_prefix TEXT NOT NULL DEFAULT '',
+			type TEXT NOT NULL DEFAULT 'agent',
 			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_apikeys_user ON apikeys (user_id)`,
@@ -595,11 +646,11 @@ func scanErr(err error) error {
 
 // userColumns is the canonical select list — keep ordering aligned with
 // the Scan calls below so adding a column means editing both lines.
-const userColumns = `id, username, email, password_hash, display_name, role, status, apikey_id, external_id, created_at, updated_at`
+const userColumns = `id, username, email, password_hash, display_name, role, status, apikey_id, external_id, avatar_url, created_at, updated_at`
 
 func scanUser(scanner interface{ Scan(dest ...any) error }) (*UserRecord, error) {
 	var u UserRecord
-	if err := scanner.Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.DisplayName, &u.Role, &u.Status, &u.APIKeyID, &u.ExternalID, &u.CreatedAt, &u.UpdatedAt); err != nil {
+	if err := scanner.Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.DisplayName, &u.Role, &u.Status, &u.APIKeyID, &u.ExternalID, &u.AvatarURL, &u.CreatedAt, &u.UpdatedAt); err != nil {
 		return nil, err
 	}
 	return &u, nil
@@ -612,10 +663,10 @@ func (d *DBStore) CreateUser(ctx context.Context, u *UserRecord) error {
 	}
 	u.UpdatedAt = now
 	_, err := d.db.ExecContext(ctx,
-		fmt.Sprintf(`INSERT INTO users (id, username, email, password_hash, display_name, role, status, apikey_id, external_id, created_at, updated_at)
-			VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)`,
-			d.ph(1), d.ph(2), d.ph(3), d.ph(4), d.ph(5), d.ph(6), d.ph(7), d.ph(8), d.ph(9), d.ph(10), d.ph(11)),
-		u.ID, u.Username, u.Email, u.PasswordHash, u.DisplayName, u.Role, u.Status, u.APIKeyID, u.ExternalID, u.CreatedAt, u.UpdatedAt)
+		fmt.Sprintf(`INSERT INTO users (id, username, email, password_hash, display_name, role, status, apikey_id, external_id, avatar_url, created_at, updated_at)
+			VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)`,
+			d.ph(1), d.ph(2), d.ph(3), d.ph(4), d.ph(5), d.ph(6), d.ph(7), d.ph(8), d.ph(9), d.ph(10), d.ph(11), d.ph(12)),
+		u.ID, u.Username, u.Email, u.PasswordHash, u.DisplayName, u.Role, u.Status, u.APIKeyID, u.ExternalID, u.AvatarURL, u.CreatedAt, u.UpdatedAt)
 	return err
 }
 
@@ -681,9 +732,9 @@ func (d *DBStore) UpdateUser(ctx context.Context, u *UserRecord) error {
 	u.UpdatedAt = time.Now().UTC()
 	_, err := d.db.ExecContext(ctx,
 		fmt.Sprintf(`UPDATE users SET username = %s, email = %s, password_hash = %s, display_name = %s,
-			role = %s, status = %s, updated_at = %s WHERE id = %s`,
-			d.ph(1), d.ph(2), d.ph(3), d.ph(4), d.ph(5), d.ph(6), d.ph(7), d.ph(8)),
-		u.Username, u.Email, u.PasswordHash, u.DisplayName, u.Role, u.Status, u.UpdatedAt, u.ID)
+			role = %s, status = %s, avatar_url = %s, updated_at = %s WHERE id = %s`,
+			d.ph(1), d.ph(2), d.ph(3), d.ph(4), d.ph(5), d.ph(6), d.ph(7), d.ph(8), d.ph(9)),
+		u.Username, u.Email, u.PasswordHash, u.DisplayName, u.Role, u.Status, u.AvatarURL, u.UpdatedAt, u.ID)
 	return err
 }
 
@@ -798,7 +849,7 @@ func (d *DBStore) DeleteExpiredWebSessions(ctx context.Context, before time.Time
 
 func (d *DBStore) ListAPIKeys(ctx context.Context, userID string) ([]APIKeyRecord, error) {
 	rows, err := d.db.QueryContext(ctx,
-		fmt.Sprintf(`SELECT id, user_id, name, key_hash, key_prefix, created_at FROM apikeys WHERE user_id = %s ORDER BY created_at`, d.ph(1)),
+		fmt.Sprintf(`SELECT id, user_id, name, key_hash, key_prefix, type, created_at FROM apikeys WHERE user_id = %s ORDER BY created_at`, d.ph(1)),
 		userID)
 	if err != nil {
 		return nil, err
@@ -807,7 +858,7 @@ func (d *DBStore) ListAPIKeys(ctx context.Context, userID string) ([]APIKeyRecor
 	var out []APIKeyRecord
 	for rows.Next() {
 		var ak APIKeyRecord
-		if err := rows.Scan(&ak.ID, &ak.UserID, &ak.Name, &ak.KeyHash, &ak.KeyPrefix, &ak.CreatedAt); err != nil {
+		if err := rows.Scan(&ak.ID, &ak.UserID, &ak.Name, &ak.KeyHash, &ak.KeyPrefix, &ak.Type, &ak.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, ak)
@@ -817,9 +868,9 @@ func (d *DBStore) ListAPIKeys(ctx context.Context, userID string) ([]APIKeyRecor
 
 func (d *DBStore) GetAPIKey(ctx context.Context, id string) (*APIKeyRecord, error) {
 	row := d.db.QueryRowContext(ctx,
-		fmt.Sprintf(`SELECT id, user_id, name, key_hash, key_prefix, created_at FROM apikeys WHERE id = %s`, d.ph(1)), id)
+		fmt.Sprintf(`SELECT id, user_id, name, key_hash, key_prefix, type, created_at FROM apikeys WHERE id = %s`, d.ph(1)), id)
 	var ak APIKeyRecord
-	if err := row.Scan(&ak.ID, &ak.UserID, &ak.Name, &ak.KeyHash, &ak.KeyPrefix, &ak.CreatedAt); err != nil {
+	if err := row.Scan(&ak.ID, &ak.UserID, &ak.Name, &ak.KeyHash, &ak.KeyPrefix, &ak.Type, &ak.CreatedAt); err != nil {
 		return nil, scanErr(err)
 	}
 	return &ak, nil
@@ -829,10 +880,13 @@ func (d *DBStore) CreateAPIKey(ctx context.Context, ak *APIKeyRecord) error {
 	if ak.CreatedAt.IsZero() {
 		ak.CreatedAt = time.Now().UTC()
 	}
+	if ak.Type == "" {
+		ak.Type = "agent"
+	}
 	_, err := d.db.ExecContext(ctx,
-		fmt.Sprintf(`INSERT INTO apikeys (id, user_id, name, key_hash, key_prefix, created_at) VALUES (%s, %s, %s, %s, %s, %s)`,
-			d.ph(1), d.ph(2), d.ph(3), d.ph(4), d.ph(5), d.ph(6)),
-		ak.ID, ak.UserID, ak.Name, ak.KeyHash, ak.KeyPrefix, ak.CreatedAt)
+		fmt.Sprintf(`INSERT INTO apikeys (id, user_id, name, key_hash, key_prefix, type, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s)`,
+			d.ph(1), d.ph(2), d.ph(3), d.ph(4), d.ph(5), d.ph(6), d.ph(7)),
+		ak.ID, ak.UserID, ak.Name, ak.KeyHash, ak.KeyPrefix, ak.Type, ak.CreatedAt)
 	return err
 }
 
@@ -863,10 +917,10 @@ func (d *DBStore) RotateAPIKey(ctx context.Context, id, keyHash, keyPrefix strin
 
 func (d *DBStore) LookupAPIKeyByHash(ctx context.Context, keyHash string) (*APIKeyRecord, error) {
 	row := d.db.QueryRowContext(ctx,
-		fmt.Sprintf(`SELECT id, user_id, name, key_hash, key_prefix, created_at FROM apikeys WHERE key_hash = %s`, d.ph(1)),
+		fmt.Sprintf(`SELECT id, user_id, name, key_hash, key_prefix, type, created_at FROM apikeys WHERE key_hash = %s`, d.ph(1)),
 		keyHash)
 	var ak APIKeyRecord
-	if err := row.Scan(&ak.ID, &ak.UserID, &ak.Name, &ak.KeyHash, &ak.KeyPrefix, &ak.CreatedAt); err != nil {
+	if err := row.Scan(&ak.ID, &ak.UserID, &ak.Name, &ak.KeyHash, &ak.KeyPrefix, &ak.Type, &ak.CreatedAt); err != nil {
 		return nil, scanErr(err)
 	}
 	return &ak, nil

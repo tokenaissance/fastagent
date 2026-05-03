@@ -210,6 +210,7 @@ export interface MeResponse {
     email: string;
     role: string;
     displayName?: string;
+    avatarUrl?: string;
     status: string;
   };
   authMethod?: string;
@@ -235,6 +236,24 @@ export async function logout(): Promise<void> {
 
 export async function getMe(): Promise<MeResponse> {
   const res = await apiFetch("/api/me");
+  return res.json();
+}
+
+export async function updateMe(req: { displayName: string; avatarUrl: string }) {
+  const res = await apiFetch("/api/me", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
+  return res.json();
+}
+
+export async function changeMyPassword(req: { oldPassword: string; newPassword: string }) {
+  const res = await apiFetch("/api/me/password", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
   return res.json();
 }
 
@@ -325,7 +344,9 @@ export async function listApikeys() {
   return res.json();
 }
 
-export async function createApikey(req: { name: string; agentIds?: string[] }) {
+export type ApikeyType = "admin" | "user" | "agent";
+
+export async function createApikey(req: { name: string; type: ApikeyType; agentIds?: string[] }) {
   const res = await apiFetch("/api/apikeys", {
     method: "POST",
     headers: { "Content-Type": "application/json" },

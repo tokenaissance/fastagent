@@ -106,6 +106,11 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 	if !s.requireWritable(w, r) {
 		return
 	}
+	ident, _ := auth.FromContext(r.Context())
+	if !ident.CanCreateAgent() {
+		jsonResponse(w, http.StatusForbidden, map[string]any{"error": "type=agent api keys cannot create agents"})
+		return
+	}
 	uid := s.effectiveUserID(r)
 	var req createAgentRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
