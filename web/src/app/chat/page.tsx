@@ -8,6 +8,7 @@ import { useAgentName } from "@/hooks/use-agent-name";
 import { Bot, Send, Copy, Check, SquarePen, MessageSquare, Wrench, ChevronDown, ChevronRight } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { ExternalAnchor } from "@/components/markdown-link";
 
 interface ChatMessage {
   id: string;
@@ -414,7 +415,7 @@ export default function ChatPage() {
                       }`}
                     >
                       <div className="text-[15px] leading-relaxed prose prose-sm dark:prose-invert max-w-none prose-p:my-1 prose-pre:my-2 prose-ul:my-1 prose-ol:my-1">
-                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                        <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: ExternalAnchor }}>
                           {msg.content}
                         </ReactMarkdown>
                       </div>
@@ -521,7 +522,7 @@ function ToolCallGroup({ msg }: { msg: ChatMessage }) {
         {msg.content && (
           <div className="bg-muted rounded-2xl rounded-bl-md px-4 py-2.5">
             <div className="text-[15px] leading-relaxed prose prose-sm dark:prose-invert max-w-none prose-p:my-1">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>
+              <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: ExternalAnchor }}>
                 {msg.content}
               </ReactMarkdown>
             </div>

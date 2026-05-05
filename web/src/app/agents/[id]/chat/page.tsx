@@ -10,6 +10,7 @@ import { Bot, Send, Copy, Check, Pencil, Wrench, ChevronDown, ChevronRight, Down
 import Link from "next/link";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { ExternalAnchor } from "@/components/markdown-link";
 
 // react-markdown's default urlTransform strips any protocol not in the
 // safe-list (http, https, mailto, ircs, xmpp) — including `data:`. We want
@@ -113,7 +114,7 @@ function renderContentWithDataImages(
           );
         }
         return (
-          <ReactMarkdown key={i} remarkPlugins={[remarkGfm]}>
+          <ReactMarkdown key={i} remarkPlugins={[remarkGfm]} components={{ a: ExternalAnchor }}>
             {p.text}
           </ReactMarkdown>
         );
@@ -1145,7 +1146,7 @@ export default function AgentChatPage() {
                             surfacedSrcs,
                             (attachedImages.get(msg.id)?.length ?? 0) > 0,
                           ) ?? (
-                            <ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={makeUrlTransform(selectedAgent, sessionId)}>
+                            <ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={makeUrlTransform(selectedAgent, sessionId)} components={{ a: ExternalAnchor }}>
                               {msg.content}
                             </ReactMarkdown>
                           )}
@@ -1471,7 +1472,7 @@ function ToolCallGroup({ msg, surfacedSrcs, agentId, sessionId }: { msg: ChatMes
           <div className="bg-muted rounded-2xl rounded-bl-md px-4 py-2.5">
             <div className="text-[15px] leading-relaxed prose prose-sm dark:prose-invert max-w-none prose-p:my-1">
               {renderContentWithDataImages(msg.content, surfacedSrcs) ?? (
-                <ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={makeUrlTransform(agentId, sessionId)}>
+                <ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={makeUrlTransform(agentId, sessionId)} components={{ a: ExternalAnchor }}>
                   {msg.content}
                 </ReactMarkdown>
               )}
@@ -1919,7 +1920,7 @@ function FilePreview({ agentId, file, onClose }: { agentId: string; file: Produc
             : text === null ? <p className="text-sm text-muted-foreground">Loading…</p>
             : (
               <div className="prose prose-sm dark:prose-invert max-w-none">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
+                <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: ExternalAnchor }}>{text}</ReactMarkdown>
               </div>
             )
           )}
