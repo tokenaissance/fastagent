@@ -175,6 +175,22 @@ func resolvePathSandboxed(root, sandboxRoot, path string) (string, error) {
 	return absFull, nil
 }
 
+// effectiveSandboxRoot picks the bound that file ops should enforce for a
+// path resolving against `root`. Identity files (SOUL.md / IDENTITY.md /
+// …) live in r.systemRoot — agent home, OUTSIDE the workspace sandbox
+// mount — so the workspace sandbox bound would always reject them.
+// Confine system-file operations to systemRoot itself instead, which
+// keeps zip-slip-style escapes blocked without breaking the legitimate
+// "agent reads its own IDENTITY.md" flow when the systemFileStore lookup
+// misses (fresh agent, store not yet hydrated, no store configured at
+// all).
+func (r *Registry) effectiveSandboxRoot(root string) string {
+	if root == r.systemRoot && r.systemRoot != "" {
+		return r.systemRoot
+	}
+	return r.sandboxRoot
+}
+
 // looksBinary returns true when the payload contains a NUL byte in the
 // first 8KB — a near-perfect signal for JPEG/PNG/PDF/zip/wasm/etc. We
 // refuse to read binary files via read_file because the bytes get coerced
@@ -238,19 +254,39 @@ func makeReadFile(r *Registry) ToolFunc {
 			return string(data), nil
 		}
 
-		// Identity file reads go through the same durable store as writes
-		// so the agent sees the admin UI's latest edits (and vice-versa)
-		// regardless of which pod answered the request.
-		if r.systemFileStore != nil && r.agentID != "" && isSingleSegmentSystemFile(args.Path) {
-			name := filepath.Clean(args.Path)
+		// Identity file reads always go through the durable store first
+		// (db is source of truth; on-disk is fallback). Use the lenient
+		// basename match so an LLM that expands "IDENTITY.md" into the
+		// full host path it saw in the prompt's "Working Directory"
+		// line still hits the store — earlier we required a bare
+		// filename and absolute paths bypassed the store entirely,
+		// reading from a workspace dir where identity files don't live.
+		if r.systemFileStore != nil && r.agentID != "" && basenameIsSystemFile(args.Path) {
+			name := filepath.Base(filepath.Clean(args.Path))
 			if data, err := r.systemFileStore.GetWorkspaceFile(ctx, r.agentID, r.userID, name); err == nil {
 				return string(data), nil
 			}
-			// Store miss falls through to the filesystem below — e.g. a
-			// pod with a local-only copy that hasn't been mirrored yet.
+			// Store miss: try the agent's systemRoot on disk directly,
+			// bypassing resolvePathSandboxed. systemRoot is the agent
+			// metadata dir (e.g. ~/.fastclaw/agents/<id>/agent) which
+			// in K8s deployments lives OUTSIDE sandboxRoot, so the
+			// sandbox bound would always reject identity files even
+			// though the filename is a fixed whitelist with no escape
+			// surface. "Not found" is legitimate (a fresh agent may
+			// have no IDENTITY.md row yet) — return empty so the agent
+			// treats the field as unset, matching how
+			// ContextBuilder.loadFile loads identity files for the
+			// system prompt.
+			if r.systemRoot != "" {
+				if data, err := os.ReadFile(filepath.Join(r.systemRoot, name)); err == nil {
+					return string(data), nil
+				}
+			}
+			return "", nil
 		}
 
-		fullPath, err := resolvePathSandboxed(r.rootForPath(args.Path), r.sandboxRoot, args.Path)
+		root := r.rootForPath(args.Path)
+		fullPath, err := resolvePathSandboxed(root, r.effectiveSandboxRoot(root), args.Path)
 		if err != nil {
 			return "", err
 		}
@@ -316,7 +352,8 @@ func makeWriteFile(r *Registry) ToolFunc {
 			return fmt.Sprintf("Written %d bytes to %s", len(args.Content), name), nil
 		}
 
-		fullPath, err := resolvePathSandboxed(r.rootForPath(args.Path), r.sandboxRoot, args.Path)
+		root := r.rootForPath(args.Path)
+		fullPath, err := resolvePathSandboxed(root, r.effectiveSandboxRoot(root), args.Path)
 		if err != nil {
 			return "", err
 		}
@@ -339,7 +376,9 @@ func makeWriteFile(r *Registry) ToolFunc {
 // isSingleSegmentSystemFile matches "SOUL.md", "IDENTITY.md", etc. —
 // the allow-listed identity file names, and only when the write targets
 // the top-level directory (no slashes). Nested paths like
-// "notes/SOUL.md" deliberately don't qualify.
+// "notes/SOUL.md" deliberately don't qualify. Used by the WRITE path
+// where over-broad matching would let users hijack identity rows by
+// putting an arbitrary file at /any/path/IDENTITY.md.
 func isSingleSegmentSystemFile(path string) bool {
 	if filepath.IsAbs(path) {
 		return false
@@ -349,6 +388,19 @@ func isSingleSegmentSystemFile(path string) bool {
 		return false
 	}
 	return systemFiles[clean]
+}
+
+// basenameIsSystemFile is the lenient READ-side variant: it accepts
+// absolute paths and nested paths as long as the *basename* is one of
+// the identity filenames. Identity files are the source of truth in
+// systemFileStore (db); the on-disk view is only a fallback. The LLM
+// frequently expands a bare "IDENTITY.md" into the full host path it
+// saw in the system prompt's "Working Directory" line — without this
+// lenient match, those reads bypass the store entirely and miss the
+// real content. Read-only, so the write-path attack surface above
+// stays unchanged.
+func basenameIsSystemFile(path string) bool {
+	return systemFiles[filepath.Base(filepath.Clean(path))]
 }
 
 func makeListDir(r *Registry) ToolFunc {
@@ -395,7 +447,8 @@ func makeListDir(r *Registry) ToolFunc {
 			return sb.String(), nil
 		}
 
-		fullPath, err := resolvePathSandboxed(r.rootForPath(args.Path), r.sandboxRoot, args.Path)
+		root := r.rootForPath(args.Path)
+		fullPath, err := resolvePathSandboxed(root, r.effectiveSandboxRoot(root), args.Path)
 		if err != nil {
 			return "", err
 		}
@@ -447,14 +500,20 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 		if err := json.Unmarshal(rawArgs, &args); err != nil {
 			return "", fmt.Errorf("parse args: %w", err)
 		}
-		if r.systemFileStore != nil && r.agentID != "" && isSingleSegmentSystemFile(args.Path) {
-			name := filepath.Clean(args.Path)
+		if r.systemFileStore != nil && r.agentID != "" && basenameIsSystemFile(args.Path) {
+			// Lenient match (basename, not just bare filename) so that
+			// LLM-expanded absolute paths like
+			// /data/.fastclaw/workspaces/<id>/IDENTITY.md still hit the
+			// store. Without this the read goes to the sandbox executor
+			// which 404s because identity files live in db, not the
+			// sandbox FS.
+			name := filepath.Base(filepath.Clean(args.Path))
 			if data, err := r.systemFileStore.GetWorkspaceFile(ctx, r.agentID, r.userID, name); err == nil {
 				return string(data), nil
 			}
-			// Identity files don't live in the sandbox FS — the executor
-			// would just 404. Treat a store miss as "unset" and return
-			// empty, matching the non-sandboxed path's behavior.
+			// Store miss: treat as unset (a fresh agent may have no
+			// IDENTITY.md row yet). Don't fall through to the sandbox
+			// executor — identity files don't live there.
 			return "", nil
 		}
 		if r.workspaceStore != nil && r.agentID != "" && r.isWorkspacePath(args.Path) {
