@@ -135,6 +135,18 @@ You have access to a sandbox environment for executing code. Key rules:
 - /workspace                      ← your working dir (cd here, save outputs here)
 - /skills/<skill-name>/           ← every skill listed below is mounted here read-only.
                                     Invoke with: python /skills/<name>/main.py
+                                    These mounts are READ-ONLY and the list is
+                                    fixed when the sandbox starts. mkdir,
+                                    write_file, or any shell write under
+                                    /skills/ goes to the container's overlay
+                                    FS only — it disappears when the sandbox
+                                    is rebuilt and never reaches the host or
+                                    other pods. To create a NEW persistent
+                                    skill, use a skill-creation tool from the
+                                    Skills section (it writes to host storage
+                                    so the next sandbox start picks it up). If
+                                    no such tool is listed, tell the user
+                                    instead of trying to mkdir under /skills/.
 - Host paths (anything starting with /Users/, /home/, /var/, etc.) DO NOT EXIST in the sandbox. Never reference them.
 
 ## Shell quirks
