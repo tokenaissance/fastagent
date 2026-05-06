@@ -5,8 +5,10 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
+	"github.com/fastclaw-ai/fastclaw/internal/cron"
 	"github.com/fastclaw-ai/fastclaw/internal/store"
 )
 
@@ -104,6 +106,34 @@ func makeCreateCronJob(st store.Store, r *Registry, userID, agentID string) Tool
 
 		id := generateUUID()
 		now := time.Now()
+
+		// Calculate NextRun based on type
+		var nextRun time.Time
+		switch jobType {
+		case "once":
+			t, err := time.Parse(time.RFC3339, args.Schedule)
+			if err != nil {
+				t, err = time.Parse("2006-01-02T15:04:05", args.Schedule)
+				if err != nil {
+					return "", fmt.Errorf("once schedule must be ISO datetime (e.g. 2026-05-06T15:30:00Z), got: %q", args.Schedule)
+				}
+			}
+			if t.Before(now) {
+				return "", fmt.Errorf("schedule is in the past: %s", args.Schedule)
+			}
+			nextRun = t
+		case "interval":
+			sched := strings.TrimPrefix(args.Schedule, "every ")
+			dur, err := time.ParseDuration(sched)
+			if err != nil {
+				return "", fmt.Errorf("invalid interval (e.g. '30m', '1h', 'every 2h'): %q", args.Schedule)
+			}
+			nextRun = now.Add(dur)
+		default:
+			// cron expression — fire on next scheduler tick
+			nextRun = now
+		}
+
 		job := &store.CronJobRecord{
 			ID:        id,
 			AgentID:   agentID,
@@ -115,13 +145,16 @@ func makeCreateCronJob(st store.Store, r *Registry, userID, agentID string) Tool
 			ChatID:    chatID,
 			Timezone:  "UTC",
 			Enabled:   true,
-			NextRun:   &now,
+			NextRun:   &nextRun,
 			CreatedAt: now,
 		}
 
 		if err := st.SaveCronJob(ctx, job); err != nil {
 			return "", fmt.Errorf("save cron job: %w", err)
 		}
+
+		// Wake the scheduler to pick up this new job
+		cron.NotifyJobCreated()
 
 		return fmt.Sprintf("Cron job created successfully.\nID: %s\nName: %s\nSchedule: %s\nType: %s", id, args.Name, args.Schedule, jobType), nil
 	}

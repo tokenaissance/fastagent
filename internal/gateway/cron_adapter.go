@@ -63,3 +63,7 @@ func (a *cronStoreAdapter) IncrementCronJobFailure(ctx context.Context, jobID st
 func (a *cronStoreAdapter) DeleteCronJob(ctx context.Context, jobID string) error {
 	return a.st.DeleteCronJob(ctx, jobID)
 }
+
+func (a *cronStoreAdapter) GetNextDueTime(ctx context.Context) (time.Time, error) {
+	return a.st.GetNextDueTime(ctx)
+}

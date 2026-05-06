@@ -50,6 +50,7 @@ type StoreInterface interface {
 	// the row once the counter crosses cronMaxConsecutiveFailures.
 	IncrementCronJobFailure(ctx context.Context, jobID string) (int, error)
 	DeleteCronJob(ctx context.Context, jobID string) error
+	GetNextDueTime(ctx context.Context) (time.Time, error)
 }
 
 // ChannelChecker is the bit of channels.Manager the scheduler needs to
@@ -82,6 +83,19 @@ type StoreJob struct {
 	Channel     string
 	ChatID      string
 	AccountID   string
+}
+
+// globalNotify wakes the DB-mode scheduler when a cron tool creates or
+// deletes a job, so it can recalculate its next sleep target immediately.
+var globalNotify = make(chan struct{}, 1)
+
+// NotifyJobCreated wakes the DB-mode scheduler. Non-blocking, safe from
+// any goroutine.
+func NotifyJobCreated() {
+	select {
+	case globalNotify <- struct{}{}:
+	default:
+	}
 }
 
 // Scheduler manages cron job execution.
@@ -170,18 +184,29 @@ func (s *Scheduler) Start(ctx context.Context) {
 }
 
 func (s *Scheduler) pollStore(ctx context.Context) {
-	ticker := time.NewTicker(60 * time.Second)
-	defer ticker.Stop()
-
-	// Run immediately on start, then on tick
-	s.processDueJobs(ctx)
-
 	for {
+		s.processDueJobs(ctx)
+
+		// Sleep precisely until the next job is due
+		nextDue, err := s.store.GetNextDueTime(ctx)
+		var sleepDur time.Duration
+		if err != nil || nextDue.IsZero() {
+			sleepDur = 5 * time.Minute // idle — no pending jobs
+		} else {
+			sleepDur = time.Until(nextDue)
+			if sleepDur <= 0 {
+				continue
+			}
+		}
+
+		timer := time.NewTimer(sleepDur)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return
-		case <-ticker.C:
-			s.processDueJobs(ctx)
+		case <-globalNotify:
+			timer.Stop() // new job created — recalculate
+		case <-timer.C:
 		}
 	}
 }
@@ -256,13 +281,32 @@ func (s *Scheduler) processDueJobs(ctx context.Context) {
 			PeerKind:    "dm",
 		}
 
-		// Calculate next run (simple: add 60s for now; real
-		// implementation would parse schedule). UpdateCronJobRun
-		// also resets failure_count to 0 — a single successful
-		// fire is enough to clear prior misses.
-		nextRun := now.Add(60 * time.Second)
-		if err := s.store.UpdateCronJobRun(ctx, j.ID, now, nextRun); err != nil {
-			slog.Error("failed to update cron job run", "id", j.ID, "error", err)
+		// Calculate next run based on job type.
+		// UpdateCronJobRun also resets failure_count to 0 — a single
+		// successful fire clears prior misses.
+		switch j.Type {
+		case "once":
+			if err := s.store.DeleteCronJob(ctx, j.ID); err != nil {
+				slog.Error("failed to delete once cron job", "id", j.ID, "error", err)
+				farFuture := now.Add(100 * 365 * 24 * time.Hour)
+				_ = s.store.UpdateCronJobRun(ctx, j.ID, now, farFuture)
+			} else {
+				slog.Info("once cron job completed and deleted", "id", j.ID, "name", j.Name)
+			}
+		case "interval":
+			sched := strings.TrimPrefix(j.Schedule, "every ")
+			dur, err := time.ParseDuration(sched)
+			if err != nil {
+				slog.Error("invalid interval schedule, disabling job", "id", j.ID, "schedule", j.Schedule)
+				farFuture := now.Add(100 * 365 * 24 * time.Hour)
+				_ = s.store.UpdateCronJobRun(ctx, j.ID, now, farFuture)
+			} else {
+				_ = s.store.UpdateCronJobRun(ctx, j.ID, now, now.Add(dur))
+			}
+		case "cron":
+			_ = s.store.UpdateCronJobRun(ctx, j.ID, now, nextCronOccurrence(j.Schedule, now))
+		default:
+			_ = s.store.UpdateCronJobRun(ctx, j.ID, now, now.Add(time.Hour))
 		}
 	}
 }
@@ -441,4 +485,22 @@ func (s *Scheduler) startJobGoroutines() {
 	for _, job := range s.jobs {
 		go s.runJob(jobCtx, job)
 	}
+}
+
+// nextCronOccurrence finds the next time matching a 5-field cron
+// expression after the given time. Scans up to 48 hours ahead.
+func nextCronOccurrence(schedule string, after time.Time) time.Time {
+	fields := strings.Fields(schedule)
+	if len(fields) != 5 {
+		return after.Add(time.Hour)
+	}
+	t := after.Truncate(time.Minute).Add(time.Minute)
+	limit := after.Add(48 * time.Hour)
+	for t.Before(limit) {
+		if cronMatch(fields, t) {
+			return t
+		}
+		t = t.Add(time.Minute)
+	}
+	return after.Add(time.Hour)
 }

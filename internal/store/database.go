@@ -1976,6 +1976,23 @@ func (d *DBStore) IncrementCronJobFailure(ctx context.Context, jobID string) (in
 	return n, nil
 }
 
+func (d *DBStore) GetNextDueTime(ctx context.Context) (time.Time, error) {
+	var t sql.NullTime
+	var q string
+	if d.dialect == "postgres" {
+		q = `SELECT MIN(next_run) FROM cron_jobs WHERE enabled = true AND next_run IS NOT NULL`
+	} else {
+		q = `SELECT MIN(next_run) FROM cron_jobs WHERE enabled = 1 AND next_run IS NOT NULL`
+	}
+	if err := d.db.QueryRowContext(ctx, q).Scan(&t); err != nil {
+		return time.Time{}, err
+	}
+	if !t.Valid {
+		return time.Time{}, nil
+	}
+	return t.Time, nil
+}
+
 func scanCronJobs(rows *sql.Rows) ([]CronJobRecord, error) {
 	var jobs []CronJobRecord
 	for rows.Next() {

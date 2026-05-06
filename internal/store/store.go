@@ -159,6 +159,10 @@ type Store interface {
 	// the configured channel; the caller decides whether to delete the
 	// row at threshold.
 	IncrementCronJobFailure(ctx context.Context, jobID string) (int, error)
+	// GetNextDueTime returns the earliest next_run across all enabled
+	// cron jobs. Used by the scheduler to sleep precisely until the
+	// next job is due instead of polling.
+	GetNextDueTime(ctx context.Context) (time.Time, error)
 
 	Close() error
 }
