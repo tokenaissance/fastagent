@@ -331,6 +331,19 @@ func (sp *UserSpace) EnsureAgent(ctx context.Context, st store.Store, mb *bus.Me
 			rc.PolicyPreset = ovr.PolicyPreset
 		}
 	}
+	// Overlay agent-scope providers — sp.Config.Providers carries only
+	// system+user rows (assembleConfig in loadUserSpace runs with
+	// agentID=""). Without this overlay, providerForAgent can't see the
+	// agent's own credentials and falls back to the shared provider,
+	// firing the agent's chosen model id at the wrong base URL.
+	if agentProvs, err := scope.AgentScopeProviders(ctx, st, rc.ID); err == nil {
+		for k, v := range agentProvs {
+			if rc.Providers == nil {
+				rc.Providers = make(map[string]config.ProviderConfig)
+			}
+			rc.Providers[k] = v
+		}
+	}
 	ensureAgentHome(rc)
 	if ws != nil {
 		if err := skills.HydrateSkillsDown(ctx, ws, rc.ID, filepath.Join(rc.Home, "skills")); err != nil {
@@ -468,12 +481,18 @@ func loadUserSpace(ctx context.Context, userID string, mb *bus.MessageBus, st st
 		cfg.Bindings = append(cfg.Bindings, wrap.List...)
 	}
 	resolved := config.ResolveAgents(cfg, entries)
-	for _, rc := range resolved {
+	for i := range resolved {
 		// Layer the agent-scope agents.defaults on top of the
 		// system→user merge that ResolveAgents already applied. We
 		// read the agent-scope row directly (not via SettingInto
 		// system+user, which would re-merge those layers and clobber
 		// the user-scoped Model already in cfg.Agents.Defaults).
+		//
+		// Index into resolved (not range-by-value) so the writes
+		// land on the slice element the manager later reads —
+		// otherwise the agent-scope Model never reaches NewManager
+		// and chat silently uses the system/user default.
+		rc := &resolved[i]
 		var agentOverride config.AgentDefaults
 		if rec, err := st.GetConfigByName(ctx, store.KindSetting, store.ScopeAgent, rc.ID, "agents.defaults"); err == nil && rec != nil {
 			blob, _ := json.Marshal(rec.Data)
@@ -497,7 +516,22 @@ func loadUserSpace(ctx context.Context, userID string, mb *bus.MessageBus, st st
 				rc.PolicyPreset = agentOverride.PolicyPreset
 			}
 		}
-		ensureAgentHome(rc)
+		// Same story for providers: assembleConfig was called with
+		// agentID="" so cfg.Providers (now in rc.Providers) only
+		// carries system+user rows. Without this, a per-agent
+		// provider key (e.g. an agent-scoped OpenRouter credential)
+		// is invisible to providerForAgent, which falls back to the
+		// shared provider — chat fires the agent's chosen model id
+		// at the wrong base URL and gets a 400 from the wrong vendor.
+		if agentProvs, err := scope.AgentScopeProviders(ctx, st, rc.ID); err == nil {
+			for k, v := range agentProvs {
+				if rc.Providers == nil {
+					rc.Providers = make(map[string]config.ProviderConfig)
+				}
+				rc.Providers[k] = v
+			}
+		}
+		ensureAgentHome(*rc)
 		if ws != nil {
 			if err := skills.HydrateSkillsDown(
 				ctx, ws, rc.ID, filepath.Join(rc.Home, "skills"),

@@ -66,6 +66,29 @@ func Providers(ctx context.Context, st store.Store, userID, agentID string) (map
 	return out, nil
 }
 
+// AgentScopeProviders returns providers stored at scope=agent only,
+// without merging system or user layers. Use this to overlay an agent's
+// own rows on top of an already system+user-merged view: re-running the
+// full Providers walk would re-apply outer layers and silently clobber
+// any user-scope override the caller already merged in.
+func AgentScopeProviders(ctx context.Context, st store.Store, agentID string) (map[string]config.ProviderConfig, error) {
+	if st == nil {
+		return nil, errors.New("scope.AgentScopeProviders: store is required")
+	}
+	if agentID == "" {
+		return map[string]config.ProviderConfig{}, nil
+	}
+	rows, err := st.ListConfigs(ctx, store.KindProvider, Agent, agentID)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]config.ProviderConfig, len(rows))
+	for _, r := range rows {
+		out[r.Name] = providerToConfig(r)
+	}
+	return out, nil
+}
+
 // Channels returns the merged channel map. Disabled rows in an inner
 // scope erase the outer entry.
 func Channels(ctx context.Context, st store.Store, userID, agentID string) (map[string]config.ChannelConfig, error) {
