@@ -236,10 +236,11 @@ func (s *Scheduler) processDueJobs(ctx context.Context) {
 		// and be dropped. Instead, bump the failure counter; after
 		// cronMaxConsecutiveFailures consecutive misses, delete
 		// the row so the scheduler stops re-trying forever.
-		// "web" channel is the dashboard SSE — always considered
-		// alive; same for empty Channel (legacy rows that don't
-		// route through any IM bot).
-		if s.channels != nil && j.Channel != "" && j.Channel != "web" {
+		// "web" is the dashboard SSE, "api" is the HTTP completions
+		// endpoint — both are always reachable (replies go through
+		// the plugin's channel.send, not an IM adapter). Empty
+		// channel is a legacy row that doesn't route through any bot.
+		if s.channels != nil && j.Channel != "" && j.Channel != "web" && j.Channel != "api" {
 			if !s.channels.Has(j.Channel, j.AccountID) {
 				count, ferr := s.store.IncrementCronJobFailure(ctx, j.ID)
 				if ferr != nil {
