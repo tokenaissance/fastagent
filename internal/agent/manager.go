@@ -169,10 +169,14 @@ func (m *Manager) buildAgent(rc config.ResolvedAgent, prov provider.Provider, mb
 		// store as memory so write_file from the agent ends up in
 		// the same rows the admin UI's Customize page reads.
 		ag.registry.SetSystemFileStore(m.opts.memoryStore, rc.ID)
-		// Tag identity-file writes with the chatter so write_file on
-		// SOUL.md / USER.md / MEMORY.md lands in the per-user override
-		// row, not the shared template the Customize page edits.
+		// Tag the chatter (m.uid) for per-user files (USER.md /
+		// MEMORY.md) and the agent's owner (rc.UserID) for identity
+		// files (SOUL.md / IDENTITY.md / BOOTSTRAP.md / ...). Without
+		// the second call, the agent's BOOTSTRAP flow would write
+		// SOUL/IDENTITY/BOOTSTRAP under the chatter and the Customize
+		// page (keyed on the agent owner) would never see them.
 		ag.registry.SetOwnerUserID(m.uid)
+		ag.registry.SetAgentOwnerUserID(rc.UserID)
 	}
 	if m.opts.workspaceStore != nil {
 		ag.registry.SetWorkspaceStore(m.opts.workspaceStore, rc.ID)

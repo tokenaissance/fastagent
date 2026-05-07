@@ -4,11 +4,28 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 
 	"github.com/fastclaw-ai/fastclaw/internal/provider"
 	"github.com/fastclaw-ai/fastclaw/internal/sandbox"
 	"github.com/fastclaw-ai/fastclaw/internal/workspace"
 )
+
+// identityFiles is the canonical list of agent-owned files that key under
+// agent.user_id (the agent owner) rather than the chatter's user_id.
+// These are the "shared template" — every chatter sees them via owner-row
+// fallback. Mirrors handlers_admin.forkAgentFiles in the setup package; if
+// you add a file there, add it here too. USER.md / MEMORY.md are
+// deliberately omitted: those are per-user state, keyed under chatter.
+var identityFiles = map[string]bool{
+	"SOUL.md":      true,
+	"IDENTITY.md":  true,
+	"AGENTS.md":    true,
+	"BOOTSTRAP.md": true,
+	"TOOLS.md":     true,
+	"HEARTBEAT.md": true,
+	"agent.json":   true,
+}
 
 // ToolFunc is a function that executes a tool with JSON arguments and returns a result string.
 type ToolFunc func(ctx context.Context, args json.RawMessage) (string, error)
@@ -63,11 +80,20 @@ type Registry struct {
 	// never be visible from the UI — so we route identity writes here
 	// when set.
 	systemFileStore SystemFileStore
-	// userID is the chatter — passed through to systemFileStore so
-	// chat-time writes (write_file on SOUL.md / USER.md / MEMORY.md)
-	// land in that user's per-user override row, not the shared
-	// template. Set once at agent boot via SetOwnerUserID.
+	// userID is the chatter — passed through to systemFileStore for
+	// per-user files (USER.md, MEMORY.md) so chat-time writes land in
+	// that caller's row. Identity files (SOUL.md, IDENTITY.md,
+	// BOOTSTRAP.md, ...) route through agentOwnerUserID instead — see
+	// systemFileUserID. Set once at agent boot via SetOwnerUserID.
 	userID string
+	// agentOwnerUserID is agent.user_id (the human/account that owns
+	// this agent definition). Identity files write here so the
+	// canonical "shared template" everyone reads via owner-row fallback
+	// stays in one place, instead of being trapped in whichever chatter
+	// happened to fire the agent's BOOTSTRAP flow. Set at agent boot
+	// via SetAgentOwnerUserID. Empty means "single-user install / no
+	// distinction" — systemFileUserID falls back to userID then.
+	agentOwnerUserID string
 	// sandboxRequired is the runtime contract: when true, the exec tool
 	// MUST refuse to fall through to the host shell — even if sbCfg
 	// wasn't set at agent construction (cfg.Sandbox.Enabled was false at
@@ -121,13 +147,37 @@ func (r *Registry) SetSystemFileStore(s SystemFileStore, agentID string) {
 	}
 }
 
-// SetOwnerUserID records the chatter so identity-file writes go through
-// the systemFileStore tagged with the right user_id (per-user override),
-// not the shared template. Set once at agent boot from the UserSpace's
-// owner; current architecture has one agent per user, so this is fixed
-// for the lifetime of the registry.
+// SetOwnerUserID records the chatter so per-user file writes go through
+// the systemFileStore tagged with the right user_id (per-user override).
+// Identity files route via SetAgentOwnerUserID instead. Set once at
+// agent boot from the UserSpace's owner.
 func (r *Registry) SetOwnerUserID(userID string) {
 	r.userID = userID
+}
+
+// SetAgentOwnerUserID records the agent's owning user_id (agent.user_id
+// in the DB). Identity-file writes (SOUL.md / IDENTITY.md / BOOTSTRAP.md
+// / AGENTS.md / TOOLS.md / HEARTBEAT.md / agent.json) route here, so
+// they land in the row everyone — including the owner viewing the
+// Customize page — reads back via owner-row fallback. Without this,
+// identity writes get trapped in whichever chatter triggered the
+// agent's BOOTSTRAP flow.
+func (r *Registry) SetAgentOwnerUserID(uid string) {
+	r.agentOwnerUserID = uid
+}
+
+// systemFileUserID picks the user_id to scope a systemFileStore call
+// to. Identity files (SOUL/IDENTITY/AGENTS/BOOTSTRAP/TOOLS/HEARTBEAT/
+// agent.json) route to agentOwnerUserID so the "shared template" lives
+// under a single, owner-keyed row; per-user files (USER.md, MEMORY.md)
+// route to the chatter (userID). Falls back to userID when the agent
+// owner isn't set — that's the single-user / legacy case where they
+// coincide anyway.
+func (r *Registry) systemFileUserID(filename string) string {
+	if r.agentOwnerUserID != "" && identityFiles[filepath.Base(filepath.Clean(filename))] {
+		return r.agentOwnerUserID
+	}
+	return r.userID
 }
 
 // SetSandboxRequired flips the exec tool's host-shell fallback off. Call

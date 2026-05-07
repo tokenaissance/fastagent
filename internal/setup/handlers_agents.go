@@ -401,23 +401,32 @@ func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 }
 
 // Agent identity / memory files — all live in agent_files, agent-scoped.
-// Filename allowlist gates which files the admin UI can edit through this
-// endpoint; agent-runtime tool calls go through the workspace store
-// instead.
+// Two classes:
+//
+//   - identity files (agentIdentityFiles below) are the canonical "shared
+//     template" for the agent. They live under a single row keyed by the
+//     agent owner's user_id — so admin provisioning, the owner's edits,
+//     and the agent's own BOOTSTRAP-flow write_file calls all converge on
+//     the same row. Mirrors handlers_admin.forkAgentFiles and
+//     internal/agent/tools.identityFiles; keep these three lists in sync.
+//
+//   - per-user files (USER.md, MEMORY.md) are state that genuinely
+//     differs per chatter. They're keyed by the caller's effective
+//     user_id; a non-owner caller can author their own override and the
+//     read path falls back to the owner's row when none exists.
+//
+// Filename allowlist gates which files this endpoint can touch at all;
+// agent-runtime tool calls go through the workspace store instead.
 var agentSystemFileAllowlist = map[string]bool{
 	"SOUL.md": true, "IDENTITY.md": true, "AGENTS.md": true,
 	"BOOTSTRAP.md": true, "TOOLS.md": true, "MEMORY.md": true,
 	"HEARTBEAT.md": true, "USER.md": true, "agent.json": true,
 }
 
-// systemFileUserScope returns the user_id to use for Customize page
-// CRUD on system files. Every read/write is keyed by the caller's
-// effective user_id; a user with no override on a given (agent_id,
-// filename) gets an empty content blob from the API. The agent runtime
-// transparently falls back to a local FS file at <agent_home>/<name>
-// for installs that want a global default for an agent.
-func (s *Server) systemFileUserScope(r *http.Request) string {
-	return s.effectiveUserID(r)
+var agentIdentityFiles = map[string]bool{
+	"SOUL.md": true, "IDENTITY.md": true, "AGENTS.md": true,
+	"BOOTSTRAP.md": true, "TOOLS.md": true, "HEARTBEAT.md": true,
+	"agent.json": true,
 }
 
 func (s *Server) handleGetAgentSystemFile(w http.ResponseWriter, r *http.Request) {
@@ -427,16 +436,64 @@ func (s *Server) handleGetAgentSystemFile(w http.ResponseWriter, r *http.Request
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "filename not allowed"})
 		return
 	}
-	data, err := s.dataStore.GetAgentFileExact(r.Context(), id, s.systemFileUserScope(r), name)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			jsonResponse(w, http.StatusOK, map[string]any{"content": ""})
+	if !s.requireAgentReadable(w, r, id) {
+		return
+	}
+	rec, err := s.dataStore.GetAgent(r.Context(), id)
+	if err != nil || rec == nil {
+		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "not found"})
+		return
+	}
+	caller := s.effectiveUserID(r)
+
+	// Identity files: read the owner's row directly — that's the single
+	// source of truth, regardless of who's asking.
+	if agentIdentityFiles[name] {
+		data, err := s.dataStore.GetAgentFileExact(r.Context(), id, rec.UserID, name)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				jsonResponse(w, http.StatusOK, map[string]any{"content": "", "source": "default"})
+				return
+			}
+			jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 			return
 		}
+		jsonResponse(w, http.StatusOK, map[string]any{"content": string(data), "source": "owner"})
+		return
+	}
+
+	// Per-user files: prefer caller's own row, fall back to the owner's.
+	// `source: "db"` means the caller has authored an override; "owner"
+	// means we're showing the agent owner's row by fallback. The
+	// frontend uses this to decide whether to show the "Edited" badge
+	// and enable the Revert action.
+	if data, err := s.dataStore.GetAgentFileExact(r.Context(), id, caller, name); err == nil {
+		baseContent := ""
+		if rec.UserID != caller {
+			if base, err2 := s.dataStore.GetAgentFileExact(r.Context(), id, rec.UserID, name); err2 == nil {
+				baseContent = string(base)
+			}
+		}
+		resp := map[string]any{"content": string(data), "source": "db"}
+		if baseContent != "" {
+			resp["baseContent"] = baseContent
+		}
+		jsonResponse(w, http.StatusOK, resp)
+		return
+	} else if !errors.Is(err, store.ErrNotFound) {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-	jsonResponse(w, http.StatusOK, map[string]any{"content": string(data)})
+	if rec.UserID != caller {
+		if data, err := s.dataStore.GetAgentFileExact(r.Context(), id, rec.UserID, name); err == nil {
+			jsonResponse(w, http.StatusOK, map[string]any{"content": string(data), "source": "owner"})
+			return
+		} else if !errors.Is(err, store.ErrNotFound) {
+			jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{"content": "", "source": "default"})
 }
 
 func (s *Server) handlePutAgentSystemFile(w http.ResponseWriter, r *http.Request) {
@@ -456,11 +513,15 @@ func (s *Server) handlePutAgentSystemFile(w http.ResponseWriter, r *http.Request
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
-	if err := s.dataStore.SaveAgentFile(r.Context(), id, s.systemFileUserScope(r), name, []byte(body.Content)); err != nil {
+	target, ok := s.resolveSystemFileTarget(w, r, id, name)
+	if !ok {
+		return
+	}
+	if err := s.dataStore.SaveAgentFile(r.Context(), id, target, name, []byte(body.Content)); err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-	s.invalidateUser(s.effectiveUserID(r))
+	s.invalidateUser(target)
 	jsonResponse(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -474,12 +535,49 @@ func (s *Server) handleDeleteAgentSystemFile(w http.ResponseWriter, r *http.Requ
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "filename not allowed"})
 		return
 	}
-	if err := s.dataStore.DeleteAgentFile(r.Context(), id, s.systemFileUserScope(r), name); err != nil {
+	target, ok := s.resolveSystemFileTarget(w, r, id, name)
+	if !ok {
+		return
+	}
+	if err := s.dataStore.DeleteAgentFile(r.Context(), id, target, name); err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-	s.invalidateUser(s.effectiveUserID(r))
+	s.invalidateUser(target)
 	jsonResponse(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// resolveSystemFileTarget figures out which user_id row a write/delete
+// on (agentID, filename) should hit, and gates access:
+//
+//   - Identity files (SOUL/IDENTITY/AGENTS/BOOTSTRAP/TOOLS/HEARTBEAT/
+//     agent.json) always target the agent owner's row — this is the
+//     canonical "shared template". Caller must be the owner or hold
+//     platform admin (super_admin session, or type=admin apikey).
+//   - Per-user files (USER.md, MEMORY.md) target the caller's own row
+//     so each chatter has an independent override. Caller just needs
+//     read access to the agent.
+//
+// Writes 4xx and returns ok=false on permission/lookup failures.
+func (s *Server) resolveSystemFileTarget(w http.ResponseWriter, r *http.Request, agentID, name string) (string, bool) {
+	rec, err := s.dataStore.GetAgent(r.Context(), agentID)
+	if err != nil || rec == nil {
+		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "not found"})
+		return "", false
+	}
+	caller := s.effectiveUserID(r)
+	ident, _ := auth.FromContext(r.Context())
+	if agentIdentityFiles[name] {
+		if rec.UserID != caller && !ident.CanAdminPlatform() {
+			jsonResponse(w, http.StatusForbidden, map[string]any{"error": "not your agent"})
+			return "", false
+		}
+		return rec.UserID, true
+	}
+	if !s.requireAgentReadable(w, r, agentID) {
+		return "", false
+	}
+	return caller, true
 }
 
 // Workspace files — list / get / upload of agent-produced artifacts.

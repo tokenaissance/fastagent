@@ -22,8 +22,17 @@ const CUSTOMIZE_FILES = [
 
 // FileState mirrors the backend's GET response: `content` is what's
 // effectively loaded, `source` says where it came from, and `baseContent`
-// (only set when source==="db") is the FS file the user could revert to.
-type FileSource = "db" | "fs" | "default";
+// (only set when source==="db" with a different owner row to revert to)
+// is what the user would fall back to on Revert.
+//
+//   - "db":      the caller's own per-user override row (USER.md /
+//                MEMORY.md only) — distinct from the owner's content.
+//   - "owner":   the agent owner's row, the canonical "shared template"
+//                — what identity files (SOUL/IDENTITY/BOOTSTRAP/...)
+//                always render as, and what per-user files fall back to.
+//   - "fs":      legacy filesystem default. Kept for back-compat.
+//   - "default": neither caller nor owner row exists; tab is empty.
+type FileSource = "db" | "owner" | "fs" | "default";
 type FileState = { content: string; source: FileSource; baseContent?: string };
 
 export default function AgentCustomizePage() {

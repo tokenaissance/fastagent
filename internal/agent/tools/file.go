@@ -325,7 +325,7 @@ func makeReadFile(r *Registry) ToolFunc {
 		// reading from a workspace dir where identity files don't live.
 		if r.systemFileStore != nil && r.agentID != "" && basenameIsSystemFile(args.Path) {
 			name := filepath.Base(filepath.Clean(args.Path))
-			if data, err := r.systemFileStore.GetWorkspaceFile(ctx, r.agentID, r.userID, name); err == nil {
+			if data, err := r.systemFileStore.GetWorkspaceFile(ctx, r.agentID, r.systemFileUserID(name), name); err == nil {
 				return string(data), nil
 			}
 			// Store miss: try the agent's systemRoot on disk directly,
@@ -399,7 +399,7 @@ func makeWriteFile(r *Registry) ToolFunc {
 		// systemFileStore when available.
 		if r.systemFileStore != nil && r.agentID != "" && isSingleSegmentSystemFile(args.Path) {
 			name := filepath.Clean(args.Path)
-			if err := r.systemFileStore.SaveWorkspaceFile(ctx, r.agentID, r.userID, name, []byte(args.Content)); err != nil {
+			if err := r.systemFileStore.SaveWorkspaceFile(ctx, r.agentID, r.systemFileUserID(name), name, []byte(args.Content)); err != nil {
 				return "", fmt.Errorf("system file save: %w", err)
 			}
 			// Keep a filesystem mirror so the agent runtime (context
@@ -656,7 +656,7 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 			// which 404s because identity files live in db, not the
 			// sandbox FS.
 			name := filepath.Base(filepath.Clean(args.Path))
-			if data, err := r.systemFileStore.GetWorkspaceFile(ctx, r.agentID, r.userID, name); err == nil {
+			if data, err := r.systemFileStore.GetWorkspaceFile(ctx, r.agentID, r.systemFileUserID(name), name); err == nil {
 				return string(data), nil
 			}
 			// Store miss: treat as unset (a fresh agent may have no
@@ -704,7 +704,7 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 		}
 		if r.systemFileStore != nil && r.agentID != "" && isSingleSegmentSystemFile(args.Path) {
 			name := filepath.Clean(args.Path)
-			if err := r.systemFileStore.SaveWorkspaceFile(ctx, r.agentID, r.userID, name, []byte(args.Content)); err != nil {
+			if err := r.systemFileStore.SaveWorkspaceFile(ctx, r.agentID, r.systemFileUserID(name), name, []byte(args.Content)); err != nil {
 				return "", fmt.Errorf("system file save: %w", err)
 			}
 			return fmt.Sprintf("Written %d bytes to %s", len(args.Content), name), nil
