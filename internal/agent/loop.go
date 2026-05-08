@@ -1055,6 +1055,17 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 	a.refreshSkillsFromStore()
 	sess := a.sessions.Get(msg.Channel, msg.ChatID)
 	a.bindSession(ctx, msg.Channel, msg.ChatID)
+
+	// Same orphan-tool_use safety net as HandleMessage. The streaming path
+	// previously lacked this, so loop detection (which appends an assistant
+	// tool_use + a system warn and breaks without ever running tools) and
+	// any other premature exit between sess.Append(assistantMsg) and tool
+	// result append left orphaned tool_use ids in the session. The next
+	// turn's API request — especially against Anthropic-compat endpoints
+	// like DeepSeek's /anthropic — then 400s with "tool_use ids were found
+	// without tool_result blocks immediately after".
+	defer padOrphanToolResults(sess)
+
 	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: BeforeSystemPrompt, UserID: a.ownerUserID})
 	systemPrompt := a.ctxBuilder.BuildSystemPrompt()
 	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: AfterSystemPrompt, UserID: a.ownerUserID})
