@@ -40,6 +40,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { MoreHorizontalIcon, PencilIcon, Trash2Icon, MoreHorizontal } from "lucide-react";
 import { deleteChatSession, renameChatSession } from "@/lib/api";
+import { ChannelIcon, channelLabel } from "@/components/channel-icon";
 
 // Cap the sidebar list so a chatty agent doesn't push every other nav
 // item off-screen. The full list lives at /agents/<id>/chats with
@@ -53,6 +54,9 @@ export interface SessionItem {
   // Renders as a small thumbnail before the title so multimodal chats
   // show "image + text" instead of just the text label.
   thumbnailUrl?: string;
+  // channel drives the per-channel icon prefix (telegram / wechat /
+  // line / web …). Empty falls back to the web glyph.
+  channel?: string;
 }
 
 export function NavSessions({
@@ -199,16 +203,18 @@ function SessionRow({
     <SidebarMenuItem>
       <SidebarMenuButton
         isActive={active}
-        tooltip={session.title}
+        tooltip={`${channelLabel(session.channel)} · ${session.title}`}
         onClick={onOpen}
       >
-        {session.thumbnailUrl && (
+        {session.thumbnailUrl ? (
           // eslint-disable-next-line @next/next/no-img-element
           <img
             src={session.thumbnailUrl}
             alt=""
             className="h-5 w-5 shrink-0 rounded object-cover"
           />
+        ) : (
+          <ChannelIcon channel={session.channel} />
         )}
         <span className="truncate">{session.title || session.id}</span>
       </SidebarMenuButton>

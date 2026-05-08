@@ -638,7 +638,23 @@ export async function getChatHistoryWithCursor(agentId: string, sessionId: strin
   return { history, latestEventSeq };
 }
 
-export async function getChatSessions(agentId: string): Promise<{ id: string; title?: string; preview: string; thumbnailUrl?: string; createdAt?: number; updatedAt?: number }[]> {
+export interface ChatSessionEntry {
+  id: string;
+  // channel/accountId/chatId let the sidebar render a per-channel icon
+  // and the chats page tell apart "the same agent's wechat thread vs
+  // its web thread". Empty channel means "legacy row that escaped the
+  // backfill" — falls back to web styling on the UI side.
+  channel?: string;
+  accountId?: string;
+  chatId?: string;
+  title?: string;
+  preview: string;
+  thumbnailUrl?: string;
+  createdAt?: number;
+  updatedAt?: number;
+}
+
+export async function getChatSessions(agentId: string): Promise<ChatSessionEntry[]> {
   const res = await apiFetch(`/api/chat/sessions?agentId=${encodeURIComponent(agentId)}`);
   if (!res.ok) return [];
   const data = await res.json();

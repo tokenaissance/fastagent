@@ -199,6 +199,7 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
               id: s.id,
               title: s.title || s.preview || s.id,
               thumbnailUrl: s.thumbnailUrl,
+              channel: s.channel,
             })),
           ),
         )

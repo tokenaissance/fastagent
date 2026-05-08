@@ -45,9 +45,13 @@ import {
   renameChatSession,
   deleteChatSession,
 } from "@/lib/api";
+import { ChannelIcon, channelLabel } from "@/components/channel-icon";
 
 type Session = {
   id: string;
+  channel?: string;
+  accountId?: string;
+  chatId?: string;
   title?: string;
   preview: string;
   thumbnailUrl?: string;
@@ -160,6 +164,7 @@ export default function AgentChatsPage() {
               <TableHeader>
                 <TableRow>
                   <TableHead>Title</TableHead>
+                  <TableHead className="hidden md:table-cell w-[120px]">Channel</TableHead>
                   <TableHead className="hidden sm:table-cell w-[160px]">Created</TableHead>
                   <TableHead className="w-[100px] text-right">Actions</TableHead>
                 </TableRow>
@@ -179,13 +184,15 @@ export default function AgentChatsPage() {
                   >
                     <TableCell className="font-medium">
                       <div className="flex items-center gap-2 min-w-0">
-                        {s.thumbnailUrl && (
+                        {s.thumbnailUrl ? (
                           // eslint-disable-next-line @next/next/no-img-element
                           <img
                             src={s.thumbnailUrl}
                             alt=""
                             className="h-6 w-6 shrink-0 rounded object-cover"
                           />
+                        ) : (
+                          <ChannelIcon channel={s.channel} className="size-4 shrink-0 text-muted-foreground" />
                         )}
                         <span
                           className="truncate"
@@ -193,6 +200,12 @@ export default function AgentChatsPage() {
                         >
                           {s.title || s.preview || s.id}
                         </span>
+                      </div>
+                    </TableCell>
+                    <TableCell className="hidden md:table-cell text-xs text-muted-foreground whitespace-nowrap">
+                      <div className="flex items-center gap-1.5">
+                        <ChannelIcon channel={s.channel} className="size-3.5 text-muted-foreground" />
+                        <span>{channelLabel(s.channel)}</span>
                       </div>
                     </TableCell>
                     <TableCell className="hidden sm:table-cell text-xs text-muted-foreground whitespace-nowrap">

@@ -148,6 +148,25 @@ interface ChatMessage {
   attachments?: UserAttachment[];
 }
 
+// Tailwind class string applied to every chat-bubble markdown wrapper
+// (assistant + user). The unmodified `prose prose-sm` defaults render
+// markdown like a long-form article — H1/H2 are huge, headings have
+// big top/bottom margins, and tables / code blocks introduce extra
+// vertical padding. In a conversational bubble those defaults make a
+// reply with `## Section` look out of proportion next to surrounding
+// plain text. This override clamps headings to slightly-larger-than-
+// body sizes, tightens table cell padding, and shrinks the gap above
+// each block element so the bubble reads as one coherent message.
+const CHAT_PROSE_CLASS =
+  "text-[15px] leading-relaxed prose prose-sm max-w-none dark:prose-invert " +
+  "prose-p:my-1 prose-pre:my-2 prose-ul:my-1 prose-ol:my-1 " +
+  "prose-headings:font-semibold prose-headings:mt-3 prose-headings:mb-1 " +
+  "prose-h1:text-[16px] prose-h2:text-[15.5px] prose-h3:text-[15px] " +
+  "prose-h4:text-[15px] prose-h5:text-[15px] prose-h6:text-[15px] " +
+  "prose-table:my-2 prose-table:text-[14px] " +
+  "prose-th:py-1 prose-th:px-2 prose-td:py-1 prose-td:px-2 " +
+  "prose-hr:my-3";
+
 // Single-segment identity filenames that route to the agent's home dir
 // (not the workspace) — exclude from the "Your files" panel.
 const SYSTEM_FILES = new Set([
@@ -457,11 +476,21 @@ export default function AgentChatPage() {
       if (typeof data.type === "string") {
         const seq = typeof data.seq === "number" ? data.seq : -1;
         if (seq >= 0 && seq <= maxSeqRef.current) return; // already rendered via POST stream
-        if (seq >= 0) maxSeqRef.current = seq;
+        // CAREFUL: do NOT bump maxSeqRef before the switch. This handler
+        // intentionally drops tool_call / tool_result during catch-up
+        // (the post-`done` history reload renders them properly) — but
+        // a pre-switch bump would mark those seqs as "rendered" and the
+        // parallel POST sendChatStream callback would dedup-skip the
+        // very same events when it tries to actually render them. Bump
+        // only inside cases that really took ownership of this seq.
+        const claim = () => {
+          if (seq >= 0) maxSeqRef.current = seq;
+        };
         switch (data.type) {
           case "content": {
             const content = data.data?.content || "";
             if (!content) break;
+            claim();
             setMessages((prev) => {
               if (transientBubbleIdRef.current) {
                 const idx = prev.findIndex((m) => m.id === transientBubbleIdRef.current);
@@ -481,6 +510,7 @@ export default function AgentChatPage() {
             break;
           }
           case "error": {
+            claim();
             const msg = data.data?.message || "Unknown error";
             setMessages((prev) => [
               ...prev,
@@ -489,6 +519,7 @@ export default function AgentChatPage() {
             break;
           }
           case "done": {
+            claim();
             // Only reload history when we actually built a transient
             // bubble from subscribe-replayed content events (i.e. the
             // user reloaded mid-turn and we need to swap the
@@ -609,17 +640,36 @@ export default function AgentChatPage() {
     [selectedAgent, sessionId, sessionTitle, loadSessions],
   );
 
-  // Render the editable title into the global sticky header (next to the
-  // sidebar toggle). Re-fires whenever the title changes.
+  // Render the editable title + the workspace-panel toggle into the
+  // global sticky header (the chat container injects whatever JSX it
+  // wants here, next to the sidebar toggle). The toggle stays wired
+  // even when the panel is open so users can collapse it from the
+  // same control they used to expand it.
   const headerSlot = useMemo(
     () => (
-      <ChatHeaderTitle
-        title={sessionTitle}
-        fallback={`Chat with ${agentName || selectedAgent}`}
-        onSave={handleRenameTitle}
-      />
+      <div className="flex flex-1 items-center justify-between gap-2 min-w-0">
+        <ChatHeaderTitle
+          title={sessionTitle}
+          fallback={`Chat with ${agentName || selectedAgent}`}
+          onSave={handleRenameTitle}
+        />
+        <button
+          type="button"
+          onClick={() => setFilesSheetOpen((v) => !v)}
+          className={`shrink-0 inline-flex h-8 w-8 items-center justify-center rounded-md transition-colors ${
+            filesSheetOpen
+              ? "bg-muted text-foreground"
+              : "text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+          }`}
+          title={filesSheetOpen ? "Hide workspace" : "Show workspace"}
+          aria-pressed={filesSheetOpen}
+        >
+          <FolderOpen className="h-4 w-4" />
+          <span className="sr-only">Toggle workspace</span>
+        </button>
+      </div>
     ),
-    [sessionTitle, agentName, selectedAgent, handleRenameTitle],
+    [sessionTitle, agentName, selectedAgent, handleRenameTitle, filesSheetOpen],
   );
   usePageHeader(headerSlot, [headerSlot]);
 
@@ -1183,15 +1233,69 @@ export default function AgentChatPage() {
                   pending = [];
                 }
               }
-              return messages.map((msg) =>
-              msg.role === "tool-group" ? (
-                <div key={msg.id}>
-                  <ToolCallGroup msg={msg} surfacedSrcs={surfacedSrcs} agentId={selectedAgent} sessionId={sessionId} />
-                  {msg.files && msg.files.length > 0 && (
-                    <FilesPanel agentId={selectedAgent} files={msg.files} />
-                  )}
-                </div>
-              ) : (
+              // Walk messages once so we can bundle consecutive
+              // tool-group rounds into a single collapsible. Without
+              // this, a long ReAct turn with seven sequential rounds
+              // produces seven independently-collapsible boxes that
+              // dominate the chat — the bundle hides them behind one
+              // header until the user actually wants to dive in.
+              const elements: React.ReactNode[] = [];
+              for (let i = 0; i < messages.length; i++) {
+                const msg = messages[i];
+                if (msg.role === "tool-group") {
+                  const start = i;
+                  while (
+                    i + 1 < messages.length &&
+                    messages[i + 1].role === "tool-group"
+                  ) {
+                    i++;
+                  }
+                  const rounds = messages.slice(start, i + 1);
+                  // Keep the surfacing of any per-round produced files
+                  // out here so each round's panel still renders below
+                  // the bundle in chronological order.
+                  const filePanels = rounds
+                    .filter((r) => r.files && r.files.length > 0)
+                    .map((r) => (
+                      <FilesPanel
+                        key={`files-${r.id}`}
+                        agentId={selectedAgent}
+                        files={r.files!}
+                      />
+                    ));
+                  if (rounds.length === 1) {
+                    elements.push(
+                      <div key={rounds[0].id}>
+                        <ToolCallGroup
+                          msg={rounds[0]}
+                          surfacedSrcs={surfacedSrcs}
+                          agentId={selectedAgent}
+                          sessionId={sessionId}
+                        />
+                        {filePanels}
+                      </div>,
+                    );
+                  } else {
+                    elements.push(
+                      <div key={`bundle-${rounds[0].id}`}>
+                        <ToolRoundsBundle
+                          rounds={rounds}
+                          surfacedSrcs={surfacedSrcs}
+                          agentId={selectedAgent}
+                          sessionId={sessionId}
+                        />
+                        {filePanels}
+                      </div>,
+                    );
+                  }
+                  continue;
+                }
+                elements.push(renderRegularBubble(msg));
+              }
+              return elements;
+
+              function renderRegularBubble(msg: ChatMessage) {
+                return (
                 <div
                   key={msg.id}
                   className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
@@ -1255,9 +1359,7 @@ export default function AgentChatPage() {
                         </div>
                       )}
                       {msg.content && (
-                        <div
-                          className={`text-[15px] leading-relaxed prose prose-sm max-w-none prose-p:my-1 prose-pre:my-2 prose-ul:my-1 prose-ol:my-1 dark:prose-invert`}
-                        >
+                        <div className={CHAT_PROSE_CLASS}>
                           {renderContentWithDataImages(
                             msg.content,
                             surfacedSrcs,
@@ -1309,8 +1411,8 @@ export default function AgentChatPage() {
                     </div>
                   </div>
                 </div>
-              )
-            );
+              );
+              }
             })()}
 
             {sending && (
@@ -1481,7 +1583,7 @@ export default function AgentChatPage() {
         )}
       </div>
       {filesSheetOpen && selectedAgent && sessionId && (
-        <SessionFilesPanel
+        <WorkspacePanel
           agentId={selectedAgent}
           sessionId={sessionId}
           onClose={() => setFilesSheetOpen(false)}
@@ -1569,8 +1671,11 @@ function ChatHeaderTitle({ title, fallback, onSave }: ChatHeaderTitleProps) {
   );
 }
 
-/** Renders a group of tool calls as a collapsible summary. */
-function ToolCallGroup({ msg, surfacedSrcs, agentId, sessionId }: { msg: ChatMessage; surfacedSrcs?: ReadonlySet<string>; agentId: string; sessionId: string }) {
+/** Renders a group of tool calls as a collapsible summary. When
+ *  `nested`, the outer flex/max-width wrappers are dropped so a parent
+ *  container (ToolRoundsBundle) can stack rounds without each one
+ *  re-imposing its own bubble alignment. */
+function ToolCallGroup({ msg, surfacedSrcs, agentId, sessionId, nested = false, roundIndex }: { msg: ChatMessage; surfacedSrcs?: ReadonlySet<string>; agentId: string; sessionId: string; nested?: boolean; roundIndex?: number }) {
   const [groupOpen, setGroupOpen] = useState(false);
   const [expandedTool, setExpandedTool] = useState<Record<string, boolean>>({});
 
@@ -1581,29 +1686,36 @@ function ToolCallGroup({ msg, surfacedSrcs, agentId, sessionId }: { msg: ChatMes
   const toggleTool = (id: string) =>
     setExpandedTool((prev) => ({ ...prev, [id]: !prev[id] }));
 
-  return (
-    <div className="flex justify-start">
-      <div className="max-w-[85%] space-y-2">
-        {/* Content before tools */}
-        {msg.content && (
-          <div className="bg-muted rounded-2xl rounded-bl-md px-4 py-2.5">
-            <div className="text-[15px] leading-relaxed prose prose-sm dark:prose-invert max-w-none prose-p:my-1">
-              {renderContentWithDataImages(msg.content, surfacedSrcs) ?? (
-                <ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={makeUrlTransform(agentId, sessionId)} components={{ a: ExternalAnchor }}>
-                  {msg.content}
-                </ReactMarkdown>
-              )}
-            </div>
+  const inner = (
+    <>
+      {/* Content before tools */}
+      {msg.content && (
+        <div className="bg-muted rounded-2xl rounded-bl-md px-4 py-2.5">
+          <div className={CHAT_PROSE_CLASS}>
+            {renderContentWithDataImages(msg.content, surfacedSrcs) ?? (
+              <ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={makeUrlTransform(agentId, sessionId)} components={{ a: ExternalAnchor }}>
+                {msg.content}
+              </ReactMarkdown>
+            )}
           </div>
-        )}
-        {/* Collapsed tool group summary */}
-        <div className="rounded-lg border border-border bg-card/50 overflow-hidden">
+        </div>
+      )}
+      {/* Collapsed tool group summary */}
+      <div className="rounded-lg border border-border bg-card/50 overflow-hidden">
           <button
             onClick={() => setGroupOpen(!groupOpen)}
             className="flex w-full items-center gap-2 px-3 py-2 text-xs hover:bg-muted/50 transition-colors"
           >
             {!allDone ? (
-              <div className="h-3.5 w-3.5 shrink-0 rounded-full border-2 border-amber-500 border-t-transparent animate-spin" />
+              <div className="h-5 w-5 shrink-0 rounded-full border-2 border-amber-500 border-t-transparent animate-spin" />
+            ) : roundIndex !== undefined ? (
+              // When this group is a round inside a bundle, the leading
+              // glyph carries the round number — gives the bundle's
+              // expanded view a built-in step indicator without an
+              // extra "ROUND N" label row above each card.
+              <span className="h-5 w-5 shrink-0 inline-flex items-center justify-center rounded-full bg-amber-500/10 text-[11px] font-semibold text-amber-600 dark:text-amber-400">
+                {roundIndex}
+              </span>
             ) : (
               <Wrench className="h-3.5 w-3.5 text-amber-500 shrink-0" />
             )}
@@ -1685,6 +1797,84 @@ function ToolCallGroup({ msg, surfacedSrcs, agentId, sessionId }: { msg: ChatMes
                     </div>
                   )}
                 </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </>
+    );
+  if (nested) {
+    return <div className="space-y-2">{inner}</div>;
+  }
+  return (
+    <div className="flex justify-start">
+      <div className="max-w-[85%] space-y-2">{inner}</div>
+    </div>
+  );
+}
+
+/** ToolRoundsBundle wraps consecutive tool-group rounds (the agent
+ *  ran tools, got results, then ran more tools, …) in a single
+ *  collapsible header so a long ReAct turn doesn't take over the chat
+ *  with seven independent "Executed N tools" boxes. The aggregate
+ *  badge shows total rounds + total tools; expanding reveals each
+ *  round as a regular ToolCallGroup, which itself stays collapsible
+ *  per the existing per-round UX. Single-round bundles aren't built
+ *  here — those still render as a flat ToolCallGroup so the extra
+ *  layer doesn't show up unless it earns its keep. */
+function ToolRoundsBundle({
+  rounds,
+  surfacedSrcs,
+  agentId,
+  sessionId,
+}: {
+  rounds: ChatMessage[];
+  surfacedSrcs?: ReadonlySet<string>;
+  agentId: string;
+  sessionId: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const allTools = rounds.flatMap((r) => r.toolCalls || []);
+  const totalTools = allTools.length;
+  const doneCount = allTools.filter((tc) => tc.result != null).length;
+  const allDone = doneCount === totalTools;
+  return (
+    <div className="flex justify-start">
+      <div className="max-w-[85%] w-full">
+        <div className="rounded-lg border border-border bg-card/50 overflow-hidden">
+          <button
+            onClick={() => setOpen(!open)}
+            className="flex w-full items-center gap-2 px-3 py-2 text-xs hover:bg-muted/50 transition-colors"
+          >
+            {!allDone ? (
+              <div className="h-3.5 w-3.5 shrink-0 rounded-full border-2 border-amber-500 border-t-transparent animate-spin" />
+            ) : (
+              <Wrench className="h-3.5 w-3.5 text-amber-500 shrink-0" />
+            )}
+            <span className="font-medium text-foreground">
+              {allDone
+                ? `Used ${totalTools} tool${totalTools === 1 ? "" : "s"} across ${rounds.length} round${rounds.length === 1 ? "" : "s"}`
+                : `Running tools… (${doneCount}/${totalTools} across ${rounds.length} rounds)`}
+            </span>
+            <span className="ml-auto" />
+            {open ? (
+              <ChevronDown className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+            ) : (
+              <ChevronRight className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+            )}
+          </button>
+          {open && (
+            <div className="border-t border-border p-2 space-y-1.5 bg-background/30">
+              {rounds.map((round, idx) => (
+                <ToolCallGroup
+                  key={round.id || idx}
+                  msg={round}
+                  surfacedSrcs={surfacedSrcs}
+                  agentId={agentId}
+                  sessionId={sessionId}
+                  nested
+                  roundIndex={idx + 1}
+                />
               ))}
             </div>
           )}
@@ -1788,10 +1978,17 @@ function FilesPanel({ agentId, files }: { agentId: string; files: ProducedFile[]
 
 const FILES_PANEL_MIN = 280;
 const FILES_PANEL_MAX = 640;
-const FILES_PANEL_DEFAULT = 416;
+const FILES_PANEL_DEFAULT = 280;
 const FILES_PANEL_KEY = "chat:filesPanelWidth";
 
-function SessionFilesPanel({
+// WorkspacePanel renders only the files produced inside the active
+// session (sessions/<sid>/ in the agent workspace). The agent's
+// shared files — SKILL.md / main.py / template scripts — leak into
+// the panel if we list the whole workspace and confuse the "what did
+// THIS conversation produce" mental model the panel is here to serve.
+// User can still drill into other sessions' artifacts from the
+// dashboard's per-session views.
+function WorkspacePanel({
   agentId,
   sessionId,
   onClose,
