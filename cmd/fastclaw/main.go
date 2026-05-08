@@ -92,6 +92,7 @@ func main() {
 	rootCmd.AddCommand(policyCmd())
 	rootCmd.AddCommand(daemonCmd())
 	rootCmd.AddCommand(adminCmd())
+	rootCmd.AddCommand(apikeyCmd())
 	rootCmd.AddCommand(agentsCmd())
 
 	if err := rootCmd.Execute(); err != nil {
@@ -142,6 +143,12 @@ func runGateway(port int) error {
 	gwCfg := &config.GatewayCfg{
 		Port: port,
 		Bind: env.Gateway.Bind,
+		HTTP: config.GatewayHTTP{
+			Endpoints: config.GatewayHTTPEndpoints{
+				ChatCompletions: config.GatewayEndpoint{Enabled: true},
+				Agents:          config.GatewayEndpoint{Enabled: true},
+			},
+		},
 	}
 
 	webSrv := setup.NewServer(port)
