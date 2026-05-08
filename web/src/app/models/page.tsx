@@ -54,6 +54,7 @@ const PROVIDER_PRESETS: Record<
   openai: { apiBase: "https://api.openai.com/v1", apiType: "openai-chat", authType: "bearer-token" },
   openrouter: { apiBase: "https://openrouter.ai/api/v1", apiType: "openai-chat", authType: "bearer-token" },
   anthropic: { apiBase: "https://api.anthropic.com", apiType: "anthropic-messages", authType: "api-key" },
+  deepseek: { apiBase: "https://api.deepseek.com", apiType: "openai-chat", authType: "bearer-token" },
   ollama: { apiBase: "http://localhost:11434/v1", apiType: "openai-chat", authType: "bearer-token" },
   custom: { apiBase: "", apiType: "openai-chat", authType: "bearer-token" },
 };
@@ -62,6 +63,7 @@ const PROVIDER_LABELS: Record<string, string> = {
   openai: "OpenAI",
   openrouter: "OpenRouter",
   anthropic: "Anthropic",
+  deepseek: "DeepSeek",
   ollama: "Ollama",
   custom: "Custom",
 };
