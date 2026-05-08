@@ -37,12 +37,19 @@ func NewOpenAI(apiKey, apiBase string) *OpenAIProvider {
 
 // apiMessage is the wire format for a message sent to the OpenAI API.
 // It uses json.RawMessage for Content to support both string and array formats.
+//
+// ReasoningContent is DeepSeek's thinking-mode field. DeepSeek requires
+// it to be echoed back on subsequent turns or it returns
+// `invalid_request_error: The reasoning_content in the thinking mode
+// must be passed back to the API.` Pure OpenAI ignores unknown fields,
+// so omitempty keeps non-DeepSeek providers unaffected.
 type apiMessage struct {
-	Role       string          `json:"role"`
-	Content    json.RawMessage `json:"content,omitempty"`
-	ToolCalls  []ToolCall      `json:"tool_calls,omitempty"`
-	ToolCallID string          `json:"tool_call_id,omitempty"`
-	Name       string          `json:"name,omitempty"`
+	Role             string          `json:"role"`
+	Content          json.RawMessage `json:"content,omitempty"`
+	ReasoningContent string          `json:"reasoning_content,omitempty"`
+	ToolCalls        []ToolCall      `json:"tool_calls,omitempty"`
+	ToolCallID       string          `json:"tool_call_id,omitempty"`
+	Name             string          `json:"name,omitempty"`
 }
 
 type chatRequest struct {
@@ -91,9 +98,10 @@ type sseToolCallDelta struct {
 }
 
 type sseDelta struct {
-	Role      string             `json:"role,omitempty"`
-	Content   string             `json:"content,omitempty"`
-	ToolCalls []sseToolCallDelta `json:"tool_calls,omitempty"`
+	Role             string             `json:"role,omitempty"`
+	Content          string             `json:"content,omitempty"`
+	ReasoningContent string             `json:"reasoning_content,omitempty"`
+	ToolCalls        []sseToolCallDelta `json:"tool_calls,omitempty"`
 }
 
 type sseChoice struct {
@@ -182,6 +190,7 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, messages []Message, too
 		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
 		toolCalls := make(map[int]*ToolCall)
+		var contentBuilder, reasoningBuilder strings.Builder
 
 		for scanner.Scan() {
 			line := scanner.Text()
@@ -190,15 +199,33 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, messages []Message, too
 			}
 			data := strings.TrimPrefix(line, "data: ")
 			if data == "[DONE]" {
-				// Send final chunk with accumulated tool calls
+				// Send final chunk with accumulated tool calls and a
+				// fully-formed RawAssistant. DeepSeek thinking mode
+				// requires reasoning_content to round-trip on the next
+				// turn (or the API rejects with 400), so we serialize
+				// the assistant message in the OpenAI wire format here
+				// and let callers persist it verbatim.
 				var tcs []ToolCall
 				for i := 0; i < len(toolCalls); i++ {
 					if tc, ok := toolCalls[i]; ok {
 						tcs = append(tcs, *tc)
 					}
 				}
+				reasoning := reasoningBuilder.String()
+				rawMsg := apiMessage{
+					Role:             "assistant",
+					ToolCalls:        tcs,
+					ReasoningContent: reasoning,
+				}
+				rawMsg.Content, _ = json.Marshal(contentBuilder.String())
+				raw, _ := json.Marshal(rawMsg)
 				select {
-				case ch <- StreamChunk{ToolCalls: tcs, Done: true}:
+				case ch <- StreamChunk{
+					ToolCalls:    tcs,
+					Done:         true,
+					Thinking:     reasoning,
+					RawAssistant: raw,
+				}:
 				case <-ctx.Done():
 				}
 				return
@@ -242,8 +269,13 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, messages []Message, too
 				}
 			}
 
+			if delta.ReasoningContent != "" {
+				reasoningBuilder.WriteString(delta.ReasoningContent)
+			}
+
 			// Yield content chunks
 			if delta.Content != "" {
+				contentBuilder.WriteString(delta.Content)
 				select {
 				case ch <- StreamChunk{Content: delta.Content}:
 				case <-ctx.Done():
@@ -266,6 +298,7 @@ func (p *OpenAIProvider) parseSSE(reader io.Reader) (*Response, error) {
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
 	var contentBuilder strings.Builder
+	var reasoningBuilder strings.Builder
 	toolCalls := make(map[int]*ToolCall)
 
 	for scanner.Scan() {
@@ -292,6 +325,9 @@ func (p *OpenAIProvider) parseSSE(reader io.Reader) (*Response, error) {
 
 		if delta.Content != "" {
 			contentBuilder.WriteString(delta.Content)
+		}
+		if delta.ReasoningContent != "" {
+			reasoningBuilder.WriteString(delta.ReasoningContent)
 		}
 
 		for _, tc := range delta.ToolCalls {
@@ -324,8 +360,10 @@ func (p *OpenAIProvider) parseSSE(reader io.Reader) (*Response, error) {
 		return nil, fmt.Errorf("read stream: %w", err)
 	}
 
+	reasoning := reasoningBuilder.String()
 	result := &Response{
-		Content: contentBuilder.String(),
+		Content:  contentBuilder.String(),
+		Thinking: reasoning,
 	}
 	for i := 0; i < len(toolCalls); i++ {
 		if tc, ok := toolCalls[i]; ok {
@@ -335,9 +373,13 @@ func (p *OpenAIProvider) parseSSE(reader io.Reader) (*Response, error) {
 
 	// Capture raw assistant message for cache-safe replay.
 	// Reconstruct the exact message format the API would expect back.
+	// reasoning_content must round-trip for DeepSeek's thinking mode
+	// (otherwise the next turn fails with `The reasoning_content in
+	// the thinking mode must be passed back to the API.`).
 	rawMsg := apiMessage{
-		Role:      "assistant",
-		ToolCalls: result.ToolCalls,
+		Role:             "assistant",
+		ToolCalls:        result.ToolCalls,
+		ReasoningContent: reasoning,
 	}
 	rawMsg.Content, _ = json.Marshal(result.Content)
 	result.RawAssistant, _ = json.Marshal(rawMsg)
