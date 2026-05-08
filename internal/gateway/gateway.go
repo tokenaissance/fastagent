@@ -55,9 +55,23 @@ func ToolProviderRegistry() *toolproviders.Registry { return toolProviderRegistr
 // the given agents using their merged config view (system + user + agent
 // scopes overlaid by the resolver).
 func registerAgentToolChains(cfg *config.Config, agents []*agent.Agent) {
+	envSearxNG := strings.TrimSpace(os.Getenv("FASTCLAW_SEARXNG_ENDPOINT"))
 	for _, ag := range agents {
 		resolved := cfg.MergedAgentConfig(config.AgentEntry{ID: ag.Name()})
-		if chain := buildToolChainFromResolved(resolved, "web_search"); chain != nil {
+		chain := buildToolChainFromResolved(resolved, "web_search")
+		// Fallback: if no web_search chain is configured AND
+		// FASTCLAW_SEARXNG_ENDPOINT is set in the environment,
+		// synthesize a one-provider chain pointing at that endpoint.
+		// One-line setup ("docker run searxng …" + an env var) is the
+		// difference between an agent that can find the right URL on
+		// the first try and one that burns 11 rounds guessing — we
+		// observed the latter in the wild and the cost of leaving
+		// users without search is not worth the cost of injecting a
+		// sensible default.
+		if chain == nil && envSearxNG != "" {
+			chain = synthesizeSearxNGChain(envSearxNG)
+		}
+		if chain != nil {
 			ag.RegisterWebSearchChain(chain)
 		}
 		if chain := buildToolChainFromResolved(resolved, "image_gen"); chain != nil {
@@ -67,6 +81,31 @@ func registerAgentToolChains(cfg *config.Config, agents []*agent.Agent) {
 			ag.RegisterTTSChain(chain)
 		}
 	}
+}
+
+// synthesizeSearxNGChain builds an ad-hoc web_search chain backed
+// solely by the SearxNG provider, configured from FASTCLAW_SEARXNG_ENDPOINT.
+// Lets a fresh install enable search without going through the
+// dashboard's tool-providers config — the most common reason a user
+// in the wild never sees web_search is that they didn't realize they
+// had to wire it up in two places (provider entry + category chain).
+func synthesizeSearxNGChain(endpoint string) *toolproviders.Chain {
+	chain := &toolproviders.Chain{
+		Category:     "web_search",
+		Order:        []string{"searxng"},
+		AutoFallback: false,
+		Registry:     toolProviderRegistry,
+		GetConfig: func(name string) toolproviders.ProviderConfig {
+			if name != "searxng" {
+				return toolproviders.ProviderConfig{}
+			}
+			return toolproviders.ProviderConfig{Endpoint: endpoint}
+		},
+	}
+	if !chain.Available() {
+		return nil
+	}
+	return chain
 }
 
 func buildToolChainFromResolved(resolved config.ResolvedAgent, category string) *toolproviders.Chain {

@@ -35,11 +35,12 @@ type Agent struct {
 	ctxBuilder        *ContextBuilder
 	mcpMgr            *mcp.Manager
 	hooks             *HookRegistry
-	model             string
-	maxTokens         int
-	temperature       float64
-	maxToolIterations int
-	thinking          string
+	model                string
+	maxTokens            int
+	temperature          float64
+	maxToolIterations    int
+	maxParallelToolCalls int // 0 = unlimited
+	thinking             string
 	homePath          string // agent's home: SOUL.md, sessions, memory, skills
 	workspacePath     string // working dir where agent creates user files
 	homeDir           string // FastClaw root, ~/.fastclaw
@@ -247,11 +248,12 @@ func NewAgentWithSkillsCfg(rc config.ResolvedAgent, prov provider.Provider, mb *
 		memory:            memory,
 		ctxBuilder:        newContextBuilderWithSandbox(rc.Home, workspace, memory, skillsSummary, rc.Thinking, rc.Sandbox.Enabled, rc.Sandbox.Backend),
 		hooks:             hooks,
-		model:             rc.Model,
-		maxTokens:         rc.MaxTokens,
-		temperature:       rc.Temperature,
-		maxToolIterations: rc.MaxToolIterations,
-		thinking:          rc.Thinking,
+		model:                rc.Model,
+		maxTokens:            rc.MaxTokens,
+		temperature:          rc.Temperature,
+		maxToolIterations:    rc.MaxToolIterations,
+		maxParallelToolCalls: rc.MaxParallelToolCalls,
+		thinking:             rc.Thinking,
 		homePath:          rc.Home,
 		workspacePath:     workspace,
 		homeDir:           homeDir,
@@ -314,9 +316,10 @@ func (a *Agent) HandleWebChat(ctx context.Context, sessionId, text string, image
 	if sessionId == "" {
 		sessionId = "web-ui"
 	}
-	channel, chatID := a.recoverWebTriple(sessionId)
+	channel, accountID, chatID := a.recoverWebTriple(sessionId)
 	msg := bus.InboundMessage{
 		Channel:   channel,
+		AccountID: accountID,
 		ChatID:    chatID,
 		UserID:    "web-user",
 		Text:      text,
@@ -336,9 +339,10 @@ func (a *Agent) HandleWebChatStream(ctx context.Context, sessionId, text string,
 		sessionId = "web-ui"
 	}
 	ctx = ContextWithChatEvents(ctx, events)
-	channel, chatID := a.recoverWebTriple(sessionId)
+	channel, accountID, chatID := a.recoverWebTriple(sessionId)
 	msg := bus.InboundMessage{
 		Channel:   channel,
+		AccountID: accountID,
 		ChatID:    chatID,
 		UserID:    "web-user",
 		Text:      text,
@@ -350,24 +354,27 @@ func (a *Agent) HandleWebChatStream(ctx context.Context, sessionId, text string,
 }
 
 // recoverWebTriple maps a URL `?session=` token (which can be a
-// session_key for any channel, OR a legacy web chat_id) to the
-// (channel, chatID) the downstream session lookup expects.
+// session_key for any channel, OR a legacy web chat_id) to the full
+// (channel, accountID, chatID) triple the downstream session lookup
+// keys on.
 //
-// The session.Manager keys its triple lookup on chat_id, so if we
-// blindly forward the URL token as the chat_id, a legacy session_key
-// like `web_<chatID>` would miss the existing row (its chat_id is
-// `<chatID>`, not `web_<chatID>`) and the agent would mint a duplicate.
+// Without recovering accountID too, an inbound web write to a
+// telegram/wechat session would query Manager.Get(channel, "", chatID),
+// miss the existing row (which has account_id=<bot_id>), and mint a
+// brand-new session under the wrong triple — the user sees the reply
+// briefly, but a refresh loads the original session's history and the
+// just-written exchange vanishes.
 //
 // Two-step recovery:
-//  1. If the token matches a session_key → look up the triple.
+//  1. If the token matches a session_key → look up the full triple.
 //  2. Otherwise treat it as a web chat_id (preserves the brand-new
 //     "+New chat" path where the row doesn't exist yet).
-func (a *Agent) recoverWebTriple(sessionId string) (channel, chatID string) {
-	channel, chatID = "web", sessionId
+func (a *Agent) recoverWebTriple(sessionId string) (channel, accountID, chatID string) {
+	channel, accountID, chatID = "web", "", sessionId
 	if !a.sessions.SessionExists(sessionId) {
 		return
 	}
-	if c, _, ci, err := a.sessions.LookupSessionTriple(sessionId); err == nil && (c != "" || ci != "") {
+	if c, acc, ci, err := a.sessions.LookupSessionTriple(sessionId); err == nil && (c != "" || ci != "") {
 		channel = c
 		if channel == "" {
 			channel = "web"
@@ -375,6 +382,7 @@ func (a *Agent) recoverWebTriple(sessionId string) (channel, chatID string) {
 		if ci != "" {
 			chatID = ci
 		}
+		accountID = acc
 	}
 	return
 }
@@ -718,6 +726,13 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	// for orphaned tool_use ids.
 	defer padOrphanToolResults(sess)
 
+	// Reset per-turn tool failure tracking. The web_fetch (and any
+	// future tool that opts in) consults the registry's
+	// PriorFailure to refuse a guaranteed-fail retry within the
+	// same turn — without StartTurn here, failures from a previous
+	// turn would poison legit retries the user explicitly asked for.
+	a.registry.StartTurn()
+
 	// Hook: BeforeSystemPrompt
 	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: BeforeSystemPrompt, UserID: a.ownerUserID})
 
@@ -783,6 +798,15 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	var lastSig toolCallSig
 	consecutiveCount := 0
 	totalToolCalls := 0
+	// allFailedRounds is the count of CONSECUTIVE rounds where every
+	// tool result came back as a 4xx/5xx HTTP error or an executor
+	// error. This catches the "model rotates through five guessed
+	// URLs that all 404" pattern that loop detection (which keys on
+	// identical args) misses. After three such rounds we drop tools
+	// from the next LLM call so the model is forced to produce text
+	// directly instead of burning more rounds chasing dead URLs.
+	allFailedRounds := 0
+	const failedRoundsLimit = 3
 
 	// ReAct loop
 	for i := 0; i < a.maxToolIterations; i++ {
@@ -810,8 +834,26 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 			emitEvent(ctx, ChatEvent{Type: "done"})
 			return noProviderMsg
 		}
-		dumpLLMRequest(a.name, a.model, llmMessages, toolDefs)
-		resp, err := a.provider.Chat(ctx, llmMessages, toolDefs, a.model, a.maxTokens, a.temperature)
+		// After enough consecutive rounds where every tool came back
+		// as 4xx/5xx, drop tools from the next call so the model is
+		// forced to produce a text answer with what it has. The
+		// system message above the request makes the constraint
+		// explicit so the model doesn't apologetically dangle.
+		callTools := toolDefs
+		if allFailedRounds >= failedRoundsLimit {
+			slog.Warn("disabling tools after consecutive failed rounds",
+				"agent", a.name, "failed_rounds", allFailedRounds)
+			callTools = nil
+			llmMessages = append(llmMessages, provider.Message{
+				Role: "system",
+				Content: fmt.Sprintf(
+					"The last %d rounds of tool calls all failed (HTTP errors or empty results). Stop calling tools and answer the user directly with what you know — explain that authoritative sources weren't reachable and provide your best-effort response based on training knowledge, clearly marked as unverified.",
+					allFailedRounds,
+				),
+			})
+		}
+		dumpLLMRequest(a.name, a.model, llmMessages, callTools)
+		resp, err := a.provider.Chat(ctx, llmMessages, callTools, a.model, a.maxTokens, a.temperature)
 
 		// Hook: AfterModelCall
 		hcAfter := &HookContext{AgentName: a.name, Point: AfterModelCall, Messages: messages, Response: resp, Error: err, StartTime: hcBefore.StartTime, ChatID: msg.ChatID, UserID: a.ownerUserID}
@@ -897,12 +939,48 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 			})
 		}
 
+		// Apply per-round parallel cap. The LLM decides how many
+		// tool calls to emit; we cap how many run concurrently this
+		// round. Overflow gets a synthetic "deferred" tool_result so
+		// the model sees them as resolved (no orphan tool_use ids
+		// that would poison the next API request) but without
+		// content — naturally re-issuing them next round when it can
+		// react to the executed batch's results. Effective default
+		// is 0 = unlimited; users hit specific rate-limited APIs
+		// (Brave free tier 1RPS, etc.) set it to 1 / 2 to force
+		// strict serial / lightly-parallel execution.
+		executeCalls := resp.ToolCalls
+		var deferredCalls []provider.ToolCall
+		if a.maxParallelToolCalls > 0 && len(resp.ToolCalls) > a.maxParallelToolCalls {
+			executeCalls = resp.ToolCalls[:a.maxParallelToolCalls]
+			deferredCalls = resp.ToolCalls[a.maxParallelToolCalls:]
+			slog.Info("deferring tool calls beyond parallel cap",
+				"agent", a.name,
+				"cap", a.maxParallelToolCalls,
+				"deferred", len(deferredCalls),
+			)
+		}
+
 		// Execute tools concurrently via SDK engine
 		slog.Info("executing tools concurrently",
 			"agent", a.name,
-			"count", len(resp.ToolCalls),
+			"count", len(executeCalls),
 		)
-		results := a.engine.executeToolsConcurrently(ctx, a.registry, resp.ToolCalls, a.workspacePath)
+		results := a.engine.executeToolsConcurrently(ctx, a.registry, executeCalls, a.workspacePath)
+		// Append synthetic deferred results so every original tool_use
+		// id has a paired tool_result. The deferred message tells the
+		// model exactly why it didn't run — it can re-issue next
+		// round once it has the executed batch's results.
+		for _, tc := range deferredCalls {
+			results = append(results, toolCallResult{
+				toolCallID: tc.ID,
+				toolName:   tc.Function.Name,
+				result: fmt.Sprintf(
+					"Deferred — this turn's parallel-tool cap is %d, and you emitted %d. Re-issue this exact call next round if you still need it; you'll have the other tools' results to inform the decision then.",
+					a.maxParallelToolCalls, len(resp.ToolCalls),
+				),
+			})
+		}
 
 		// Defensive backstop: if the SDK returned fewer results than tool
 		// calls (and the bridge somehow didn't already pad — belt and
@@ -930,6 +1008,10 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 			results = padded
 		}
 
+		// Round-level failure detection: did EVERY result come back
+		// as a 4xx/5xx HTTP error or executor error? Tracked here so
+		// the next iteration can decide whether to drop tools.
+		roundAllFailed := len(results) > 0
 		// Process results
 		for idx, r := range results {
 			totalToolCalls++
@@ -952,6 +1034,23 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 					"name", r.toolName,
 					"error", r.err,
 				)
+			}
+
+			// Classify the result: did this single call fail? Records
+			// it in the registry's per-turn failure map so a later
+			// retry of the same args can be short-circuited (see
+			// Registry.PriorFailure / web_fetch).
+			thisFailed := isFailedToolResult(r.err, resultContent)
+			if thisFailed {
+				summary := r.err.Error()
+				if summary == "" || summary == "<nil>" {
+					summary = firstNonEmptyLine(resultContent)
+				}
+				a.registry.RecordToolFailure(r.toolName, tc.Function.Arguments, summary)
+			} else {
+				// One call in this round produced a real result —
+				// the round as a whole isn't "all failed".
+				roundAllFailed = false
 			}
 
 			// Index in FTS if available
@@ -984,11 +1083,60 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 			}
 			emitEvent(ctx, ChatEvent{Type: "tool_result", Data: evt})
 		}
+		// Update consecutive-failed-rounds tally now that the whole
+		// round's results have been processed. A single non-failure
+		// resets it — the model just got useful info, give it room
+		// to use it.
+		if roundAllFailed {
+			allFailedRounds++
+		} else {
+			allFailedRounds = 0
+		}
 	}
 
 	a.runPostTurn(ctx, messages, totalToolCalls)
 	slog.Warn("max tool iterations reached", "agent", a.name, "max", a.maxToolIterations)
 	return "I've reached the maximum number of tool iterations. Here's what I have so far."
+}
+
+// isFailedToolResult is the agent loop's heuristic for "this tool
+// returned nothing useful". Used both to populate the per-turn failure
+// map (so a later identical call can be refused up front) and to drive
+// the consecutive-failed-rounds short-circuit. We deliberately stay
+// conservative — empty exec output is legit for many shell commands —
+// and only flag the high-signal patterns: tool error, HTTP 4xx/5xx,
+// or the `[Analyze the error above…]` envelope our wrapper appends to
+// upstream failures.
+func isFailedToolResult(err error, content string) bool {
+	if err != nil {
+		return true
+	}
+	c := strings.TrimSpace(content)
+	if strings.HasPrefix(c, "HTTP 4") || strings.HasPrefix(c, "HTTP 5") {
+		return true
+	}
+	if strings.Contains(c, "[Analyze the error above and try a different approach.]") {
+		return true
+	}
+	return false
+}
+
+// firstNonEmptyLine returns the first non-empty line of s, trimmed
+// and capped at 120 chars. Used to make a stash-friendly summary of a
+// tool result when err.Error() is empty. (Named distinctly from
+// skills.firstLine to avoid the duplicate declaration.)
+func firstNonEmptyLine(s string) string {
+	for _, line := range strings.Split(s, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if len(line) > 120 {
+			return line[:120] + "…"
+		}
+		return line
+	}
+	return ""
 }
 
 // padOrphanToolResults walks the session and appends a synthetic
@@ -1350,6 +1498,7 @@ func (a *Agent) UpdateConfig(rc config.ResolvedAgent) {
 	a.maxTokens = rc.MaxTokens
 	a.temperature = rc.Temperature
 	a.maxToolIterations = rc.MaxToolIterations
+	a.maxParallelToolCalls = rc.MaxParallelToolCalls
 	// Sandbox flags drive the system prompt's "Working Directory" / "home
 	// dir" description and the sandbox-capabilities block. Without this
 	// propagation an agent that existed before sandbox was enabled keeps

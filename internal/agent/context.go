@@ -102,10 +102,24 @@ func (cb *ContextBuilder) BuildSystemPrompt() string {
 		}
 		homeDesc = cb.home
 	}
+	// Current local time goes into the prompt explicitly. Without
+	// this, the model's training cutoff is its only source of "now",
+	// and any time-sensitive question ("this week", "tomorrow",
+	// "what year is it") forces it to spend a tool call on `date` —
+	// which then often runs in parallel with a web_search whose
+	// query was built from the model's stale year. Putting now() in
+	// the prompt removes the dependency at the root.
+	now := time.Now()
+	wd := now.Weekday().String()
+	dateLine := fmt.Sprintf("Current date/time: %s (%s, %s). Use this — do NOT call `date` to learn what day it is.",
+		now.Format("2006-01-02 15:04:05 -0700"), wd, now.Location().String())
+
 	runtimeInfo := fmt.Sprintf(`You are an AI agent running on the FastClaw runtime.
 Your identity (name, role, personality) is defined by IDENTITY.md and SOUL.md
 below — if those are empty, you do NOT yet have a name and must follow the
 bootstrap instructions in BOOTSTRAP.md before answering the user.
+
+%s
 
 Runtime info:
 OS: %s/%s
@@ -125,7 +139,7 @@ Use edit_file (not write_file) when you only need to change part of an
 existing file — it's cheaper, can't accidentally drop unrelated content,
 and validates the replacement landed. Reserve write_file for creating
 new files or full rewrites. This matters most for MEMORY.md / SOUL.md /
-USER.md, which grow over time and would lose context if rewritten in full.`, runtime.GOOS, runtime.GOARCH, workdir, homeDesc)
+USER.md, which grow over time and would lose context if rewritten in full.`, dateLine, runtime.GOOS, runtime.GOARCH, workdir, homeDesc)
 	parts = append(parts, runtimeInfo)
 
 	// 2. Sandbox capabilities (auto-injected when sandbox is enabled)
@@ -262,7 +276,55 @@ Messages from other bots will appear as "[BotName]: message" in the conversation
 		}
 	}
 
-	// 7. Self-updating workspace files guidance
+	// 7. Tool-use discipline. Sits before the workspace-update block
+	// because in the wild it's the source of by-far the most wasted
+	// rounds: model gets a question requiring fresh info, dives
+	// straight into web_fetch with a guessed URL, hits 404, rotates
+	// guesses; or model gets a search result with the answer already
+	// in the snippets and still fetches the source page "to verify",
+	// burning two rounds. The block here makes the rules explicit so
+	// this turn — not the next user nudge — is when the model
+	// corrects course.
+	parts = append(parts, `# Tool Use
+Three failure modes that cost rounds:
+
+1. **Don't guess URLs from training memory.** Web URLs (gov.cn, news
+   sites, blog permalinks, etc.) change constantly and your training
+   data is stale. If you need a current URL, call web_search first to
+   discover it, then web_fetch the verified URL. If web_search isn't
+   available, prefer stable hosts you can reason about (en.wikipedia.org,
+   github.com/<owner>/<repo>, …) — not date-stamped article paths.
+   A web_fetch on a guessed URL that 404s costs a round AND poisons
+   your remaining budget — the runtime refuses retries of the same
+   failed URL within this turn, so swap source, not just the path.
+
+2. **Stop when you have enough.** If web_search snippets already
+   contain the specific facts the user asked about (dates, numbers,
+   names, yes/no answer), synthesize the answer FROM the snippets and
+   reply directly. Do NOT fetch the source page "to verify" — search
+   results are already authoritative-enough for short factual
+   questions, and the extra fetch usually adds nothing the user
+   wanted. Only fetch when the snippets are clearly insufficient
+   (truncated mid-sentence, missing the specific detail, or the
+   question genuinely requires multi-paragraph context).
+
+3. **Pick parallel vs serial deliberately.** Tool calls in the same
+   message run in parallel — your second tool can't see the first's
+   result. Run in parallel ONLY when the calls are truly independent
+   (different sources, different facets of the question). When a
+   later call would use information from an earlier call's result
+   — e.g. "first get today's date, then fetch the page for that
+   year" — emit ONE call this round, wait for the result, then emit
+   the dependent call next round. Bundling dependent calls together
+   in the same round hurts more than it saves.
+
+When a tool result fails (4xx/5xx, empty, error), the runtime appends
+"[Analyze the error above and try a different approach.]" — that
+means: switch source/strategy, do not just rotate URL components. If
+several rounds in a row come back empty, stop and answer the user
+with what you know, marked clearly as unverified.`)
+
+	// 8. Self-updating workspace files guidance
 	parts = append(parts, `# Workspace Self-Update
 You have the ability to update workspace files to maintain knowledge over time:
 - MEMORY.md: Update when you learn important facts, user preferences, or key decisions. This file is loaded into your context every conversation.

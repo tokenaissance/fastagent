@@ -2,9 +2,11 @@ package tools
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"sync"
 
 	"github.com/fastclaw-ai/fastclaw/internal/provider"
 	"github.com/fastclaw-ai/fastclaw/internal/sandbox"
@@ -113,6 +115,19 @@ type Registry struct {
 	// configured.
 	envProvider SkillEnvProvider
 	skillDirs   []string
+	// turnFailures records (toolName, argsHash) → previous error
+	// summary for tool calls that already failed earlier in the
+	// current turn. StartTurn resets this map; tool implementations
+	// can consult PriorFailure to short-circuit a guaranteed-fail
+	// retry. The hash keying matches the agent loop's loop-detection
+	// hash so both layers agree on what "the same call" means.
+	turnFailMu sync.Mutex
+	turnFails  map[turnFailKey]string
+}
+
+type turnFailKey struct {
+	tool string
+	hash [32]byte
 }
 
 // SystemFileStore is the narrow slice of the DB store that write_file /
@@ -327,4 +342,45 @@ func (r *Registry) registerBuiltins() {
 	registerExec(r)
 	registerFile(r)
 	registerMessage(r)
+}
+
+// StartTurn resets per-turn tool-call state. Called by the agent loop
+// at the top of HandleMessage so each new user turn starts with a
+// blank failure map — failures from a prior turn shouldn't poison
+// retries that legitimately want to revisit a URL after the user
+// nudges the agent ("try again", "use a different source").
+func (r *Registry) StartTurn() {
+	r.turnFailMu.Lock()
+	defer r.turnFailMu.Unlock()
+	r.turnFails = nil
+}
+
+// RecordToolFailure stashes a short error summary keyed by (toolName,
+// args). Called by the agent loop after every failed tool execution.
+// Subsequent PriorFailure lookups within the same turn return this
+// summary so the tool can short-circuit instead of re-attempting the
+// same dead URL / endpoint.
+func (r *Registry) RecordToolFailure(toolName string, rawArgs string, errSummary string) {
+	if errSummary == "" {
+		return
+	}
+	r.turnFailMu.Lock()
+	defer r.turnFailMu.Unlock()
+	if r.turnFails == nil {
+		r.turnFails = map[turnFailKey]string{}
+	}
+	r.turnFails[turnFailKey{tool: toolName, hash: sha256.Sum256([]byte(rawArgs))}] = errSummary
+}
+
+// PriorFailure returns a short summary of the previous failure for
+// (toolName, args) within the current turn, or "" if not seen. Tool
+// implementations can use this to refuse a guaranteed-fail retry with
+// a stronger message than the underlying error.
+func (r *Registry) PriorFailure(toolName string, rawArgs string) string {
+	r.turnFailMu.Lock()
+	defer r.turnFailMu.Unlock()
+	if r.turnFails == nil {
+		return ""
+	}
+	return r.turnFails[turnFailKey{tool: toolName, hash: sha256.Sum256([]byte(rawArgs))}]
 }

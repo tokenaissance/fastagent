@@ -6,6 +6,7 @@ package websearch
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/fastclaw-ai/fastclaw/internal/toolproviders"
@@ -62,6 +63,28 @@ type resultItem struct {
 	Snippet string
 }
 
+// snippetTagRe matches HTML tags that some search backends (notably
+// Baidu / Sogou via SearXNG) leak into the `content` field — typically
+// <strong>…</strong> wrappers around matched query terms. They look
+// like "dirty data" to the model and trigger a "let me fetch the real
+// article to verify" reflex even when the snippet itself already
+// answers the question. Stripping them up front makes the snippet
+// look like authoritative plain text.
+var snippetTagRe = regexp.MustCompile(`<[^>]+>`)
+
+func cleanSnippet(s string) string {
+	s = snippetTagRe.ReplaceAllString(s, "")
+	s = strings.ReplaceAll(s, "&amp;", "&")
+	s = strings.ReplaceAll(s, "&lt;", "<")
+	s = strings.ReplaceAll(s, "&gt;", ">")
+	s = strings.ReplaceAll(s, "&quot;", "\"")
+	s = strings.ReplaceAll(s, "&#39;", "'")
+	s = strings.ReplaceAll(s, "&nbsp;", " ")
+	// Collapse multi-space artifacts left after tag removal.
+	s = regexp.MustCompile(`[ \t]+`).ReplaceAllString(s, " ")
+	return strings.TrimSpace(s)
+}
+
 func render(query string, items []resultItem) string {
 	if len(items) == 0 {
 		return "No results found for: " + query
@@ -69,7 +92,7 @@ func render(query string, items []resultItem) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "Search results for: %s\n\n", query)
 	for i, it := range items {
-		fmt.Fprintf(&sb, "%d. %s\n   URL: %s\n   %s\n\n", i+1, it.Title, it.URL, it.Snippet)
+		fmt.Fprintf(&sb, "%d. %s\n   URL: %s\n   %s\n\n", i+1, it.Title, it.URL, cleanSnippet(it.Snippet))
 	}
 	return sb.String()
 }

@@ -327,8 +327,17 @@ type AgentDefaults struct {
 	MaxTokens         int     `json:"maxTokens,omitempty"`
 	Temperature       float64 `json:"temperature,omitempty"`
 	MaxToolIterations int     `json:"maxToolIterations,omitempty"`
-	Thinking          string  `json:"thinking,omitempty"`
-	PolicyPreset      string  `json:"policy,omitempty"`
+	// MaxParallelToolCalls caps how many tool calls a single LLM
+	// response is allowed to execute concurrently in one round. The
+	// LLM still decides how many tools to emit; we just refuse to
+	// run more than this many at once. The overflow gets a synthetic
+	// "deferred — re-issue next round" tool_result so the model
+	// naturally serializes. 0 = unlimited (no cap, current behavior).
+	// Useful when downstream APIs (Brave free tier 1RPS, etc.) can't
+	// take a parallel burst.
+	MaxParallelToolCalls int     `json:"maxParallelToolCalls,omitempty"`
+	Thinking             string  `json:"thinking,omitempty"`
+	PolicyPreset         string  `json:"policy,omitempty"`
 }
 
 // AgentEntry is the in-memory shape of one agent row, used during
@@ -337,12 +346,13 @@ type AgentDefaults struct {
 // configs table at scope=agent and are merged in via scope.SettingInto
 // during userspace load.
 type AgentEntry struct {
-	ID                string                     `json:"id"`
-	UserID            string                     `json:"userId,omitempty"`
-	Workspace         string                     `json:"workspace,omitempty"`
-	MaxTokens         int                        `json:"maxTokens,omitempty"`
-	Temperature       float64                    `json:"temperature,omitempty"`
-	MaxToolIterations int                        `json:"maxToolIterations,omitempty"`
+	ID                   string                     `json:"id"`
+	UserID               string                     `json:"userId,omitempty"`
+	Workspace            string                     `json:"workspace,omitempty"`
+	MaxTokens            int                        `json:"maxTokens,omitempty"`
+	Temperature          float64                    `json:"temperature,omitempty"`
+	MaxToolIterations    int                        `json:"maxToolIterations,omitempty"`
+	MaxParallelToolCalls int                        `json:"maxParallelToolCalls,omitempty"`
 	Skills            []string                   `json:"skills,omitempty"`
 	Tools             []string                   `json:"tools,omitempty"`
 	MCPServers        map[string]MCPServerConfig `json:"mcpServers,omitempty"`
@@ -427,10 +437,11 @@ func defaultAgentFileConfigLoader(_, home string) (AgentFileConfig, bool) {
 // (agents.config column). Per-agent providers/channels live in their own
 // scoped DB tables and are NOT persisted here.
 type AgentFileConfig struct {
-	Model             string                     `json:"model,omitempty"`
-	MaxTokens         int                        `json:"maxTokens,omitempty"`
-	Temperature       float64                    `json:"temperature,omitempty"`
-	MaxToolIterations int                        `json:"maxToolIterations,omitempty"`
+	Model                string                     `json:"model,omitempty"`
+	MaxTokens            int                        `json:"maxTokens,omitempty"`
+	Temperature          float64                    `json:"temperature,omitempty"`
+	MaxToolIterations    int                        `json:"maxToolIterations,omitempty"`
+	MaxParallelToolCalls int                        `json:"maxParallelToolCalls,omitempty"`
 	Workspace         string                     `json:"workspace,omitempty"`
 	Skills            SkillsConfig               `json:"skills,omitempty"`
 	MCPServers        map[string]MCPServerConfig `json:"mcpServers,omitempty"`
@@ -468,15 +479,16 @@ type SkillsLoadCfg struct {
 
 // ResolvedAgent is the fully merged config for a single agent.
 type ResolvedAgent struct {
-	ID                string
-	UserID            string
-	Home              string
-	Workspace         string
-	Model             string
-	MaxTokens         int
-	Temperature       float64
-	MaxToolIterations int
-	Thinking          string
+	ID                   string
+	UserID               string
+	Home                 string
+	Workspace            string
+	Model                string
+	MaxTokens            int
+	Temperature          float64
+	MaxToolIterations    int
+	MaxParallelToolCalls int
+	Thinking             string
 	Skills            SkillsConfig
 	MCPServers        map[string]MCPServerConfig
 	Sandbox           SandboxCfg
@@ -574,17 +586,18 @@ func (cfg *Config) MergedAgentConfig(entry AgentEntry) ResolvedAgent {
 	}
 
 	resolved := ResolvedAgent{
-		ID:                entry.ID,
-		UserID:            entry.UserID,
-		Home:              home,
-		Workspace:         workspace,
-		Model:             cfg.Agents.Defaults.Model,
-		MaxTokens:         cfg.Agents.Defaults.MaxTokens,
-		Temperature:       cfg.Agents.Defaults.Temperature,
-		MaxToolIterations: cfg.Agents.Defaults.MaxToolIterations,
-		Thinking:          cfg.Agents.Defaults.Thinking,
-		Sandbox:           cfg.Sandbox,
-		PolicyPreset:      cfg.Agents.Defaults.PolicyPreset,
+		ID:                   entry.ID,
+		UserID:               entry.UserID,
+		Home:                 home,
+		Workspace:            workspace,
+		Model:                cfg.Agents.Defaults.Model,
+		MaxTokens:            cfg.Agents.Defaults.MaxTokens,
+		Temperature:          cfg.Agents.Defaults.Temperature,
+		MaxToolIterations:    cfg.Agents.Defaults.MaxToolIterations,
+		MaxParallelToolCalls: cfg.Agents.Defaults.MaxParallelToolCalls,
+		Thinking:             cfg.Agents.Defaults.Thinking,
+		Sandbox:              cfg.Sandbox,
+		PolicyPreset:         cfg.Agents.Defaults.PolicyPreset,
 	}
 
 	if entry.MaxTokens > 0 {
@@ -595,6 +608,9 @@ func (cfg *Config) MergedAgentConfig(entry AgentEntry) ResolvedAgent {
 	}
 	if entry.MaxToolIterations > 0 {
 		resolved.MaxToolIterations = entry.MaxToolIterations
+	}
+	if entry.MaxParallelToolCalls > 0 {
+		resolved.MaxParallelToolCalls = entry.MaxParallelToolCalls
 	}
 	if entry.Thinking != "" {
 		resolved.Thinking = entry.Thinking
@@ -643,6 +659,9 @@ func (cfg *Config) MergedAgentConfig(entry AgentEntry) ResolvedAgent {
 		}
 		if fileCfg.MaxToolIterations > 0 {
 			resolved.MaxToolIterations = fileCfg.MaxToolIterations
+		}
+		if fileCfg.MaxParallelToolCalls > 0 {
+			resolved.MaxParallelToolCalls = fileCfg.MaxParallelToolCalls
 		}
 		resolved.Skills = fileCfg.Skills
 		for k, v := range fileCfg.MCPServers {

@@ -642,12 +642,14 @@ func appendModel(models []config.ModelEntry, id string) []config.ModelEntry {
 // live in under the agent's row. These are the same keys the dashboard
 // exposes per-agent.
 var agentScopeKeys = map[string]string{
-	"model":       "agents.defaults",
-	"maxTokens":   "agents.defaults",
-	"temperature": "agents.defaults",
-	"thinking":    "agents.defaults",
-	"policy":      "agents.defaults",
-	"sandbox":     "sandbox",
+	"model":                "agents.defaults",
+	"maxTokens":            "agents.defaults",
+	"temperature":          "agents.defaults",
+	"maxToolIterations":    "agents.defaults",
+	"maxParallelToolCalls": "agents.defaults",
+	"thinking":             "agents.defaults",
+	"policy":               "agents.defaults",
+	"sandbox":              "sandbox",
 }
 
 var systemSettingNamespaces = []string{

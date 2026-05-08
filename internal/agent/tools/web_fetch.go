@@ -29,24 +29,50 @@ func init() {
 }
 
 // RegisterWebFetch registers the web_fetch tool.
+//
+// The description is deliberately blunt about the "search-before-fetch"
+// rule and the URL-guessing failure mode. Models that have only
+// web_fetch tend to fall back on training-memory URLs — which are
+// often stale / hallucinated — and burn a dozen rounds 404'ing.
+// Calling that out here, where the tool catalog gets serialized into
+// the model's prompt, is far more effective than burying the
+// guidance in SOUL.md.
 func RegisterWebFetch(r *Registry) {
-	r.Register("web_fetch", "Fetch a web page and return its plain text content (HTML tags stripped)", map[string]interface{}{
-		"type": "object",
-		"properties": map[string]interface{}{
-			"url": map[string]interface{}{
-				"type":        "string",
-				"description": "The URL to fetch",
+	r.Register("web_fetch",
+		"Fetch a single known URL and return its plain text. "+
+			"DO NOT guess URLs from memory — your training data has stale paths "+
+			"and you will burn rounds on 404s. Use web_search first to obtain "+
+			"a verified URL, then web_fetch that exact URL. If web_search isn't "+
+			"available, prefer well-known stable hosts (en.wikipedia.org, "+
+			"github.com), not date-stamped article URLs. A URL that returned "+
+			"4xx/5xx earlier in this turn will be refused if you retry it.",
+		map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"url": map[string]interface{}{
+					"type":        "string",
+					"description": "The exact URL to fetch (full https://… form). Don't paste search-result snippets or guessed paths.",
+				},
+				"max_length": map[string]interface{}{
+					"type":        "integer",
+					"description": "Maximum characters to return (default 10000)",
+				},
 			},
-			"max_length": map[string]interface{}{
-				"type":        "integer",
-				"description": "Maximum characters to return (default 10000)",
-			},
-		},
-		"required": []string{"url"},
-	}, webFetchTool)
+			"required": []string{"url"},
+		}, webFetchToolWith(r))
 }
 
-func webFetchTool(ctx context.Context, rawArgs json.RawMessage) (string, error) {
+// webFetchToolWith binds the registry into the tool closure so the
+// implementation can consult turn-state failure history. Wrapping
+// instead of having the tool reach into a global keeps per-agent
+// registries isolated when the same process serves multiple agents.
+func webFetchToolWith(r *Registry) ToolFunc {
+	return func(ctx context.Context, rawArgs json.RawMessage) (string, error) {
+		return webFetchTool(ctx, r, rawArgs)
+	}
+}
+
+func webFetchTool(ctx context.Context, r *Registry, rawArgs json.RawMessage) (string, error) {
 	var args webFetchArgs
 	if err := json.Unmarshal(rawArgs, &args); err != nil {
 		return "", fmt.Errorf("parse args: %w", err)
@@ -54,6 +80,22 @@ func webFetchTool(ctx context.Context, rawArgs json.RawMessage) (string, error) 
 
 	if args.URL == "" {
 		return "", fmt.Errorf("url is required")
+	}
+
+	// Refuse a retry of a URL that already failed in this turn. The
+	// agent loop's loop-detector catches "exact same call 3 times in
+	// a row" but not the more common pattern: the model rotates
+	// through five guessed URLs that all 404, then comes back to the
+	// first guess. Each attempt looks "different" to the loop
+	// detector but the user is paying for round-trips that we know
+	// up-front will fail.
+	if r != nil {
+		if prev := r.PriorFailure("web_fetch", string(rawArgs)); prev != "" {
+			return "", fmt.Errorf(
+				"already tried %s earlier in this turn (%s). DO NOT retry the same URL — pick a different source, or use web_search to find a verified URL",
+				args.URL, prev,
+			)
+		}
 	}
 
 	maxLen := args.MaxLen
