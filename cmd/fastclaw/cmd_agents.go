@@ -116,7 +116,7 @@ func agentsInitCmd() *cobra.Command {
 	var opts agentcli.InitOptions
 	cmd := &cobra.Command{
 		Use:     "init <name>",
-		Aliases: []string{"create", "new"},
+		Aliases: []string{"create", "new", "add"},
 		Short:   "Create or update an agent in the operator's store",
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
