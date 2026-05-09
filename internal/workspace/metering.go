@@ -45,9 +45,9 @@ func (c *countingReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-func (m *Metered) Put(ctx context.Context, agentID, sessionID, path string, r io.Reader, size int64, contentType string) error {
+func (m *Metered) Put(ctx context.Context, agentID, projectID, sessionID, path string, r io.Reader, size int64, contentType string) error {
 	cr := &countingReader{r: r}
-	if err := m.inner.Put(ctx, agentID, sessionID, path, cr, size, contentType); err != nil {
+	if err := m.inner.Put(ctx, agentID, projectID, sessionID, path, cr, size, contentType); err != nil {
 		return err
 	}
 	// Prefer the caller's size when it's reliable; otherwise fall back
@@ -61,24 +61,28 @@ func (m *Metered) Put(ctx context.Context, agentID, sessionID, path string, r io
 	return nil
 }
 
-func (m *Metered) Get(ctx context.Context, agentID, sessionID, path string) (io.ReadCloser, error) {
-	return m.inner.Get(ctx, agentID, sessionID, path)
+func (m *Metered) Get(ctx context.Context, agentID, projectID, sessionID, path string) (io.ReadCloser, error) {
+	return m.inner.Get(ctx, agentID, projectID, sessionID, path)
 }
 
-func (m *Metered) Stat(ctx context.Context, agentID, sessionID, path string) (*ObjectInfo, error) {
-	return m.inner.Stat(ctx, agentID, sessionID, path)
+func (m *Metered) Stat(ctx context.Context, agentID, projectID, sessionID, path string) (*ObjectInfo, error) {
+	return m.inner.Stat(ctx, agentID, projectID, sessionID, path)
 }
 
-func (m *Metered) List(ctx context.Context, agentID, sessionID string) ([]ObjectInfo, error) {
-	return m.inner.List(ctx, agentID, sessionID)
+func (m *Metered) List(ctx context.Context, agentID, projectID, sessionID string) ([]ObjectInfo, error) {
+	return m.inner.List(ctx, agentID, projectID, sessionID)
 }
 
-func (m *Metered) Delete(ctx context.Context, agentID, sessionID, path string) error {
-	return m.inner.Delete(ctx, agentID, sessionID, path)
+func (m *Metered) Delete(ctx context.Context, agentID, projectID, sessionID, path string) error {
+	return m.inner.Delete(ctx, agentID, projectID, sessionID, path)
 }
 
-func (m *Metered) SignedURL(ctx context.Context, agentID, sessionID, path string, ttl time.Duration) (string, error) {
-	return m.inner.SignedURL(ctx, agentID, sessionID, path, ttl)
+func (m *Metered) Move(ctx context.Context, agentID, fromProjectID, fromSessionID, toProjectID, toSessionID string) error {
+	return m.inner.Move(ctx, agentID, fromProjectID, fromSessionID, toProjectID, toSessionID)
+}
+
+func (m *Metered) SignedURL(ctx context.Context, agentID, projectID, sessionID, path string, ttl time.Duration) (string, error) {
+	return m.inner.SignedURL(ctx, agentID, projectID, sessionID, path, ttl)
 }
 
 // Compile-time check.

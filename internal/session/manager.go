@@ -32,6 +32,12 @@ type Session struct {
 	channel           string
 	accountID         string
 	chatID            string
+	// projectID, when non-empty, is stamped on every SaveSession write
+	// for this session. Set on the FIRST turn of a brand-new chat that
+	// arrived with a project hint (URL `?project=<pid>`); for existing
+	// rows it's read back via Manager.Get and late-bound here so the
+	// next save preserves it.
+	projectID         string
 }
 
 // ctx returns a context tagged with this Session's user so the store layer
@@ -63,12 +69,16 @@ func (s *Session) ctx() context.Context {
 //     of how many times the working set has been pruned/summarized.
 type SessionStore interface {
 	GetSession(ctx context.Context, agentID, sessionKey string) ([]provider.Message, error)
-	SaveSession(ctx context.Context, agentID, sessionKey, channel, accountID, chatID string, messages []provider.Message) error
+	SaveSession(ctx context.Context, agentID, sessionKey, channel, accountID, chatID, projectID string, messages []provider.Message) error
 	AppendMessage(ctx context.Context, agentID, sessionKey string, msg provider.Message) error
 	ListMessages(ctx context.Context, agentID, sessionKey string) ([]provider.Message, error)
 	ListWebSessions(ctx context.Context, agentID string) ([]WebSession, error)
 	DeleteSession(ctx context.Context, agentID, sessionKey string) error
 	RenameSession(ctx context.Context, agentID, sessionKey, title string) error
+	// MoveSession reassigns a session to a different project (or
+	// detaches when projectID is ""). Used by the sidebar drag-and-drop
+	// affordance; workspace file migration is the caller's job.
+	MoveSession(ctx context.Context, agentID, sessionKey, projectID string) error
 	// ResolveActiveSessionKey returns the most recent session_key for the
 	// (channel, accountID, chatID) triple, or empty string if none.
 	ResolveActiveSessionKey(ctx context.Context, agentID, channel, accountID, chatID string) (string, error)
@@ -76,6 +86,11 @@ type SessionStore interface {
 	// the conversation it belongs to. Returns ("","","",nil) when the
 	// session doesn't exist (manager treats that as "not yet stored").
 	LookupSessionTriple(ctx context.Context, agentID, sessionKey string) (channel, accountID, chatID string, err error)
+	// LookupSessionProject returns the project_id stamped on the session
+	// row, or "" for loose chats. Used by the agent runtime to thread
+	// project context onto inbound messages so the workspace store and
+	// sandbox both route to projects/<pid>/.
+	LookupSessionProject(ctx context.Context, agentID, sessionKey string) (string, error)
 }
 
 type Manager struct {
@@ -173,6 +188,11 @@ func (m *Manager) resolveOrMintKey(channel, accountID, chatID string) string {
 // chatID) triple. The session_key is resolved server-side rather than
 // derived from the inputs — see resolveOrMintKey.
 //
+// projectID is the "this chat belongs to project X" hint from the chat
+// request (URL `?project=<pid>`). It only matters on first save: if the
+// session row already has project_id stored, that wins; if the row is
+// brand new, this hint is what gets persisted.
+//
 // In multi-replica deployments (store-backed mode), every Get() reloads
 // Messages from the store so a request served by pod B sees writes made
 // by pod A. Without this, each pod's in-memory cache drifts away from
@@ -182,16 +202,30 @@ func (m *Manager) resolveOrMintKey(channel, accountID, chatID string) string {
 // transient fields (snapshot, LastConsolidated) survive.
 //
 // File-backed mode stays cache-first since there's only one process.
-func (m *Manager) Get(channel, accountID, chatID string) *Session {
+func (m *Manager) Get(channel, accountID, chatID, projectID string) *Session {
 	key := m.resolveOrMintKey(channel, accountID, chatID)
-	return m.getByKey(key, channel, accountID, chatID)
+	return m.getByKey(key, channel, accountID, chatID, projectID)
 }
 
 // GetByKey loads a specific session by its session_key. Used when the
 // caller already has a key in hand (e.g. web history fetch from a URL
 // `?session=…`) and wants to bypass the active-session lookup.
 func (m *Manager) GetByKey(sessionKey string) *Session {
-	return m.getByKey(sessionKey, "", "", "")
+	return m.getByKey(sessionKey, "", "", "", "")
+}
+
+// LookupSessionProject returns the project_id of a session row (or ""
+// if loose / not yet stored). Used by the agent runtime to populate
+// InboundMessage.ProjectID so workspace IO routes to projects/<pid>/.
+func (m *Manager) LookupSessionProject(sessionKey string) string {
+	if m.store == nil || sessionKey == "" {
+		return ""
+	}
+	pid, err := m.store.LookupSessionProject(m.ctx(), m.agentID, sessionKey)
+	if err != nil {
+		return ""
+	}
+	return pid
 }
 
 // LookupSessionTriple forwards to the store's session_key → triple
@@ -256,8 +290,10 @@ func (m *Manager) OpenNewSession(channel, accountID, chatID string) string {
 	if m.store != nil {
 		// Persist an empty row immediately so the active-session lookup
 		// for the next inbound message resolves to this key, not the
-		// previous (still-newer-than-not-existing) row.
-		_ = m.store.SaveSession(m.ctx(), m.agentID, key, channel, accountID, chatID, nil)
+		// previous (still-newer-than-not-existing) row. IM `/new` is
+		// always a loose chat (project_id=""); project chats are
+		// minted lazily by the chat handler on first message.
+		_ = m.store.SaveSession(m.ctx(), m.agentID, key, channel, accountID, chatID, "", nil)
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -275,7 +311,7 @@ func (m *Manager) OpenNewSession(channel, accountID, chatID string) string {
 	return key
 }
 
-func (m *Manager) getByKey(key, channel, accountID, chatID string) *Session {
+func (m *Manager) getByKey(key, channel, accountID, chatID, projectID string) *Session {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -287,12 +323,17 @@ func (m *Manager) getByKey(key, channel, accountID, chatID string) *Session {
 				s.mu.Unlock()
 			}
 		}
-		// Late-bind the triple if the cached entry was created via
-		// GetByKey (no triple known then) and the caller now has it.
-		if channel != "" {
+		// Late-bind the triple + project on cached entries created via
+		// GetByKey or earlier hint-less paths. Once stamped, project_id
+		// on the persisted row is authoritative — we only ever fill in
+		// the empty case so a hint mismatch can't overwrite the truth.
+		if channel != "" || projectID != "" {
 			s.mu.Lock()
-			if s.channel == "" {
+			if s.channel == "" && channel != "" {
 				s.channel, s.accountID, s.chatID = channel, accountID, chatID
+			}
+			if s.projectID == "" && projectID != "" {
+				s.projectID = projectID
 			}
 			s.mu.Unlock()
 		}
@@ -310,6 +351,7 @@ func (m *Manager) getByKey(key, channel, accountID, chatID string) *Session {
 		channel:    channel,
 		accountID:  accountID,
 		chatID:     chatID,
+		projectID:  projectID,
 	}
 
 	// Load from store (DB) if available, otherwise from file
@@ -350,7 +392,7 @@ func (s *Session) Append(msg provider.Message) {
 	s.Messages = append(s.Messages, msg)
 
 	if s.store != nil {
-		s.store.SaveSession(s.ctx(), s.agentID, s.sessionKey, s.channel, s.accountID, s.chatID, s.Messages)
+		s.store.SaveSession(s.ctx(), s.agentID, s.sessionKey, s.channel, s.accountID, s.chatID, s.projectID, s.Messages)
 		if err := s.store.AppendMessage(s.ctx(), s.agentID, s.sessionKey, msg); err != nil {
 			fmt.Fprintf(os.Stderr, "session archive append error: %v\n", err)
 		}
@@ -414,7 +456,7 @@ func (s *Session) ReplaceMessages(msgs []provider.Message) {
 	s.LastConsolidated = 0
 
 	if s.store != nil {
-		s.store.SaveSession(s.ctx(), s.agentID, s.sessionKey, s.channel, s.accountID, s.chatID, s.Messages)
+		s.store.SaveSession(s.ctx(), s.agentID, s.sessionKey, s.channel, s.accountID, s.chatID, s.projectID, s.Messages)
 	} else {
 		s.rewriteFile()
 	}
@@ -503,10 +545,14 @@ type WebSession struct {
 	Channel   string `json:"channel,omitempty"`
 	AccountID string `json:"accountId,omitempty"`
 	ChatID    string `json:"chatId,omitempty"`
-	Title     string `json:"title"`
-	Preview   string `json:"preview"`
-	CreatedAt int64  `json:"createdAt"` // unix ms
-	UpdatedAt int64  `json:"updatedAt"` // unix ms
+	// ProjectID groups this chat under a per-(user, agent) project
+	// folder. Empty = loose chat. Surfaced so the sidebar can section
+	// chats by project.
+	ProjectID    string `json:"projectId,omitempty"`
+	Title        string `json:"title"`
+	Preview      string `json:"preview"`
+	CreatedAt    int64  `json:"createdAt"` // unix ms
+	UpdatedAt    int64  `json:"updatedAt"` // unix ms
 	// ThumbnailURL is the first image_url attached to the FIRST user
 	// turn of the session, surfaced so the sidebar can show "image +
 	// text" instead of just the text label for multimodal chats.
@@ -672,6 +718,30 @@ func (m *Manager) RenameSessionByID(sessionId, title string) error {
 		return m.store.RenameSession(m.ctx(), m.agentID, key, title)
 	}
 	return m.RenameWebSession(sessionId, title)
+}
+
+// MoveSessionByID reassigns a session to a different project (or
+// detaches when projectID is ""). Resolves either a session_key or a
+// legacy web chat_id. Drops the in-memory cache entry so the next
+// Get re-loads the row with the freshly-stamped project_id — without
+// this drop, an open chat would keep saving with the old project_id
+// even after the sidebar shows it under a new project.
+//
+// File-backed mode is a no-op (no project concept) — callers that
+// only run dev mode shouldn't reach this path.
+func (m *Manager) MoveSessionByID(sessionId, projectID string) error {
+	key := m.ResolveSessionKey(sessionId)
+	m.mu.Lock()
+	if s, ok := m.sessions[key]; ok {
+		s.mu.Lock()
+		s.projectID = projectID
+		s.mu.Unlock()
+	}
+	m.mu.Unlock()
+	if m.store != nil {
+		return m.store.MoveSession(m.ctx(), m.agentID, key, projectID)
+	}
+	return nil
 }
 
 // DeleteWebSession removes a web chat session file and its metadata.

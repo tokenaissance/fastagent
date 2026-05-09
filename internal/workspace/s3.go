@@ -61,52 +61,63 @@ func NewS3(cfg S3Config) (*S3, error) {
 	}, nil
 }
 
-// key is <prefix>/<agentID>[/sessions/<sessionID>]/<path>, always with
-// forward slashes. Empty session keeps the legacy layout so skills and
-// admin uploads survive the per-session refactor without migration.
-func (s *S3) key(agentID, sessionID, p string) string {
+// key is <prefix>/<agentID>[/projects/<pid>[/<sid>]|/sessions/<sid>]/<path>,
+// always with forward slashes. Layout matches LocalFS.scopeDir — project
+// chats get their own per-session subdir under the project so concurrent
+// chats can't collide and a chat can be moved in/out as a single
+// rename. See LocalFS.scopeDir for the full table.
+func (s *S3) key(agentID, projectID, sessionID, p string) string {
 	parts := []string{}
 	if s.prefix != "" {
 		parts = append(parts, s.prefix)
 	}
 	parts = append(parts, agentID)
-	if sessionID != "" {
+	switch {
+	case projectID != "" && sessionID != "":
+		parts = append(parts, "projects", projectID, sessionID)
+	case projectID != "":
+		parts = append(parts, "projects", projectID)
+	case sessionID != "":
 		parts = append(parts, "sessions", sessionID)
 	}
 	parts = append(parts, path.Clean("/"+p)[1:])
 	return strings.Join(parts, "/")
 }
 
-// scopePrefix returns the listing prefix for an (agent, session) scope.
-// Empty session lists the whole agent subtree (useful for the admin file
-// browser); set session lists just that session's subtree.
-func (s *S3) scopePrefix(agentID, sessionID string) string {
+// scopePrefix returns the listing prefix. Both empty lists the whole
+// agent subtree (admin file browser); project/session set narrows it.
+func (s *S3) scopePrefix(agentID, projectID, sessionID string) string {
 	parts := []string{}
 	if s.prefix != "" {
 		parts = append(parts, s.prefix)
 	}
 	parts = append(parts, agentID)
-	if sessionID != "" {
+	switch {
+	case projectID != "" && sessionID != "":
+		parts = append(parts, "projects", projectID, sessionID)
+	case projectID != "":
+		parts = append(parts, "projects", projectID)
+	case sessionID != "":
 		parts = append(parts, "sessions", sessionID)
 	}
 	return strings.Join(parts, "/") + "/"
 }
 
-func (s *S3) Put(ctx context.Context, agentID, sessionID, p string, r io.Reader, size int64, contentType string) error {
+func (s *S3) Put(ctx context.Context, agentID, projectID, sessionID, p string, r io.Reader, size int64, contentType string) error {
 	if contentType == "" {
 		contentType = mime.TypeByExtension(filepath.Ext(p))
 		if contentType == "" {
 			contentType = "application/octet-stream"
 		}
 	}
-	_, err := s.client.PutObject(ctx, s.bucket, s.key(agentID, sessionID, p), r, size, minio.PutObjectOptions{
+	_, err := s.client.PutObject(ctx, s.bucket, s.key(agentID, projectID, sessionID, p), r, size, minio.PutObjectOptions{
 		ContentType: contentType,
 	})
 	return err
 }
 
-func (s *S3) Get(ctx context.Context, agentID, sessionID, p string) (io.ReadCloser, error) {
-	obj, err := s.client.GetObject(ctx, s.bucket, s.key(agentID, sessionID, p), minio.GetObjectOptions{})
+func (s *S3) Get(ctx context.Context, agentID, projectID, sessionID, p string) (io.ReadCloser, error) {
+	obj, err := s.client.GetObject(ctx, s.bucket, s.key(agentID, projectID, sessionID, p), minio.GetObjectOptions{})
 	if err != nil {
 		return nil, mapS3Err(err)
 	}
@@ -119,8 +130,8 @@ func (s *S3) Get(ctx context.Context, agentID, sessionID, p string) (io.ReadClos
 	return obj, nil
 }
 
-func (s *S3) Stat(ctx context.Context, agentID, sessionID, p string) (*ObjectInfo, error) {
-	info, err := s.client.StatObject(ctx, s.bucket, s.key(agentID, sessionID, p), minio.StatObjectOptions{})
+func (s *S3) Stat(ctx context.Context, agentID, projectID, sessionID, p string) (*ObjectInfo, error) {
+	info, err := s.client.StatObject(ctx, s.bucket, s.key(agentID, projectID, sessionID, p), minio.StatObjectOptions{})
 	if err != nil {
 		return nil, mapS3Err(err)
 	}
@@ -132,8 +143,8 @@ func (s *S3) Stat(ctx context.Context, agentID, sessionID, p string) (*ObjectInf
 	}, nil
 }
 
-func (s *S3) List(ctx context.Context, agentID, sessionID string) ([]ObjectInfo, error) {
-	prefix := s.scopePrefix(agentID, sessionID)
+func (s *S3) List(ctx context.Context, agentID, projectID, sessionID string) ([]ObjectInfo, error) {
+	prefix := s.scopePrefix(agentID, projectID, sessionID)
 	var out []ObjectInfo
 	for obj := range s.client.ListObjects(ctx, s.bucket, minio.ListObjectsOptions{
 		Prefix:    prefix,
@@ -157,10 +168,64 @@ func (s *S3) List(ctx context.Context, agentID, sessionID string) ([]ObjectInfo,
 	return out, nil
 }
 
-func (s *S3) Delete(ctx context.Context, agentID, sessionID, p string) error {
-	err := s.client.RemoveObject(ctx, s.bucket, s.key(agentID, sessionID, p), minio.RemoveObjectOptions{})
+func (s *S3) Delete(ctx context.Context, agentID, projectID, sessionID, p string) error {
+	err := s.client.RemoveObject(ctx, s.bucket, s.key(agentID, projectID, sessionID, p), minio.RemoveObjectOptions{})
 	if err != nil && !isS3NotFound(err) {
 		return err
+	}
+	return nil
+}
+
+// Move relocates every object under the source scope to the destination
+// scope. S3 has no native rename: each object is server-side copied
+// (CopyObject — bytes never round-trip the gateway) then the original
+// is deleted. Refuses to clobber a non-empty destination so a slip
+// can't merge two chats' files; returns ErrMoveDestinationExists.
+//
+// Not atomic: a crash mid-loop leaves the source/dest in a partially
+// migrated state. Callers should treat Move as best-effort and fix
+// up by re-running it (idempotent — the second call sees a missing
+// source and exits cleanly).
+func (s *S3) Move(ctx context.Context, agentID, fromProjectID, fromSessionID, toProjectID, toSessionID string) error {
+	srcPrefix := s.scopePrefix(agentID, fromProjectID, fromSessionID)
+	dstPrefix := s.scopePrefix(agentID, toProjectID, toSessionID)
+	if srcPrefix == dstPrefix {
+		return nil
+	}
+	// Destination must be empty.
+	for obj := range s.client.ListObjects(ctx, s.bucket, minio.ListObjectsOptions{
+		Prefix:    dstPrefix,
+		Recursive: true,
+		MaxKeys:   1,
+	}) {
+		if obj.Err != nil {
+			return obj.Err
+		}
+		if obj.Key != "" {
+			return ErrMoveDestinationExists
+		}
+	}
+	// Copy each source object to the corresponding destination key,
+	// then delete the source.
+	for obj := range s.client.ListObjects(ctx, s.bucket, minio.ListObjectsOptions{
+		Prefix:    srcPrefix,
+		Recursive: true,
+	}) {
+		if obj.Err != nil {
+			return obj.Err
+		}
+		if obj.Key == "" {
+			continue
+		}
+		dstKey := dstPrefix + strings.TrimPrefix(obj.Key, srcPrefix)
+		dstOpt := minio.CopyDestOptions{Bucket: s.bucket, Object: dstKey}
+		srcOpt := minio.CopySrcOptions{Bucket: s.bucket, Object: obj.Key}
+		if _, err := s.client.CopyObject(ctx, dstOpt, srcOpt); err != nil {
+			return fmt.Errorf("s3 copy %s -> %s: %w", obj.Key, dstKey, err)
+		}
+		if err := s.client.RemoveObject(ctx, s.bucket, obj.Key, minio.RemoveObjectOptions{}); err != nil && !isS3NotFound(err) {
+			return fmt.Errorf("s3 remove src %s: %w", obj.Key, err)
+		}
 	}
 	return nil
 }
@@ -168,9 +233,9 @@ func (s *S3) Delete(ctx context.Context, agentID, sessionID, p string) error {
 // SignedURL is the main reason we want S3 for cloud deployments: download
 // requests can bypass the gateway entirely. TTL is typically a few minutes;
 // the browser uses the URL once and discards it.
-func (s *S3) SignedURL(ctx context.Context, agentID, sessionID, p string, ttl time.Duration) (string, error) {
+func (s *S3) SignedURL(ctx context.Context, agentID, projectID, sessionID, p string, ttl time.Duration) (string, error) {
 	reqParams := url.Values{}
-	u, err := s.client.PresignedGetObject(ctx, s.bucket, s.key(agentID, sessionID, p), ttl, reqParams)
+	u, err := s.client.PresignedGetObject(ctx, s.bucket, s.key(agentID, projectID, sessionID, p), ttl, reqParams)
 	if err != nil {
 		return "", err
 	}

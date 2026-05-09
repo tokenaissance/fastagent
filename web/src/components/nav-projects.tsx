@@ -6,41 +6,18 @@ import {
   SidebarGroup,
   SidebarGroupLabel,
   SidebarMenu,
-  SidebarMenuAction,
   SidebarMenuButton,
   SidebarMenuItem,
-  useSidebar,
 } from "@/components/ui/sidebar";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { MoreHorizontalIcon, PencilIcon, Trash2Icon, MoreHorizontal } from "lucide-react";
-import { deleteChatSession, renameChatSession } from "@/lib/api";
+import { MoreHorizontal } from "lucide-react";
+import { moveChatSessionToProject } from "@/lib/api";
 import { ChannelIcon, channelLabel } from "@/components/channel-icon";
+import { ChatRowActions } from "@/components/chat-row-actions";
+
+// MIME type carried in dataTransfer for chat-session drags. Custom
+// type so we don't react to unrelated drops (text dragged in from
+// outside the app, files from the desktop, etc.).
+export const CHAT_DRAG_MIME = "application/x-fastclaw-chat";
 
 // Cap the sidebar list so a chatty agent doesn't push every other nav
 // item off-screen. The full list lives at /agents/<id>/chats with
@@ -57,6 +34,10 @@ export interface SessionItem {
   // channel drives the per-channel icon prefix (telegram / wechat /
   // line / web …). Empty falls back to the web glyph.
   channel?: string;
+  // projectId, when set, marks this chat as belonging to a project —
+  // NavSessions filters these out so they only appear nested under
+  // their project (NavProjectsList renders them).
+  projectId?: string;
 }
 
 export function NavSessions({
@@ -68,8 +49,33 @@ export function NavSessions({
 }) {
   const pathname = usePathname();
   const router = useRouter();
-  const [editTarget, setEditTarget] = React.useState<SessionItem | null>(null);
-  const [deleteTarget, setDeleteTarget] = React.useState<SessionItem | null>(null);
+  // Drop-zone state for "drag a project chat back out into Chats".
+  // The whole group acts as a target — we only highlight when the
+  // drag carries a CHAT_DRAG_MIME payload AND the source chat is
+  // currently inside a project (dropping a loose chat onto its own
+  // group is a no-op, so suppressing the highlight makes that
+  // self-evident). Hook must run before the early-return below to
+  // keep call order stable across renders.
+  const [chatsDropActive, setChatsDropActive] = React.useState(false);
+
+  // Dedupe rapid double-clicks on the same chat row — see the matching
+  // block in nav-projects-list.tsx for the connection-pool starvation
+  // it prevents. Hooks must come before the early-return.
+  const inFlightTargetRef = React.useRef<string | null>(null);
+  React.useEffect(() => {
+    inFlightTargetRef.current = null;
+  }, [pathname]);
+  const navigateOnce = React.useCallback(
+    (target: string) => {
+      const here =
+        pathname === target || pathname === target.replace(/\/$/, "");
+      if (here) return;
+      if (inFlightTargetRef.current === target) return;
+      inFlightTargetRef.current = target;
+      router.push(target);
+    },
+    [pathname, router],
+  );
 
   if (!agentId) return null;
 
@@ -87,51 +93,74 @@ export function NavSessions({
     }
   };
 
-  const onConfirmDelete = async () => {
-    if (!deleteTarget) return;
-    const target = deleteTarget;
-    setDeleteTarget(null);
-    try {
-      await deleteChatSession(agentId, target.id);
-    } finally {
-      // If the deleted session is the one currently open, bounce back to
-      // the fresh chat URL so the UI doesn't hang on a stale session.
-      if (
-        typeof window !== "undefined" &&
-        new URLSearchParams(window.location.search).get("session") === target.id
-      ) {
-        router.replace(chatBase);
-      }
-      broadcastChange();
+  const onChatsDragOver = (e: React.DragEvent) => {
+    if (!hasChatPayload(e)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    if (!chatsDropActive) setChatsDropActive(true);
+  };
+  const onChatsDragLeave = () => setChatsDropActive(false);
+  const onChatsDrop = async (e: React.DragEvent) => {
+    if (!hasChatPayload(e)) return;
+    e.preventDefault();
+    setChatsDropActive(false);
+    const sid = e.dataTransfer.getData(CHAT_DRAG_MIME);
+    if (!sid) return;
+    const sess = sessions.find((s) => s.id === sid);
+    // Already loose — nothing to do.
+    if (!sess || !sess.projectId) return;
+    const res = await moveChatSessionToProject(agentId, sid, "");
+    if (res?.error) {
+      // Surface the failure inline; no toast infra in the sidebar yet
+      // so a console error + alert keeps the user from silently losing
+      // the action.
+      console.error("move chat to loose failed:", res.error);
+      window.alert(`Failed to move chat: ${res.error}`);
+      return;
     }
+    broadcastChange();
   };
 
   return (
     <>
-      <SidebarGroup className="group-data-[collapsible=icon]:hidden">
+      <SidebarGroup
+        className="group-data-[collapsible=icon]:hidden"
+        onDragOver={onChatsDragOver}
+        onDragLeave={onChatsDragLeave}
+        onDrop={onChatsDrop}
+      >
         <SidebarGroupLabel>Chats</SidebarGroupLabel>
-        <SidebarMenu>
-          {sessions.slice(0, MAX_SIDEBAR_SESSIONS).map((s) => {
-            const href = `${chatBase}?session=${encodeURIComponent(s.id)}`;
-            const active =
-              pathname.startsWith(chatBase) &&
-              typeof window !== "undefined" &&
-              new URLSearchParams(window.location.search).get("session") === s.id;
+        <SidebarMenu
+          className={
+            chatsDropActive
+              ? "rounded-md outline outline-2 outline-primary/40"
+              : ""
+          }
+        >
+          {/* Skip chats that belong to a project — they render nested
+              under their project in NavProjectsList instead, so the flat
+              "Chats" section keeps showing only loose chats. */}
+          {sessions.filter((s) => !s.projectId).slice(0, MAX_SIDEBAR_SESSIONS).map((s) => {
+            const href = `${chatBase}${encodeURIComponent(s.id)}/`;
+            // Path form: /agents/<aid>/chat/<sid>/. Match exactly so a
+            // sibling chat doesn't light up just because pathname
+            // shares the chat base.
+            const active = pathname === href || pathname === href.replace(/\/$/, "");
             return (
               <SessionRow
                 key={s.id}
+                agentId={agentId}
                 session={s}
                 active={active}
-                onOpen={() => router.push(href)}
-                onEdit={() => setEditTarget(s)}
-                onDelete={() => setDeleteTarget(s)}
+                onOpen={() => navigateOnce(href)}
+                onChanged={broadcastChange}
               />
             );
           })}
           {sessions.length > MAX_SIDEBAR_SESSIONS && (
             <SidebarMenuItem>
               <SidebarMenuButton
-                onClick={() => router.push(`/agents/${agentId}/chats`)}
+                onClick={() => navigateOnce(`/agents/${agentId}/chats`)}
                 tooltip="See all chats"
                 className="text-muted-foreground"
               >
@@ -149,58 +178,37 @@ export function NavSessions({
           )}
         </SidebarMenu>
       </SidebarGroup>
-
-      <EditTitleDialog
-        target={editTarget}
-        agentId={agentId}
-        onClose={() => setEditTarget(null)}
-        onSaved={broadcastChange}
-      />
-
-      <AlertDialog
-        open={!!deleteTarget}
-        onOpenChange={(v) => !v && setDeleteTarget(null)}
-      >
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Delete chat</AlertDialogTitle>
-            <AlertDialogDescription>
-              Delete <strong>{deleteTarget?.title || deleteTarget?.id}</strong>? The
-              full message history for this chat will be removed and cannot be
-              recovered.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={onConfirmDelete}
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-            >
-              Delete
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
     </>
   );
 }
 
+// hasChatPayload: cheap predicate the drop targets use to gate
+// preventDefault + highlight. dataTransfer.types is available during
+// drag enter/over, so we can avoid lighting up for unrelated drags
+// (text/uri-list, Files, etc.) that happen to cross the sidebar.
+export function hasChatPayload(e: React.DragEvent): boolean {
+  return Array.from(e.dataTransfer.types).includes(CHAT_DRAG_MIME);
+}
+
 function SessionRow({
+  agentId,
   session,
   active,
   onOpen,
-  onEdit,
-  onDelete,
+  onChanged,
 }: {
+  agentId: string;
   session: SessionItem;
   active: boolean;
   onOpen: () => void;
-  onEdit: () => void;
-  onDelete: () => void;
+  onChanged: () => void;
 }) {
-  const { isMobile } = useSidebar();
+  const onDragStart = (e: React.DragEvent) => {
+    e.dataTransfer.setData(CHAT_DRAG_MIME, session.id);
+    e.dataTransfer.effectAllowed = "move";
+  };
   return (
-    <SidebarMenuItem>
+    <SidebarMenuItem draggable onDragStart={onDragStart}>
       <SidebarMenuButton
         isActive={active}
         tooltip={`${channelLabel(session.channel)} · ${session.title}`}
@@ -218,107 +226,11 @@ function SessionRow({
         )}
         <span className="truncate">{session.title || session.id}</span>
       </SidebarMenuButton>
-      <DropdownMenu>
-        <DropdownMenuTrigger
-          render={
-            <SidebarMenuAction showOnHover>
-              <MoreHorizontalIcon />
-              <span className="sr-only">Chat actions</span>
-            </SidebarMenuAction>
-          }
-        />
-        <DropdownMenuContent
-          className="w-40 rounded-lg"
-          side={isMobile ? "bottom" : "right"}
-          align={isMobile ? "end" : "start"}
-        >
-          <DropdownMenuItem onClick={onEdit}>
-            <PencilIcon className="text-muted-foreground" />
-            <span>Edit</span>
-          </DropdownMenuItem>
-          <DropdownMenuSeparator />
-          <DropdownMenuItem
-            onClick={onDelete}
-            className="text-destructive focus:text-destructive"
-          >
-            <Trash2Icon className="text-destructive" />
-            <span>Delete</span>
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
+      <ChatRowActions
+        agentId={agentId}
+        session={{ id: session.id, title: session.title }}
+        onChanged={onChanged}
+      />
     </SidebarMenuItem>
-  );
-}
-
-function EditTitleDialog({
-  target,
-  agentId,
-  onClose,
-  onSaved,
-}: {
-  target: SessionItem | null;
-  agentId: string;
-  onClose: () => void;
-  onSaved: () => void;
-}) {
-  const [draft, setDraft] = React.useState("");
-  const [saving, setSaving] = React.useState(false);
-
-  React.useEffect(() => {
-    setDraft(target?.title ?? "");
-  }, [target]);
-
-  if (!target) return null;
-
-  const save = async () => {
-    const next = draft.trim();
-    if (!next || next === target.title) {
-      onClose();
-      return;
-    }
-    setSaving(true);
-    try {
-      await renameChatSession(agentId, target.id, next);
-      onSaved();
-    } finally {
-      setSaving(false);
-      onClose();
-    }
-  };
-
-  return (
-    <Dialog open={!!target} onOpenChange={(v) => !v && onClose()}>
-      <DialogContent className="sm:max-w-md">
-        <DialogHeader>
-          <DialogTitle>Edit chat title</DialogTitle>
-          <DialogDescription>
-            Rename this chat so it's easier to find in the sidebar.
-          </DialogDescription>
-        </DialogHeader>
-        <Input
-          autoFocus
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => {
-            // Ignore Enter while a CJK IME composition is active — otherwise
-            // selecting a candidate would submit the dialog prematurely.
-            if (e.nativeEvent.isComposing || e.keyCode === 229) return;
-            if (e.key === "Enter") {
-              e.preventDefault();
-              save();
-            }
-          }}
-          placeholder="Chat title"
-        />
-        <DialogFooter>
-          <Button variant="outline" onClick={onClose} disabled={saving}>
-            Cancel
-          </Button>
-          <Button onClick={save} disabled={saving || !draft.trim()}>
-            {saving ? "Saving…" : "Save"}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
   );
 }

@@ -66,11 +66,12 @@ func (a *StoreAdapter) GetSession(ctx context.Context, agentID, sessionKey strin
 	return msgs, nil
 }
 
-func (a *StoreAdapter) SaveSession(ctx context.Context, agentID, sessionKey, channel, accountID, chatID string, messages []provider.Message) error {
+func (a *StoreAdapter) SaveSession(ctx context.Context, agentID, sessionKey, channel, accountID, chatID, projectID string, messages []provider.Message) error {
 	rec := &store.SessionRecord{
 		Channel:   channel,
 		AccountID: accountID,
 		ChatID:    chatID,
+		ProjectID: projectID,
 		Messages:  make([]store.SessionMessage, len(messages)),
 		UpdatedAt: time.Now(),
 	}
@@ -109,6 +110,21 @@ func (a *StoreAdapter) LookupSessionTriple(ctx context.Context, agentID, session
 		return "", "", "", err
 	}
 	return ch, acc, ci, nil
+}
+
+// LookupSessionProject returns the project_id stamped on the session
+// row (or "" for loose chats). Treats not-found as "no project" rather
+// than an error so callers can use the empty string to mean "fall back
+// to the per-chat workspace dir".
+func (a *StoreAdapter) LookupSessionProject(ctx context.Context, agentID, sessionKey string) (string, error) {
+	pid, err := a.st.LookupSessionProject(ctx, a.userID, agentID, sessionKey)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return "", nil
+		}
+		return "", err
+	}
+	return pid, nil
 }
 
 // AppendMessage persists one turn into session_messages — the append-only
@@ -267,6 +283,7 @@ func (a *StoreAdapter) ListWebSessions(ctx context.Context, agentID string) ([]W
 			Channel:      channel,
 			AccountID:    m.AccountID,
 			ChatID:       m.ChatID,
+			ProjectID:    m.ProjectID,
 			Title:        title,
 			Preview:      preview,
 			ThumbnailURL: thumb,
@@ -335,4 +352,8 @@ func (a *StoreAdapter) DeleteSession(ctx context.Context, agentID, sessionKey st
 
 func (a *StoreAdapter) RenameSession(ctx context.Context, agentID, sessionKey, title string) error {
 	return a.st.RenameSession(ctx, a.userID, agentID, sessionKey, title)
+}
+
+func (a *StoreAdapter) MoveSession(ctx context.Context, agentID, sessionKey, projectID string) error {
+	return a.st.MoveSession(ctx, a.userID, agentID, sessionKey, projectID)
 }

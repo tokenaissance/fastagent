@@ -66,6 +66,11 @@ type Store interface {
 	ListSessions(ctx context.Context, userID, agentID string) ([]SessionMeta, error)
 	DeleteSession(ctx context.Context, userID, agentID, sessionKey string) error
 	RenameSession(ctx context.Context, userID, agentID, sessionKey, title string) error
+	// MoveSession reassigns a session to a different project (or
+	// detaches it when projectID is ""). Used by the sidebar
+	// drag-and-drop affordance. Workspace file migration is the
+	// caller's responsibility — this only flips sessions.project_id.
+	MoveSession(ctx context.Context, userID, agentID, sessionKey, projectID string) error
 	// ResolveActiveSessionKey returns the most recently updated session_key
 	// for the (channel, accountID, chatID) triple, or ErrNotFound. Used by
 	// IM routing to pick the conversation thread an inbound message
@@ -77,6 +82,26 @@ type Store interface {
 	// carries the session_key, so workspace artifacts stay namespaced
 	// under the original conversation rather than re-keyed by session.
 	LookupSessionTriple(ctx context.Context, userID, agentID, sessionKey string) (channel, accountID, chatID string, err error)
+	// LookupSessionProject returns the project_id of a session_key, or
+	// "" if the session is loose (no project). Used by the workspace
+	// path resolver to pick projects/<id>/ over sessions/<chat>/ when
+	// mounting the sandbox.
+	LookupSessionProject(ctx context.Context, userID, agentID, sessionKey string) (string, error)
+
+	// --- Projects (per user, per agent — workspace folder grouping) ---
+	//
+	// A project is just (name, description) plus a stable id; the
+	// workspace dir is derived from id. Sessions opt in by setting
+	// project_id at create time; existing rows can be moved later by
+	// updating sessions.project_id (file migration is the caller's
+	// problem). DeleteProject blocks when any session still references
+	// the row — callers either delete the chats first or use a soft
+	// detach (clearing project_id back to '').
+	ListProjects(ctx context.Context, userID, agentID string) ([]ProjectRecord, error)
+	GetProject(ctx context.Context, userID, agentID, projectID string) (*ProjectRecord, error)
+	SaveProject(ctx context.Context, p *ProjectRecord) error
+	DeleteProject(ctx context.Context, userID, agentID, projectID string) error
+	CountProjectSessions(ctx context.Context, userID, agentID, projectID string) (int, error)
 
 	// --- Session messages (append-only per-turn archive) ---
 	//
@@ -271,6 +296,11 @@ type SessionRecord struct {
 	Channel   string           `json:"channel,omitempty"`
 	AccountID string           `json:"accountId,omitempty"`
 	ChatID    string           `json:"chatId,omitempty"`
+	// ProjectID groups sessions sharing a workspace folder; empty =
+	// loose chat (each session gets its own per-chat sandbox dir).
+	// Like the channel triple it's persisted on INSERT only and
+	// preserved on UPDATE.
+	ProjectID string           `json:"projectId,omitempty"`
 	Messages  []SessionMessage `json:"messages"`
 	UpdatedAt time.Time        `json:"updatedAt"`
 }
@@ -308,9 +338,29 @@ type SessionMeta struct {
 	Channel      string    `json:"channel,omitempty"`
 	AccountID    string    `json:"accountId,omitempty"`
 	ChatID       string    `json:"chatId,omitempty"`
+	ProjectID    string    `json:"projectId,omitempty"`
 	Title        string    `json:"title,omitempty"`
 	MessageCount int       `json:"messageCount"`
 	UpdatedAt    time.Time `json:"updatedAt"`
+}
+
+// ProjectRecord is a per-(user, agent) named workspace folder. Sessions
+// reference a project via sessions.project_id; every session in the
+// same project mounts workspaces/<agent>/projects/<id>/ as its sandbox
+// /workspace, so files are shared across the project's chats.
+//
+// A project is private to its creator (the user_id, agent_id pair),
+// matching SessionRecord's ownership model — different users sharing
+// the same agent each have their own projects, never seeing each
+// other's.
+type ProjectRecord struct {
+	UserID      string    `json:"-"`
+	AgentID     string    `json:"-"`
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	Description string    `json:"description,omitempty"`
+	CreatedAt   time.Time `json:"createdAt"`
+	UpdatedAt   time.Time `json:"updatedAt"`
 }
 
 // Kinds for ConfigRecord.

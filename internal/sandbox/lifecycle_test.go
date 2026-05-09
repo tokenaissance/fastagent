@@ -56,8 +56,8 @@ type fakePool struct {
 
 func newFakePool() *fakePool { return &fakePool{live: map[string]*fakeExecutor{}} }
 
-func (p *fakePool) Get(ctx context.Context, agentID, sessionID string) (Executor, error) {
-	key := poolKey(agentID, sessionID)
+func (p *fakePool) Get(ctx context.Context, agentID, projectID, sessionID string) (Executor, error) {
+	key := poolKey(agentID, projectID, sessionID)
 	if ex, ok := p.live[key]; ok {
 		return ex, nil
 	}
@@ -67,9 +67,9 @@ func (p *fakePool) Get(ctx context.Context, agentID, sessionID string) (Executor
 	return ex, nil
 }
 
-func (p *fakePool) Release(agentID, sessionID string) error {
+func (p *fakePool) Release(agentID, projectID, sessionID string) error {
 	atomic.AddInt32(&p.releases, 1)
-	key := poolKey(agentID, sessionID)
+	key := poolKey(agentID, projectID, sessionID)
 	if ex, ok := p.live[key]; ok {
 		delete(p.live, key)
 		return ex.Close()
@@ -94,7 +94,7 @@ func TestLifecycle_LazyCreation(t *testing.T) {
 	lp.Start()
 	defer lp.CloseAll()
 
-	ex, err := lp.Get(context.Background(), "alice", "")
+	ex, err := lp.Get(context.Background(), "alice", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +128,7 @@ func TestLifecycle_IdleEviction(t *testing.T) {
 	lp.Start()
 	defer lp.CloseAll()
 
-	ex, _ := lp.Get(context.Background(), "bob", "")
+	ex, _ := lp.Get(context.Background(), "bob", "", "")
 	ex.Exec(context.Background(), "ls", time.Second)
 
 	if got := atomic.LoadInt32(&inner.creates); got != 1 {
@@ -179,51 +179,79 @@ func wsScopeKey(agentID, sessionID string) string {
 	return agentID + ":" + sessionID
 }
 
-func (w *fakeWorkspace) Put(ctx context.Context, agentID, sessionID, p string, r io.Reader, _ int64, _ string) error {
+func (w *fakeWorkspace) Put(ctx context.Context, agentID, projectID, sessionID, p string, r io.Reader, _ int64, _ string) error {
 	buf, _ := io.ReadAll(r)
-	w.put(wsScopeKey(agentID, sessionID), p, buf)
+	w.put(wsScopeKey(agentID, scopeForKey(projectID, sessionID)), p, buf)
 	return nil
 }
 
-func (w *fakeWorkspace) Get(ctx context.Context, agentID, sessionID, p string) (io.ReadCloser, error) {
+func (w *fakeWorkspace) Get(ctx context.Context, agentID, projectID, sessionID, p string) (io.ReadCloser, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	data, ok := w.objects[wsScopeKey(agentID, sessionID)][p]
+	data, ok := w.objects[wsScopeKey(agentID, scopeForKey(projectID, sessionID))][p]
 	if !ok {
 		return nil, workspace.ErrNotFound
 	}
 	return io.NopCloser(bytes.NewReader(data)), nil
 }
 
-func (w *fakeWorkspace) Stat(ctx context.Context, agentID, sessionID, p string) (*workspace.ObjectInfo, error) {
+func (w *fakeWorkspace) Stat(ctx context.Context, agentID, projectID, sessionID, p string) (*workspace.ObjectInfo, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	data, ok := w.objects[wsScopeKey(agentID, sessionID)][p]
+	data, ok := w.objects[wsScopeKey(agentID, scopeForKey(projectID, sessionID))][p]
 	if !ok {
 		return nil, workspace.ErrNotFound
 	}
 	return &workspace.ObjectInfo{Path: p, Size: int64(len(data))}, nil
 }
 
-func (w *fakeWorkspace) List(ctx context.Context, agentID, sessionID string) ([]workspace.ObjectInfo, error) {
+func (w *fakeWorkspace) List(ctx context.Context, agentID, projectID, sessionID string) ([]workspace.ObjectInfo, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	var out []workspace.ObjectInfo
-	for p, data := range w.objects[wsScopeKey(agentID, sessionID)] {
+	for p, data := range w.objects[wsScopeKey(agentID, scopeForKey(projectID, sessionID))] {
 		out = append(out, workspace.ObjectInfo{Path: p, Size: int64(len(data))})
 	}
 	return out, nil
 }
 
-func (w *fakeWorkspace) Delete(ctx context.Context, agentID, sessionID, p string) error {
+func (w *fakeWorkspace) Delete(ctx context.Context, agentID, projectID, sessionID, p string) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	delete(w.objects[wsScopeKey(agentID, sessionID)], p)
+	delete(w.objects[wsScopeKey(agentID, scopeForKey(projectID, sessionID))], p)
 	return nil
 }
 
-func (w *fakeWorkspace) SignedURL(ctx context.Context, agentID, sessionID, p string, ttl time.Duration) (string, error) {
+func (w *fakeWorkspace) Move(ctx context.Context, agentID, fromProjectID, fromSessionID, toProjectID, toSessionID string) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	srcKey := wsScopeKey(agentID, scopeForKey(fromProjectID, fromSessionID))
+	dstKey := wsScopeKey(agentID, scopeForKey(toProjectID, toSessionID))
+	if srcKey == dstKey {
+		return nil
+	}
+	if existing, ok := w.objects[dstKey]; ok && len(existing) > 0 {
+		return workspace.ErrMoveDestinationExists
+	}
+	if src, ok := w.objects[srcKey]; ok {
+		w.objects[dstKey] = src
+		delete(w.objects, srcKey)
+	}
+	return nil
+}
+
+func (w *fakeWorkspace) SignedURL(ctx context.Context, agentID, projectID, sessionID, p string, ttl time.Duration) (string, error) {
 	return "", workspace.ErrSignedURLUnsupported
+}
+
+// scopeForKey collapses the (project, session) tuple to a single string
+// the test fakes can use as a map sub-key. Project wins so all chats in
+// one project share a slot, mirroring production scopeDir logic.
+func scopeForKey(projectID, sessionID string) string {
+	if projectID != "" {
+		return "p:" + projectID
+	}
+	return sessionID
 }
 
 // TestLifecycle_HydrateOnCreate proves that the first tool call triggers
@@ -240,7 +268,7 @@ func TestLifecycle_HydrateOnCreate(t *testing.T) {
 	lp.Start()
 	defer lp.CloseAll()
 
-	ex, _ := lp.Get(context.Background(), "dave", "")
+	ex, _ := lp.Get(context.Background(), "dave", "", "")
 	ex.Exec(context.Background(), "ls /workspace", time.Second)
 
 	// Grab the underlying fake executor to inspect writes.
@@ -310,8 +338,8 @@ func newSnappingPool(files map[string][]byte) *snappingPool {
 	}
 }
 
-func (p *snappingPool) Get(ctx context.Context, agentID, sessionID string) (Executor, error) {
-	key := poolKey(agentID, sessionID)
+func (p *snappingPool) Get(ctx context.Context, agentID, projectID, sessionID string) (Executor, error) {
+	key := poolKey(agentID, projectID, sessionID)
 	if _, ok := p.fakePool.live[key]; !ok {
 		atomic.AddInt32(&p.fakePool.creates, 1)
 		// Lie: stash the underlying fakeExecutor in fakePool.live so
@@ -338,7 +366,7 @@ func TestLifecycle_FlushOnEvict(t *testing.T) {
 	lp.Start()
 	defer lp.CloseAll()
 
-	ex, _ := lp.Get(context.Background(), "erin", "")
+	ex, _ := lp.Get(context.Background(), "erin", "", "")
 	ex.Exec(context.Background(), "python generate.py", time.Second)
 
 	// Wait past idle TTL so the sweeper evicts — flush should fire.
@@ -346,7 +374,7 @@ func TestLifecycle_FlushOnEvict(t *testing.T) {
 
 	// Both files should now be in the workspace store.
 	for path, want := range files {
-		got, err := ws.Get(context.Background(), "erin", "", path)
+		got, err := ws.Get(context.Background(), "erin", "", "", path)
 		if err != nil {
 			t.Fatalf("expected flushed file %q in store: %v", path, err)
 		}
@@ -365,7 +393,7 @@ func TestLifecycle_CloseAll(t *testing.T) {
 	lp := NewLifecyclePool(inner, time.Second, 50*time.Millisecond)
 	lp.Start()
 
-	ex, _ := lp.Get(context.Background(), "carol", "")
+	ex, _ := lp.Get(context.Background(), "carol", "", "")
 	ex.Exec(context.Background(), "echo", time.Second)
 
 	lp.CloseAll()

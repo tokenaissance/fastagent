@@ -24,10 +24,16 @@ type DockerSandbox struct {
 	containerID string
 	image       string
 	workspace   string
-	skillDirs   []string // host paths to mount read-only at /skills/<name>/
-	policy      *Policy
-	env         map[string]string
-	mu          sync.Mutex
+	// workdir is the container's starting working directory. Defaults
+	// to /workspace when empty. Project chats override to
+	// /workspace/<sessionID>/ so the chat sees the whole project at
+	// /workspace (siblings included) but its relative writes default
+	// to its own subdir.
+	workdir   string
+	skillDirs []string // host paths to mount read-only at /skills/<name>/
+	policy    *Policy
+	env       map[string]string
+	mu        sync.Mutex
 }
 
 // NewDockerSandbox creates a new sandbox configuration (container is created lazily).
@@ -52,6 +58,15 @@ func NewDockerSandbox(image, workspace string, policy *Policy) *DockerSandbox {
 		policy:    policy,
 		env:       make(map[string]string),
 	}
+}
+
+// SetWorkdir overrides the container's starting working directory.
+// Empty restores the default (/workspace). Must be called before
+// Create() — once the container exists the workdir is baked in.
+func (s *DockerSandbox) SetWorkdir(wd string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.workdir = wd
 }
 
 // SetSkillDirs configures host paths whose contents (skill folders)
@@ -92,7 +107,11 @@ func (s *DockerSandbox) Create() error {
 	// Mount workspace
 	if s.workspace != "" {
 		args = append(args, "-v", fmt.Sprintf("%s:/workspace:rw", s.workspace))
-		args = append(args, "-w", "/workspace")
+		wd := s.workdir
+		if wd == "" {
+			wd = "/workspace"
+		}
+		args = append(args, "-w", wd)
 	}
 
 	// Mount each skill dir read-only at /skills/<basename>/. The LLM

@@ -98,7 +98,7 @@ func (a *Agent) handleSlashCommand(msg bus.InboundMessage) slashResult {
 
 // slashRetry re-runs the last user message, discarding the last assistant response.
 func (a *Agent) slashRetry(msg bus.InboundMessage) slashResult {
-	sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID)
+	sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID, msg.ProjectID)
 	msgs := sess.GetMessages()
 
 	// Find the last user message
@@ -134,7 +134,7 @@ func (a *Agent) slashRetry(msg bus.InboundMessage) slashResult {
 
 // slashUndo reverts the last assistant response.
 func (a *Agent) slashUndo(msg bus.InboundMessage) slashResult {
-	sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID)
+	sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID, msg.ProjectID)
 
 	if !sess.HasSnapshot() {
 		// No snapshot — try to remove last user+assistant turn manually
@@ -161,7 +161,7 @@ func (a *Agent) slashUndo(msg bus.InboundMessage) slashResult {
 }
 
 func (a *Agent) slashCompact(msg bus.InboundMessage) slashResult {
-	sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID)
+	sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID, msg.ProjectID)
 	sessionMsgs := sess.GetMessages()
 
 	if len(sessionMsgs) == 0 {
@@ -180,7 +180,7 @@ func (a *Agent) slashCompact(msg bus.InboundMessage) slashResult {
 }
 
 func (a *Agent) slashStatus(msg bus.InboundMessage) slashResult {
-	sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID)
+	sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID, msg.ProjectID)
 	sessionMsgs := sess.GetMessages()
 
 	memContent := a.memory.LoadMemory()
@@ -210,7 +210,7 @@ func (a *Agent) slashStatus(msg bus.InboundMessage) slashResult {
 }
 
 func (a *Agent) slashUsage(msg bus.InboundMessage) slashResult {
-	sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID)
+	sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID, msg.ProjectID)
 	msgs := sess.GetMessages()
 
 	userTurns, asstTurns, toolTurns := 0, 0, 0

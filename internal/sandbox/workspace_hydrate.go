@@ -19,13 +19,13 @@ import (
 // logged and skipped rather than failing the whole hydrate. The typical
 // workspace is a handful of files (MB-range PDFs, audio clips); for larger
 // setups consider paginated / parallel copy, or E2B's snapshot API.
-func hydrateWorkspace(ctx context.Context, ws workspace.Store, ex Executor, agentID, sessionID, sandboxRoot string) {
+func hydrateWorkspace(ctx context.Context, ws workspace.Store, ex Executor, agentID, projectID, sessionID, sandboxRoot string) {
 	if ws == nil || ex == nil {
 		return
 	}
-	objs, err := ws.List(ctx, agentID, sessionID)
+	objs, err := ws.List(ctx, agentID, projectID, sessionID)
 	if err != nil {
-		slog.Warn("workspace hydrate: list failed", "agent", agentID, "session", sessionID, "error", err)
+		slog.Warn("workspace hydrate: list failed", "agent", agentID, "project", projectID, "session", sessionID, "error", err)
 		return
 	}
 	if len(objs) == 0 {
@@ -34,26 +34,26 @@ func hydrateWorkspace(ctx context.Context, ws workspace.Store, ex Executor, agen
 	copied := 0
 	for _, obj := range objs {
 		target := path.Join(sandboxRoot, obj.Path)
-		rc, getErr := ws.Get(ctx, agentID, sessionID, obj.Path)
+		rc, getErr := ws.Get(ctx, agentID, projectID, sessionID, obj.Path)
 		if getErr != nil {
-			slog.Warn("workspace hydrate: get failed", "agent", agentID, "session", sessionID, "path", obj.Path, "error", getErr)
+			slog.Warn("workspace hydrate: get failed", "agent", agentID, "project", projectID, "session", sessionID, "path", obj.Path, "error", getErr)
 			continue
 		}
 		content, readErr := io.ReadAll(rc)
 		rc.Close()
 		if readErr != nil {
-			slog.Warn("workspace hydrate: read failed", "agent", agentID, "session", sessionID, "path", obj.Path, "error", readErr)
+			slog.Warn("workspace hydrate: read failed", "agent", agentID, "project", projectID, "session", sessionID, "path", obj.Path, "error", readErr)
 			continue
 		}
 		// Executor.WriteFile accepts the full sandbox path; all current
 		// implementations (docker/e2b) handle mkdir implicitly.
 		if _, wErr := ex.WriteFile(ctx, target, string(content)); wErr != nil {
-			slog.Warn("workspace hydrate: sandbox write failed", "agent", agentID, "session", sessionID, "path", target, "error", wErr)
+			slog.Warn("workspace hydrate: sandbox write failed", "agent", agentID, "project", projectID, "session", sessionID, "path", target, "error", wErr)
 			continue
 		}
 		copied++
 	}
-	slog.Info("workspace hydrated into sandbox", "agent", agentID, "session", sessionID, "files", copied, "root", sandboxRoot)
+	slog.Info("workspace hydrated into sandbox", "agent", agentID, "project", projectID, "session", sessionID, "files", copied, "root", sandboxRoot)
 }
 
 // defaultSandboxRoot is where hydrated files land inside the sandbox. Kept

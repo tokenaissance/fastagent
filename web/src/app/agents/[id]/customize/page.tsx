@@ -220,7 +220,13 @@ export default function AgentCustomizePage() {
         }
         spellCheck={false}
         className="w-full rounded-lg border border-border bg-card px-4 py-3 font-mono text-sm leading-relaxed outline-none focus:ring-1 focus:ring-primary/30 resize-none"
-        style={{ height: "calc(100vh - 240px)", minHeight: 400 }}
+        // Bounded so the editor stays a reasonable size inside the
+        // Settings dialog (85vh modal) — the previous
+        // `calc(100vh - 240px)` made the textarea swallow nearly the
+        // whole dialog. The clamp keeps the standalone /customize/
+        // page usable too: still grows on tall screens, but stops
+        // short of "fills the viewport".
+        style={{ height: "min(55vh, 480px)", minHeight: 280 }}
         placeholder={`# ${activeTab}\n\nWrite your content here...`}
       />
     </div>

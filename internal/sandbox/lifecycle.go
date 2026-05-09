@@ -55,11 +55,13 @@ type LifecyclePool struct {
 	done   chan struct{}
 }
 
-// sandboxScope is the (agentID, sessionID) tuple a sandbox belongs to.
-// Stored alongside the composite map key so lifecycle code can call back
-// into ExecutorPool.Get/Release with the right scope without re-parsing.
+// sandboxScope is the (agentID, projectID, sessionID) tuple a sandbox
+// belongs to. Stored alongside the composite map key so lifecycle code
+// can call back into ExecutorPool.Get/Release with the right scope
+// without re-parsing.
 type sandboxScope struct {
 	agentID   string
+	projectID string
 	sessionID string
 }
 
@@ -146,7 +148,7 @@ func (p *LifecyclePool) evictIdle() {
 	// evicted sandbox for a live one. Clear hydrated too so the next
 	// lazy-creation re-syncs from the workspace store.
 	for _, sc := range toEvict {
-		k := poolKey(sc.agentID, sc.sessionID)
+		k := poolKey(sc.agentID, sc.projectID, sc.sessionID)
 		delete(p.lastUsed, k)
 		delete(p.hydrated, k)
 		delete(p.scopes, k)
@@ -160,7 +162,7 @@ func (p *LifecyclePool) evictIdle() {
 		// write_file) before destroying it.
 		p.flushIfSupported(sc)
 
-		if err := p.inner.Release(sc.agentID, sc.sessionID); err != nil {
+		if err := p.inner.Release(sc.agentID, sc.projectID, sc.sessionID); err != nil {
 			slog.Warn("sandbox evict failed", "agent", sc.agentID, "session", sc.sessionID, "error", err)
 			continue
 		}
@@ -176,7 +178,7 @@ func (p *LifecyclePool) flushIfSupported(sc sandboxScope) {
 	if p.workspace == nil {
 		return
 	}
-	ex, err := p.inner.Get(context.Background(), sc.agentID, sc.sessionID)
+	ex, err := p.inner.Get(context.Background(), sc.agentID, sc.projectID, sc.sessionID)
 	if err != nil {
 		return
 	}
@@ -206,10 +208,10 @@ func (p *LifecyclePool) syncSnapshot(ctx context.Context, sc sandboxScope, ex Ex
 		// avoids rewriting every file every sync when nothing changed.
 		// Content equality would be stricter but requires a full
 		// round-trip per file; size is usually enough.
-		if info, err := p.workspace.Stat(ctx, sc.agentID, sc.sessionID, path); err == nil && info.Size == int64(len(data)) {
+		if info, err := p.workspace.Stat(ctx, sc.agentID, sc.projectID, sc.sessionID, path); err == nil && info.Size == int64(len(data)) {
 			continue
 		}
-		if err := p.workspace.Put(ctx, sc.agentID, sc.sessionID, path, bytesReader(data), int64(len(data)), ""); err != nil {
+		if err := p.workspace.Put(ctx, sc.agentID, sc.projectID, sc.sessionID, path, bytesReader(data), int64(len(data)), ""); err != nil {
 			slog.Warn("sandbox sync: put failed", "agent", sc.agentID, "session", sc.sessionID, "cause", cause, "path", path, "error", err)
 			continue
 		}
@@ -225,21 +227,21 @@ func (p *LifecyclePool) syncSnapshot(ctx context.Context, sc sandboxScope, ex Ex
 // needed) and tick the last-used timestamp.
 //
 // Contract matches ExecutorPool.Get so LifecyclePool is a drop-in wrapper.
-func (p *LifecyclePool) Get(ctx context.Context, agentID, sessionID string) (Executor, error) {
-	return &lazyExecutor{pool: p, scope: sandboxScope{agentID: agentID, sessionID: sessionID}}, nil
+func (p *LifecyclePool) Get(ctx context.Context, agentID, projectID, sessionID string) (Executor, error) {
+	return &lazyExecutor{pool: p, scope: sandboxScope{agentID: agentID, projectID: projectID, sessionID: sessionID}}, nil
 }
 
 // Release forwards to the inner pool and drops the lastUsed entry. Useful
 // for explicit teardown (agent deletion) — normal flow relies on idle
 // eviction.
-func (p *LifecyclePool) Release(agentID, sessionID string) error {
-	k := poolKey(agentID, sessionID)
+func (p *LifecyclePool) Release(agentID, projectID, sessionID string) error {
+	k := poolKey(agentID, projectID, sessionID)
 	p.mu.Lock()
 	delete(p.lastUsed, k)
 	delete(p.hydrated, k)
 	delete(p.scopes, k)
 	p.mu.Unlock()
-	return p.inner.Release(agentID, sessionID)
+	return p.inner.Release(agentID, projectID, sessionID)
 }
 
 // CloseAll stops the sweeper and tears down every live sandbox. Called on
@@ -267,7 +269,7 @@ func (p *LifecyclePool) CloseAll() {
 // configured workspace.Store so exec'd commands see the files that
 // write_file has produced in previous sessions.
 func (p *LifecyclePool) getInner(ctx context.Context, sc sandboxScope) (Executor, error) {
-	k := poolKey(sc.agentID, sc.sessionID)
+	k := poolKey(sc.agentID, sc.projectID, sc.sessionID)
 	p.mu.Lock()
 	needsHydrate := !p.hydrated[k]
 	p.lastUsed[k] = time.Now()
@@ -277,7 +279,7 @@ func (p *LifecyclePool) getInner(ctx context.Context, sc sandboxScope) (Executor
 	}
 	p.mu.Unlock()
 
-	ex, err := p.inner.Get(ctx, sc.agentID, sc.sessionID)
+	ex, err := p.inner.Get(ctx, sc.agentID, sc.projectID, sc.sessionID)
 	if err != nil {
 		// Roll back the hydrated flag so a retry will try again.
 		p.mu.Lock()
@@ -291,7 +293,7 @@ func (p *LifecyclePool) getInner(ctx context.Context, sc sandboxScope) (Executor
 	// Otherwise (docker), copy each object via ex.WriteFile.
 	if needsHydrate && p.workspace != nil {
 		if _, selfHydrates := p.inner.(workspaceAware); !selfHydrates {
-			hydrateWorkspace(ctx, p.workspace, ex, sc.agentID, sc.sessionID, defaultSandboxRoot)
+			hydrateWorkspace(ctx, p.workspace, ex, sc.agentID, sc.projectID, sc.sessionID, defaultSandboxRoot)
 		}
 	}
 	return ex, nil

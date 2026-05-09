@@ -25,6 +25,7 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/session"
 	"github.com/fastclaw-ai/fastclaw/internal/store"
 	"github.com/fastclaw-ai/fastclaw/internal/users"
+	"github.com/fastclaw-ai/fastclaw/internal/workspace"
 )
 
 type agentChatEvent = agent.ChatEvent
@@ -247,6 +248,32 @@ func authIdentity(r *http.Request) (auth.Identity, bool) {
 // an actAs override gets the foreign agent injected into their OWN
 // UserSpace — sessions, memory, and provider scope stay caller-keyed
 // (admin doesn't see the owner's chats), while the agent's persistent
+// resolveSessionProject reads sessions.project_id for the chat
+// the request is targeting so attachments and other workspace IO can
+// route to projects/<pid>/ when the chat belongs to a project. Returns
+// "" on any failure (caller treats as loose chat) — non-existent
+// session, no auth context, and "no datastore" all collapse to the
+// same outcome and we don't want a path lookup to break the chat
+// hot-path.
+func (s *Server) resolveSessionProject(ctx context.Context, r *http.Request, agentID, sessionKey string) string {
+	if sessionKey == "" || s.dataStore == nil {
+		return ""
+	}
+	ident, ok := auth.FromContext(r.Context())
+	if !ok {
+		return ""
+	}
+	uid := ident.EffectiveUserID()
+	if uid == "" {
+		return ""
+	}
+	pid, err := s.dataStore.LookupSessionProject(ctx, uid, agentID, sessionKey)
+	if err != nil {
+		return ""
+	}
+	return pid
+}
+
 // identity (system prompt, agent-scope config, skills, files — all
 // keyed by agent_id) is reused.
 func (s *Server) resolveAgent(r *http.Request, agentID string) AgentHandle {
@@ -774,6 +801,12 @@ func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
 type chatRequest struct {
 	AgentID   string         `json:"agentId,omitempty"`
 	SessionID string         `json:"sessionId"`
+	// ProjectID, when non-empty AND the session row doesn't yet exist,
+	// is the "this chat belongs to project X" hint the URL carries
+	// (`?project=<pid>`) before the first message. Once the row exists
+	// it's authoritative — the server reads project_id from the row
+	// and ignores any later hint.
+	ProjectID string         `json:"projectId,omitempty"`
 	Message   string         `json:"message"`
 	// Images carries data URLs / HTTPS URLs for image attachments. The
 	// web client historically sends them under `imageUrls` (camelCase)
@@ -858,10 +891,15 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	images := req.allImages()
 	msgText := req.Message
 	if !req.preMaterialized() {
-		paths := ag.WriteSessionAttachments(r.Context(), req.SessionID, images)
+		// Resolve the chat's project so attachments land in
+		// projects/<pid>/ when the session belongs to one. Best-effort:
+		// failure → empty pid → loose-chat scope (the historical
+		// behavior).
+		projectID := s.resolveSessionProject(r.Context(), r, ag.Name(), req.SessionID)
+		paths := ag.WriteSessionAttachments(r.Context(), req.SessionID, projectID, images)
 		msgText = annotateMessageWithAttachments(req.Message, paths)
 	}
-	reply := ag.HandleWebChat(r.Context(), req.SessionID, msgText, images, req.Params)
+	reply := ag.HandleWebChat(r.Context(), req.SessionID, req.ProjectID, msgText, images, req.Params)
 	jsonResponse(w, http.StatusOK, map[string]any{"reply": reply})
 }
 
@@ -903,7 +941,8 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	images := req.allImages()
 	msgText := req.Message
 	if !req.preMaterialized() {
-		paths := ag.WriteSessionAttachments(r.Context(), req.SessionID, images)
+		projectID := s.resolveSessionProject(r.Context(), r, ag.Name(), req.SessionID)
+		paths := ag.WriteSessionAttachments(r.Context(), req.SessionID, projectID, images)
 		msgText = annotateMessageWithAttachments(req.Message, paths)
 	}
 
@@ -930,7 +969,7 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		// events param stays nil — emitEvent now fans out via the
 		// streamCtx attached above (persist + hub). The legacy channel
 		// path is no longer needed for this handler.
-		_ = ag.HandleWebChatStream(agentCtx, req.SessionID, msgText, images, req.Params, nil)
+		_ = ag.HandleWebChatStream(agentCtx, req.SessionID, req.ProjectID, msgText, images, req.Params, nil)
 	}()
 
 	// Heartbeat keeps proxies (nginx 60s default, Cloudflare 100s, ELB
@@ -1211,6 +1250,81 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := ag.DeleteWebChatSession(r.PathValue("key")); err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// handleMoveSessionProject reassigns one chat to a different project
+// (or detaches it back to the loose-chat list when projectId is "").
+// Backs the sidebar drag-and-drop affordance: dragging a chat row
+// onto a project header / out of one fires this endpoint.
+//
+// Request body: { "agentId": "...", "projectId": "<pid>" | "" }
+//
+// Side effects beyond the sessions.project_id flip:
+//   - Workspace files are moved between sessions/<sid>/ and
+//     projects/<pid>/<sid>/ so the next turn sees its own artifacts
+//     under the new scope. Empty source dir = no-op.
+//   - Any active sandbox bound to this chat is released so the
+//     replacement container starts with the new bind-mount path.
+//
+// Returns 409 with code="destination_exists" when the target dir
+// already has files (defensive — session_keys are unique so this
+// shouldn't happen organically, but better than silent merge).
+func (s *Server) handleMoveSessionProject(w http.ResponseWriter, r *http.Request) {
+	agentID := r.URL.Query().Get("agentId")
+	var req struct {
+		AgentID   string `json:"agentId"`
+		ProjectID string `json:"projectId"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	if agentID == "" {
+		agentID = req.AgentID
+	}
+	if agentID == "" {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "agentId required"})
+		return
+	}
+	// Owner-only — moving a chat changes its workspace path, which a
+	// read-only viewer should never trigger.
+	if rec := s.requireAgentOwner(w, r, agentID); rec == nil {
+		return
+	}
+	if !s.requireWritable(w, r) {
+		return
+	}
+	uid := s.effectiveUserID(r)
+	// Validate the target project exists and belongs to this caller.
+	// Empty projectId is the "detach" case — always allowed.
+	if req.ProjectID != "" && s.dataStore != nil {
+		p, err := s.dataStore.GetProject(r.Context(), uid, agentID, req.ProjectID)
+		if err != nil {
+			jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		if p == nil {
+			jsonResponse(w, http.StatusNotFound, map[string]any{"error": "project not found"})
+			return
+		}
+	}
+	ag := s.resolveAgent(r, agentID)
+	if ag == nil {
+		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "agent not found"})
+		return
+	}
+	if err := ag.MoveWebChatSession(r.Context(), r.PathValue("key"), req.ProjectID); err != nil {
+		if errors.Is(err, workspace.ErrMoveDestinationExists) {
+			jsonResponse(w, http.StatusConflict, map[string]any{
+				"error": "destination workspace already exists",
+				"code":  "destination_exists",
+			})
+			return
+		}
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}

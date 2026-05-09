@@ -27,23 +27,39 @@ func NewLocalFS(root string) *LocalFS {
 	return &LocalFS{root: root}
 }
 
-// scopeDir returns the on-disk directory for a (agent, session) scope.
-// Empty session = agent-shared root (matches the legacy single-tier
-// layout, so skills and admin uploads keep working without migration).
-// Non-empty session pushes everything under sessions/<id>/ so concurrent
-// sessions can't overwrite each other's artifacts.
-func (f *LocalFS) scopeDir(agentID, sessionID string) string {
-	if sessionID == "" {
+// scopeDir returns the on-disk directory for a (agent, project, session)
+// scope:
+//
+//	pid="", sid=""   →  <root>/<agent>/                          (agent-shared)
+//	pid="", sid="x"  →  <root>/<agent>/sessions/x/               (loose chat)
+//	pid="p", sid=""  →  <root>/<agent>/projects/p/               (project root)
+//	pid="p", sid="x" →  <root>/<agent>/projects/p/x/             (project chat)
+//
+// Project chats keep their own subdir inside the project so two
+// concurrent chats can't collide on `notes.md`, and "move chat into
+// /out of project" is a single directory rename. Sandbox containers
+// for project chats mount the project root (so siblings are visible
+// at `/workspace/<other-sid>/...`) but cwd into the chat's subdir
+// so relative writes default to the chat's own files — see
+// docker_executor.go's pool.Get.
+func (f *LocalFS) scopeDir(agentID, projectID, sessionID string) string {
+	switch {
+	case projectID != "" && sessionID != "":
+		return filepath.Join(f.root, agentID, "projects", projectID, sessionID)
+	case projectID != "":
+		return filepath.Join(f.root, agentID, "projects", projectID)
+	case sessionID != "":
+		return filepath.Join(f.root, agentID, "sessions", sessionID)
+	default:
 		return filepath.Join(f.root, agentID)
 	}
-	return filepath.Join(f.root, agentID, "sessions", sessionID)
 }
 
 // resolvePath joins scopeDir with path and rejects attempts to escape via
 // "..". Any symbolic link inside the scope dir is left alone — escape via
 // symlinks is a filesystem-level trust boundary users control.
-func (f *LocalFS) resolvePath(agentID, sessionID, path string) (string, error) {
-	dir := f.scopeDir(agentID, sessionID)
+func (f *LocalFS) resolvePath(agentID, projectID, sessionID, path string) (string, error) {
+	dir := f.scopeDir(agentID, projectID, sessionID)
 	absDir, err := filepath.Abs(dir)
 	if err != nil {
 		return "", err
@@ -55,8 +71,8 @@ func (f *LocalFS) resolvePath(agentID, sessionID, path string) (string, error) {
 	return full, nil
 }
 
-func (f *LocalFS) Put(ctx context.Context, agentID, sessionID, path string, r io.Reader, _ int64, _ string) error {
-	full, err := f.resolvePath(agentID, sessionID, path)
+func (f *LocalFS) Put(ctx context.Context, agentID, projectID, sessionID, path string, r io.Reader, _ int64, _ string) error {
+	full, err := f.resolvePath(agentID, projectID, sessionID, path)
 	if err != nil {
 		return err
 	}
@@ -74,8 +90,8 @@ func (f *LocalFS) Put(ctx context.Context, agentID, sessionID, path string, r io
 	return out.Close()
 }
 
-func (f *LocalFS) Get(ctx context.Context, agentID, sessionID, path string) (io.ReadCloser, error) {
-	full, err := f.resolvePath(agentID, sessionID, path)
+func (f *LocalFS) Get(ctx context.Context, agentID, projectID, sessionID, path string) (io.ReadCloser, error) {
+	full, err := f.resolvePath(agentID, projectID, sessionID, path)
 	if err != nil {
 		return nil, err
 	}
@@ -86,8 +102,8 @@ func (f *LocalFS) Get(ctx context.Context, agentID, sessionID, path string) (io.
 	return rc, err
 }
 
-func (f *LocalFS) Stat(ctx context.Context, agentID, sessionID, path string) (*ObjectInfo, error) {
-	full, err := f.resolvePath(agentID, sessionID, path)
+func (f *LocalFS) Stat(ctx context.Context, agentID, projectID, sessionID, path string) (*ObjectInfo, error) {
+	full, err := f.resolvePath(agentID, projectID, sessionID, path)
 	if err != nil {
 		return nil, err
 	}
@@ -106,14 +122,13 @@ func (f *LocalFS) Stat(ctx context.Context, agentID, sessionID, path string) (*O
 	}, nil
 }
 
-// List walks files under the scope dir. With sessionID == "" we walk the
-// agent root recursively, which means session-scoped subtrees show up in
-// the result with paths like "sessions/<id>/file.png" — that's what the
-// admin file browser wants ("show me everything this agent ever wrote").
-// With sessionID set we walk only that session's subtree, returning
-// session-relative paths.
-func (f *LocalFS) List(ctx context.Context, agentID, sessionID string) ([]ObjectInfo, error) {
-	dir := f.scopeDir(agentID, sessionID)
+// List walks files under the scope dir. With projectID and sessionID
+// both empty we walk the agent root recursively — session and project
+// subtrees show up with prefixes like "sessions/<id>/file.png" or
+// "projects/<id>/notes.md", which is what the admin file browser wants.
+// With either set we walk only that subtree.
+func (f *LocalFS) List(ctx context.Context, agentID, projectID, sessionID string) ([]ObjectInfo, error) {
+	dir := f.scopeDir(agentID, projectID, sessionID)
 	var out []ObjectInfo
 	err := filepath.WalkDir(dir, func(p string, d os.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -147,8 +162,55 @@ func (f *LocalFS) List(ctx context.Context, agentID, sessionID string) ([]Object
 	return out, nil
 }
 
-func (f *LocalFS) Delete(ctx context.Context, agentID, sessionID, path string) error {
-	full, err := f.resolvePath(agentID, sessionID, path)
+// Move renames the source scope dir to the destination scope dir.
+// LocalFS gets it for free as a single os.Rename — both source and
+// destination live under the same agent root, so the kernel handles
+// it atomically (within one filesystem). Refuses to clobber a
+// non-empty destination so a buggy caller can't silently merge two
+// chats' files; returns ErrMoveDestinationExists in that case.
+//
+// No-op when the source dir doesn't exist (the chat never wrote any
+// workspace files yet — common for brand-new sessions). Empty
+// destination dirs are removed first so MkdirAll-style placeholders
+// from earlier code paths don't trip the conflict check.
+func (f *LocalFS) Move(ctx context.Context, agentID, fromProjectID, fromSessionID, toProjectID, toSessionID string) error {
+	src := f.scopeDir(agentID, fromProjectID, fromSessionID)
+	dst := f.scopeDir(agentID, toProjectID, toSessionID)
+	if src == dst {
+		return nil
+	}
+	if _, err := os.Stat(src); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	if info, err := os.Stat(dst); err == nil {
+		if info.IsDir() {
+			entries, rderr := os.ReadDir(dst)
+			if rderr != nil {
+				return rderr
+			}
+			if len(entries) == 0 {
+				if rmErr := os.Remove(dst); rmErr != nil {
+					return rmErr
+				}
+			} else {
+				return ErrMoveDestinationExists
+			}
+		} else {
+			return ErrMoveDestinationExists
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	return os.Rename(src, dst)
+}
+
+func (f *LocalFS) Delete(ctx context.Context, agentID, projectID, sessionID, path string) error {
+	full, err := f.resolvePath(agentID, projectID, sessionID, path)
 	if err != nil {
 		return err
 	}
@@ -163,6 +225,6 @@ func (f *LocalFS) Delete(ctx context.Context, agentID, sessionID, path string) e
 // sites that need to hand a URL to a browser should fall through to the
 // gateway's existing /api/agents/{id}/files/{path} endpoint, which streams
 // the file over the authenticated channel.
-func (f *LocalFS) SignedURL(ctx context.Context, agentID, sessionID, path string, ttl time.Duration) (string, error) {
+func (f *LocalFS) SignedURL(ctx context.Context, agentID, projectID, sessionID, path string, ttl time.Duration) (string, error) {
 	return "", ErrSignedURLUnsupported
 }

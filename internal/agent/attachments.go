@@ -39,7 +39,7 @@ import (
 // Docker doesn't need the third write (bind mount makes host writes show
 // up instantly), but calling it is harmless. The host write is also
 // harmless for E2B (gateway-local bytes nobody reads).
-func (a *Agent) WriteSessionAttachments(ctx context.Context, sessionID string, urls []string) []string {
+func (a *Agent) WriteSessionAttachments(ctx context.Context, sessionID, projectID string, urls []string) []string {
 	if len(urls) == 0 {
 		return nil
 	}
@@ -76,7 +76,7 @@ func (a *Agent) WriteSessionAttachments(ctx context.Context, sessionID string, u
 
 		// 2. Durable store (covers E2B / multi-pod via hydrate-on-create)
 		if a.workspaceStore != nil {
-			if pErr := a.workspaceStore.Put(ctx, a.agentID, sessionID, name, strings.NewReader(string(data)), int64(len(data)), contentTypeFromExt(ext)); pErr != nil {
+			if pErr := a.workspaceStore.Put(ctx, a.agentID, projectID, sessionID, name, strings.NewReader(string(data)), int64(len(data)), contentTypeFromExt(ext)); pErr != nil {
 				slog.Warn("attachment store put failed", "agent", a.name, "session", sessionID, "path", name, "error", pErr)
 			}
 		}
@@ -85,7 +85,7 @@ func (a *Agent) WriteSessionAttachments(ctx context.Context, sessionID string, u
 		// pool / get failure just means the next exec will pull from the
 		// store via hydrate-on-create.
 		if a.sandboxPool != nil {
-			if ex, gErr := a.sandboxPool.Get(ctx, a.name, sessionID); gErr == nil && ex != nil {
+			if ex, gErr := a.sandboxPool.Get(ctx, a.name, projectID, sessionID); gErr == nil && ex != nil {
 				if _, wErr := ex.WriteFile(ctx, "/workspace/"+name, string(data)); wErr != nil {
 					slog.Warn("attachment sandbox write failed", "agent", a.name, "session", sessionID, "path", name, "error", wErr)
 				}

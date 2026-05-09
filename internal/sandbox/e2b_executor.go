@@ -45,6 +45,7 @@ type E2BExecutor struct {
 	skillDirs []string
 	workspace workspace.Store
 	agentID   string
+	projectID string
 	sessionID string
 }
 
@@ -145,10 +146,11 @@ func (e *E2BExecutor) recreate(ctx context.Context) error {
 // the next call. Called by the pool right after sandbox creation; the
 // executor then carries them so recreate() can replay everything without
 // asking the pool. Pass nil/empty for any source you don't have.
-func (e *E2BExecutor) SetHydrationSources(skillDirs []string, ws workspace.Store, agentID, sessionID string) {
+func (e *E2BExecutor) SetHydrationSources(skillDirs []string, ws workspace.Store, agentID, projectID, sessionID string) {
 	e.skillDirs = append(e.skillDirs[:0], skillDirs...)
 	e.workspace = ws
 	e.agentID = agentID
+	e.projectID = projectID
 	e.sessionID = sessionID
 }
 
@@ -206,12 +208,22 @@ func (e *E2BExecutor) Hydrate(ctx context.Context) error {
 
 	workspaceCount := 0
 	if e.workspace != nil {
-		objs, err := e.workspace.List(ctx, e.agentID, e.sessionID)
+		// For project chats, hydrate the whole project (List with
+		// session=""), so the chat sees sibling chats' files at
+		// /workspace/<other-sid>/... — same visibility docker gets
+		// from mounting projects/<pid>/ as the bind root. Loose chats
+		// stay scoped to their own session subtree.
+		listProject := e.projectID
+		listSession := e.sessionID
+		if e.projectID != "" {
+			listSession = ""
+		}
+		objs, err := e.workspace.List(ctx, e.agentID, listProject, listSession)
 		if err != nil {
-			slog.Warn("e2b hydrate: workspace list", "agent", e.agentID, "session", e.sessionID, "error", err)
+			slog.Warn("e2b hydrate: workspace list", "agent", e.agentID, "project", e.projectID, "session", e.sessionID, "error", err)
 		} else {
 			for _, obj := range objs {
-				rc, err := e.workspace.Get(ctx, e.agentID, e.sessionID, obj.Path)
+				rc, err := e.workspace.Get(ctx, e.agentID, listProject, listSession, obj.Path)
 				if err != nil {
 					slog.Warn("e2b hydrate: workspace get", "path", obj.Path, "error", err)
 					continue
@@ -762,10 +774,10 @@ func (p *E2BExecutorPool) SetWorkspace(ws workspace.Store) {
 	p.workspace = ws
 }
 
-func (p *E2BExecutorPool) Get(ctx context.Context, agentID, sessionID string) (Executor, error) {
+func (p *E2BExecutorPool) Get(ctx context.Context, agentID, projectID, sessionID string) (Executor, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	key := poolKey(agentID, sessionID)
+	key := poolKey(agentID, projectID, sessionID)
 	if ex, ok := p.executors[key]; ok {
 		return ex, nil
 	}
@@ -773,17 +785,17 @@ func (p *E2BExecutorPool) Get(ctx context.Context, agentID, sessionID string) (E
 	if err != nil {
 		return nil, err
 	}
-	ex.SetHydrationSources(skillDirsForAgent(p.home, agentID), p.workspace, agentID, sessionID)
+	ex.SetHydrationSources(skillDirsForAgent(p.home, agentID), p.workspace, agentID, projectID, sessionID)
 	if err := ex.Hydrate(ctx); err != nil {
-		slog.Warn("e2b hydrate failed", "agent", agentID, "session", sessionID, "error", err)
+		slog.Warn("e2b hydrate failed", "agent", agentID, "project", projectID, "session", sessionID, "error", err)
 	}
 	p.executors[key] = ex
 	return ex, nil
 }
 
-func (p *E2BExecutorPool) Release(agentID, sessionID string) error {
+func (p *E2BExecutorPool) Release(agentID, projectID, sessionID string) error {
 	p.mu.Lock()
-	key := poolKey(agentID, sessionID)
+	key := poolKey(agentID, projectID, sessionID)
 	ex, ok := p.executors[key]
 	delete(p.executors, key)
 	p.mu.Unlock()

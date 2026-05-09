@@ -26,30 +26,42 @@ import (
 // paths are never passed in. Implementations are free to add their own
 // namespacing (bucket prefix, directory tree, ...) below the agent scope.
 //
-// sessionID isolates artifacts produced inside a single chat session so
-// concurrent sessions of the same agent don't clobber each other's
-// outputs. Pass an empty string for agent-shared artifacts (skills,
-// admin uploads, anything that should outlive a single session). On
-// disk this maps to:
+// projectID and sessionID together name the workspace folder for one
+// chat. projectID wins when both are set: every session inside a
+// project shares the same folder, which is the whole value of project
+// (notes/files persist across the project's chats). On disk:
 //
-//	sessionID == ""   →  <root>/<agentID>/<path>
-//	sessionID == "x"  →  <root>/<agentID>/sessions/x/<path>
+//	projectID="", sessionID=""   → <root>/<agentID>/<path>
+//	projectID="", sessionID="x"  → <root>/<agentID>/sessions/x/<path>
+//	projectID="p", *             → <root>/<agentID>/projects/p/<path>
 //
-// List(agentID, "") returns EVERY object under the agent regardless of
-// session — used by the admin file browser. List(agentID, "x") returns
-// only files in session x.
+// List with both empty returns EVERY object under the agent regardless
+// of project/session — used by the admin file browser. List with a
+// specific scope returns only that subtree.
 type Store interface {
-	Put(ctx context.Context, agentID, sessionID, path string, r io.Reader, size int64, contentType string) error
+	Put(ctx context.Context, agentID, projectID, sessionID, path string, r io.Reader, size int64, contentType string) error
 
-	Get(ctx context.Context, agentID, sessionID, path string) (io.ReadCloser, error)
+	Get(ctx context.Context, agentID, projectID, sessionID, path string) (io.ReadCloser, error)
 
-	Stat(ctx context.Context, agentID, sessionID, path string) (*ObjectInfo, error)
+	Stat(ctx context.Context, agentID, projectID, sessionID, path string) (*ObjectInfo, error)
 
-	List(ctx context.Context, agentID, sessionID string) ([]ObjectInfo, error)
+	List(ctx context.Context, agentID, projectID, sessionID string) ([]ObjectInfo, error)
 
-	Delete(ctx context.Context, agentID, sessionID, path string) error
+	Delete(ctx context.Context, agentID, projectID, sessionID, path string) error
 
-	SignedURL(ctx context.Context, agentID, sessionID, path string, ttl time.Duration) (string, error)
+	// Move relocates a session's entire workspace from one (project,
+	// session) scope to another. Used when a chat is dragged in or out
+	// of a project: the session_id stays the same, only the projectID
+	// changes (one of fromProjectID / toProjectID is "" for loose).
+	// Implementations MUST refuse to overwrite a non-empty destination —
+	// returning ErrMoveDestinationExists — so a slip can't merge two
+	// chats' files. fromSessionID and toSessionID are usually equal
+	// but kept as separate args in case a future caller wants to
+	// rename the session at the same time. No-op if the source scope
+	// has no objects.
+	Move(ctx context.Context, agentID, fromProjectID, fromSessionID, toProjectID, toSessionID string) error
+
+	SignedURL(ctx context.Context, agentID, projectID, sessionID, path string, ttl time.Duration) (string, error)
 }
 
 // ObjectInfo describes one stored object. Fields not known by a particular
@@ -64,6 +76,7 @@ type ObjectInfo struct {
 // Common errors. Implementations should wrap these with fmt.Errorf("%w: ...")
 // when adding context, so callers can still errors.Is() match.
 var (
-	ErrNotFound             = errors.New("workspace: object not found")
-	ErrSignedURLUnsupported = errors.New("workspace: signed URLs not supported by this backend")
+	ErrNotFound                = errors.New("workspace: object not found")
+	ErrSignedURLUnsupported    = errors.New("workspace: signed URLs not supported by this backend")
+	ErrMoveDestinationExists   = errors.New("workspace: move destination already exists")
 )

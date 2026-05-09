@@ -25,10 +25,16 @@ function DialogClose({ ...props }: DialogPrimitive.Close.Props) {
 
 function DialogOverlay({
   className,
+  forceRender = true,
   ...props
 }: DialogPrimitive.Backdrop.Props) {
+  // base-ui suppresses the backdrop on nested dialogs by default (only
+  // the outermost one renders). That leaves a 3rd-level dialog popping
+  // on top of a clear 2nd-level dialog — no visual depth cue. Force the
+  // backdrop on every level so each child dims the parent it sits over.
   return (
     <DialogPrimitive.Backdrop
+      forceRender={forceRender}
       data-slot="dialog-overlay"
       className={cn(
         "fixed inset-0 isolate z-50 bg-black/10 duration-100 supports-backdrop-filter:backdrop-blur-xs data-open:animate-in data-open:fade-in-0 data-closed:animate-out data-closed:fade-out-0",

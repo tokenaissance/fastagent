@@ -185,7 +185,11 @@ func (s *Server) HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// probe" notes here actively backfire — models reflexively run
 	// which/ls/file to "verify" the path when the prompt foregrounds it.
 	// PhotoURLs is preserved so vision LLMs still see the image inline.
-	attachmentPaths := ag.WriteSessionAttachments(r.Context(), sessionKey, req.Images)
+	// API clients can't address a project today — chat completions only
+	// know session_key — so attachments always land in the loose-chat
+	// scope. When/if we expose project addressing here, look up the
+	// session row and pass its project_id instead of "".
+	attachmentPaths := ag.WriteSessionAttachments(r.Context(), sessionKey, "", req.Images)
 	if len(attachmentPaths) > 0 {
 		var b strings.Builder
 		for _, p := range attachmentPaths {

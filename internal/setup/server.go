@@ -26,18 +26,23 @@ import (
 // AgentHandle is the surface the web UI uses to talk to a running agent.
 type AgentHandle interface {
 	Name() string
-	HandleWebChat(ctx context.Context, sessionId, text string, imageURLs []string, params map[string]any) string
-	HandleWebChatStream(ctx context.Context, sessionId, text string, imageURLs []string, params map[string]any, events chan<- agent.ChatEvent) string
+	HandleWebChat(ctx context.Context, sessionId, projectIdHint, text string, imageURLs []string, params map[string]any) string
+	HandleWebChatStream(ctx context.Context, sessionId, projectIdHint, text string, imageURLs []string, params map[string]any, events chan<- agent.ChatEvent) string
 	WebChatHistory(sessionId string) []map[string]any
 	WebChatSessions() []session.WebSession
 	DeleteWebChatSession(sessionId string) error
 	RenameWebChatSession(sessionId, title string) error
+	// MoveWebChatSession reassigns the chat to a different project (or
+	// detaches when projectID==""). Migrates workspace files between
+	// the old and new scope dirs and releases any active sandbox so
+	// the next turn cold-starts at the new bind-mount path.
+	MoveWebChatSession(ctx context.Context, sessionId, projectID string) error
 	ReloadWorkspaceFiles()
 	// WriteSessionAttachments materializes user-uploaded image bytes (data
 	// URLs / HTTPS URLs) into the agent's session workspace so skills can
 	// read them via /workspace/<filename>. Returns the relative filenames
 	// in input order; per-image errors are skipped.
-	WriteSessionAttachments(ctx context.Context, sessionID string, urls []string) []string
+	WriteSessionAttachments(ctx context.Context, sessionID, projectID string, urls []string) []string
 }
 
 // AgentProvider is implemented by gateway.UserSpace's agent manager — used
@@ -214,6 +219,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("GET /api/chat/sessions", auth(s.handleChatSessions))
 	mux.HandleFunc("PUT /api/chat/sessions/{key}", auth(s.handleRenameSession))
 	mux.HandleFunc("DELETE /api/chat/sessions/{key}", auth(s.handleDeleteSession))
+	mux.HandleFunc("PATCH /api/chat/sessions/{key}/project", auth(s.handleMoveSessionProject))
 	// Long-lived SSE subscription so cron-fired (and other async)
 	// messages reach the open chat panel without a manual refresh.
 	mux.HandleFunc("GET /api/chat/subscribe", auth(s.handleChatSubscribe))
@@ -234,6 +240,16 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("GET /api/agents/{id}/system-files/{name}", auth(s.handleGetAgentSystemFile))
 	mux.HandleFunc("PUT /api/agents/{id}/system-files/{name}", auth(s.handlePutAgentSystemFile))
 	mux.HandleFunc("DELETE /api/agents/{id}/system-files/{name}", auth(s.handleDeleteAgentSystemFile))
+
+	// Per-agent projects: named workspace folders that group chats and
+	// share files across all sessions inside them. POST .../sessions
+	// is the "New chat in project" path — pre-creates the session row
+	// stamped with project_id so the very first turn already routes
+	// workspace IO to projects/<pid>/.
+	mux.HandleFunc("GET /api/agents/{id}/projects", auth(s.handleListProjects))
+	mux.HandleFunc("POST /api/agents/{id}/projects", auth(s.handleCreateProject))
+	mux.HandleFunc("PATCH /api/agents/{id}/projects/{pid}", auth(s.handleUpdateProject))
+	mux.HandleFunc("DELETE /api/agents/{id}/projects/{pid}", auth(s.handleDeleteProject))
 
 	// Per-agent channels (IM bot bindings)
 	mux.HandleFunc("GET /api/agents/{id}/channels", auth(s.handleListAgentChannels))
@@ -416,6 +432,25 @@ func (h spaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				f.Close()
 				http.ServeFileFS(w, r, h.fs, dirFallback)
 				return
+			}
+			// Nested dynamic segment fallback: routes like
+			// agents/[id]/chat/[session] and agents/[id]/project/[pid]
+			// emit a single placeholder ("_") at build time. When
+			// neither the concrete URL nor the agent-id substitution
+			// resolved to a real file, swap the last segment with the
+			// placeholder so any /chat/<sid>/ or /project/<pid>/
+			// renders the right component shell. Add new dynamic
+			// routes to dynamicLeaves below as they get introduced.
+			dynamicLeaves := map[string]bool{"chat": true, "project": true}
+			sub := strings.Split(parts[2], "/")
+			if len(sub) >= 2 && dynamicLeaves[sub[len(sub)-2]] {
+				sub[len(sub)-1] = "_"
+				placeholder := "agents/default/" + strings.Join(sub, "/") + "/index.html"
+				if f, err := h.fs.Open(placeholder); err == nil {
+					f.Close()
+					http.ServeFileFS(w, r, h.fs, placeholder)
+					return
+				}
 			}
 		}
 	}

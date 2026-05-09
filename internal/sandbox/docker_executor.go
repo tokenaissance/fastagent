@@ -146,14 +146,26 @@ type DockerExecutorPool struct {
 	workspaceRoot string
 }
 
-// poolKey is the composite map key used by the executor pools. Empty
-// sessionID is treated as the agent-shared sandbox slot so legacy
-// callers that haven't been migrated still work.
-func poolKey(agentID, sessionID string) string {
-	if sessionID == "" {
+// poolKey is the composite map key used by the executor pools. Every
+// (project, session) pair gets its own slot — including chats that
+// belong to the same project — because two project chats running in
+// parallel would otherwise share a Python kernel / shell state and
+// step on each other. The project mount itself is shared at the FS
+// level so siblings stay visible (see pool.Get for the mount logic).
+//
+// Both empty falls back to the agent-shared sandbox slot for legacy
+// callers (admin shell, fixtures).
+func poolKey(agentID, projectID, sessionID string) string {
+	switch {
+	case projectID != "" && sessionID != "":
+		return agentID + ":p:" + projectID + ":s:" + sessionID
+	case projectID != "":
+		return agentID + ":p:" + projectID
+	case sessionID != "":
+		return agentID + ":s:" + sessionID
+	default:
 		return agentID
 	}
-	return agentID + ":" + sessionID
 }
 
 // NewDockerExecutorPool creates a pool of Docker-backed executors.
@@ -169,23 +181,43 @@ func NewDockerExecutorPool(image, workspaceRoot string, policy *Policy) *DockerE
 	}
 }
 
-func (p *DockerExecutorPool) Get(ctx context.Context, agentID, sessionID string) (Executor, error) {
+func (p *DockerExecutorPool) Get(ctx context.Context, agentID, projectID, sessionID string) (Executor, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	key := poolKey(agentID, sessionID)
+	key := poolKey(agentID, projectID, sessionID)
 	if ex, ok := p.executors[key]; ok {
 		return ex, nil
 	}
 
-	// Session-scoped mount keeps parallel sessions of the same agent from
-	// stepping on each other's /workspace files. workspace.LocalFS uses
-	// the same on-disk layout (workspaces/<agent>/sessions/<sid>/), so
-	// the sandbox sees exactly what the workspace store wrote and vice
-	// versa. Empty sessionID falls back to the legacy agent root, used
-	// by tools that don't carry a session yet (admin shell, fixtures).
+	// Bind-mount layout. Project chats mount the project ROOT (so
+	// siblings show up under /workspace) and cwd into their own
+	// subdir, so relative writes default to the chat's files but
+	// reads/walks see the whole project. Mirrors workspace.LocalFS:
+	//
+	//   pid="p", sid="s" → mount projects/p/, workdir /workspace/s/
+	//   pid="",  sid="s" → mount sessions/s/,  workdir /workspace
+	//   pid="p", sid=""  → mount projects/p/,  workdir /workspace
+	//   both empty       → mount agent root,   workdir /workspace
+	//
+	// Per-chat per-container — even within the same project — so
+	// concurrent chats don't share shell state. The shared part is the
+	// FS mount, not the container.
 	workspace := filepath.Join(p.workspaceRoot, "workspaces", agentID)
-	if sessionID != "" {
+	var workdir string
+	switch {
+	case projectID != "" && sessionID != "":
+		workspace = filepath.Join(workspace, "projects", projectID)
+		workdir = "/workspace/" + sessionID
+		// Pre-create the per-chat subdir on disk so docker's `-w` lands
+		// in an existing path; Docker creates missing workdirs but
+		// only as root, leaving the agent unable to write later.
+		if err := os.MkdirAll(filepath.Join(workspace, sessionID), 0o755); err != nil {
+			return nil, fmt.Errorf("create chat workspace subdir: %w", err)
+		}
+	case projectID != "":
+		workspace = filepath.Join(workspace, "projects", projectID)
+	case sessionID != "":
 		workspace = filepath.Join(workspace, "sessions", sessionID)
 	}
 	if err := os.MkdirAll(workspace, 0o755); err != nil {
@@ -197,6 +229,9 @@ func (p *DockerExecutorPool) Get(ctx context.Context, agentID, sessionID string)
 	// NewDockerExecutor would call Create immediately on a sandbox
 	// that hasn't been told about skill dirs.
 	sb := NewDockerSandbox(p.image, workspace, p.policy)
+	if workdir != "" {
+		sb.SetWorkdir(workdir)
+	}
 	sb.SetSkillDirs(skillDirsForAgent(p.workspaceRoot, agentID))
 	if err := sb.Create(); err != nil {
 		return nil, fmt.Errorf("create docker sandbox: %w", err)
@@ -206,10 +241,10 @@ func (p *DockerExecutorPool) Get(ctx context.Context, agentID, sessionID string)
 	return ex, nil
 }
 
-func (p *DockerExecutorPool) Release(agentID, sessionID string) error {
+func (p *DockerExecutorPool) Release(agentID, projectID, sessionID string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	key := poolKey(agentID, sessionID)
+	key := poolKey(agentID, projectID, sessionID)
 	if ex, ok := p.executors[key]; ok {
 		delete(p.executors, key)
 		return ex.Close()

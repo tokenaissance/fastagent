@@ -23,18 +23,20 @@ type Executor interface {
 	Close() error
 }
 
-// ExecutorPool manages per-(agent,session) sandbox lifecycles. Get lazily
-// creates a sandbox on first access; Release tears it down.
+// ExecutorPool manages per-(agent, project, session) sandbox lifecycles.
+// Get lazily creates a sandbox on first access; Release tears it down.
 //
-// Why both agentID AND sessionID: parallel sessions of the same agent must
-// not see each other's /workspace files (collision + cross-talk). Each
-// session gets its own container with a session-scoped bind mount. The
-// inner pool keys on the composite (agentID, sessionID) — empty
-// sessionID is allowed for legacy callers but should be treated as a
-// single shared scope (don't mix the two in production).
+// Why agentID + projectID + sessionID: parallel sessions of the same
+// agent must not see each other's /workspace files (collision +
+// cross-talk) — each gets its own container with a session-scoped
+// bind mount. projectID overrides that isolation: every chat in the
+// same project shares one container mounted on the project folder, so
+// notes/files persist across the project's chats. Pool key is
+// (agentID, projectID, sessionID); empty project + empty session is
+// the agent-shared scope used by legacy callers.
 type ExecutorPool interface {
-	Get(ctx context.Context, agentID, sessionID string) (Executor, error)
-	Release(agentID, sessionID string) error
+	Get(ctx context.Context, agentID, projectID, sessionID string) (Executor, error)
+	Release(agentID, projectID, sessionID string) error
 	CloseAll()
 }
 

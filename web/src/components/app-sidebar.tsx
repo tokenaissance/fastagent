@@ -7,24 +7,26 @@ import {
   SidebarContent,
   SidebarFooter,
   SidebarHeader,
+  SidebarMenu,
+  SidebarMenuButton,
+  SidebarMenuItem,
   SidebarRail,
 } from "@/components/ui/sidebar";
 import { AgentSwitcher, AgentSwitcherItem } from "@/components/team-switcher";
 import { NavMain, NavItem } from "@/components/nav-main";
 import { NavSessions, SessionItem } from "@/components/nav-projects";
+import { NavProjectsList } from "@/components/nav-projects-list";
 import { NavUser } from "@/components/nav-user";
+import { AgentSettingsDialog } from "@/components/agent-settings-dialog";
 import {
   BotIcon,
   BrainIcon,
-  ClockIcon,
   KeyRoundIcon,
   LayoutDashboardIcon,
   PlusIcon,
-  RadioIcon,
   SettingsIcon,
   SparklesIcon,
   UsersIcon,
-  Wand2Icon,
 } from "lucide-react";
 import {
   getAgent,
@@ -32,16 +34,21 @@ import {
   getChatSessions,
   getMe,
   getStatus,
+  listProjects,
   type MeResponse,
+  type ProjectEntry,
   type StatusResponse,
 } from "@/lib/api";
 
 // Extract agent ID from pathname like /agents/default/chat/. The second
 // capture is an explicit allow-list of sub-routes so the bare /agents/
 // index keeps the Platform nav instead of flipping to Agent nav.
+// Add new agent-scoped routes here when they ship — `project` was
+// missed when the project chat route was introduced and that left
+// the sidebar showing the platform nav for /agents/<id>/project/...
 function extractAgentId(pathname: string): string | null {
   const match = pathname.match(
-    /^\/agents\/([^/]+)\/(chat|customize|skills|models|sessions|channels|chats|scheduler)/,
+    /^\/agents\/([^/]+)\/(chat|customize|skills|models|sessions|channels|chats|scheduler|project)/,
   );
   return match ? match[1] : null;
 }
@@ -72,43 +79,25 @@ const ADMIN_NAV: NavItem[] = [
 ];
 
 // "New chat" is active iff we're on the chat route AND no session is
-// open. Two corrections vs. the default prefix matching:
-//   1. ?session=… on /chat/ → suppress (otherwise New chat lights up
-//      while a specific session is open).
-//   2. /customize/ and /skills/ → suppress (`!hasSession` alone made
-//      New chat light up on every sibling agent page since pathname
-//      didn't match anyway).
+// open. ?session=… on /chat/ → suppress (otherwise New chat lights up
+// while a specific session is open).
 //
-// `viewer` is true when the active agent was shared with the caller by
-// another user. Configuration tabs (Customize / Models / Skills /
-// Channels / Scheduler) are gated to owners only — viewers see just
-// "New chat" so the chat surface stays usable but the read-only nature
-// of the relationship is obvious in the sidebar.
+// Configuration tabs (Customize / Models / Skills / Channels /
+// Scheduler) live in the footer Settings dialog — for owners only —
+// so the sidebar nav itself just exposes "New chat" regardless of role.
 const AGENT_NAV = (
   agentId: string,
   pathname: string,
   hasSession: boolean,
-  viewer: boolean,
 ): NavItem[] => {
   const onChatRoute = pathname.startsWith(`/agents/${agentId}/chat`);
-  const items: NavItem[] = [
+  return [
     {
       title: "New chat",
       url: `/agents/${agentId}/chat/`,
       icon: PlusIcon,
       active: onChatRoute && !hasSession,
     },
-  ];
-  if (viewer) {
-    return items;
-  }
-  return [
-    ...items,
-    { title: "Customize", url: `/agents/${agentId}/customize/`, icon: Wand2Icon },
-    { title: "Models", url: `/agents/${agentId}/models/`, icon: BrainIcon },
-    { title: "Skills", url: `/agents/${agentId}/skills/`, icon: SparklesIcon },
-    { title: "Channels", url: `/agents/${agentId}/channels/`, icon: RadioIcon },
-    { title: "Scheduler", url: `/agents/${agentId}/scheduler/`, icon: ClockIcon },
   ];
 };
 
@@ -126,6 +115,8 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
   // configuration tabs.
   const [agentRoles, setAgentRoles] = React.useState<Record<string, "owner" | "viewer">>({});
   const [sessions, setSessions] = React.useState<SessionItem[]>([]);
+  const [projects, setProjects] = React.useState<ProjectEntry[]>([]);
+  const [settingsOpen, setSettingsOpen] = React.useState(false);
 
   // Keep status polling so the online dot / admin flag stay fresh.
   React.useEffect(() => {
@@ -182,13 +173,16 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
     };
   }, [activeAgentId, agents]);
 
-  // Sessions only matter while a specific agent is selected. We re-run
-  // whenever the active agent changes *or* the chat page broadcasts a
-  // `fastclaw:sessions-changed` event (e.g. after rename / new chat) so
-  // the sidebar title list stays in sync without a page refresh.
+  // Sessions + projects only matter while a specific agent is selected.
+  // We re-run both whenever the active agent changes *or* the chat page
+  // broadcasts a `fastclaw:sessions-changed` event (e.g. after rename /
+  // new chat / project create) so the sidebar stays in sync without a
+  // page refresh. Projects are bundled with sessions because creating a
+  // chat in a project also affects which sessions appear under it.
   React.useEffect(() => {
     if (!activeAgentId) {
       setSessions([]);
+      setProjects([]);
       return;
     }
     const refetch = () => {
@@ -200,9 +194,13 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
               title: s.title || s.preview || s.id,
               thumbnailUrl: s.thumbnailUrl,
               channel: s.channel,
+              projectId: s.projectId,
             })),
           ),
         )
+        .catch(() => {});
+      listProjects(activeAgentId)
+        .then(setProjects)
         .catch(() => {});
     };
     refetch();
@@ -216,6 +214,20 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
     return () => {
       window.removeEventListener("fastclaw:sessions-changed", onChange);
     };
+  }, [activeAgentId]);
+
+  // broadcastSessionsChanged fires the same custom event NavSessions
+  // listens to, so a project mutation refreshes both the projects list
+  // AND the sessions list (a new chat-in-project shows up under its
+  // project, and the project's session count drives the delete-block).
+  const broadcastSessionsChanged = React.useCallback(() => {
+    if (typeof window !== "undefined" && activeAgentId) {
+      window.dispatchEvent(
+        new CustomEvent("fastclaw:sessions-changed", {
+          detail: { agentId: activeAgentId },
+        }),
+      );
+    }
   }, [activeAgentId]);
 
   const isAdmin = status?.isAdmin ?? false;
@@ -246,23 +258,39 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
         {activeAgentId ? (
           <NavMain
             label="Agent"
-            items={AGENT_NAV(
-              activeAgentId,
-              pathname,
-              hasOpenSession,
-              // Fail closed: hide owner-only config tabs until role is
-              // confirmed === "owner". Loading state defaults to viewer
-              // so a non-owner public-link visitor never briefly sees
-              // Customize / Models / Skills / Channels / Scheduler.
-              agentRoles[activeAgentId] !== "owner",
-            )}
+            items={AGENT_NAV(activeAgentId, pathname, hasOpenSession)}
           />
         ) : (
           <NavMain label="Platform" items={platformItems} />
         )}
+        {activeAgentId && agentRoles[activeAgentId] === "owner" && (
+          <NavProjectsList
+            agentId={activeAgentId}
+            projects={projects}
+            sessions={sessions}
+            onChanged={broadcastSessionsChanged}
+          />
+        )}
         <NavSessions agentId={activeAgentId} sessions={sessions} />
       </SidebarContent>
       <SidebarFooter>
+        {/* Settings opens a tabbed dialog with the agent's owner-only
+            configuration panels (Customize / Models / Skills / Channels /
+            Scheduler). Hidden for viewers and when no agent is active —
+            matches the prior "owner-only sidebar tabs" gate. */}
+        {activeAgentId && agentRoles[activeAgentId] === "owner" && (
+          <SidebarMenu>
+            <SidebarMenuItem>
+              <SidebarMenuButton
+                tooltip="Settings"
+                onClick={() => setSettingsOpen(true)}
+              >
+                <SettingsIcon />
+                <span>Settings</span>
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+          </SidebarMenu>
+        )}
         <NavUser
           name={
             me?.user?.displayName ||
@@ -273,6 +301,7 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
         />
       </SidebarFooter>
       <SidebarRail />
+      <AgentSettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
     </Sidebar>
   );
 }

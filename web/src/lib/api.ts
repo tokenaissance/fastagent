@@ -647,12 +647,78 @@ export interface ChatSessionEntry {
   channel?: string;
   accountId?: string;
   chatId?: string;
+  // projectId groups this chat under a per-(user, agent) project.
+  // Empty = loose chat (rendered in the flat Chats section).
+  projectId?: string;
   title?: string;
   preview: string;
   thumbnailUrl?: string;
   createdAt?: number;
   updatedAt?: number;
 }
+
+export interface ProjectEntry {
+  id: string;
+  name: string;
+  description?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export async function listProjects(agentId: string): Promise<ProjectEntry[]> {
+  const res = await apiFetch(
+    `/api/agents/${encodeURIComponent(agentId)}/projects`,
+  );
+  if (!res.ok) return [];
+  const data = await res.json();
+  return Array.isArray(data?.projects) ? data.projects : [];
+}
+
+export async function createProject(
+  agentId: string,
+  req: { name: string; description?: string },
+): Promise<ProjectEntry | { error: string }> {
+  const res = await apiFetch(
+    `/api/agents/${encodeURIComponent(agentId)}/projects`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
+    },
+  );
+  return res.json();
+}
+
+export async function updateProject(
+  agentId: string,
+  projectId: string,
+  req: { name?: string; description?: string },
+): Promise<ProjectEntry | { error: string }> {
+  const res = await apiFetch(
+    `/api/agents/${encodeURIComponent(agentId)}/projects/${encodeURIComponent(projectId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
+    },
+  );
+  return res.json();
+}
+
+// deleteProject returns a structured shape because the server replies
+// 409 when the project still owns chats — surface sessionCount so the
+// caller can render a useful prompt instead of just "delete failed".
+export async function deleteProject(
+  agentId: string,
+  projectId: string,
+): Promise<{ ok?: boolean; error?: string; sessionCount?: number }> {
+  const res = await apiFetch(
+    `/api/agents/${encodeURIComponent(agentId)}/projects/${encodeURIComponent(projectId)}`,
+    { method: "DELETE" },
+  );
+  return res.json();
+}
+
 
 export async function getChatSessions(agentId: string): Promise<ChatSessionEntry[]> {
   const res = await apiFetch(`/api/chat/sessions?agentId=${encodeURIComponent(agentId)}`);
@@ -677,6 +743,27 @@ export async function deleteChatSession(agentId: string, sessionId: string) {
   const res = await apiFetch(
     `/api/chat/sessions/${encodeURIComponent(sessionId)}?agentId=${encodeURIComponent(agentId)}`,
     { method: "DELETE" },
+  );
+  return res.json();
+}
+
+// moveChatSessionToProject reassigns a chat to a project (or detaches
+// it back to the loose-chat list when projectId is ""). Backs the
+// sidebar drag-and-drop affordance. Returns { ok } on success;
+// { error, code? } on failure — code="destination_exists" when the
+// target workspace dir already has files (defensive 409).
+export async function moveChatSessionToProject(
+  agentId: string,
+  sessionId: string,
+  projectId: string,
+): Promise<{ ok?: boolean; error?: string; code?: string }> {
+  const res = await apiFetch(
+    `/api/chat/sessions/${encodeURIComponent(sessionId)}/project`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ agentId, projectId }),
+    },
   );
   return res.json();
 }
@@ -719,11 +806,22 @@ export async function sendChatStream(
   onEvent: (evt: ChatStreamEvent) => void,
   signal?: AbortSignal,
   imageUrls?: string[],
+  // projectId, when set, is the "this chat belongs to project X" hint
+  // the URL carries (`?project=<pid>`) before any session row exists.
+  // Server stamps it on the first SaveSession; subsequent turns ignore
+  // it (the row is authoritative).
+  projectId?: string,
 ): Promise<void> {
   const res = await apiFetch("/api/chat/stream", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ agentId, sessionId, message, imageUrls: imageUrls ?? [] }),
+    body: JSON.stringify({
+      agentId,
+      sessionId,
+      projectId: projectId || undefined,
+      message,
+      imageUrls: imageUrls ?? [],
+    }),
     signal,
   });
   if (!res.ok) {

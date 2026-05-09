@@ -84,10 +84,10 @@ func SyncSkillUp(ctx context.Context, ws workspace.Store, owner, skillName, root
 		defer f.Close()
 
 		key := buildKey(skillName, rel)
-		// Skills live in the agent-shared scope (sessionID="") so every
-		// session of an agent sees the same set; per-session subtrees are
-		// reserved for chat artifacts.
-		if putErr := ws.Put(ctx, owner, "", key, f, info.Size(), ""); putErr != nil {
+		// Skills live in the agent-shared scope (project + session both
+		// empty) so every chat of an agent sees the same set; per-scope
+		// subtrees are reserved for chat artifacts.
+		if putErr := ws.Put(ctx, owner, "", "", key, f, info.Size(), ""); putErr != nil {
 			return fmt.Errorf("put %s: %w", key, putErr)
 		}
 		uploaded++
@@ -107,7 +107,7 @@ func DeleteSkillUp(ctx context.Context, ws workspace.Store, owner, skillName str
 	if ws == nil {
 		return nil
 	}
-	objs, err := ws.List(ctx, owner, "")
+	objs, err := ws.List(ctx, owner, "", "")
 	if err != nil {
 		return fmt.Errorf("list skills for %s: %w", owner, err)
 	}
@@ -117,7 +117,7 @@ func DeleteSkillUp(ctx context.Context, ws workspace.Store, owner, skillName str
 		if !strings.HasPrefix(o.Path, prefix) {
 			continue
 		}
-		if err := ws.Delete(ctx, owner, "", o.Path); err != nil {
+		if err := ws.Delete(ctx, owner, "", "", o.Path); err != nil {
 			if errors.Is(err, workspace.ErrNotFound) {
 				continue
 			}
@@ -152,7 +152,7 @@ func HydrateSkillsDown(ctx context.Context, ws workspace.Store, owner, rootDir s
 	if ws == nil {
 		return nil
 	}
-	objs, err := ws.List(ctx, owner, "")
+	objs, err := ws.List(ctx, owner, "", "")
 	if err != nil {
 		return fmt.Errorf("list object store skills for %s: %w", owner, err)
 	}
@@ -184,7 +184,7 @@ func HydrateSkillsDown(ctx context.Context, ws workspace.Store, owner, rootDir s
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 			return fmt.Errorf("mkdir %s: %w", filepath.Dir(target), err)
 		}
-		rc, err := ws.Get(ctx, owner, "", o.Path)
+		rc, err := ws.Get(ctx, owner, "", "", o.Path)
 		if err != nil {
 			if errors.Is(err, workspace.ErrNotFound) {
 				continue
@@ -256,7 +256,7 @@ func ListRemoteSkillNames(ctx context.Context, ws workspace.Store, owner string)
 	if ws == nil {
 		return nil, nil
 	}
-	objs, err := ws.List(ctx, owner, "")
+	objs, err := ws.List(ctx, owner, "", "")
 	if err != nil {
 		return nil, err
 	}

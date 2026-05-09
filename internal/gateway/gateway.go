@@ -364,7 +364,7 @@ func New(env *config.EnvConfig) (*Gateway, error) {
 		// workspace.Store, and ship them as MediaItems so IM channels
 		// can upload as photos. The textual placeholders are stripped
 		// from the body so users don't see the raw `![](...)` syntax.
-		text, items := splitMediaFromReply(ctx, g.workspace, task.AgentID, task.Message.ChatID, reply)
+		text, items := splitMediaFromReply(ctx, g.workspace, task.AgentID, task.Message.ProjectID, task.Message.ChatID, reply)
 		// Workspace fallback: list the session's files and attach
 		// every image whose mtime falls in this turn's window. Catches
 		// the case where the LLM emits a broken data URL (with
@@ -372,7 +372,7 @@ func New(env *config.EnvConfig) (*Gateway, error) {
 		// image-tool already saved the real file to /workspace. Dedupe
 		// by filename so we don't double-send anything
 		// splitMediaFromReply already resolved.
-		items = appendRecentWorkspaceImages(ctx, g.workspace, task.AgentID, task.Message.ChatID, turnStart, items)
+		items = appendRecentWorkspaceImages(ctx, g.workspace, task.AgentID, task.Message.ProjectID, task.Message.ChatID, turnStart, items)
 		out := bus.OutboundMessage{
 			Channel:      task.Message.Channel,
 			AccountID:    task.AccountID,
@@ -687,7 +687,7 @@ var imgRefRegex = regexp.MustCompile(`!\[([^\]]*)\]\(([^)]+)\)`)
 // too because the agent's prose around it usually stands on its own.
 //
 // sessionID = msgChatID since the gateway routes one chat per session.
-func splitMediaFromReply(ctx context.Context, ws workspace.Store, agentID, sessionID, reply string) (string, []bus.MediaItem) {
+func splitMediaFromReply(ctx context.Context, ws workspace.Store, agentID, projectID, sessionID, reply string) (string, []bus.MediaItem) {
 	if reply == "" {
 		return reply, nil
 	}
@@ -733,9 +733,9 @@ func splitMediaFromReply(ctx context.Context, ws workspace.Store, agentID, sessi
 			key = strings.TrimPrefix(key, "workspace/")
 			key = strings.TrimPrefix(key, "/")
 			if key != "" {
-				rc, err := ws.Get(ctx, agentID, sessionID, key)
+				rc, err := ws.Get(ctx, agentID, projectID, sessionID, key)
 				if err != nil {
-					slog.Warn("split media: workspace get failed", "agent", agentID, "session", sessionID, "key", key, "error", err)
+					slog.Warn("split media: workspace get failed", "agent", agentID, "project", projectID, "session", sessionID, "key", key, "error", err)
 				} else {
 					data, rerr := io.ReadAll(rc)
 					rc.Close()
@@ -875,14 +875,14 @@ func decodeBase64Tolerant(s string) ([]byte, error) {
 //
 // Logs counts at every filter stage so a future "no image attached"
 // report can be diagnosed from logs alone.
-func appendRecentWorkspaceImages(ctx context.Context, ws workspace.Store, agentID, sessionID string, turnStart time.Time, existing []bus.MediaItem) []bus.MediaItem {
+func appendRecentWorkspaceImages(ctx context.Context, ws workspace.Store, agentID, projectID, sessionID string, turnStart time.Time, existing []bus.MediaItem) []bus.MediaItem {
 	if ws == nil {
 		return existing
 	}
-	objs, err := ws.List(ctx, agentID, sessionID)
+	objs, err := ws.List(ctx, agentID, projectID, sessionID)
 	if err != nil {
 		slog.Warn("workspace list failed for media fallback",
-			"agent", agentID, "session", sessionID, "error", err)
+			"agent", agentID, "project", projectID, "session", sessionID, "error", err)
 		return existing
 	}
 
@@ -912,7 +912,7 @@ func appendRecentWorkspaceImages(ctx context.Context, ws workspace.Store, agentI
 		if have[base] {
 			continue
 		}
-		rc, gerr := ws.Get(ctx, agentID, sessionID, obj.Path)
+		rc, gerr := ws.Get(ctx, agentID, projectID, sessionID, obj.Path)
 		if gerr != nil {
 			slog.Warn("workspace get failed for media fallback",
 				"path", obj.Path, "error", gerr)

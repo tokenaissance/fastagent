@@ -122,6 +122,28 @@ func (d *DBStore) Migrate(ctx context.Context) error {
 	if err := d.migrateConfigsAddScopeColumn(ctx); err != nil {
 		return fmt.Errorf("migrate configs.scope: %w", err)
 	}
+	if err := d.migrateSessionsAddProjectID(ctx); err != nil {
+		return fmt.Errorf("migrate sessions.project_id: %w", err)
+	}
+	return nil
+}
+
+// migrateSessionsAddProjectID adds the project_id column to legacy
+// sessions tables. Empty default = "loose chat" (the existing behavior),
+// non-empty = belongs to that project. Idempotent: returns early if
+// the column already exists.
+func (d *DBStore) migrateSessionsAddProjectID(ctx context.Context) error {
+	has, err := d.tableHasColumn(ctx, "sessions", "project_id")
+	if err != nil {
+		return err
+	}
+	if has {
+		return nil
+	}
+	if _, err := d.db.ExecContext(ctx,
+		`ALTER TABLE sessions ADD COLUMN project_id TEXT NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("add column: %w", err)
+	}
 	return nil
 }
 
@@ -1042,6 +1064,7 @@ func (d *DBStore) migrationSQL() []string {
 			channel TEXT NOT NULL DEFAULT '',
 			account_id TEXT NOT NULL DEFAULT '',
 			chat_id TEXT NOT NULL DEFAULT '',
+			project_id TEXT NOT NULL DEFAULT '',
 			title TEXT NOT NULL DEFAULT '',
 			messages TEXT NOT NULL DEFAULT '[]',
 			message_count INTEGER NOT NULL DEFAULT 0,
@@ -1183,6 +1206,24 @@ func (d *DBStore) migrationSQL() []string {
 		// installs reach the same code path via Migrate's full sweep.
 		`CREATE INDEX IF NOT EXISTS idx_cron_jobs_schedule ON cron_jobs (enabled, next_run)`,
 		`CREATE INDEX IF NOT EXISTS idx_cron_jobs_agent ON cron_jobs (agent_id)`,
+		// projects groups sessions that share a workspace folder. PK
+		// matches sessions: a project is "user X's working folder on
+		// agent Y", same private-per-user ownership model. The on-disk
+		// workspace dir lives at workspaces/<agent>/projects/<pid>/ and
+		// is shared by every session whose project_id equals pid; the
+		// per-session sessions/<chat>/ subdir is bypassed for project
+		// sessions so files persist across chats inside the project.
+		`CREATE TABLE IF NOT EXISTS projects (
+			user_id TEXT NOT NULL,
+			agent_id TEXT NOT NULL,
+			project_id TEXT NOT NULL,
+			name TEXT NOT NULL DEFAULT '',
+			description TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (user_id, agent_id, project_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_projects_listing ON projects (user_id, agent_id, updated_at DESC)`,
 	}
 }
 
@@ -1661,22 +1702,23 @@ func scanAgents(rows *sql.Rows) ([]AgentRecord, error) {
 
 func (d *DBStore) GetSession(ctx context.Context, userID, agentID, sessionKey string) (*SessionRecord, error) {
 	row := d.db.QueryRowContext(ctx,
-		fmt.Sprintf(`SELECT messages, channel, account_id, chat_id, updated_at FROM sessions WHERE user_id = %s AND agent_id = %s AND session_key = %s`,
+		fmt.Sprintf(`SELECT messages, channel, account_id, chat_id, project_id, updated_at FROM sessions WHERE user_id = %s AND agent_id = %s AND session_key = %s`,
 			d.ph(1), d.ph(2), d.ph(3)),
 		userID, agentID, sessionKey)
 	var msgsStr string
 	var rec SessionRecord
-	if err := row.Scan(&msgsStr, &rec.Channel, &rec.AccountID, &rec.ChatID, &rec.UpdatedAt); err != nil {
+	if err := row.Scan(&msgsStr, &rec.Channel, &rec.AccountID, &rec.ChatID, &rec.ProjectID, &rec.UpdatedAt); err != nil {
 		return nil, scanErr(err)
 	}
 	json.Unmarshal([]byte(msgsStr), &rec.Messages)
 	return &rec, nil
 }
 
-// SaveSession upserts the session row. Channel / AccountID / ChatID are
-// written on INSERT only; the ON CONFLICT branch deliberately preserves
-// the existing values so a callback that didn't know the triple (e.g.
-// compaction calling ReplaceMessages) can't accidentally clear it.
+// SaveSession upserts the session row. Channel / AccountID / ChatID /
+// ProjectID are written on INSERT only; the ON CONFLICT branch
+// deliberately preserves the existing values so a callback that didn't
+// know the triple (e.g. compaction calling ReplaceMessages) can't
+// accidentally clear it.
 func (d *DBStore) SaveSession(ctx context.Context, userID, agentID, sessionKey string, session *SessionRecord) error {
 	if userID == "" {
 		return errors.New("store: SaveSession requires user_id")
@@ -1686,27 +1728,27 @@ func (d *DBStore) SaveSession(ctx context.Context, userID, agentID, sessionKey s
 	count := len(session.Messages)
 	if d.dialect == "postgres" {
 		_, err := d.db.ExecContext(ctx,
-			`INSERT INTO sessions (user_id, agent_id, session_key, channel, account_id, chat_id, messages, message_count, updated_at)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+			`INSERT INTO sessions (user_id, agent_id, session_key, channel, account_id, chat_id, project_id, messages, message_count, updated_at)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 				ON CONFLICT (user_id, agent_id, session_key) DO UPDATE
-				SET messages=$7, message_count=$8, updated_at=$9`,
-			userID, agentID, sessionKey, session.Channel, session.AccountID, session.ChatID,
+				SET messages=$8, message_count=$9, updated_at=$10`,
+			userID, agentID, sessionKey, session.Channel, session.AccountID, session.ChatID, session.ProjectID,
 			string(msgsData), count, now)
 		return err
 	}
 	_, err := d.db.ExecContext(ctx,
-		`INSERT INTO sessions (user_id, agent_id, session_key, channel, account_id, chat_id, messages, message_count, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO sessions (user_id, agent_id, session_key, channel, account_id, chat_id, project_id, messages, message_count, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT (user_id, agent_id, session_key) DO UPDATE SET
 			  messages=excluded.messages, message_count=excluded.message_count, updated_at=excluded.updated_at`,
-		userID, agentID, sessionKey, session.Channel, session.AccountID, session.ChatID,
+		userID, agentID, sessionKey, session.Channel, session.AccountID, session.ChatID, session.ProjectID,
 		string(msgsData), count, now)
 	return err
 }
 
 func (d *DBStore) ListSessions(ctx context.Context, userID, agentID string) ([]SessionMeta, error) {
 	rows, err := d.db.QueryContext(ctx,
-		fmt.Sprintf(`SELECT session_key, channel, account_id, chat_id, title, message_count, updated_at FROM sessions
+		fmt.Sprintf(`SELECT session_key, channel, account_id, chat_id, project_id, title, message_count, updated_at FROM sessions
 			WHERE user_id = %s AND agent_id = %s ORDER BY updated_at DESC`, d.ph(1), d.ph(2)),
 		userID, agentID)
 	if err != nil {
@@ -1716,7 +1758,7 @@ func (d *DBStore) ListSessions(ctx context.Context, userID, agentID string) ([]S
 	var metas []SessionMeta
 	for rows.Next() {
 		var m SessionMeta
-		if err := rows.Scan(&m.Key, &m.Channel, &m.AccountID, &m.ChatID, &m.Title, &m.MessageCount, &m.UpdatedAt); err != nil {
+		if err := rows.Scan(&m.Key, &m.Channel, &m.AccountID, &m.ChatID, &m.ProjectID, &m.Title, &m.MessageCount, &m.UpdatedAt); err != nil {
 			return nil, err
 		}
 		metas = append(metas, m)
@@ -1740,6 +1782,22 @@ func (d *DBStore) LookupSessionTriple(ctx context.Context, userID, agentID, sess
 		return "", "", "", scanErr(err)
 	}
 	return ch, acc, ci, nil
+}
+
+// LookupSessionProject returns the project_id of a session_key (or "")
+// — the workspace path resolver consults this to decide between
+// projects/<id>/ and sessions/<chat>/ for the sandbox mount.
+func (d *DBStore) LookupSessionProject(ctx context.Context, userID, agentID, sessionKey string) (string, error) {
+	row := d.db.QueryRowContext(ctx,
+		fmt.Sprintf(`SELECT project_id FROM sessions
+			WHERE user_id = %s AND agent_id = %s AND session_key = %s`,
+			d.ph(1), d.ph(2), d.ph(3)),
+		userID, agentID, sessionKey)
+	var pid string
+	if err := row.Scan(&pid); err != nil {
+		return "", scanErr(err)
+	}
+	return pid, nil
 }
 
 // ResolveActiveSessionKey returns the most recently updated session_key
@@ -1972,6 +2030,19 @@ func (d *DBStore) RenameSession(ctx context.Context, userID, agentID, sessionKey
 		fmt.Sprintf(`UPDATE sessions SET title = %s WHERE user_id = %s AND agent_id = %s AND session_key = %s`,
 			d.ph(1), d.ph(2), d.ph(3), d.ph(4)),
 		title, userID, agentID, sessionKey)
+	return err
+}
+
+// MoveSession flips a session's project_id. Empty string detaches the
+// session from its current project (drag-out to "Chats"). The caller
+// must have already migrated the workspace files and validated that
+// projectID, when non-empty, is a real project the user owns under
+// this agent — this method only touches the sessions row.
+func (d *DBStore) MoveSession(ctx context.Context, userID, agentID, sessionKey, projectID string) error {
+	_, err := d.db.ExecContext(ctx,
+		fmt.Sprintf(`UPDATE sessions SET project_id = %s WHERE user_id = %s AND agent_id = %s AND session_key = %s`,
+			d.ph(1), d.ph(2), d.ph(3), d.ph(4)),
+		projectID, userID, agentID, sessionKey)
 	return err
 }
 
@@ -2486,6 +2557,92 @@ func (d *DBStore) GetNextDueTime(ctx context.Context) (time.Time, error) {
 		return time.Time{}, nil
 	}
 	return parseTimeString(s.String), nil
+}
+
+// --- Projects ---
+
+func (d *DBStore) ListProjects(ctx context.Context, userID, agentID string) ([]ProjectRecord, error) {
+	rows, err := d.db.QueryContext(ctx,
+		fmt.Sprintf(`SELECT project_id, name, description, created_at, updated_at FROM projects
+			WHERE user_id = %s AND agent_id = %s ORDER BY updated_at DESC`,
+			d.ph(1), d.ph(2)),
+		userID, agentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ProjectRecord
+	for rows.Next() {
+		p := ProjectRecord{UserID: userID, AgentID: agentID}
+		if err := rows.Scan(&p.ID, &p.Name, &p.Description, &p.CreatedAt, &p.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+func (d *DBStore) GetProject(ctx context.Context, userID, agentID, projectID string) (*ProjectRecord, error) {
+	row := d.db.QueryRowContext(ctx,
+		fmt.Sprintf(`SELECT name, description, created_at, updated_at FROM projects
+			WHERE user_id = %s AND agent_id = %s AND project_id = %s`,
+			d.ph(1), d.ph(2), d.ph(3)),
+		userID, agentID, projectID)
+	p := ProjectRecord{UserID: userID, AgentID: agentID, ID: projectID}
+	if err := row.Scan(&p.Name, &p.Description, &p.CreatedAt, &p.UpdatedAt); err != nil {
+		return nil, scanErr(err)
+	}
+	return &p, nil
+}
+
+// SaveProject upserts. created_at is preserved on update; updated_at
+// is bumped every write. Empty name is allowed at the row level — the
+// HTTP handler enforces non-empty so we don't double-validate here.
+func (d *DBStore) SaveProject(ctx context.Context, p *ProjectRecord) error {
+	if p.UserID == "" || p.AgentID == "" || p.ID == "" {
+		return errors.New("store: SaveProject requires user_id, agent_id, project_id")
+	}
+	now := time.Now().UTC()
+	if d.dialect == "postgres" {
+		_, err := d.db.ExecContext(ctx,
+			`INSERT INTO projects (user_id, agent_id, project_id, name, description, created_at, updated_at)
+				VALUES ($1, $2, $3, $4, $5, $6, $6)
+				ON CONFLICT (user_id, agent_id, project_id) DO UPDATE
+				SET name=$4, description=$5, updated_at=$6`,
+			p.UserID, p.AgentID, p.ID, p.Name, p.Description, now)
+		return err
+	}
+	_, err := d.db.ExecContext(ctx,
+		`INSERT INTO projects (user_id, agent_id, project_id, name, description, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT (user_id, agent_id, project_id) DO UPDATE SET
+			  name=excluded.name, description=excluded.description, updated_at=excluded.updated_at`,
+		p.UserID, p.AgentID, p.ID, p.Name, p.Description, now, now)
+	return err
+}
+
+// DeleteProject removes the row. Caller must ensure no sessions still
+// reference it (via CountProjectSessions); this method does not check
+// because the handler decides the policy (block vs cascade) — the
+// store stays mechanical.
+func (d *DBStore) DeleteProject(ctx context.Context, userID, agentID, projectID string) error {
+	_, err := d.db.ExecContext(ctx,
+		fmt.Sprintf(`DELETE FROM projects WHERE user_id = %s AND agent_id = %s AND project_id = %s`,
+			d.ph(1), d.ph(2), d.ph(3)),
+		userID, agentID, projectID)
+	return err
+}
+
+func (d *DBStore) CountProjectSessions(ctx context.Context, userID, agentID, projectID string) (int, error) {
+	row := d.db.QueryRowContext(ctx,
+		fmt.Sprintf(`SELECT COUNT(*) FROM sessions WHERE user_id = %s AND agent_id = %s AND project_id = %s`,
+			d.ph(1), d.ph(2), d.ph(3)),
+		userID, agentID, projectID)
+	var n int
+	if err := row.Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
 }
 
 // parseTimeString tries common time formats that modernc.org/sqlite may

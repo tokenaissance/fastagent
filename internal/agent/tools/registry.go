@@ -64,6 +64,11 @@ type Registry struct {
 	// the agent loop via SetSessionID; an empty value falls back to
 	// agent-shared scope (admin uploads, fixtures, tests).
 	sessionID string
+	// projectID, when set, overrides sessionID-based scoping so all
+	// tool calls land in workspaces/<agent>/projects/<pid>/. That's
+	// the whole value of "project": notes/files persist across the
+	// project's chats. Set per-turn alongside sessionID.
+	projectID string
 	// messageChannel + messageChatID name the bus address of the chat
 	// that's currently in flight. Set per-turn by bindSession so tools
 	// that schedule asynchronous work (e.g. create_cron_job) can stamp
@@ -212,6 +217,14 @@ func (r *Registry) SetSandboxRequired(required bool) {
 // back to the agent-shared scope (no session isolation).
 func (r *Registry) SetSessionID(sessionID string) {
 	r.sessionID = sessionID
+}
+
+// SetProjectID scopes the registry's workspace.Store calls to a project
+// folder when non-empty, taking priority over the session scope so all
+// chats inside a project share files. Pair with SetSessionID at the top
+// of every turn.
+func (r *Registry) SetProjectID(projectID string) {
+	r.projectID = projectID
 }
 
 // SetMessageContext records the bus address of the in-flight turn so

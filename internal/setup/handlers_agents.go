@@ -628,22 +628,19 @@ func (s *Server) handleAgentFileList(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAgentReadable(w, r, id) {
 		return
 	}
-	// Always List with sessionID="" so returned paths stay agent-relative
-	// (e.g. "sessions/<sid>/foo.png") — the download endpoint expects that
+	// Always List with project + session both empty so returned paths
+	// stay agent-relative (e.g. "sessions/<sid>/foo.png" or
+	// "projects/<pid>/notes.md") — the download endpoint expects that
 	// shape, and filtering here is cheaper than two divergent code paths.
-	objects, err := s.workspaceStore.List(r.Context(), id, "")
+	objects, err := s.workspaceStore.List(r.Context(), id, "", "")
 	if err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-	sessionID := s.workspaceSessionScope(r.Context(), id, r.URL.Query().Get("sessionId"))
-	var prefix string
-	if sessionID != "" {
-		prefix = "sessions/" + sessionID + "/"
-	}
+	scope := s.fileScopeForRequest(r, id)
 	files := make([]map[string]any, 0, len(objects))
 	for _, o := range objects {
-		if prefix != "" && !strings.HasPrefix(o.Path, prefix) {
+		if !scope.acceptPath(o.Path) {
 			continue
 		}
 		files = append(files, map[string]any{
@@ -653,6 +650,99 @@ func (s *Server) handleAgentFileList(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	jsonResponse(w, http.StatusOK, map[string]any{"files": files})
+}
+
+// fileScope describes which agent-relative paths to surface for the
+// file browser / zip filter. acceptPath returns true for paths the
+// scope considers in-bounds:
+//
+//   loose chat:  paths under sessions/<chat_id>/
+//   project chat: paths under projects/<pid>/<chat_id>/ (the chat's
+//                 own files), PLUS files directly at projects/<pid>/
+//                 (project-root "shared/legacy" files — pre-subdir
+//                 layout still lives there, and operators may
+//                 deliberately drop shared files at the root). Other
+//                 chats' subdirs (projects/<pid>/<other-sid>/...)
+//                 are excluded — those belong to that chat's panel.
+//   no session:  everything (admin browser).
+//
+// archiveSuffix returns the human-readable scope id used in the zip
+// filename — chat_id for loose chats, "<pid>-<chat_id>" for project
+// chats so a download names "agent-pid-sid.zip" instead of
+// disambiguating by chat_id alone.
+type fileScope struct {
+	acceptPath    func(string) bool
+	archiveSuffix string
+}
+
+// stripScopePrefix removes the deepest known scope prefix from an
+// agent-relative path so zip entries read as plain filenames. Order
+// matters: project chats are tried before session chats so a
+// `projects/<pid>/<sid>/foo.md` collapses to `foo.md` rather than
+// `<pid>/<sid>/foo.md`. Top-level project files keep the leading
+// `projects/<pid>/` strip so they read as bare filenames too.
+func stripScopePrefix(p string) string {
+	for _, top := range []string{"projects/", "sessions/"} {
+		if !strings.HasPrefix(p, top) {
+			continue
+		}
+		rest := p[len(top):]
+		// Cut after the scope id (one path segment).
+		if i := strings.IndexByte(rest, '/'); i >= 0 {
+			rest = rest[i+1:]
+			// Project paths can have a second id segment for the
+			// per-chat subdir; collapse that too when present.
+			if top == "projects/" {
+				if j := strings.IndexByte(rest, '/'); j >= 0 {
+					// Only treat the first segment as a chat id when it
+					// looks like one (s-... prefix). Otherwise keep
+					// rest as-is so legacy "subdir/file.md" structures
+					// don't get over-stripped.
+					if first := rest[:j]; strings.HasPrefix(first, "s-") {
+						rest = rest[j+1:]
+					}
+				}
+			}
+			return rest
+		}
+		return ""
+	}
+	return p
+}
+
+func (s *Server) fileScopeForRequest(r *http.Request, agentID string) fileScope {
+	rawSession := r.URL.Query().Get("sessionId")
+	if rawSession == "" {
+		return fileScope{acceptPath: func(string) bool { return true }}
+	}
+	chatID := s.workspaceSessionScope(r.Context(), agentID, rawSession)
+	if chatID == "" {
+		return fileScope{acceptPath: func(string) bool { return true }}
+	}
+	if pid := s.resolveSessionProject(r.Context(), r, agentID, rawSession); pid != "" {
+		ownPrefix := "projects/" + pid + "/" + chatID + "/"
+		rootPrefix := "projects/" + pid + "/"
+		return fileScope{
+			acceptPath: func(p string) bool {
+				if strings.HasPrefix(p, ownPrefix) {
+					return true
+				}
+				// Top-level file at projects/<pid>/<file> (no further
+				// "/" — i.e. not in any sid subdir).
+				if strings.HasPrefix(p, rootPrefix) {
+					rest := p[len(rootPrefix):]
+					return rest != "" && !strings.Contains(rest, "/")
+				}
+				return false
+			},
+			archiveSuffix: pid + "-" + chatID,
+		}
+	}
+	prefix := "sessions/" + chatID + "/"
+	return fileScope{
+		acceptPath:    func(p string) bool { return strings.HasPrefix(p, prefix) },
+		archiveSuffix: chatID,
+	}
 }
 
 // handleAgentFilesZip streams a zip of every workspace file for the agent
@@ -668,18 +758,15 @@ func (s *Server) handleAgentFilesZip(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAgentReadable(w, r, id) {
 		return
 	}
-	objects, err := s.workspaceStore.List(r.Context(), id, "")
+	objects, err := s.workspaceStore.List(r.Context(), id, "", "")
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	sessionID := s.workspaceSessionScope(r.Context(), id, r.URL.Query().Get("sessionId"))
-	var prefix, archiveName string
-	if sessionID != "" {
-		prefix = "sessions/" + sessionID + "/"
-		archiveName = fmt.Sprintf("%s-%s.zip", id, sessionID)
-	} else {
-		archiveName = fmt.Sprintf("%s.zip", id)
+	scope := s.fileScopeForRequest(r, id)
+	archiveName := fmt.Sprintf("%s.zip", id)
+	if scope.archiveSuffix != "" {
+		archiveName = fmt.Sprintf("%s-%s.zip", id, scope.archiveSuffix)
 	}
 
 	w.Header().Set("Content-Type", "application/zip")
@@ -689,13 +776,13 @@ func (s *Server) handleAgentFilesZip(w http.ResponseWriter, r *http.Request) {
 	defer zw.Close()
 
 	for _, o := range objects {
-		if prefix != "" && !strings.HasPrefix(o.Path, prefix) {
+		if !scope.acceptPath(o.Path) {
 			continue
 		}
-		entryName := o.Path
-		if prefix != "" {
-			entryName = strings.TrimPrefix(o.Path, prefix)
-		}
+		// Strip the deepest scope prefix from the archive entry name
+		// so the user sees clean filenames in the zip rather than
+		// nested `projects/<pid>/<sid>/foo.md` paths.
+		entryName := stripScopePrefix(o.Path)
 		if entryName == "" {
 			continue
 		}
@@ -709,7 +796,7 @@ func (s *Server) handleAgentFilesZip(w http.ResponseWriter, r *http.Request) {
 			slog.Warn("zip: create entry failed", "agent", id, "path", o.Path, "err", err)
 			return
 		}
-		rc, err := s.workspaceStore.Get(r.Context(), id, "", o.Path)
+		rc, err := s.workspaceStore.Get(r.Context(), id, "", "", o.Path)
 		if err != nil {
 			slog.Warn("zip: open object failed", "agent", id, "path", o.Path, "err", err)
 			continue
@@ -755,7 +842,7 @@ func (s *Server) handleAgentFile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) serveFileFromWorkspaceStore(w http.ResponseWriter, r *http.Request, agentID, path string) {
-	rc, err := s.workspaceStore.Get(r.Context(), agentID, "", path)
+	rc, err := s.workspaceStore.Get(r.Context(), agentID, "", "", path)
 	if err != nil {
 		jsonResponse(w, http.StatusNotFound, map[string]any{"error": err.Error()})
 		return
@@ -791,9 +878,17 @@ func (s *Server) handleAgentFileUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// sessionId scopes the upload to the sandbox mount the agent actually
-	// sees (<agent>/sessions/<sid>/). Without it, files land at the agent
-	// root and list_dir on /workspace can't find them.
-	sessionID := r.URL.Query().Get("sessionId")
+	// sees. We resolve the session to find its project_id so uploads in
+	// a project chat land in projects/<pid>/ alongside the agent's own
+	// writes; loose chats keep the legacy sessions/<chat>/ subdir.
+	sessionKey := r.URL.Query().Get("sessionId")
+	sessionID := s.workspaceSessionScope(r.Context(), id, sessionKey)
+	projectID := s.resolveSessionProject(r.Context(), r, id, sessionKey)
+	if projectID != "" {
+		// Project sessions don't use the per-chat subdir — clear it so
+		// the workspace store routes to projects/<pid>/.
+		sessionID = ""
+	}
 	saved := make([]map[string]any, 0, len(headers))
 	for _, h := range headers {
 		fh, err := h.Open()
@@ -807,7 +902,7 @@ func (s *Server) handleAgentFileUpload(w http.ResponseWriter, r *http.Request) {
 			jsonResponse(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 			return
 		}
-		if err := s.workspaceStore.Put(r.Context(), id, sessionID, h.Filename, strings.NewReader(string(data)), int64(len(data)), ""); err != nil {
+		if err := s.workspaceStore.Put(r.Context(), id, projectID, sessionID, h.Filename, strings.NewReader(string(data)), int64(len(data)), ""); err != nil {
 			jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 			return
 		}

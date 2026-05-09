@@ -5,6 +5,12 @@ type InboundMessage struct {
 	Channel      string   // channel type, e.g. "telegram"
 	AccountID    string   // account within the channel (e.g. which bot)
 	ChatID       string   // unique chat identifier within the channel
+	// ProjectID, when set, names the per-(user, agent) project the chat
+	// belongs to. Empty = loose chat (legacy behavior). Stamped on
+	// inbound messages by the chat handlers after they've resolved the
+	// session row, so the agent runtime can route workspace IO to
+	// projects/<id>/ instead of sessions/<chat>/.
+	ProjectID    string
 	UserID       string   // user identifier
 	OwnerUserID  string   // fastclaw user that owns the agent (for multi-user routing)
 	// AgentID is an *explicit* agent target. Non-empty when the source

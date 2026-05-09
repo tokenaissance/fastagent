@@ -114,13 +114,14 @@ func (a *Agent) SetSandboxPool(p sandbox.ExecutorPool) {
 // Mutating the shared registry across concurrent chats would race, but
 // the current invariant is one chat-in-flight per agent — the gateway
 // serializes per-agent turns. Documenting it here in case that changes.
-func (a *Agent) bindSession(ctx context.Context, channel, sessionID string) {
+func (a *Agent) bindSession(ctx context.Context, channel, sessionID, projectID string) {
 	a.registry.SetSessionID(sessionID)
+	a.registry.SetProjectID(projectID)
 	a.registry.SetMessageContext(channel, sessionID)
 	if a.sandboxPool == nil {
 		return
 	}
-	ex, err := a.sandboxPool.Get(ctx, a.name, sessionID)
+	ex, err := a.sandboxPool.Get(ctx, a.name, projectID, sessionID)
 	if err != nil {
 		// Error level (not warn) — when sandbox is required and we
 		// can't bind, the next exec call will refuse with the
@@ -312,15 +313,24 @@ func (a *Agent) Name() string {
 // imageURLs and params mirror the streaming variant so non-streaming
 // callers (third-party apps hitting POST /api/chat) get the same
 // vision + per-turn-params support as the SSE path.
-func (a *Agent) HandleWebChat(ctx context.Context, sessionId, text string, imageURLs []string, params map[string]any) string {
+//
+// projectIDHint is the chat's "owning project" as carried in the URL
+// (`?project=<pid>`) or chat request body. It only matters on the very
+// first turn of a brand-new session: once the row exists, project_id
+// stamped on it is authoritative and the hint is ignored.
+func (a *Agent) HandleWebChat(ctx context.Context, sessionId, projectIDHint, text string, imageURLs []string, params map[string]any) string {
 	if sessionId == "" {
 		sessionId = "web-ui"
 	}
-	channel, accountID, chatID := a.recoverWebTriple(sessionId)
+	channel, accountID, chatID, projectID := a.recoverWebTriple(sessionId)
+	if projectID == "" {
+		projectID = projectIDHint
+	}
 	msg := bus.InboundMessage{
 		Channel:   channel,
 		AccountID: accountID,
 		ChatID:    chatID,
+		ProjectID: projectID,
 		UserID:    "web-user",
 		Text:      text,
 		PeerKind:  "dm",
@@ -333,17 +343,22 @@ func (a *Agent) HandleWebChat(ctx context.Context, sessionId, text string, image
 // HandleWebChatStream handles a web chat message with real-time event streaming.
 // imageURLs carries any user-attached images (data URLs or fetchable HTTPS
 // links) so vision-capable models receive them as image_url content parts on
-// the user message.
-func (a *Agent) HandleWebChatStream(ctx context.Context, sessionId, text string, imageURLs []string, params map[string]any, events chan<- ChatEvent) string {
+// the user message. projectIDHint mirrors HandleWebChat's parameter — see
+// that doc.
+func (a *Agent) HandleWebChatStream(ctx context.Context, sessionId, projectIDHint, text string, imageURLs []string, params map[string]any, events chan<- ChatEvent) string {
 	if sessionId == "" {
 		sessionId = "web-ui"
 	}
 	ctx = ContextWithChatEvents(ctx, events)
-	channel, accountID, chatID := a.recoverWebTriple(sessionId)
+	channel, accountID, chatID, projectID := a.recoverWebTriple(sessionId)
+	if projectID == "" {
+		projectID = projectIDHint
+	}
 	msg := bus.InboundMessage{
 		Channel:   channel,
 		AccountID: accountID,
 		ChatID:    chatID,
+		ProjectID: projectID,
 		UserID:    "web-user",
 		Text:      text,
 		PeerKind:  "dm",
@@ -355,8 +370,8 @@ func (a *Agent) HandleWebChatStream(ctx context.Context, sessionId, text string,
 
 // recoverWebTriple maps a URL `?session=` token (which can be a
 // session_key for any channel, OR a legacy web chat_id) to the full
-// (channel, accountID, chatID) triple the downstream session lookup
-// keys on.
+// (channel, accountID, chatID, projectID) tuple downstream callers
+// need.
 //
 // Without recovering accountID too, an inbound web write to a
 // telegram/wechat session would query Manager.Get(channel, "", chatID),
@@ -365,11 +380,16 @@ func (a *Agent) HandleWebChatStream(ctx context.Context, sessionId, text string,
 // briefly, but a refresh loads the original session's history and the
 // just-written exchange vanishes.
 //
+// projectID is "" for loose chats and forwarded onto the inbound
+// message so bindSession routes the sandbox + workspace.Store to the
+// project folder.
+//
 // Two-step recovery:
-//  1. If the token matches a session_key → look up the full triple.
+//  1. If the token matches a session_key → look up the full triple +
+//     project.
 //  2. Otherwise treat it as a web chat_id (preserves the brand-new
 //     "+New chat" path where the row doesn't exist yet).
-func (a *Agent) recoverWebTriple(sessionId string) (channel, accountID, chatID string) {
+func (a *Agent) recoverWebTriple(sessionId string) (channel, accountID, chatID, projectID string) {
 	channel, accountID, chatID = "web", "", sessionId
 	if !a.sessions.SessionExists(sessionId) {
 		return
@@ -384,6 +404,7 @@ func (a *Agent) recoverWebTriple(sessionId string) (channel, accountID, chatID s
 		}
 		accountID = acc
 	}
+	projectID = a.sessions.LookupSessionProject(sessionId)
 	return
 }
 
@@ -401,7 +422,7 @@ func (a *Agent) SetGroupContext(gc *GroupContext) {
 // without triggering an LLM call. This gives the agent awareness of what other
 // bots said in the group chat.
 func (a *Agent) InjectGroupMessage(ctx context.Context, msg bus.InboundMessage) {
-	sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID)
+	sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID, msg.ProjectID)
 	label := msg.SenderName
 	if label == "" {
 		label = "Bot"
@@ -553,6 +574,51 @@ func (a *Agent) DeleteWebChatSession(sessionId string) error {
 // channel) by the URL token.
 func (a *Agent) RenameWebChatSession(sessionId, title string) error {
 	return a.sessions.RenameSessionByID(sessionId, title)
+}
+
+// MoveWebChatSession reassigns a chat to a different project (or
+// detaches it when projectID is "") and migrates its workspace files
+// from the old scope to the new one. Drives the sidebar drag-and-drop
+// affordance.
+//
+// Order matters:
+//  1. Resolve the URL token to the canonical session_key.
+//  2. Read the current project_id so we know the source workspace
+//     scope (loose chat = sessions/<sid>/, project chat =
+//     projects/<oldPid>/<sid>/).
+//  3. Release any live sandbox bound to this chat — leaving it up
+//     would keep the old bind-mount referenced and the new mount
+//     wouldn't take effect until eviction. Released proactively so
+//     the next turn cold-starts at the new path.
+//  4. Move workspace files (no-op when the source dir is empty).
+//  5. Flip sessions.project_id in the store and drop the in-memory
+//     Session cache so the next Get re-reads the row.
+//
+// Steps 4 and 5 are not atomic: a crash between them leaves the row
+// pointing at the new project but files at the old path (or vice
+// versa). The pending follow-up move is idempotent — re-running this
+// method finishes the migration cleanly.
+func (a *Agent) MoveWebChatSession(ctx context.Context, sessionId, projectID string) error {
+	key := a.sessions.ResolveSessionKey(sessionId)
+	if key == "" {
+		return fmt.Errorf("session not found: %s", sessionId)
+	}
+	oldProject := a.sessions.LookupSessionProject(key)
+	if oldProject == projectID {
+		return nil
+	}
+	if a.sandboxPool != nil {
+		if err := a.sandboxPool.Release(a.name, oldProject, key); err != nil {
+			slog.Warn("MoveWebChatSession: sandbox release failed",
+				"agent", a.name, "session", key, "error", err)
+		}
+	}
+	if a.workspaceStore != nil {
+		if err := a.workspaceStore.Move(ctx, a.name, oldProject, key, projectID, key); err != nil {
+			return fmt.Errorf("workspace move: %w", err)
+		}
+	}
+	return a.sessions.MoveSessionByID(sessionId, projectID)
 }
 
 // Model returns the agent's model name.
@@ -709,12 +775,12 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	}
 
 	a.refreshSkillsFromStore()
-	sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID)
+	sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID, msg.ProjectID)
 	// Bind the registry to this chat's session so workspace.Store reads
 	// + writes get session-scoped paths and (when a sandbox pool is
 	// wired) the executor used by exec/read_file/list_dir is tied to a
 	// session-private container.
-	a.bindSession(ctx, msg.Channel, msg.ChatID)
+	a.bindSession(ctx, msg.Channel, msg.ChatID, msg.ProjectID)
 
 	// Safety net for client-aborted turns: if the loop exits with a
 	// tool_use that never got its matching tool_result appended (the
@@ -1242,8 +1308,8 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 	}
 
 	a.refreshSkillsFromStore()
-	sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID)
-	a.bindSession(ctx, msg.Channel, msg.ChatID)
+	sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID, msg.ProjectID)
+	a.bindSession(ctx, msg.Channel, msg.ChatID, msg.ProjectID)
 
 	// Same orphan-tool_use safety net as HandleMessage. The streaming path
 	// previously lacked this, so loop detection (which appends an assistant
