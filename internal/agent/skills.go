@@ -115,6 +115,12 @@ type SkillsLoader struct {
 	// completely invisible on replicas that didn't handle the upload.
 	workspaceStore workspace.Store
 	agentID        string
+	// userID is the chatter. When set, LoadSkills also scans the
+	// per-user skills dir (~/.fastclaw/users/<uid>/skills/) so skills
+	// the user creates while chatting any agent are reusable on every
+	// other agent they chat with. Empty disables this layer (legacy /
+	// single-user installs that pre-date per-user skills).
+	userID string
 }
 
 // NewSkillsLoader creates a new skills loader.
@@ -143,6 +149,15 @@ func (sl *SkillsLoader) WithObjectStore(ws workspace.Store, agentID string) *Ski
 	return sl
 }
 
+// WithUserID enables the per-user skill layer (~/.fastclaw/users/<uid>/skills).
+// When set together with WithObjectStore, hydrate also pulls the user's
+// pseudo-owner namespace so skills created on another pod are mirrored to
+// this pod's disk. Empty userID disables the layer.
+func (sl *SkillsLoader) WithUserID(userID string) *SkillsLoader {
+	sl.userID = userID
+	return sl
+}
+
 // LoadSkills discovers skills from all layers and returns them merged.
 // Precedence: agent workspace > user installed > managed > extra dirs.
 func (sl *SkillsLoader) LoadSkills() []Skill {
@@ -163,6 +178,23 @@ func (sl *SkillsLoader) LoadSkills() []Skill {
 			agentSkills := filepath.Join(sl.agentDir, "skills")
 			if err := skills.HydrateSkillsDown(ctx, sl.workspaceStore, sl.agentID, agentSkills); err != nil {
 				slog.Warn("agent skill hydrate failed", "error", err)
+			}
+		}
+		// Per-user skill bucket: shared across every agent the chatter
+		// uses, isolated from other chatters. Lets utility skills the
+		// user sinks on agent A be available on agent B without
+		// polluting the agent owner's official skill set.
+		if userDir := sl.userSkillsDir(); userDir != "" {
+			owner := skills.UserSkillOwner(sl.userID)
+			if err := skills.HydrateSkillsDown(ctx, sl.workspaceStore, owner, userDir); err != nil {
+				slog.Warn("user skill hydrate failed", "user", sl.userID, "error", err)
+			}
+			// Anything the agent installed mid-chat into the bind-mounted
+			// per-user dir (e.g. via `npx skills add -g -y`) is local-only
+			// at this point. Push it up so sibling pods pick it up on their
+			// next hydrate cycle. Cheap when nothing's new.
+			if err := skills.MirrorSkillsUp(ctx, sl.workspaceStore, owner, userDir); err != nil {
+				slog.Warn("user skill mirror-up failed", "user", sl.userID, "error", err)
 			}
 		}
 	}
@@ -216,6 +248,18 @@ func (sl *SkillsLoader) LoadSkills() []Skill {
 		}
 	}
 
+	// Layer 1.3: per-user skills (this chatter's personal bucket).
+	// Sits below agent (owner-curated) so an agent's official skill
+	// can override a user's same-named utility, but above team / host
+	// so the user's own skills always trump generic installs.
+	if userDir := sl.userSkillsDir(); userDir != "" {
+		for name, skill := range discoverSkillsEnhanced(userDir, "personal") {
+			if !disabled[name] {
+				skillsMap[name] = skill
+			}
+		}
+	}
+
 	// Layer 1 (highest): agent workspace skills
 	agentSkillsDir := filepath.Join(sl.agentDir, "skills")
 	for name, skill := range discoverSkillsEnhanced(agentSkillsDir, "agent") {
@@ -255,11 +299,25 @@ func (sl *SkillsLoader) BuildSkillsSummary(skills []Skill) string {
 	return sb.String()
 }
 
-// skillsDirective tells the LLM how to invoke the pre-installed skills.
-// Short and assertive — no marketplace mentions, no "load_skill first"
-// dance, just "here are your skills, run the script via exec".
+// skillsDirective tells the LLM how to invoke pre-installed skills AND
+// what to try before falling back to ad-hoc code when the inline set
+// doesn't cover the request. The trigger condition is concrete — "before
+// any package install via exec" — rather than abstract ("when no skill
+// covers it"), because the abstract framing left the model an easy
+// rationalization ("this is one-shot, skip the ladder") that produced
+// reflexive `pip install` calls for tasks a published skill would handle.
 const skillsDirective = `<skill_usage_rules>
-The skills listed below are this agent's complete toolset. Each skill's full SKILL.md is included inline. To invoke a skill, run its main script via the exec tool and pass arguments on stdin as JSON; the SKILL.md describes args and return shape.
+The skills listed below are pre-installed for this agent. Each skill's full SKILL.md is included inline. To invoke one, run its main script via the exec tool and pass arguments on stdin as JSON; the SKILL.md describes args and return shape.
+
+The sandbox image already has: python3 + pip, node + npm + npx, the agent-browser CLI (run as ` + "`agent-browser open <url>`" + `; uses Chromium via /usr/bin/chromium-browser), git, curl, requests / pillow / beautifulsoup4 / lxml. DO NOT reinstall any of these — wasted tool calls and timeouts. If you see "command not found", check the spelling before reaching for npm/pip.
+
+When the inline skills don't cover what the user asked for, follow this order BEFORE running any package install (pip / npm / apt / brew / cargo / gem / go install / …) via exec:
+
+1. If a "find-skills" skill is listed above, run it FIRST to search the open skill ecosystem. If a credible match exists, surface it and offer to install it instead of installing the package yourself.
+2. If no published skill fits, use "skill-creator" (if listed) to scaffold a new skill under skills/<name>/, then invoke it. Prefer this over inline scripts whenever the user might ask the same kind of thing again.
+3. Only if find-skills found nothing AND skill-creator isn't appropriate (e.g. truly one-time throwaway like printing the date), fall through to the direct package install.
+
+Skipping step 1 to "save time" is not allowed — it costs one tool call and prevents reinventing wheels the community has already published.
 </skill_usage_rules>`
 
 // SkillEnvVars returns environment variables for a specific skill from global config.
@@ -325,10 +383,44 @@ func (sl *SkillsLoader) allSkillDirs() []string {
 	if sl.teamDir != "" {
 		dirs = append(dirs, filepath.Join(sl.teamDir, "skills"))
 	}
+	if userDir := sl.userSkillsDir(); userDir != "" {
+		dirs = append(dirs, userDir)
+	}
 	dirs = append(dirs, filepath.Join(sl.homeDir, "skills"))
 	dirs = append(dirs, fastclawManagedDir())
 	dirs = append(dirs, sl.globalCfg.Load.ExtraDirs...)
 	return dirs
+}
+
+// userSkillsDir returns ~/.fastclaw/users/<uid>/skills (FASTCLAW_HOME-aware).
+// Empty when no userID is set so the loader skips the layer entirely on
+// single-user installs / legacy paths.
+func (sl *SkillsLoader) userSkillsDir() string {
+	if sl.userID == "" {
+		return ""
+	}
+	base := fastclawBaseDir()
+	if base == "" {
+		return ""
+	}
+	return filepath.Join(base, "users", sl.userID, "skills")
+}
+
+// userSkillsRootDir is the host parent dir of the per-user skills/
+// subtree (~/.fastclaw/users/<uid>/). Returned form leaves "skills/"
+// off the end so file.go's path resolver can join a relative
+// "skills/foo/SKILL.md" against it the same way it handles agent
+// home; the SkillsLoader layer reaches the actual subdir via
+// userSkillsDir (which appends "skills/").
+func userSkillsRootDir(userID string) string {
+	if userID == "" {
+		return ""
+	}
+	base := fastclawBaseDir()
+	if base == "" {
+		return ""
+	}
+	return filepath.Join(base, "users", userID)
 }
 
 // discoverSkillsEnhanced scans a directory for skill subdirectories with SKILL.md,
@@ -592,18 +684,28 @@ func checkGating(meta *SkillMetadata) (bool, string) {
 	return false, ""
 }
 
-// fastclawManagedDir returns the FastClaw managed skills directory.
-// Honors FASTCLAW_HOME so multi-instance dev (one stack per product)
-// doesn't all share /Users/<u>/.fastclaw/skills/.
-func fastclawManagedDir() string {
+// fastclawBaseDir returns $FASTCLAW_HOME or $HOME/.fastclaw. Used as
+// the parent for skills/, users/<uid>/skills/, etc. Honors FASTCLAW_HOME
+// so multi-instance dev (one stack per product) stays isolated.
+func fastclawBaseDir() string {
 	if h := os.Getenv("FASTCLAW_HOME"); h != "" {
-		return filepath.Join(h, "skills")
+		return h
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(home, ".fastclaw", "skills")
+	return filepath.Join(home, ".fastclaw")
+}
+
+// fastclawManagedDir returns the FastClaw managed skills directory
+// (~/.fastclaw/skills/, host-shared).
+func fastclawManagedDir() string {
+	base := fastclawBaseDir()
+	if base == "" {
+		return ""
+	}
+	return filepath.Join(base, "skills")
 }
 
 func expandPath(path string) string {

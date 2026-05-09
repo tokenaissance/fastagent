@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/fastclaw-ai/fastclaw/internal/buildinfo"
 	"github.com/fastclaw-ai/fastclaw/internal/sandbox"
 )
 
@@ -288,6 +289,94 @@ func mergeEnv(base []string, additional map[string]string) []string {
 	return env
 }
 
+// HostExecToolName is the tool name advertised for host-shell exec on
+// self-hosted installs. Exported so callers (loop.go skill-dirs slice,
+// future audit logs, etc.) can refer to it without re-stringing the
+// literal.
+const HostExecToolName = "host_exec"
+
+// registerHostExec adds an escape-hatch exec tool that bypasses the
+// sandbox executor and runs straight on the operator's host shell.
+// Only registered on SELF-HOSTED installs (buildinfo.IsHostedDeploy()
+// false) AND only when a sandbox executor is also present — otherwise
+// `exec` already IS the host shell and host_exec would be a duplicate.
+//
+// Tool description spells out the boundary loudly so the model picks
+// `exec` (sandbox) by default and only escapes to host_exec for
+// genuine operator-environment work (`fastclaw upgrade`, `~/Downloads`,
+// `launchctl`, system services, anything tied to the user's actual
+// machine). The dangerousCommands shortlist still applies — sandbox vs
+// host doesn't change the "no rm -rf /" rule.
+//
+// Hosted deployments deliberately don't get this tool: in a multi-
+// tenant cloud environment the chatter doesn't operate the daemon,
+// and exposing host shell would be a privilege-escalation path.
+func registerHostExec(r *Registry, envProvider SkillEnvProvider, skillDirs []string) {
+	r.Register(HostExecToolName,
+		"Execute a shell command on the OPERATOR's host machine, bypassing the sandbox. "+
+			"Use this ONLY for tasks tied to the user's actual environment — `fastclaw upgrade`, "+
+			"reading their `~/Downloads`, listing host processes, running CLI tools they have "+
+			"installed locally, similar host-side ops. For everything else (running scripts, "+
+			"web requests, data processing, generating files for the user) use `exec` instead "+
+			"so the work stays inside the sandbox. Same dangerous-command guard as exec; "+
+			"`rm -rf /` and friends are still refused.",
+		map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"command": map[string]interface{}{
+					"type":        "string",
+					"description": "The shell command to execute on the host.",
+				},
+				"stdin": map[string]interface{}{
+					"type":        "string",
+					"description": "Optional input piped to the command's stdin.",
+				},
+				"timeout": map[string]interface{}{
+					"type":        "integer",
+					"description": "Timeout in seconds (default 30)",
+				},
+			},
+			"required": []string{"command"},
+		},
+		func(ctx context.Context, rawArgs json.RawMessage) (string, error) {
+			var args execArgs
+			if err := json.Unmarshal(rawArgs, &args); err != nil {
+				return "", fmt.Errorf("parse args: %w", err)
+			}
+			if args.Command == "" {
+				return "", fmt.Errorf("command is required")
+			}
+			lower := strings.ToLower(args.Command)
+			for _, dc := range dangerousCommands {
+				if strings.Contains(lower, dc) {
+					return "", fmt.Errorf("dangerous command blocked: %s", args.Command)
+				}
+			}
+			timeout := 30
+			if args.Timeout > 0 {
+				timeout = args.Timeout
+			}
+			execCtx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
+			defer cancel()
+			command := args.Command
+			if args.Stdin != "" {
+				command = fmt.Sprintf("(cat <<'__FCSTDIN__'\n%s\n__FCSTDIN__\n) | %s", args.Stdin, args.Command)
+			}
+			cmd := exec.CommandContext(execCtx, "sh", "-c", command)
+			if envProvider != nil && skillDirs != nil {
+				if skillEnv := resolveSkillEnv(args.Command, envProvider, skillDirs); len(skillEnv) > 0 {
+					cmd.Env = mergeEnv(os.Environ(), skillEnv)
+				}
+			}
+			out, err := cmd.CombinedOutput()
+			result := string(out)
+			if err != nil {
+				return fmt.Sprintf("%s\nError: %s", result, err.Error()), err
+			}
+			return result, nil
+		})
+}
+
 // registerSandboxedExec re-registers the exec tool so it delegates to a
 // sandbox.Executor instead of running on the host. Skill env vars
 // (FAL_KEY, REPLICATE_API_TOKEN, etc.) configured via the admin UI are
@@ -371,8 +460,46 @@ func registerSandboxedExec(r *Registry, ex sandbox.Executor) {
 			"injected", injected,
 			"cmdHead", firstN(args.Command, 80))
 		out, err := ex.Exec(ctx, command, time.Duration(timeout)*time.Second)
+		// Hint, don't auto-fall-back: an auto-retry to host shell would
+		// silently breach the sandbox boundary on any prompt-injected
+		// "make it fail in sandbox" trick AND would re-run a possibly
+		// wrong command in a different filesystem. Surface a hint
+		// instead so the LLM (or its operator-trained ChatBot) makes
+		// an explicit decision. Only attach the hint when host_exec is
+		// actually available — on hosted deployments it's not, and
+		// suggesting a tool that doesn't exist just confuses the
+		// model. We probe by tool name so the check is decoupled from
+		// the deploy-mode flag — same answer, less coupling.
+		if err != nil && looksLikeSandboxAbsence(err, out) && !buildinfo.IsHostedDeploy() {
+			err = fmt.Errorf("%w\n[hint: this looks like a sandbox-environment miss (binary or path not present in the container). If the command needs the user's actual host machine — e.g. `fastclaw upgrade`, `~/Downloads`, host CLI tools — retry with the `host_exec` tool instead.]", err)
+		}
 		return MetaSandboxPrefix + out, err
 	})
+}
+
+// looksLikeSandboxAbsence sniffs an exec error / output for the common
+// "tried to run a host-only thing inside the sandbox" signatures so the
+// hint we attach to the error is targeted, not noisy. Conservative —
+// returns false unless we're fairly sure: a real failure (e.g. a script
+// crashed mid-run) shouldn't get a "use host_exec instead" suggestion
+// that would just send the LLM down the wrong path.
+func looksLikeSandboxAbsence(err error, out string) bool {
+	if err == nil {
+		return false
+	}
+	hay := strings.ToLower(err.Error() + "\n" + out)
+	patterns := []string{
+		"command not found",
+		"not found in path",
+		": no such file or directory",
+		"executable file not found",
+	}
+	for _, p := range patterns {
+		if strings.Contains(hay, p) {
+			return true
+		}
+	}
+	return false
 }
 
 func firstN(s string, n int) string {

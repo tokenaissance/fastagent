@@ -40,12 +40,17 @@ func init() {
 func RegisterWebFetch(r *Registry) {
 	r.Register("web_fetch",
 		"Fetch a single known URL and return its plain text. "+
-			"DO NOT guess URLs from memory — your training data has stale paths "+
-			"and you will burn rounds on 404s. Use web_search first to obtain "+
-			"a verified URL, then web_fetch that exact URL. If web_search isn't "+
-			"available, prefer well-known stable hosts (en.wikipedia.org, "+
-			"github.com), not date-stamped article URLs. A URL that returned "+
-			"4xx/5xx earlier in this turn will be refused if you retry it.",
+			"If the user's message itself contains a URL or bare domain "+
+			"(e.g. 'idoubi.ai', 'https://example.com/cv'), fetch THAT URL "+
+			"directly — prepend https:// for bare domains — instead of "+
+			"running web_search first. DO NOT guess URLs from memory: "+
+			"your training data has stale paths and you will burn rounds "+
+			"on 404s. When the user described a page in natural language "+
+			"with no URL, run web_search first to discover the URL, then "+
+			"web_fetch that exact URL. If web_search isn't available, "+
+			"prefer well-known stable hosts (en.wikipedia.org, github.com), "+
+			"not date-stamped article URLs. A URL that returned 4xx/5xx "+
+			"earlier in this turn will be refused if you retry it.",
 		map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{

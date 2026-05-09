@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/fastclaw-ai/fastclaw/internal/buildinfo"
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 )
 
@@ -114,6 +115,28 @@ func (cb *ContextBuilder) BuildSystemPrompt() string {
 	dateLine := fmt.Sprintf("Current date/time: %s (%s, %s). Use this — do NOT call `date` to learn what day it is.",
 		now.Format("2006-01-02 15:04:05 -0700"), wd, now.Location().String())
 
+	// Host OS — what the fastclaw binary itself runs on. Inside a sandbox
+	// (docker/e2b) the actual exec environment is Linux regardless; we
+	// label this line "Host OS" to keep the model from confidently
+	// answering "I'm on macOS" when it's about to run a command in a
+	// Linux container. The sandbox section below adds its own filesystem
+	// note when relevant.
+	//
+	// Deployment mode (FASTCLAW_DEPLOY env var) splits the build-info
+	// disclosure: self-hosted installs see the version + CLI hint so
+	// the agent can help with `fastclaw upgrade` etc.; hosted/multi-
+	// tenant deployments hide the version (no upside for the chatter,
+	// might prompt unfounded "I'll upgrade for you" offers) and
+	// substitute a redirect-to-admin note for upgrade questions.
+	var fastclawLine string
+	if buildinfo.IsHostedDeploy() {
+		fastclawLine = "FastClaw: hosted deployment. The chatter does NOT operate this runtime — if they ask about the version, upgrades, or installing/changing skills at the platform level, tell them those are administrator-controlled and offer to help with what's actually in your reach (config, skills you can author, files in the workspace)."
+	} else {
+		fastclawLine = fmt.Sprintf(`FastClaw: %s (commit %s, built %s). Self-hosted install — the chatter is the operator. If they ask about upgrading, tell them: run %sfastclaw upgrade%s in a terminal (and %sfastclaw version%s to verify). Don't try to run those yourself unless the chatter explicitly asks you to and you have host shell access (no sandbox).`,
+			buildinfo.Version, buildinfo.Commit, buildinfo.Date,
+			"`", "`", "`", "`")
+	}
+
 	runtimeInfo := fmt.Sprintf(`You are an AI agent running on the FastClaw runtime.
 Your identity (name, role, personality) is defined by IDENTITY.md and SOUL.md
 below — if those are empty, you do NOT yet have a name and must follow the
@@ -122,7 +145,8 @@ bootstrap instructions in BOOTSTRAP.md before answering the user.
 %s
 
 Runtime info:
-OS: %s/%s
+%s
+Host OS: %s/%s
 Working Directory: %s
 
 File-tool routing: when you call write_file / read_file / edit_file /
@@ -139,7 +163,9 @@ Use edit_file (not write_file) when you only need to change part of an
 existing file — it's cheaper, can't accidentally drop unrelated content,
 and validates the replacement landed. Reserve write_file for creating
 new files or full rewrites. This matters most for MEMORY.md / SOUL.md /
-USER.md, which grow over time and would lose context if rewritten in full.`, dateLine, runtime.GOOS, runtime.GOARCH, workdir, homeDesc)
+USER.md, which grow over time and would lose context if rewritten in full.`,
+		dateLine, fastclawLine,
+		runtime.GOOS, runtime.GOARCH, workdir, homeDesc)
 	parts = append(parts, runtimeInfo)
 
 	// 2. Sandbox capabilities (auto-injected when sandbox is enabled)
@@ -286,13 +312,53 @@ Messages from other bots will appear as "[BotName]: message" in the conversation
 	// this turn — not the next user nudge — is when the model
 	// corrects course.
 	parts = append(parts, `# Tool Use
-Three failure modes that cost rounds:
+Four failure modes that cost rounds:
 
-1. **Don't guess URLs from training memory.** Web URLs (gov.cn, news
-   sites, blog permalinks, etc.) change constantly and your training
-   data is stale. If you need a current URL, call web_search first to
-   discover it, then web_fetch the verified URL. If web_search isn't
-   available, prefer stable hosts you can reason about (en.wikipedia.org,
+0. **Check Skills BEFORE improvising a multi-tool pipeline.** For any
+   request that would otherwise need 3+ tool calls of stitched-
+   together work — generating a PDF / converting a document /
+   summarising a webpage / scraping a site / batch-processing files
+   / building a report — scan the # Skills section above FIRST.
+
+   Decision tree, NO hedging:
+   - A listed skill matches the user's intent → invoke its main
+     script via exec. Do NOT pip install / write your own scraper
+     when a skill already does the job.
+   - Nothing matches → load the skill-creator skill (it's listed in
+     # Skills above) and have it scaffold one. write_file with the
+     skills/<name>/... path prefix routes
+     to the chatter's per-user bucket and the new skill is callable
+     on the NEXT message. Yes, even if the user only asked once —
+     "PDF for one website" turns into "PDF for many websites" the
+     moment the skill exists, and the model that answered them last
+     time was you, so future-you will thank you.
+
+   Anti-patterns to refuse: pip install random-pdf-libs followed by
+   hand-written conversion scripts, multi-round web_fetch +
+   exec(weasyprint/pdfkit/playwright) chains, "let me try a different
+   library" loops. These are the #1 source of "agent burned 11+
+   rounds and still didn't finish" reports — pay the one-round
+   skill-creation cost up front and it pays back forever.
+
+   Only skip the skill route for genuinely one-shot, single-tool
+   work (one web_search, one read_file, one math calc) — anything
+   that fits in one round and won't recur.
+
+1. **Don't guess URLs from training memory — but DO use the ones the
+   user gave you.** If the user's message itself contains a URL or
+   bare domain (e.g. "give me a summary of idoubi.ai", "make a resume
+   from https://example.com/cv"), web_fetch that URL directly — do
+   NOT run web_search to "look it up first". For a bare domain prepend
+   the https scheme and fetch the root. Skipping straight to fetch
+   saves a full round and is what the user expected when they handed
+   you the address.
+   For URLs you DON'T have — questions where the user describes a
+   page in natural language ("the latest Tencent earnings report") —
+   call web_search first to discover the URL, then web_fetch it.
+   Web URLs (gov.cn, news sites, blog permalinks, etc.) change
+   constantly and your training data is stale, so guessing them from
+   memory burns rounds on 404s. If web_search isn't available, prefer
+   stable hosts you can reason about (en.wikipedia.org,
    github.com/<owner>/<repo>, …) — not date-stamped article paths.
    A web_fetch on a guessed URL that 404s costs a round AND poisons
    your remaining budget — the runtime refuses retries of the same

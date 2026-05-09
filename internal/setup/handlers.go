@@ -899,7 +899,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		paths := ag.WriteSessionAttachments(r.Context(), req.SessionID, projectID, images)
 		msgText = annotateMessageWithAttachments(req.Message, paths)
 	}
-	reply := ag.HandleWebChat(r.Context(), req.SessionID, req.ProjectID, msgText, images, req.Params)
+	reply := ag.HandleWebChat(r.Context(), req.SessionID, req.ProjectID, s.effectiveUserID(r), msgText, images, req.Params)
 	jsonResponse(w, http.StatusOK, map[string]any{"reply": reply})
 }
 
@@ -969,7 +969,7 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		// events param stays nil — emitEvent now fans out via the
 		// streamCtx attached above (persist + hub). The legacy channel
 		// path is no longer needed for this handler.
-		_ = ag.HandleWebChatStream(agentCtx, req.SessionID, req.ProjectID, msgText, images, req.Params, nil)
+		_ = ag.HandleWebChatStream(agentCtx, req.SessionID, req.ProjectID, uid, msgText, images, req.Params, nil)
 	}()
 
 	// Heartbeat keeps proxies (nginx 60s default, Cloudflare 100s, ELB

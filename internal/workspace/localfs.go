@@ -27,6 +27,24 @@ func NewLocalFS(root string) *LocalFS {
 	return &LocalFS{root: root}
 }
 
+// Root returns the on-disk root the LocalFS was constructed with
+// (typically ~/.fastclaw/workspaces). Exposed so callers that need
+// to compute a host path for an external tool — e.g. "open in
+// Finder" / shelling out — can join from the same anchor LocalFS
+// uses internally without re-deriving it from FASTCLAW_HOME.
+func (f *LocalFS) Root() string {
+	return f.root
+}
+
+// LocalScopeDir implements the LocalScoper marker. Always returns
+// (path, true) for LocalFS — every (agent, project, session) tuple
+// has a real host directory we can reveal in Finder. S3 / R2
+// implementations of Store don't implement LocalScoper, so handlers
+// that probe via type-assertion get ok=false and 503 the request.
+func (f *LocalFS) LocalScopeDir(agentID, projectID, sessionID string) (string, bool) {
+	return f.scopeDir(agentID, projectID, sessionID), true
+}
+
 // scopeDir returns the on-disk directory for a (agent, project, session)
 // scope:
 //

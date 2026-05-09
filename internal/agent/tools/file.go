@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/fastclaw-ai/fastclaw/internal/buildinfo"
 	"github.com/fastclaw-ai/fastclaw/internal/sandbox"
+	"github.com/fastclaw-ai/fastclaw/internal/skills"
 )
 
 type readFileArgs struct {
@@ -132,10 +135,144 @@ func (r *Registry) isWorkspacePath(path string) bool {
 	return true
 }
 
+// hostHomePath returns the resolved absolute filesystem path when the
+// arg looks like an operator-host path the chatter wants to read/write,
+// and false otherwise. Three forms are recognised:
+//
+//	~                 → the operator's home dir
+//	~/<rel>           → joined under the operator's home dir
+//	/Users/<u>/...    → macOS-style absolute home roots
+//	/home/<u>/...     → Linux-style absolute home roots
+//
+// Used by the sandboxed file tools on SELF-HOSTED installs to route
+// requests like "read ~/Downloads/foo.csv" to actual host disk
+// instead of 404'ing inside the sandbox FS. Hosted (multi-tenant)
+// deployments deliberately don't call this — the chatter doesn't own
+// the daemon's filesystem so exposing it would be a privilege leak.
+//
+// Returns ("", false) when the path is not a host-home reference, OR
+// when it falls under one of the FastClaw-managed roots
+// (~/.fastclaw/...) — those are runtime internals and should keep
+// flowing through their existing routing (workspaceStore, identity
+// store, etc.) so chat writes can't, say, smash the agents' DB file.
+func hostHomePath(path string) (string, bool) {
+	if path == "" {
+		return "", false
+	}
+	if path == "~" || strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", false
+		}
+		if path == "~" {
+			return home, true
+		}
+		return filepath.Join(home, path[2:]), true
+	}
+	if !filepath.IsAbs(path) {
+		return "", false
+	}
+	if strings.HasPrefix(path, "/Users/") || strings.HasPrefix(path, "/home/") {
+		// Refuse FastClaw-internal subpaths even when the chatter
+		// reaches them via the host-home channel. Same guard as
+		// errGlobalSkillsDirWrite, broader scope.
+		if home, err := os.UserHomeDir(); err == nil {
+			fastclawDir := filepath.Join(home, ".fastclaw")
+			if path == fastclawDir || strings.HasPrefix(path, fastclawDir+string(filepath.Separator)) {
+				return "", false
+			}
+		}
+		return path, true
+	}
+	return "", false
+}
+
+// isSkillPath reports whether path is a chat-time `skills/<name>/...`
+// write — the skill-creator convention. Absolute paths and the bare
+// `skills` segment don't qualify (the latter is a directory, not a
+// file write). Cleans the path so `skills/./foo/SKILL.md` matches.
+func (r *Registry) isSkillPath(path string) bool {
+	if filepath.IsAbs(path) {
+		return false
+	}
+	clean := filepath.Clean(path)
+	return clean != "skills" && strings.HasPrefix(clean, "skills"+string(filepath.Separator))
+}
+
+// skillRoot returns the host parent of the `skills/` subdir that
+// chat-time skill writes should land in. Per-user when configured
+// (the chatter's personal bucket), agent home otherwise.
+func (r *Registry) skillRoot() string {
+	if r.userSkillsRoot != "" {
+		return r.userSkillsRoot
+	}
+	return r.systemRoot
+}
+
+// skillStoreOwner returns the workspace.Store pseudo-owner key the
+// chat-created skill should mirror to. Per-user when userSkillsRoot
+// is set (so the skill follows the chatter across agents); agent ID
+// otherwise (legacy / single-user mode).
+func (r *Registry) skillStoreOwner() string {
+	if r.userSkillsRoot != "" && r.userID != "" {
+		return skills.UserSkillOwner(r.userID)
+	}
+	return r.agentID
+}
+
+// writeSkillToHost lands a chat-created `skills/<name>/<rel>` file on
+// host disk and mirrors it to the workspace store so SkillsLoader's
+// local scan and any sibling pod's hydrate both see it. Used by the
+// sandbox-mode write_file path (which would otherwise trap the file
+// inside the ephemeral sandbox FS) and by host-mode write_file as a
+// post-write store-sync hook.
+//
+// The path arg must already pass isSkillPath. Returns the absolute
+// host path written so the caller can echo it back to the model.
+func (r *Registry) writeSkillToHost(ctx context.Context, path, content string) (string, error) {
+	root := r.skillRoot()
+	if root == "" {
+		return "", fmt.Errorf("write_file: no skills root configured for path %q", path)
+	}
+	full := filepath.Join(root, filepath.Clean(path))
+	if isGlobalSkillsPath(full) {
+		return "", errGlobalSkillsDirWrite
+	}
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		return "", fmt.Errorf("create directory: %w", err)
+	}
+	if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+		return "", fmt.Errorf("write file: %w", err)
+	}
+	// Mirror to the workspace store so a sibling pod (cloud deploy)
+	// hydrates the new skill on its next turn instead of waiting for
+	// pod restart. Best-effort; failures here don't unwrite the file.
+	if r.workspaceStore != nil {
+		if owner := r.skillStoreOwner(); owner != "" {
+			rel := strings.TrimPrefix(filepath.ToSlash(filepath.Clean(path)), "skills/")
+			parts := strings.SplitN(rel, "/", 2)
+			if len(parts) >= 1 && parts[0] != "" {
+				skillName := parts[0]
+				skillsDir := filepath.Join(root, "skills")
+				if err := skills.SyncSkillUp(ctx, r.workspaceStore, owner, skillName, skillsDir); err != nil {
+					slog.Warn("skill mirror to store failed",
+						"owner", owner, "skill", skillName, "error", err)
+				}
+			}
+		}
+	}
+	return full, nil
+}
+
 // rootForPath returns the root a relative path should resolve against:
-//   - systemRoot (agent home) for identity files (SOUL.md, IDENTITY.md, …)
-//     and for anything under the `skills/` subtree, which must land in the
-//     agent's private skills dir so SkillsLoader actually discovers it;
+//   - systemRoot (agent home) for identity files (SOUL.md, IDENTITY.md, …);
+//   - userSkillsRoot (~/.fastclaw/users/<uid>/skills/) for `skills/...`
+//     writes when the chatter's user-skills dir is wired (default in
+//     multi-user installs). Routes here so chat-created skills accumulate
+//     in the chatter's personal bucket — shared across every agent they
+//     chat with, isolated from the agent owner's official skills and from
+//     other users on the same shared agent. Falls back to systemRoot when
+//     userSkillsRoot is empty (legacy / single-user installs);
 //   - userRoot (agent workspace) for everything else, which is user-facing
 //     artifact territory.
 //
@@ -145,11 +282,13 @@ func (r *Registry) rootForPath(path string) string {
 		return ""
 	}
 	clean := filepath.Clean(path)
-	// `skills/...` always routes to the agent's home so write_file
-	// ("skills/foo/SKILL.md") ends up in the location SkillsLoader scans.
-	// Without this, skill-creator's scaffolding ends up in the workspace
-	// where nothing ever finds it.
 	if clean == "skills" || strings.HasPrefix(clean, "skills"+string(filepath.Separator)) {
+		// Per-user bucket when configured, otherwise the agent home
+		// (legacy behavior). The leading `skills/` prefix is preserved
+		// in either case so SkillsLoader's scan picks it up.
+		if r.userSkillsRoot != "" {
+			return r.userSkillsRoot
+		}
 		return r.systemRoot
 	}
 	// Single-segment system files (SOUL.md, IDENTITY.md, ...) also route
@@ -412,6 +551,18 @@ func makeWriteFile(r *Registry) ToolFunc {
 				_ = os.WriteFile(disk, []byte(args.Content), 0o644)
 			}
 			return fmt.Sprintf("Written %d bytes to %s", len(args.Content), name), nil
+		}
+
+		// Skill scaffolding takes a dedicated path so the same writeSkillToHost
+		// helper that handles sandbox-mode also lands the file + mirrors to
+		// the workspace store here, instead of duplicating the SyncSkillUp
+		// hook in two places.
+		if r.isSkillPath(args.Path) && r.skillRoot() != "" {
+			full, err := r.writeSkillToHost(ctx, args.Path, args.Content)
+			if err != nil {
+				return "", err
+			}
+			return fmt.Sprintf("Written %d bytes to %s", len(args.Content), full), nil
 		}
 
 		root := r.rootForPath(args.Path)
@@ -678,6 +829,40 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 				}
 			}
 		}
+		// Match write-side routing for `skills/...` so the agent reads
+		// the same file it just wrote. Without this, the read goes to
+		// the sandbox FS and 404s when the file actually lives on
+		// host disk.
+		if r.isSkillPath(args.Path) && r.skillRoot() != "" {
+			full := filepath.Join(r.skillRoot(), filepath.Clean(args.Path))
+			if data, err := os.ReadFile(full); err == nil {
+				if looksBinary(data) {
+					return binaryRefusal(args.Path, len(data)), nil
+				}
+				return string(data), nil
+			}
+			// Fall through to sandbox executor on miss — gives the
+			// model a chance to read pre-mounted skill files inside
+			// the sandbox (/skills/<name>/...) when the path resolved
+			// against the host dir doesn't exist.
+		}
+		// Host-home paths (`~/...`, `/Users/...`, `/home/...`) on
+		// self-hosted installs go to the operator's actual disk; the
+		// chatter is the operator there and the sandbox FS doesn't
+		// have these paths anyway. Hosted deployments fall through to
+		// the sandbox so chatters can't reach the daemon's home dir.
+		if !buildinfo.IsHostedDeploy() {
+			if full, ok := hostHomePath(args.Path); ok {
+				if data, err := os.ReadFile(full); err == nil {
+					if looksBinary(data) {
+						return binaryRefusal(args.Path, len(data)), nil
+					}
+					return string(data), nil
+				} else {
+					return "", fmt.Errorf("host read %s: %w", full, err)
+				}
+			}
+		}
 		out, err := ex.ReadFile(ctx, args.Path)
 		if err == nil && looksBinary([]byte(out)) {
 			return binaryRefusal(args.Path, len(out)), nil
@@ -716,6 +901,34 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 				return "", fmt.Errorf("workspace put: %w", err)
 			}
 			return fmt.Sprintf("Written %d bytes to %s", len(args.Content), args.Path), nil
+		}
+		// Skill scaffolding (skill-creator's `skills/<name>/...`) must
+		// land on host disk where SkillsLoader scans, NOT in the
+		// ephemeral sandbox FS. Without this intercept the file goes
+		// to /home/user/skills/... inside E2B and is gone on next
+		// session — which is why skill-creator silently failed in
+		// cloud mode before. writeSkillToHost also mirrors to the
+		// workspace store so sibling pods pick it up.
+		if r.isSkillPath(args.Path) && r.skillRoot() != "" {
+			full, err := r.writeSkillToHost(ctx, args.Path, args.Content)
+			if err != nil {
+				return "", err
+			}
+			return fmt.Sprintf("Written %d bytes to %s", len(args.Content), full), nil
+		}
+		// Host-home paths on self-hosted installs land on the
+		// operator's actual disk. See read-side comment for why this
+		// is gated on IsHostedDeploy().
+		if !buildinfo.IsHostedDeploy() {
+			if full, ok := hostHomePath(args.Path); ok {
+				if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+					return "", fmt.Errorf("create directory: %w", err)
+				}
+				if err := os.WriteFile(full, []byte(args.Content), 0o644); err != nil {
+					return "", fmt.Errorf("host write %s: %w", full, err)
+				}
+				return fmt.Sprintf("Written %d bytes to %s", len(args.Content), full), nil
+			}
 		}
 		out, err := ex.WriteFile(ctx, args.Path, args.Content)
 		return MetaSandboxPrefix + out, err
@@ -763,6 +976,29 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 						continue
 					}
 					fmt.Fprintf(&sb, "f %s (%d bytes)\n", rel, o.Size)
+				}
+				return sb.String(), nil
+			}
+		}
+		// Host-home dir on self-hosted installs.
+		if !buildinfo.IsHostedDeploy() {
+			if full, ok := hostHomePath(args.Path); ok {
+				entries, err := os.ReadDir(full)
+				if err != nil {
+					return "", fmt.Errorf("host list %s: %w", full, err)
+				}
+				var sb strings.Builder
+				for _, e := range entries {
+					if e.IsDir() {
+						fmt.Fprintf(&sb, "d %s/\n", e.Name())
+						continue
+					}
+					info, ierr := e.Info()
+					if ierr != nil {
+						fmt.Fprintf(&sb, "f %s\n", e.Name())
+						continue
+					}
+					fmt.Fprintf(&sb, "f %s (%d bytes)\n", e.Name(), info.Size())
 				}
 				return sb.String(), nil
 			}
@@ -819,6 +1055,29 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 				}
 			}
 			// Fall through to sandbox executor on store miss.
+		}
+
+		// Host-home edit on self-hosted installs: read+write must use
+		// the same backend, so a host-home path stays on os.* through
+		// the whole edit instead of mixing host-read with sandbox-write.
+		if !buildinfo.IsHostedDeploy() {
+			if full, ok := hostHomePath(args.Path); ok {
+				data, err := os.ReadFile(full)
+				if err != nil {
+					return "", fmt.Errorf("host read %s: %w", full, err)
+				}
+				if looksBinary(data) {
+					return binaryRefusal(args.Path, len(data)), nil
+				}
+				updated, count, err := applyEdit(args.Path, string(data), args.OldString, args.NewString, args.ReplaceAll)
+				if err != nil {
+					return "", err
+				}
+				if err := os.WriteFile(full, []byte(updated), 0o644); err != nil {
+					return "", fmt.Errorf("host write %s: %w", full, err)
+				}
+				return fmt.Sprintf("Edited %s (%d replacement(s))", full, count), nil
+			}
 		}
 
 		// Read-modify-write through the sandbox executor for paths that

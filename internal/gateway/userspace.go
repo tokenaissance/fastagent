@@ -308,6 +308,54 @@ func (sp *UserSpace) EnsureAgent(ctx context.Context, st store.Store, mb *bus.Me
 		return fmt.Errorf("EnsureAgent: ResolveAgents returned %d entries", len(resolved))
 	}
 	rc := resolved[0]
+	// Owner-fallback layer: when the calling UserSpace isn't the agent
+	// owner (super_admin, public-link viewer, apikey-shared user), pull
+	// the OWNER's user-scope settings/providers so the agent runs with
+	// the credentials and model the owner actually intended. Without
+	// this, a viewer with no providers of their own falls through to
+	// either the system shared provider (often a free-tier key that
+	// runs out) or no provider at all → 429 / "no provider configured".
+	// Order: viewer's resolved cfg → owner's user-scope (this block) →
+	// agent-scope `agents.defaults` → agent-scope providers. Agent-
+	// scope still wins, matching the precedence the owner's own
+	// loadUserSpace path uses.
+	if rec.UserID != "" && rec.UserID != sp.UserID {
+		if ownerCfg, err := assembleConfig(ctx, st, rec.UserID, ""); err == nil && ownerCfg != nil {
+			ovr := ownerCfg.Agents.Defaults
+			if ovr.Model != "" {
+				rc.Model = ovr.Model
+			}
+			if ovr.MaxTokens > 0 {
+				rc.MaxTokens = ovr.MaxTokens
+			}
+			if ovr.Temperature > 0 {
+				rc.Temperature = ovr.Temperature
+			}
+			if ovr.MaxToolIterations > 0 {
+				rc.MaxToolIterations = ovr.MaxToolIterations
+			}
+			if ovr.Thinking != "" {
+				rc.Thinking = ovr.Thinking
+			}
+			if ovr.PolicyPreset != "" {
+				rc.PolicyPreset = ovr.PolicyPreset
+			}
+		}
+		// Pull only the owner's user-scope provider rows (not the
+		// owner's full merged view) so we don't re-apply system rows
+		// over the viewer's already-merged set. Owner's user-scope
+		// keys then sit between viewer's user-scope and the
+		// agent-scope overlay below — same precedence the owner's
+		// own UserSpace would have built.
+		if ownerProvs, err := scope.UserScopeProviders(ctx, st, rec.UserID); err == nil {
+			for k, v := range ownerProvs {
+				if rc.Providers == nil {
+					rc.Providers = make(map[string]config.ProviderConfig)
+				}
+				rc.Providers[k] = v
+			}
+		}
+	}
 	if cfgRec, err := st.GetConfigByName(ctx, store.KindSetting, "", rc.ID, "agents.defaults"); err == nil && cfgRec != nil {
 		var ovr config.AgentDefaults
 		blob, _ := json.Marshal(cfgRec.Data)

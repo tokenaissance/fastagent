@@ -234,6 +234,10 @@ export interface MeResponse {
   authMethod?: string;
   actAsUserId?: string;
   readOnly?: boolean;
+  // 'self-hosted' (default) or 'hosted' — driven by FASTCLAW_DEPLOY
+  // env var on the daemon. Frontend uses this to gate local-only
+  // conveniences (open-in-Finder, future $EDITOR hooks).
+  deployMode?: "self-hosted" | "hosted";
   error?: string;
 }
 
@@ -581,12 +585,49 @@ export interface WorkspaceFile {
   modTime: number;
 }
 
+// revealAgentWorkspace opens the workspace folder for this scope in
+// the operator's native file browser (Finder/Explorer/xdg-open).
+// Self-hosted only — hosted deployments 403; the UI hides the
+// trigger button so callers shouldn't normally hit that path. One
+// of sessionId/projectId scopes the reveal: pass sessionId for a
+// chat, projectId for the project landing page, neither for the
+// agent root (admin browser).
+export async function revealAgentWorkspace(
+  agentId: string,
+  sessionId?: string,
+  projectId?: string,
+): Promise<{ ok: boolean; path?: string; error?: string }> {
+  const params = new URLSearchParams();
+  if (sessionId) params.set("sessionId", sessionId);
+  if (projectId) params.set("projectId", projectId);
+  const qs = params.toString();
+  const res = await apiFetch(
+    `/api/agents/${encodeURIComponent(agentId)}/workspace/reveal${qs ? "?" + qs : ""}`,
+    { method: "POST" },
+  );
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    return { ok: false, error: (data.error as string) || `HTTP ${res.status}` };
+  }
+  return { ok: true, path: data.path as string };
+}
+
 export async function listAgentFiles(
   agentId: string,
   sessionId?: string,
+  projectId?: string,
 ): Promise<WorkspaceFile[]> {
-  const qs = sessionId ? `?sessionId=${encodeURIComponent(sessionId)}` : "";
-  const res = await apiFetch(`/api/agents/${encodeURIComponent(agentId)}/files${qs}`);
+  // sessionId scopes to a single chat; projectId (used on the project
+  // landing page when no chat is selected) scopes to the whole project
+  // tree (every chat under it + root-level shared files). Caller passes
+  // one or the other — both empty means agent-wide (admin browser).
+  const params = new URLSearchParams();
+  if (sessionId) params.set("sessionId", sessionId);
+  if (projectId) params.set("projectId", projectId);
+  const qs = params.toString();
+  const res = await apiFetch(
+    `/api/agents/${encodeURIComponent(agentId)}/files${qs ? "?" + qs : ""}`,
+  );
   if (!res.ok) return [];
   const data = await res.json();
   return (data.files || []) as WorkspaceFile[];

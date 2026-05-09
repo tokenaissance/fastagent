@@ -85,5 +85,28 @@ func (m *Metered) SignedURL(ctx context.Context, agentID, projectID, sessionID, 
 	return m.inner.SignedURL(ctx, agentID, projectID, sessionID, path, ttl)
 }
 
+// LocalScopeDir forwards to the inner store when it implements
+// LocalScoper (LocalFS does, S3 doesn't). Lets the workspace-reveal
+// handler ask the public Store interface for an on-disk path
+// without unwrapping Metered manually.
+func (m *Metered) LocalScopeDir(agentID, projectID, sessionID string) (string, bool) {
+	if ls, ok := m.inner.(LocalScoper); ok {
+		return ls.LocalScopeDir(agentID, projectID, sessionID)
+	}
+	return "", false
+}
+
+// LocalScoper is implemented by stores whose objects live on the
+// local filesystem (LocalFS today). A store that returns ok=true
+// commits to: "this path is on the same disk as the daemon and
+// safe to hand to `open`/`xdg-open`/`explorer`". Cloud stores
+// (S3, R2) return ok=false — there's no host-side path to reveal.
+type LocalScoper interface {
+	LocalScopeDir(agentID, projectID, sessionID string) (string, bool)
+}
+
 // Compile-time check.
-var _ Store = (*Metered)(nil)
+var (
+	_ Store       = (*Metered)(nil)
+	_ LocalScoper = (*Metered)(nil)
+)

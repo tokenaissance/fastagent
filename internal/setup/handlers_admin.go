@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/fastclaw-ai/fastclaw/internal/auth"
+	"github.com/fastclaw-ai/fastclaw/internal/buildinfo"
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 	"github.com/fastclaw-ai/fastclaw/internal/scope"
 	"github.com/fastclaw-ai/fastclaw/internal/store"
@@ -71,12 +72,22 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
+	// deployMode lets the frontend show or hide local-only conveniences
+	// (open-in-Finder for the workspace folder, future "edit SOUL.md in
+	// $EDITOR" hooks, etc). One source of truth here so we don't read
+	// the env var in 5 different handlers; the frontend can cache it
+	// alongside the user profile since it doesn't change at runtime.
+	deployMode := "self-hosted"
+	if buildinfo.IsHostedDeploy() {
+		deployMode = "hosted"
+	}
 	jsonResponse(w, http.StatusOK, map[string]any{
 		"ok":          true,
 		"user":        acct,
 		"authMethod":  ident.AuthMethod,
 		"actAsUserId": ident.ActAsUserID,
 		"readOnly":    ident.ReadOnly(),
+		"deployMode":  deployMode,
 	})
 }
 

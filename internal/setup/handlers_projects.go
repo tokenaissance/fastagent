@@ -104,7 +104,11 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
-	if rec := s.requireAgentOwner(w, r, id); rec == nil {
+	// Readable-not-owner is enough: projects are keyed on (user_id,
+	// agent_id, project_id), so a viewer creating a project on a shared
+	// agent only adds rows under THEIR user_id and can never touch the
+	// owner's project list. Same reasoning for update / delete below.
+	if !s.requireAgentReadable(w, r, id) {
 		return
 	}
 	uid := s.effectiveUserID(r)
@@ -151,7 +155,7 @@ func (s *Server) handleUpdateProject(w http.ResponseWriter, r *http.Request) {
 	}
 	id := r.PathValue("id")
 	pid := r.PathValue("pid")
-	if rec := s.requireAgentOwner(w, r, id); rec == nil {
+	if !s.requireAgentReadable(w, r, id) {
 		return
 	}
 	uid := s.effectiveUserID(r)
@@ -199,7 +203,7 @@ func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 	}
 	id := r.PathValue("id")
 	pid := r.PathValue("pid")
-	if rec := s.requireAgentOwner(w, r, id); rec == nil {
+	if !s.requireAgentReadable(w, r, id) {
 		return
 	}
 	uid := s.effectiveUserID(r)

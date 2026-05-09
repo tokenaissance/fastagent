@@ -41,11 +41,24 @@ RUN pip install --no-cache-dir \
         beautifulsoup4 \
         lxml
 
-# Pre-install the agent-browser CLI globally so `npx agent-browser …`
-# and `agent-browser …` resolve immediately — saves one install round-
-# trip per fresh container. Failure here is non-fatal: if upstream is
-# down at build time we still ship a runnable image and the agent will
-# fall back to `npm i -g` at runtime.
+# Pre-install the agent-browser CLI globally so `agent-browser …`
+# resolves immediately. Failure non-fatal: a registry hiccup at build
+# time still produces a runnable image and the agent can fall back
+# to `npm i -g agent-browser` at runtime.
 RUN npm install -g agent-browser || true
+
+# Make Playwright's bundled Chromium discoverable to agent-browser.
+# agent-browser auto-launch only checks four fixed locations
+# (its own cache, system Chrome, Puppeteer cache, ~/.cache/ms-playwright)
+# and ignores PLAYWRIGHT_BROWSERS_PATH, so without this it errors with
+# "Chrome not found" even though arm64 Chromium is sitting at
+# /ms-playwright/chromium-*/chrome-linux/chrome. The /usr/bin/chromium-browser
+# symlink trips agent-browser's "System Chrome" check, which is what
+# upstream's own error message recommends for non-x86_64 hosts (Chrome
+# for Testing has no Linux ARM64 build, so `agent-browser install`
+# isn't an option on Apple Silicon / Graviton). Glob expands at build
+# time to today's revision, so a Playwright base bump just regenerates
+# the symlink on the next image build.
+RUN ln -sfn "$(echo /ms-playwright/chromium-*/chrome-linux/chrome)" /usr/bin/chromium-browser
 
 WORKDIR /workspace

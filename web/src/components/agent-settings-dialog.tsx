@@ -60,22 +60,37 @@ const USER_TABS: Array<{ id: AgentSettingsTab; label: string; icon: TabIcon }> =
 // could want to change. Each tab mounts the existing page component
 // lazily — switching tabs unmounts the previous panel, which is fine
 // because the pages are self-contained and re-fetch on mount.
+//
+// role="viewer" hides the owner-only Agent tabs (Profile, Customize,
+// Models, Skills, Scheduler) and only exposes Channels under Agent —
+// viewers can still bind their own IM accounts to a shared agent, but
+// can't touch the agent's identity / skills / scheduling.
 export function AgentSettingsDialog({
   open,
   onOpenChange,
-  defaultTab = "profile",
+  defaultTab,
+  role = "owner",
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   defaultTab?: AgentSettingsTab;
+  role?: "owner" | "viewer";
 }) {
-  const [tab, setTab] = React.useState<AgentSettingsTab>(defaultTab);
+  const agentTabs = role === "viewer"
+    ? AGENT_TABS.filter((t) => t.id === "channels")
+    : AGENT_TABS;
+  // Viewers don't see Profile, so fall back to Channels (their only
+  // Agent tab) when no defaultTab is provided. Owners stay on Profile
+  // for backwards-compat with existing entry points.
+  const initialTab: AgentSettingsTab =
+    defaultTab ?? (role === "viewer" ? "channels" : "profile");
+  const [tab, setTab] = React.useState<AgentSettingsTab>(initialTab);
 
   // Reset to the requested tab whenever the dialog re-opens, so a fresh
   // click on the sidebar Settings button always lands on the same place.
   React.useEffect(() => {
-    if (open) setTab(defaultTab);
-  }, [open, defaultTab]);
+    if (open) setTab(initialTab);
+  }, [open, initialTab]);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -88,7 +103,7 @@ export function AgentSettingsDialog({
       >
         <aside className="flex flex-col gap-1 border-r bg-muted/40 p-3 overflow-y-auto">
           <SectionLabel>Agent</SectionLabel>
-          {AGENT_TABS.map((t) => (
+          {agentTabs.map((t) => (
             <TabButton
               key={t.id}
               tab={t}

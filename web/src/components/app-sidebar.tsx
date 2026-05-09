@@ -263,7 +263,13 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
         ) : (
           <NavMain label="Platform" items={platformItems} />
         )}
-        {activeAgentId && agentRoles[activeAgentId] === "owner" && (
+        {/* Projects are per-(user, agent), so viewers on a shared agent
+            see/create their OWN projects — the owner's projects stay
+            private. The owner-only Settings dialog below is unaffected:
+            project CRUD is read-write for whoever opened the agent, but
+            agent configuration (skills, channels, models) stays the
+            owner's. */}
+        {activeAgentId && (
           <NavProjectsList
             agentId={activeAgentId}
             projects={projects}
@@ -274,11 +280,14 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
         <NavSessions agentId={activeAgentId} sessions={sessions} />
       </SidebarContent>
       <SidebarFooter>
-        {/* Settings opens a tabbed dialog with the agent's owner-only
-            configuration panels (Customize / Models / Skills / Channels /
-            Scheduler). Hidden for viewers and when no agent is active —
-            matches the prior "owner-only sidebar tabs" gate. */}
-        {activeAgentId && agentRoles[activeAgentId] === "owner" && (
+        {/* Settings opens a tabbed dialog. Owners get the full agent
+            configuration panels (Profile / Customize / Models / Skills /
+            Channels / Scheduler); viewers on a shared agent get the
+            User panels (Account / General) plus Channels — Channels
+            stays available because viewers can bind their own IM
+            accounts to the shared agent. The dialog filters its own
+            tabs based on the role we pass in. */}
+        {activeAgentId && (
           <SidebarMenu>
             <SidebarMenuItem>
               <SidebarMenuButton
@@ -301,7 +310,15 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
         />
       </SidebarFooter>
       <SidebarRail />
-      <AgentSettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
+      <AgentSettingsDialog
+        open={settingsOpen}
+        onOpenChange={setSettingsOpen}
+        role={
+          activeAgentId && agentRoles[activeAgentId] === "viewer"
+            ? "viewer"
+            : "owner"
+        }
+      />
     </Sidebar>
   );
 }

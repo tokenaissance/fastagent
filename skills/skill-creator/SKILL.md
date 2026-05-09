@@ -13,10 +13,13 @@ chat instead of being available the next turn).
 
 When you call the `write_file` tool for a new skill's files, prefix
 every path with `skills/<skill-name>/`. The runtime routes any path
-matching that prefix to the agent's home directory on the host
-(specifically `<agentHome>/skills/<name>/`), where the SkillsLoader
-scans it on the next sandbox start and mounts it read-only at
-`/skills/<name>/` inside the sandbox.
+matching that prefix to the chatter's per-user skills bucket on host
+disk (`~/.fastclaw/users/<userId>/skills/<name>/`). SkillsLoader scans
+that bucket on the next turn and exposes the skill on every agent the
+chatter uses — so a "PDF generator" sunk while talking to agent A is
+also available when they switch to agent B. The write is also
+mirrored to the workspace store so sibling pods (cloud deploys) see
+it without a pod restart.
 
   ✅ write_file(path="skills/domain-check/SKILL.md", content=...)
   ✅ write_file(path="skills/domain-check/main.py", content=...)
@@ -25,6 +28,11 @@ scans it on the next sandbox start and mounts it read-only at
        lost on next rebuild
   ❌ exec(command="mkdir -p /skills/domain-check && ...")
        → sandbox overlay, same fate as above
+
+Note: the new skill becomes visible to the LLM on the **next turn**,
+not mid-turn — the current message's system prompt is already frozen.
+Tell the user something like "skill saved — invoke it on your next
+message" so they don't expect immediate use.
 
 The rest of this document was written for Claude Code / claude.ai and
 talks about absolute paths, `/tmp/` staging, packaging `.skill` files,

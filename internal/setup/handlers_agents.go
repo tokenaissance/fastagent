@@ -10,10 +10,13 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/fastclaw-ai/fastclaw/internal/auth"
+	"github.com/fastclaw-ai/fastclaw/internal/buildinfo"
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 	"github.com/fastclaw-ai/fastclaw/internal/scope"
 	"github.com/fastclaw-ai/fastclaw/internal/store"
@@ -712,6 +715,19 @@ func stripScopePrefix(p string) string {
 
 func (s *Server) fileScopeForRequest(r *http.Request, agentID string) fileScope {
 	rawSession := r.URL.Query().Get("sessionId")
+	rawProject := r.URL.Query().Get("projectId")
+	// Project landing page: no specific chat is open, so the panel
+	// shows everything under projects/<pid>/ — every chat's subtree
+	// plus root-level shared files. The sessionId branch below is
+	// the per-chat view; use this branch when the URL is
+	// /agents/<aid>/project/<pid> with no chat selected.
+	if rawSession == "" && rawProject != "" {
+		prefix := "projects/" + rawProject + "/"
+		return fileScope{
+			acceptPath:    func(p string) bool { return strings.HasPrefix(p, prefix) },
+			archiveSuffix: rawProject,
+		}
+	}
 	if rawSession == "" {
 		return fileScope{acceptPath: func(string) bool { return true }}
 	}
@@ -808,6 +824,108 @@ func (s *Server) handleAgentFilesZip(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+}
+
+// handleAgentWorkspaceReveal opens the chatter's workspace folder in
+// the operator's native file browser (Finder/Explorer/xdg-open).
+// Self-hosted only — hosted deployments don't have a meaningful
+// concept of "the operator's local filesystem" and the chatter
+// doesn't own the daemon, so exposing this would be a privilege
+// leak. Reads sessionId / projectId from the query string, mirrors
+// fileScopeForRequest's resolution (session_key → chat_id, project
+// lookup) so the revealed dir matches what the chat-side Workspace
+// panel is showing.
+//
+// Best-effort: returns 200 with the resolved path on success, 4xx
+// on bad scope, 503 when the configured workspace store doesn't
+// expose a host path (S3 / R2 deploys), 500 if the OS open command
+// fails. Non-blocking — we don't wait for Finder to actually
+// surface the window.
+func (s *Server) handleAgentWorkspaceReveal(w http.ResponseWriter, r *http.Request) {
+	if buildinfo.IsHostedDeploy() {
+		jsonResponse(w, http.StatusForbidden, map[string]any{"error": "workspace reveal is disabled on hosted deployments"})
+		return
+	}
+	id := r.PathValue("id")
+	if s.workspaceStore == nil {
+		jsonResponse(w, http.StatusServiceUnavailable, map[string]any{"error": "no workspace store configured"})
+		return
+	}
+	if !s.requireAgentReadable(w, r, id) {
+		return
+	}
+
+	scoper, ok := s.workspaceStore.(workspace.LocalScoper)
+	if !ok {
+		jsonResponse(w, http.StatusServiceUnavailable, map[string]any{"error": "workspace store has no local path (e.g. S3-backed) — open in Finder is unavailable"})
+		return
+	}
+
+	rawSession := r.URL.Query().Get("sessionId")
+	rawProject := r.URL.Query().Get("projectId")
+
+	// Resolve to the same (project, chatID) the chat-side panel is
+	// scoped to. Empty rawSession + non-empty projectId means project
+	// landing — reveal the project root. Empty both means agent root
+	// (admin browser); we still allow it because requireAgentReadable
+	// has already gated access.
+	chatID := ""
+	projectID := rawProject
+	if rawSession != "" {
+		chatID = s.workspaceSessionScope(r.Context(), id, rawSession)
+		if pid := s.resolveSessionProject(r.Context(), r, id, rawSession); pid != "" {
+			projectID = pid
+		}
+	}
+
+	dir, ok := scoper.LocalScopeDir(id, projectID, chatID)
+	if !ok || dir == "" {
+		jsonResponse(w, http.StatusServiceUnavailable, map[string]any{"error": "workspace store did not return a host path"})
+		return
+	}
+
+	// Pre-create the dir so `open <missing-path>` doesn't error out
+	// on a brand-new chat that hasn't written any files yet — empty
+	// folder still feels like progress to the user.
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	if err := openInFileBrowser(dir); err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{"ok": true, "path": dir})
+}
+
+// openInFileBrowser shells out to the platform-appropriate "open"
+// command. macOS and Linux behave consistently (open the directory
+// in the default file manager); Windows uses explorer.exe. We
+// deliberately don't wait on the child — Finder in particular
+// returns immediately, and there's no useful exit code to surface
+// either way.
+func openInFileBrowser(path string) error {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", path)
+	case "windows":
+		// `explorer` returns exit code 1 even on success, so we
+		// don't check err. The only real failure mode is "binary
+		// not on PATH", which Start() reports.
+		cmd = exec.Command("explorer", path)
+		return cmd.Start()
+	default:
+		// Linux / *BSD — xdg-open is the freedesktop standard.
+		cmd = exec.Command("xdg-open", path)
+	}
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("open %s: %w", path, err)
+	}
+	// Detach: we don't care about the file manager's lifetime.
+	go func() { _ = cmd.Wait() }()
+	return nil
 }
 
 func (s *Server) handleAgentFile(w http.ResponseWriter, r *http.Request) {

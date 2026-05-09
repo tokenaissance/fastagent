@@ -318,9 +318,16 @@ func (a *Agent) Name() string {
 // (`?project=<pid>`) or chat request body. It only matters on the very
 // first turn of a brand-new session: once the row exists, project_id
 // stamped on it is authoritative and the hint is ignored.
-func (a *Agent) HandleWebChat(ctx context.Context, sessionId, projectIDHint, text string, imageURLs []string, params map[string]any) string {
+func (a *Agent) HandleWebChat(ctx context.Context, sessionId, projectIDHint, userID, text string, imageURLs []string, params map[string]any) string {
 	if sessionId == "" {
 		sessionId = "web-ui"
+	}
+	if userID == "" {
+		// Backward compat for unauth'd / legacy callers: keep the
+		// sentinel so the per-user skills mount lands at a stable shared
+		// dir instead of trying to mkdir <base>/users//skills/ (which
+		// docker would happily mount over the user's whole home dir).
+		userID = "web-user"
 	}
 	channel, accountID, chatID, projectID := a.recoverWebTriple(sessionId)
 	if projectID == "" {
@@ -331,7 +338,7 @@ func (a *Agent) HandleWebChat(ctx context.Context, sessionId, projectIDHint, tex
 		AccountID: accountID,
 		ChatID:    chatID,
 		ProjectID: projectID,
-		UserID:    "web-user",
+		UserID:    userID,
 		Text:      text,
 		PeerKind:  "dm",
 		PhotoURLs: imageURLs,
@@ -345,9 +352,12 @@ func (a *Agent) HandleWebChat(ctx context.Context, sessionId, projectIDHint, tex
 // links) so vision-capable models receive them as image_url content parts on
 // the user message. projectIDHint mirrors HandleWebChat's parameter — see
 // that doc.
-func (a *Agent) HandleWebChatStream(ctx context.Context, sessionId, projectIDHint, text string, imageURLs []string, params map[string]any, events chan<- ChatEvent) string {
+func (a *Agent) HandleWebChatStream(ctx context.Context, sessionId, projectIDHint, userID, text string, imageURLs []string, params map[string]any, events chan<- ChatEvent) string {
 	if sessionId == "" {
 		sessionId = "web-ui"
+	}
+	if userID == "" {
+		userID = "web-user"
 	}
 	ctx = ContextWithChatEvents(ctx, events)
 	channel, accountID, chatID, projectID := a.recoverWebTriple(sessionId)
@@ -359,7 +369,7 @@ func (a *Agent) HandleWebChatStream(ctx context.Context, sessionId, projectIDHin
 		AccountID: accountID,
 		ChatID:    chatID,
 		ProjectID: projectID,
-		UserID:    "web-user",
+		UserID:    userID,
 		Text:      text,
 		PeerKind:  "dm",
 		PhotoURLs: imageURLs,
@@ -774,7 +784,13 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		return result.reply
 	}
 
-	a.refreshSkillsFromStore()
+	chatterUID := a.chatterUserID(msg)
+	// Tag ctx so the sandbox layer can bind-mount this chatter's
+	// per-user skills dir into the container at /root/.agents/skills
+	// (where `npx skills add -g -y` writes). Tagging happens before
+	// any sandbox.Get call below so attachments + exec inherit it.
+	ctx = sandbox.WithUserID(ctx, chatterUID)
+	a.refreshSkillsFromStore(chatterUID)
 	sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID, msg.ProjectID)
 	// Bind the registry to this chat's session so workspace.Store reads
 	// + writes get session-scoped paths and (when a sandbox pool is
@@ -1307,7 +1323,9 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 		return provider.NewStreamReader(ch)
 	}
 
-	a.refreshSkillsFromStore()
+	chatterUID := a.chatterUserID(msg)
+	ctx = sandbox.WithUserID(ctx, chatterUID)
+	a.refreshSkillsFromStore(chatterUID)
 	sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID, msg.ProjectID)
 	a.bindSession(ctx, msg.Channel, msg.ChatID, msg.ProjectID)
 
@@ -1576,18 +1594,37 @@ func (a *Agent) UpdateConfig(rc config.ResolvedAgent) {
 	a.ctxBuilder.sandboxBackend = rc.Sandbox.Backend
 }
 
-// refreshSkillsFromStore mirrors OSS-hosted skills (global and per-agent)
-// to the local filesystem and rebuilds the skills summary baked into the
-// system prompt. No-op when no workspace store is configured. Called at
-// the top of every turn so a skill uploaded after pod start — or on a
-// sibling replica — becomes visible here on the next message instead of
-// requiring a pod restart.
-func (a *Agent) refreshSkillsFromStore() {
+// chatterUserID picks the per-message chatter identity, falling back
+// to the agent owner when the inbound message doesn't carry one
+// (legacy channels, system-injected events, …). This is what we use
+// as the per-user skills bucket key and the sandbox bind-mount target,
+// so two different chatters of the same agent each see their own
+// personal skill set and write installs into their own host dir.
+func (a *Agent) chatterUserID(msg bus.InboundMessage) string {
+	if msg.UserID != "" {
+		return msg.UserID
+	}
+	return a.ownerUserID
+}
+
+// refreshSkillsFromStore mirrors OSS-hosted skills (global, per-agent,
+// and per-user) to the local filesystem and rebuilds the skills summary
+// baked into the system prompt. No-op when no workspace store is
+// configured. Called at the top of every turn so a skill uploaded
+// after pod start — or on a sibling replica — becomes visible here on
+// the next message instead of requiring a pod restart.
+//
+// userID identifies whose per-user skill bucket to merge into the set;
+// pass the chatter (not the agent owner) so a skill chatter A installs
+// is visible only to chatter A even when both chat the same agent. Empty
+// disables the per-user layer.
+func (a *Agent) refreshSkillsFromStore(userID string) {
 	if a.workspaceStore == nil {
 		return
 	}
 	loader := NewSkillsLoaderWithGlobal(a.homeDir, a.homePath, "", a.skillsCfg, a.globalSkillsCfg).
-		WithObjectStore(a.workspaceStore, a.agentID)
+		WithObjectStore(a.workspaceStore, a.agentID).
+		WithUserID(userID)
 	skills := loader.LoadSkills()
 	a.ctxBuilder.SetSkillsSummary(loader.BuildSkillsSummary(skills))
 }
@@ -1601,10 +1638,11 @@ func (a *Agent) ReloadWorkspaceFiles() {
 		a.memory = NewMemory(a.homePath)
 	}
 	// Rebuild skills summary. When a workspace store is configured,
-	// LoadSkills first hydrates global + per-agent skill dirs from object
-	// storage so skills uploaded on another replica (or post-boot on this
-	// one) become visible.
-	loader := NewSkillsLoaderWithGlobal(a.homeDir, a.homePath, "", a.skillsCfg, a.globalSkillsCfg)
+	// LoadSkills first hydrates global + per-agent + per-user skill dirs
+	// from object storage so skills uploaded on another replica (or
+	// post-boot on this one) become visible.
+	loader := NewSkillsLoaderWithGlobal(a.homeDir, a.homePath, "", a.skillsCfg, a.globalSkillsCfg).
+		WithUserID(a.ownerUserID)
 	if a.workspaceStore != nil {
 		loader.WithObjectStore(a.workspaceStore, a.agentID)
 	}

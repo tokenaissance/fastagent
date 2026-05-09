@@ -5,8 +5,8 @@ import { useRouter, usePathname } from "next/navigation";
 import { useAgentIdFromURL } from "@/hooks/use-agent-id";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { getAgent, getChatHistoryWithCursor, getChatSessions, listAgentFiles, listProjects, renameChatSession, sendChatStream, uploadAgentFiles, getAuthToken, getSkills, type ChatHistoryMessage, type ChatStreamEvent, type SkillInfo, type ToolResultMetadata, type WorkspaceFile } from "@/lib/api";
-import { Bot, Send, Copy, Check, Pencil, Wrench, ChevronDown, ChevronRight, Download, X, File, FileText, Image as ImageIcon, FileCode, Film, Music, Puzzle, SlidersHorizontal, ShieldCheck, Paperclip, Square, FolderOpen, RefreshCw } from "lucide-react";
+import { getAgent, getChatHistoryWithCursor, getChatSessions, getMe, listAgentFiles, listProjects, renameChatSession, revealAgentWorkspace, sendChatStream, uploadAgentFiles, getAuthToken, getSkills, type ChatHistoryMessage, type ChatStreamEvent, type SkillInfo, type ToolResultMetadata, type WorkspaceFile } from "@/lib/api";
+import { Bot, Send, Copy, Check, Pencil, Wrench, ChevronDown, ChevronRight, Download, X, File, FileText, FolderSearch, Image as ImageIcon, FileCode, Film, Music, Puzzle, SlidersHorizontal, ShieldCheck, Paperclip, Square, FolderOpen, RefreshCw } from "lucide-react";
 import Link from "next/link";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -1854,10 +1854,16 @@ export function ChatScreen() {
           </div>
         )}
       </div>
-      {filesSheetOpen && selectedAgent && sessionId && (
+      {filesSheetOpen && selectedAgent && (sessionId || urlProjectId) && (
         <WorkspacePanel
           agentId={selectedAgent}
-          sessionId={sessionId}
+          // On a project landing (no urlSessionId), sessionId here is the
+          // synthetic id chat-screen mints for the upcoming "New chat" —
+          // it doesn't correspond to anything on disk, so we suppress it
+          // and let projectId drive the scope. Inside an actual chat,
+          // urlSessionId is set and we pass the real sessionId.
+          sessionId={urlSessionId ? sessionId : ""}
+          projectId={!urlSessionId && urlProjectId ? urlProjectId : undefined}
           onClose={() => setFilesSheetOpen(false)}
         />
       )}
@@ -2187,10 +2193,14 @@ function fileUrl(agentId: string, path: string, download: boolean): string {
   return `/api/agents/${agentId}/files/${encoded}${qs ? "?" + qs : ""}`;
 }
 
-function zipUrl(agentId: string, sessionId: string): string {
+function zipUrl(agentId: string, sessionId: string, projectId?: string): string {
   const token = getAuthToken();
   const params = new URLSearchParams();
-  if (sessionId) params.set("sessionId", sessionId);
+  // projectId wins when both are present — same precedence as the
+  // backend's fileScopeForRequest, which treats projectId-without-
+  // session as "whole project zip".
+  if (projectId) params.set("projectId", projectId);
+  else if (sessionId) params.set("sessionId", sessionId);
   if (token) params.set("token", token);
   const qs = params.toString();
   return `/api/agents/${agentId}/files.zip${qs ? "?" + qs : ""}`;
@@ -2253,25 +2263,52 @@ const FILES_PANEL_MAX = 640;
 const FILES_PANEL_DEFAULT = 280;
 const FILES_PANEL_KEY = "chat:filesPanelWidth";
 
-// WorkspacePanel renders only the files produced inside the active
-// session (sessions/<sid>/ in the agent workspace). The agent's
-// shared files — SKILL.md / main.py / template scripts — leak into
-// the panel if we list the whole workspace and confuse the "what did
-// THIS conversation produce" mental model the panel is here to serve.
-// User can still drill into other sessions' artifacts from the
-// dashboard's per-session views.
+// WorkspacePanel renders the files in the active scope:
+//   - chat scope (sessionId set): files produced in this conversation.
+//     Project chats also see root-level project files so shared notes
+//     are visible alongside the chat's own outputs.
+//   - project scope (projectId set, no session): every file under the
+//     project — root-level + every chat's subtree. Used on the
+//     /agents/<aid>/project/<pid> landing where no specific chat is
+//     selected, so the user can still see what's accumulated in the
+//     project.
+// The agent's shared files (SKILL.md / main.py / templates) are
+// excluded by the backend's scope filter so they can't leak into
+// either view and confuse "what did this conversation produce".
 function WorkspacePanel({
   agentId,
   sessionId,
+  projectId,
   onClose,
 }: {
   agentId: string;
   sessionId: string;
+  projectId?: string;
   onClose: () => void;
 }) {
   const [files, setFiles] = useState<WorkspaceFile[]>([]);
   const [loading, setLoading] = useState(false);
   const [previewing, setPreviewing] = useState<ProducedFile | null>(null);
+  // Self-hosted-only "open in Finder" affordance. We learn the deploy
+  // mode from /api/me on mount; it doesn't change at runtime, so one
+  // fetch per panel instance is enough. Hosted deployments leave this
+  // null and the button never renders.
+  const [deployMode, setDeployMode] = useState<"self-hosted" | "hosted" | null>(null);
+  const [revealing, setRevealing] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    getMe()
+      .then((m) => {
+        if (cancelled) return;
+        if (m.deployMode === "self-hosted" || m.deployMode === "hosted") {
+          setDeployMode(m.deployMode);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const [width, setWidth] = useState<number>(() => {
     if (typeof window === "undefined") return FILES_PANEL_DEFAULT;
     const stored = Number(window.localStorage.getItem(FILES_PANEL_KEY));
@@ -2309,11 +2346,36 @@ function WorkspacePanel({
     };
   }, [resizing, width]);
 
+  const handleReveal = useCallback(async () => {
+    if (!agentId || (!sessionId && !projectId)) return;
+    setRevealing(true);
+    try {
+      const res = await revealAgentWorkspace(agentId, sessionId || undefined, projectId);
+      if (!res.ok) {
+        // Best-effort UX — surface the error inline rather than a
+        // toast lib we don't have. The message comes from the
+        // backend (e.g. "S3-backed store, no host path").
+        // eslint-disable-next-line no-alert
+        alert(res.error || "Could not open workspace folder");
+      }
+    } finally {
+      setRevealing(false);
+    }
+  }, [agentId, sessionId, projectId]);
+
   const refresh = useCallback(async () => {
-    if (!agentId || !sessionId) return;
+    // Project scope (no session) is handled via projectId; chat scope
+    // requires sessionId. With neither, there's nothing to fetch.
+    if (!agentId || (!sessionId && !projectId)) return;
     setLoading(true);
     try {
-      const list = await listAgentFiles(agentId, sessionId);
+      // When projectId is set we skip sessionId — backend scope filter
+      // expects exactly one of them to drive the prefix match. Mixing
+      // them would fall into the chat-scope branch and miss other
+      // chats' files.
+      const list = projectId
+        ? await listAgentFiles(agentId, undefined, projectId)
+        : await listAgentFiles(agentId, sessionId);
       const cleaned = list
         .filter((f) => !isSystemFile(f.path))
         .sort((a, b) => (b.modTime || 0) - (a.modTime || 0));
@@ -2321,7 +2383,7 @@ function WorkspacePanel({
     } finally {
       setLoading(false);
     }
-  }, [agentId, sessionId]);
+  }, [agentId, sessionId, projectId]);
 
   useEffect(() => {
     refresh();
@@ -2351,7 +2413,11 @@ function WorkspacePanel({
           </div>
           <div className="flex items-center gap-1">
             <a
-              href={files.length > 0 ? zipUrl(agentId, sessionId) : undefined}
+              href={
+                files.length > 0
+                  ? zipUrl(agentId, sessionId, projectId)
+                  : undefined
+              }
               aria-disabled={files.length === 0}
               className={`p-1.5 rounded-md transition-colors ${
                 files.length === 0
@@ -2362,6 +2428,21 @@ function WorkspacePanel({
             >
               <Download className="h-4 w-4" />
             </a>
+            {/* Open the workspace folder in the operator's native file
+                browser. Self-hosted only — hosted deployments don't
+                expose a meaningful "local folder" so the button is
+                hidden entirely (we learned the mode from /api/me at
+                mount). */}
+            {deployMode === "self-hosted" && (
+              <button
+                onClick={handleReveal}
+                disabled={revealing || (!sessionId && !projectId)}
+                className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors disabled:opacity-50"
+                title="Open folder in Finder"
+              >
+                <FolderSearch className="h-4 w-4" />
+              </button>
+            )}
             <button
               onClick={refresh}
               disabled={loading}
@@ -2382,7 +2463,9 @@ function WorkspacePanel({
         <div className="flex-1 overflow-y-auto p-2">
           {!loading && files.length === 0 ? (
             <p className="px-3 py-8 text-center text-sm text-muted-foreground">
-              No files in this session yet.
+              {projectId
+                ? "No files in this project yet."
+                : "No files in this session yet."}
             </p>
           ) : (
             <div className="flex flex-col">

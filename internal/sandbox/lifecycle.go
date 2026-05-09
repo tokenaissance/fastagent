@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -341,7 +342,50 @@ func (l *lazyExecutor) WriteFile(ctx context.Context, path, content string) (str
 	if err != nil {
 		return "", err
 	}
-	return ex.WriteFile(ctx, path, content)
+	out, writeErr := ex.WriteFile(ctx, path, content)
+	// Mirror writes to the durable store on cloud sandboxes — same
+	// reasoning as the post-exec sync above. Without this, write_file
+	// (and apply_patch) calls that fall through to ex.WriteFile (any
+	// absolute /workspace path — see file.go's isWorkspacePath, which
+	// rejects abs paths) only land in the E2B sandbox and disappear on
+	// idle eviction, never reaching the host workspace.Store the UI and
+	// signed URLs read from. Targeted single-file Put rather than
+	// syncSnapshot: we already have the bytes in memory, no need for a
+	// full tar round-trip per write. Best-effort — never overrides the
+	// write result.
+	if writeErr == nil {
+		if _, remote := ex.(RemoteWorkspace); remote {
+			l.pool.mirrorSandboxWrite(ctx, l.scope, path, content)
+		}
+	}
+	return out, writeErr
+}
+
+// mirrorSandboxWrite copies a single sandbox-side write into the durable
+// workspace.Store. Skips paths outside /workspace (e.g. /tmp/, /home/user/)
+// since those have no store mapping. Mirrors the sessionID-scoped Put that
+// syncSnapshot uses, so write_file and exec-generated files land in the
+// same store location.
+func (p *LifecyclePool) mirrorSandboxWrite(ctx context.Context, sc sandboxScope, sandboxPath, content string) {
+	if p.workspace == nil {
+		return
+	}
+	const prefix = "/workspace/"
+	if !strings.HasPrefix(sandboxPath, prefix) {
+		return
+	}
+	key := strings.TrimPrefix(sandboxPath, prefix)
+	if key == "" {
+		return
+	}
+	if err := p.workspace.Put(ctx, sc.agentID, sc.projectID, sc.sessionID, key,
+		bytesReader([]byte(content)), int64(len(content)), ""); err != nil {
+		slog.Warn("sandbox sync: write_file mirror failed",
+			"agent", sc.agentID, "project", sc.projectID, "session", sc.sessionID,
+			"path", key, "error", err)
+		return
+	}
+	slog.Debug("sandbox synced to workspace store", "agent", sc.agentID, "session", sc.sessionID, "cause", "post-write", "path", key)
 }
 
 func (l *lazyExecutor) ListDir(ctx context.Context, path string) (string, error) {

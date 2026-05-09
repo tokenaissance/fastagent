@@ -26,8 +26,8 @@ import (
 // AgentHandle is the surface the web UI uses to talk to a running agent.
 type AgentHandle interface {
 	Name() string
-	HandleWebChat(ctx context.Context, sessionId, projectIdHint, text string, imageURLs []string, params map[string]any) string
-	HandleWebChatStream(ctx context.Context, sessionId, projectIdHint, text string, imageURLs []string, params map[string]any, events chan<- agent.ChatEvent) string
+	HandleWebChat(ctx context.Context, sessionId, projectIdHint, userID, text string, imageURLs []string, params map[string]any) string
+	HandleWebChatStream(ctx context.Context, sessionId, projectIdHint, userID, text string, imageURLs []string, params map[string]any, events chan<- agent.ChatEvent) string
 	WebChatHistory(sessionId string) []map[string]any
 	WebChatSessions() []session.WebSession
 	DeleteWebChatSession(sessionId string) error
@@ -236,6 +236,11 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("GET /api/agents/{id}/files.zip", auth(s.handleAgentFilesZip))
 	mux.HandleFunc("GET /api/agents/{id}/files/{path...}", auth(s.handleAgentFile))
 	mux.HandleFunc("POST /api/agents/{id}/files", auth(s.handleAgentFileUpload))
+	// Self-hosted-only: opens the workspace dir in the operator's
+	// native file browser (Finder/Explorer/xdg-open). Hosted
+	// deployments 403 inside the handler — chatters there don't
+	// own the daemon's filesystem.
+	mux.HandleFunc("POST /api/agents/{id}/workspace/reveal", auth(s.handleAgentWorkspaceReveal))
 
 	mux.HandleFunc("GET /api/agents/{id}/system-files/{name}", auth(s.handleGetAgentSystemFile))
 	mux.HandleFunc("PUT /api/agents/{id}/system-files/{name}", auth(s.handlePutAgentSystemFile))

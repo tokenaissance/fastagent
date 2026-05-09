@@ -31,9 +31,18 @@ type DockerSandbox struct {
 	// to its own subdir.
 	workdir   string
 	skillDirs []string // host paths to mount read-only at /skills/<name>/
-	policy    *Policy
-	env       map[string]string
-	mu        sync.Mutex
+	// userSkillsHostDir, when non-empty, gets bind-mounted RW at
+	// /root/.agents/skills inside the container. That's where
+	// `npx skills add -g -y` (which is how find-skills tells the agent
+	// to install community skills) writes its global install — so any
+	// skill installed mid-chat lands directly in the chatter's
+	// per-user host dir and persists across sandbox eviction. Empty
+	// means no mount, which is the right behavior for legacy / system-
+	// injected calls that don't carry a chatter identity.
+	userSkillsHostDir string
+	policy            *Policy
+	env               map[string]string
+	mu                sync.Mutex
 }
 
 // NewDockerSandbox creates a new sandbox configuration (container is created lazily).
@@ -78,6 +87,18 @@ func (s *DockerSandbox) SetSkillDirs(dirs []string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.skillDirs = append(s.skillDirs[:0], dirs...)
+}
+
+// SetUserSkillsHostDir tells Create() to bind-mount this host directory
+// RW at /root/.agents/skills inside the sandbox — the location
+// `npx skills add -g -y` writes to. Empty value disables the mount
+// (no per-user persistence). Caller is responsible for the directory
+// existing; Create() will mkdir it defensively but a permission error
+// silently degrades to "no mount" rather than failing sandbox start.
+func (s *DockerSandbox) SetUserSkillsHostDir(dir string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.userSkillsHostDir = dir
 }
 
 // SetEnv sets environment variables to inject into the container.
@@ -146,6 +167,19 @@ func (s *DockerSandbox) Create() error {
 			mounted[e.Name()] = true
 			host := filepath.Join(dir, e.Name())
 			args = append(args, "-v", fmt.Sprintf("%s:/skills/%s:ro", host, e.Name()))
+		}
+	}
+
+	// Per-user RW mount for `npx skills add -g -y` — the CLI writes its
+	// global install to /root/.agents/skills/<name>/ inside the sandbox,
+	// so binding that path to the chatter's per-user host dir means
+	// installs persist on host disk and SkillsLoader picks them up on
+	// the next turn without any extra plumbing. mkdir is defensive;
+	// silent on failure so a busted host dir degrades to "agent install
+	// fails inside sandbox" instead of "sandbox refuses to start".
+	if s.userSkillsHostDir != "" {
+		if err := os.MkdirAll(s.userSkillsHostDir, 0o755); err == nil {
+			args = append(args, "-v", fmt.Sprintf("%s:/root/.agents/skills:rw", s.userSkillsHostDir))
 		}
 	}
 

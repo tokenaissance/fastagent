@@ -156,6 +156,22 @@ func (m *Manager) buildAgent(rc config.ResolvedAgent, prov provider.Provider, mb
 	// were never reaching the sandbox.
 	ag := NewAgentWithSkillsCfg(rc, providerForAgent(rc, prov), mb, homeDir, m.opts.globalSkillsCfg)
 	ag.SetOwnerUserID(m.uid)
+	// Per-user skills bucket: chat-time `skills/...` writes route to
+	// ~/.fastclaw/users/<uid>/, where SkillsLoader's "personal" layer
+	// also scans (see SkillsLoader.WithUserID). Set userID on the
+	// registry up front (the systemFileStore branch below also sets
+	// it, but only when memoryStore is wired — without this hoist a
+	// non-cloud install would store-mirror skills under agentID
+	// instead of the per-user owner key, splitting the same skill's
+	// content between two store namespaces). Skipped on legacy /
+	// single-user installs where m.uid is empty — file.go falls back
+	// to systemRoot (agent home) so existing skill bundles still work.
+	if m.uid != "" {
+		ag.registry.SetOwnerUserID(m.uid)
+		if base := userSkillsRootDir(m.uid); base != "" {
+			ag.registry.SetUserSkillsRoot(base)
+		}
+	}
 	if m.opts.sessionStore != nil {
 		ag.sessions = session.NewManagerWithStoreForUser(rc.Home+"/sessions", m.opts.sessionStore, m.uid, rc.ID)
 	}

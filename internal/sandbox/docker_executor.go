@@ -233,6 +233,23 @@ func (p *DockerExecutorPool) Get(ctx context.Context, agentID, projectID, sessio
 		sb.SetWorkdir(workdir)
 	}
 	sb.SetSkillDirs(skillDirsForAgent(p.workspaceRoot, agentID))
+	// Bind-mount the chatter's per-user skills host dir into the
+	// sandbox at the path `npx skills add -g -y` writes to, so any
+	// skill the agent installs mid-chat lands on host disk and is
+	// visible to the next LoadSkills scan. UserID flows in via ctx
+	// (set by HandleMessage / HandleMessageStream); empty just skips
+	// the mount, which is the right fallback for non-chat callers.
+	if uid := UserIDFromContext(ctx); uid != "" {
+		base := os.Getenv("FASTCLAW_HOME")
+		if base == "" {
+			if h, err := os.UserHomeDir(); err == nil {
+				base = filepath.Join(h, ".fastclaw")
+			}
+		}
+		if base != "" {
+			sb.SetUserSkillsHostDir(filepath.Join(base, "users", uid, "skills"))
+		}
+	}
 	if err := sb.Create(); err != nil {
 		return nil, fmt.Errorf("create docker sandbox: %w", err)
 	}

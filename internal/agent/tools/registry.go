@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/fastclaw-ai/fastclaw/internal/buildinfo"
 	"github.com/fastclaw-ai/fastclaw/internal/provider"
 	"github.com/fastclaw-ai/fastclaw/internal/sandbox"
 	"github.com/fastclaw-ai/fastclaw/internal/workspace"
@@ -101,6 +102,23 @@ type Registry struct {
 	// via SetAgentOwnerUserID. Empty means "single-user install / no
 	// distinction" — systemFileUserID falls back to userID then.
 	agentOwnerUserID string
+	// userSkillsRoot is the on-disk PARENT of the chatter's per-user
+	// skills/ subdir (~/.fastclaw/users/<uid>/). A write to relative
+	// path "skills/foo/SKILL.md" with this set lands at
+	// <userSkillsRoot>/skills/foo/SKILL.md — same shape rootForPath +
+	// resolvePathSandboxed expect for systemRoot. Set per-Agent from
+	// the chatter's user_id. When empty, falls back to systemRoot
+	// (agent home) for backwards compatibility — that's the legacy
+	// "skill written by chat lives on the agent" behavior.
+	//
+	// Why per-user instead of per-agent: chat-created skills are
+	// utility-flavored (PDF gen, table-to-md, …) and the user expects
+	// them to follow them across every agent they chat with. Routing
+	// to a user-namespaced dir also keeps a viewer on a shared agent
+	// from polluting the owner's official skill set, since SkillsLoader
+	// loads this directory under "personal" layer and only for the
+	// chatter who owns it.
+	userSkillsRoot string
 	// sandboxRequired is the runtime contract: when true, the exec tool
 	// MUST refuse to fall through to the host shell — even if sbCfg
 	// wasn't set at agent construction (cfg.Sandbox.Enabled was false at
@@ -189,6 +207,15 @@ func (r *Registry) SetOwnerUserID(userID string) {
 // agent's BOOTSTRAP flow.
 func (r *Registry) SetAgentOwnerUserID(uid string) {
 	r.agentOwnerUserID = uid
+}
+
+// SetUserSkillsRoot points chat-time `skills/...` writes at the
+// chatter's per-user skills dir (~/.fastclaw/users/<uid>/skills/).
+// Empty disables — `skills/...` then falls back to systemRoot (agent
+// home). Pair with SkillsLoader.WithUserID so the loader scans the
+// same dir on the next turn and the new skill becomes visible.
+func (r *Registry) SetUserSkillsRoot(dir string) {
+	r.userSkillsRoot = dir
 }
 
 // systemFileUserID picks the user_id to scope a systemFileStore call
@@ -361,12 +388,22 @@ func (r *Registry) SetSandboxRoot(root string) {
 // list_dir, and exec are ALL forwarded to the executor instead of operating
 // on the host filesystem. This is the mode used for cloud deployments where
 // each user gets an isolated container/VM with their own runtime + files.
+//
+// Self-hosted installs additionally get a `host_exec` escape hatch so the
+// agent can help with operator-environment tasks (fastclaw upgrade,
+// ~/Downloads access, system tools) without losing the sandbox default
+// for everything else. Hosted (multi-tenant) deployments deliberately
+// skip this — chatters there don't own the daemon and host shell would
+// be a privilege-escalation surface.
 func (r *Registry) SetExecutor(ex sandbox.Executor) {
 	r.executor = ex
 	// Re-register built-in tools to use the executor.
 	registerSandboxedFile(r, ex)
 	registerSandboxedApplyPatch(r, ex)
 	registerSandboxedExec(r, ex)
+	if !buildinfo.IsHostedDeploy() {
+		registerHostExec(r, r.envProvider, r.skillDirs)
+	}
 }
 
 func (r *Registry) registerBuiltins() {
