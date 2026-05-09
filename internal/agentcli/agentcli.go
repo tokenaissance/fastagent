@@ -154,16 +154,22 @@ func Init(ctx context.Context, st store.Store, name string, opts InitOptions) (*
 }
 
 // ensureOwner picks (or creates) the user account the agent belongs to.
-// Rules: --username pins the lookup; otherwise we look for "admin". If
-// the named user doesn't exist we create them when the DB is empty (and
-// surface the generated password for first-run UX), or fail loudly when
-// other users already exist.
+// Rules: --username pins the lookup. Without it we prefer "admin", then
+// fall back to the oldest active super_admin so deployments that
+// provisioned a differently-named admin via the dashboard still work.
+// If the named user doesn't exist we create them when the DB is empty
+// (and surface the generated password for first-run UX), or fail loudly
+// when other users already exist.
 func ensureOwner(ctx context.Context, st store.Store, opts InitOptions) (*users.Account, bool, string, error) {
 	accts, err := users.NewAccounts(st)
 	if err != nil {
 		return nil, false, "", err
 	}
-	username := defaultStr(opts.Username, "admin")
+	username := opts.Username
+	explicit := username != ""
+	if !explicit {
+		username = "admin"
+	}
 
 	rec, err := st.GetUserByLogin(ctx, username)
 	if err == nil {
@@ -179,6 +185,18 @@ func ensureOwner(ctx context.Context, st store.Store, opts InitOptions) (*users.
 		return nil, false, "", err
 	}
 	if count > 0 {
+		if !explicit {
+			all, err := accts.List(ctx)
+			if err != nil {
+				return nil, false, "", err
+			}
+			for _, a := range all {
+				if a.Role == users.RoleSuperAdmin && a.Status == users.StatusActive {
+					return a, false, "", nil
+				}
+			}
+			return nil, false, "", errors.New(`no "admin" user and no active super_admin found; pass --username to pick an existing user`)
+		}
 		return nil, false, "", fmt.Errorf("user %q not found; pass --username to pick an existing user", username)
 	}
 
