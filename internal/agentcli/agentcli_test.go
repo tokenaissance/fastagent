@@ -215,19 +215,54 @@ func TestInitDefaultsToAdmin(t *testing.T) {
 	}
 }
 
-func TestInitFailsWhenDefaultAdminMissing(t *testing.T) {
+func TestInitFallsBackToFirstSuperAdmin(t *testing.T) {
 	st := freshStore(t)
 
-	// Seed alice as the only user (no admin in the DB).
-	if _, err := Init(context.Background(), st, "alpha", InitOptions{Username: "alice"}); err != nil {
+	// Seed alice as the only user (no admin in the DB). She is created
+	// as a super_admin by ensureOwner.
+	res1, err := Init(context.Background(), st, "alpha", InitOptions{Username: "alice"})
+	if err != nil {
 		t.Fatalf("seed alice: %v", err)
 	}
 
-	// New agent with no --username defaults to admin, which does not
-	// exist; the CLI must surface that rather than silently fall back.
-	_, err := Init(context.Background(), st, "beta", InitOptions{})
-	if err == nil || !strings.Contains(err.Error(), `"admin"`) {
-		t.Fatalf("expected admin-not-found error, got %v", err)
+	// New agent with no --username: admin doesn't exist, but alice does
+	// and is a super_admin, so init should adopt her instead of erroring.
+	res2, err := Init(context.Background(), st, "beta", InitOptions{})
+	if err != nil {
+		t.Fatalf("init beta: %v", err)
+	}
+	if res2.Agent.UserID != res1.Agent.UserID {
+		t.Fatalf("expected beta to be owned by alice (%s), got %s", res1.Agent.UserID, res2.Agent.UserID)
+	}
+	if res2.OwnerCreated {
+		t.Fatal("fallback to existing super_admin must not create a new user")
+	}
+}
+
+func TestInitFailsWhenNoSuperAdmin(t *testing.T) {
+	st := freshStore(t)
+
+	// Seed admin via the empty-DB path so we can demote them and leave
+	// the DB with users but no super_admin.
+	res, err := Init(context.Background(), st, "alpha", InitOptions{})
+	if err != nil {
+		t.Fatalf("seed admin: %v", err)
+	}
+	accts, _ := users.NewAccounts(st)
+	if _, err := accts.Update(context.Background(), res.Agent.UserID, "", users.RoleUser, "", nil); err != nil {
+		t.Fatalf("demote admin: %v", err)
+	}
+	// Rename so the "admin" lookup doesn't short-circuit before the
+	// super_admin scan.
+	rec, _ := st.GetUser(context.Background(), res.Agent.UserID)
+	rec.Username = "alice"
+	if err := st.UpdateUser(context.Background(), rec); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+
+	_, err = Init(context.Background(), st, "beta", InitOptions{})
+	if err == nil || !strings.Contains(err.Error(), "super_admin") {
+		t.Fatalf("expected no-super_admin error, got %v", err)
 	}
 }
 
