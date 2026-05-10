@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -86,17 +85,16 @@ function AgentAvatar({
 }
 
 export default function AgentsPage() {
-  const router = useRouter();
   const [agents, setAgents] = useState<AgentDetail[]>([]);
   const [otherAgents, setOtherAgents] = useState<OtherAgent[]>([]);
   const [isAdmin, setIsAdmin] = useState(false);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<"own" | "others">("own");
   // quotaLocked = true when the caller has agent_quota=0 (admin
-  // provisions only). For these single-agent users this whole list /
-  // create page is meaningless — we redirect into the one agent they
-  // own, or show a "contact your admin" empty state if none has been
-  // provisioned yet.
+  // provisions only). They can still browse /agents to see what's
+  // been provisioned for them and jump into chat — we just hide the
+  // Create button. If nothing has been provisioned yet, the empty
+  // state tells them to contact their admin.
   const [quotaLocked, setQuotaLocked] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [editTarget, setEditTarget] = useState<AgentDetail | null>(null);
@@ -182,29 +180,22 @@ export default function AgentsPage() {
     fetchAgents();
   }, []);
 
-  // Quota-locked redirect: agent_quota === 0 means the caller can't
-  // self-create. They're typically a single-agent customer whose agent
-  // was admin-provisioned. Bounce them straight into chat instead of
-  // showing an empty list with a disabled Create button. We wait for
-  // both /api/me and the agent list to land before deciding so the
-  // redirect doesn't race ahead of the list.
+  // Resolve quotaLocked from /api/me. agent_quota === 0 means the
+  // caller can't self-create — we hide the Create button but still
+  // render the list so they can see admin-provisioned agents and
+  // jump into chat.
   useEffect(() => {
     let aborted = false;
-    if (loading) return;
     getMe()
       .then((me) => {
         if (aborted) return;
-        if (me?.user?.agentQuota !== 0) return;
-        setQuotaLocked(true);
-        if (agents.length > 0) {
-          router.replace(`/agents/${agents[0].id}/chat/`);
-        }
+        if (me?.user?.agentQuota === 0) setQuotaLocked(true);
       })
       .catch(() => {});
     return () => {
       aborted = true;
     };
-  }, [loading, agents, router]);
+  }, []);
 
   async function uploadAvatar(agentID: string, file: File) {
     const fd = new FormData();
@@ -273,18 +264,6 @@ export default function AgentsPage() {
     setDeleteId(null);
     fetchAgents();
   };
-
-  // Quota-locked rendering: while the redirect to the single agent
-  // is in flight, paint a tiny "redirecting" state instead of the
-  // management UI flashing through. When the locked user has no agent
-  // yet, fall through to a "contact admin" empty state below.
-  if (quotaLocked && (loading || ownedAgents.length > 0)) {
-    return (
-      <div className="p-6 max-w-5xl mx-auto">
-        <Skeleton className="h-8 w-48" />
-      </div>
-    );
-  }
 
   return (
     <div className="p-6 space-y-6 max-w-5xl mx-auto">
@@ -406,32 +385,37 @@ export default function AgentsPage() {
               {/* mt-auto pins the action row to the card bottom so cards
                   with no description don't shrink — keeps the grid row
                   aligned regardless of content length. */}
-              <div className="flex items-center gap-2 mt-auto pt-3 border-t border-border">
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-8 text-xs"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    openEdit(agent);
-                  }}
-                >
-                  <Pencil className="h-3 w-3 mr-1.5" />
-                  Edit
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-8 text-xs text-destructive hover:text-destructive"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setDeleteId(agent.id);
-                  }}
-                >
-                  <Trash2 className="h-3 w-3 mr-1.5" />
-                  Remove
-                </Button>
-              </div>
+              {/* quotaLocked users (agent_quota=0) are admin-provisioned —
+                  they can browse and chat but can't mutate the agent
+                  record, so hide Edit/Remove entirely. */}
+              {!quotaLocked && (
+                <div className="flex items-center gap-2 mt-auto pt-3 border-t border-border">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-8 text-xs"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      openEdit(agent);
+                    }}
+                  >
+                    <Pencil className="h-3 w-3 mr-1.5" />
+                    Edit
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-8 text-xs text-destructive hover:text-destructive"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setDeleteId(agent.id);
+                    }}
+                  >
+                    <Trash2 className="h-3 w-3 mr-1.5" />
+                    Remove
+                  </Button>
+                </div>
+              )}
             </div>
           ))}
         </div>

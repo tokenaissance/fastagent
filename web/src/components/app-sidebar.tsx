@@ -54,17 +54,17 @@ function extractAgentId(pathname: string): string | null {
 }
 
 // Platform nav for regular users — non-admins see what they can do for
-// themselves. API Keys lets them issue type=user/agent tokens for their
-// own integrations (admin keys remain super_admin only). Models lets
-// them configure their own user-scope providers; Settings covers
-// Account + General (Runtime is hidden inside the layout for non-admin).
-// Skills/Users stay admin-only — Skills currently has no user-scope
-// install path so a sidebar entry would just dead-end on 403s.
+// themselves. Models lets them configure their own user-scope providers;
+// Settings covers Account + General (Runtime is hidden inside the layout
+// for non-admin). Skills/Users stay admin-only — Skills currently has no
+// user-scope install path so a sidebar entry would just dead-end on 403s.
+// API Keys is also admin-only in the sidebar: regular users don't need
+// to issue programmatic credentials in the typical product flow, so we
+// keep the entry off their nav.
 const USER_NAV: NavItem[] = [
   { title: "Overview", url: "/overview/", icon: LayoutDashboardIcon },
   { title: "Agents", url: "/agents/", icon: BotIcon },
   { title: "Models", url: "/models/", icon: BrainIcon },
-  { title: "API Keys", url: "/apikeys/", icon: KeyRoundIcon },
   { title: "Settings", url: "/settings/", icon: SettingsIcon },
 ];
 
@@ -232,15 +232,13 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
 
   const isAdmin = status?.isAdmin ?? false;
   // quotaLocked = caller has agent_quota=0 (admin-provisions-only,
-  // typical single-agent customer model). For these users we lock the
-  // agent switcher header (no menu / "Manage agents" link) and pull
-  // the "Agents" entry out of the platform nav — the /agents page
-  // itself redirects them straight into chat anyway.
+  // typical single-agent customer model). The agent switcher header
+  // is locked (static label, no "Manage agents" dropdown), but the
+  // /agents page itself stays reachable so they can browse what's
+  // been provisioned and jump into chat — it just hides the Create
+  // button. So we keep the Agents nav entry visible.
   const quotaLocked = me?.user?.agentQuota === 0;
-  const platformItemsRaw = isAdmin ? ADMIN_NAV : USER_NAV;
-  const platformItems = quotaLocked
-    ? platformItemsRaw.filter((it) => it.url !== "/agents/")
-    : platformItemsRaw;
+  const platformItems = isAdmin ? ADMIN_NAV : USER_NAV;
 
   return (
     <Sidebar collapsible="icon" {...props}>

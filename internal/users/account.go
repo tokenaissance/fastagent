@@ -115,7 +115,24 @@ type CreateInput struct {
 
 // Create writes a new account. Password is hashed with bcrypt; plaintext
 // is never persisted. ID is always auto-generated.
+//
+// Idempotent on (APIKeyID, ExternalID): when both are non-empty, a repeat
+// call returns the already-provisioned row instead of erroring on the
+// partial UNIQUE index. Upstream apps can re-issue the same provisioning
+// call without tracking whether they've called us before. username/email
+// UNIQUE collisions across *different* identities still surface as errors —
+// silently returning a stranger's row would hide a real conflict.
 func (a *Accounts) Create(ctx context.Context, in CreateInput) (*Account, error) {
+	apikeyID := strings.TrimSpace(in.APIKeyID)
+	externalID := strings.TrimSpace(in.ExternalID)
+	// Fast path — already provisioned for this (apikey, external_id) pair.
+	if apikeyID != "" && externalID != "" {
+		if rec, err := a.store.GetUserByExternal(ctx, apikeyID, externalID); err == nil {
+			return toAccount(rec), nil
+		} else if !errors.Is(err, store.ErrNotFound) {
+			return nil, err
+		}
+	}
 	username := strings.TrimSpace(in.Username)
 	email := strings.ToLower(strings.TrimSpace(in.Email))
 	if username == "" || email == "" || in.Password == "" {
@@ -148,12 +165,24 @@ func (a *Accounts) Create(ctx context.Context, in CreateInput) (*Account, error)
 		DisplayName:  in.DisplayName,
 		Role:         role,
 		Status:       StatusActive,
-		APIKeyID:     in.APIKeyID,
-		ExternalID:   in.ExternalID,
+		APIKeyID:     apikeyID,
+		ExternalID:   externalID,
 		AvatarURL:    in.AvatarURL,
 		AgentQuota:   quota,
 	}
 	if err := a.store.CreateUser(ctx, rec); err != nil {
+		// Race: another concurrent request minted the same
+		// (apikey_id, external_id) pair between our fast-path miss
+		// above and the INSERT. Re-read and return that row so the
+		// caller sees the same idempotent contract regardless of
+		// timing. username/email collisions across different
+		// identities still bubble — see EnsureAppUser for the same
+		// pattern.
+		if apikeyID != "" && externalID != "" {
+			if again, qerr := a.store.GetUserByExternal(ctx, apikeyID, externalID); qerr == nil {
+				return toAccount(again), nil
+			}
+		}
 		return nil, err
 	}
 	return toAccount(rec), nil

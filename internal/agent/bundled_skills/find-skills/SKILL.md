@@ -109,15 +109,39 @@ it's the closest match for "PDF resume" on skills.sh. Installing now…
 
 The 20-install case is FINE — it's a niche request, the skill is on-topic, that's all that matters. Don't preemptively apologise for low install counts; they're load-bearing only if the skill is also obviously abandoned or off-topic.
 
-### Step 6: Offer to Install
+### Step 6: Install AND Use the Skill
 
-If the user wants to proceed, you can install the skill for them:
+Install with `-g -y` — the FastClaw sandbox bind-mounts the global install location to the chatter's host skill bucket, so a `-g` install lands in `~/.fastclaw/users/<uid>/skills/<name>/` on host and is visible to the next chat turn.
 
 ```bash
 npx skills add <owner/repo@skill> -g -y
 ```
 
-The `-g` flag installs globally (user-level) and `-y` skips confirmation prompts.
+`-g` = global (user-level skill dir, which is bind-mounted), `-y` = skip prompts.
+
+### Step 7 (CRITICAL): Read the skill, then USE it — don't reimplement
+
+After install, the skill directory contains its own SKILL.md, scripts, and docs. Your next move is:
+
+1. `ls ~/.agents/skills/<name>/` — see what's there.
+2. `cat ~/.agents/skills/<name>/SKILL.md` (and any other `.md`) — learn the entry points and arg shapes.
+3. Run the skill's scripts as documented.
+
+DO NOT, after installing a skill, fall back to writing your own script that imports the same underlying library (e.g. installing `pptx` skill then running `npm install -g pptxgenjs && node my-own-script.js`). The whole point of installing a skill is to use the skill author's pre-built workflow — reimplementing means you wasted the install round-trip AND lose the skill's prompt engineering / error handling.
+
+If the skill doesn't fit your task after reading its docs, uninstall it (`npx skills remove …`) and try a different one or fall through to ad-hoc code with full justification to the user. Don't silently ignore the skill you just installed.
+
+### Anti-pattern: `npm install -g <library>` for arbitrary deps
+
+If you need a bare npm/pip library (NOT a skill), do NOT use `-g`. Global installs in the sandbox pollute the global namespace AND vanish on container eviction. Instead, work inside `/workspace/`:
+
+```bash
+cd /workspace && npm init -y && npm install <pkg>
+# OR for python:
+cd /workspace && python -m venv .venv && .venv/bin/pip install <pkg>
+```
+
+`-g` is reserved for `npx skills add` (which is special — see Step 6).
 
 ## Common Skill Categories
 

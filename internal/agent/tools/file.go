@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/fastclaw-ai/fastclaw/internal/buildinfo"
 	"github.com/fastclaw-ai/fastclaw/internal/sandbox"
 	"github.com/fastclaw-ai/fastclaw/internal/skills"
 )
@@ -160,6 +159,20 @@ func hostHomePath(path string) (string, bool) {
 		return "", false
 	}
 	if path == "~" || strings.HasPrefix(path, "~/") {
+		// Sandbox-only / FastClaw-internal subtrees: skip host expansion
+		// so the read/write falls through to the sandbox executor instead
+		// of trying (and failing) on host disk where the path doesn't
+		// exist. Symmetric to the absolute-path guard below.
+		//   ~/.fastclaw/... — runtime internals (db, workspaces, …)
+		//   ~/.agents/...   — sandbox bind-mount target for npx skills.
+		//                     Host has these at <FASTCLAW_HOME>/users/<uid>/skills/,
+		//                     not under ~. After `ls ~/.agents/skills/<x>/` runs
+		//                     in-sandbox the model naturally calls
+		//                     read_file with the same path; that path only
+		//                     resolves inside the container.
+		if strings.HasPrefix(path, "~/.fastclaw") || strings.HasPrefix(path, "~/.agents") {
+			return "", false
+		}
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return "", false
@@ -800,23 +813,20 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 		if err := json.Unmarshal(rawArgs, &args); err != nil {
 			return "", fmt.Errorf("parse args: %w", err)
 		}
+		// Identity files (SOUL.md, IDENTITY.md, …) are routed by basename
+		// (lenient) instead of the strict isSingleSegmentSystemFile that
+		// routeFor uses. Need to be checked separately for reads so an
+		// LLM-emitted absolute path like
+		// /data/.fastclaw/workspaces/<id>/IDENTITY.md still hits the DB.
 		if r.systemFileStore != nil && r.agentID != "" && basenameIsSystemFile(args.Path) {
-			// Lenient match (basename, not just bare filename) so that
-			// LLM-expanded absolute paths like
-			// /data/.fastclaw/workspaces/<id>/IDENTITY.md still hit the
-			// store. Without this the read goes to the sandbox executor
-			// which 404s because identity files live in db, not the
-			// sandbox FS.
 			name := filepath.Base(filepath.Clean(args.Path))
 			if data, err := r.systemFileStore.GetWorkspaceFile(ctx, r.agentID, r.systemFileUserID(name), name); err == nil {
 				return string(data), nil
 			}
-			// Store miss: treat as unset (a fresh agent may have no
-			// IDENTITY.md row yet). Don't fall through to the sandbox
-			// executor — identity files don't live there.
-			return "", nil
+			return "", nil // miss → treat as unset (fresh agent)
 		}
-		if r.workspaceStore != nil && r.agentID != "" && r.isWorkspacePath(args.Path) {
+		switch r.routeFor(args.Path, OpRead) {
+		case RouteWorkspaceStore:
 			rc, err := r.workspaceStore.Get(ctx, r.agentID, r.projectID, r.sessionID, args.Path)
 			if err == nil {
 				defer rc.Close()
@@ -828,12 +838,15 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 					return string(data), nil
 				}
 			}
-		}
-		// Match write-side routing for `skills/...` so the agent reads
-		// the same file it just wrote. Without this, the read goes to
-		// the sandbox FS and 404s when the file actually lives on
-		// host disk.
-		if r.isSkillPath(args.Path) && r.skillRoot() != "" {
+			// Fall through to sandbox on store miss so a freshly-written
+			// file the agent put inside the sandbox (mid-turn, not yet
+			// mirrored to store) is still readable.
+			out, err := ex.ReadFile(ctx, args.Path)
+			if err == nil && looksBinary([]byte(out)) {
+				return binaryRefusal(args.Path, len(out)), nil
+			}
+			return MetaSandboxPrefix + out, err
+		case RouteSkillStore:
 			full := filepath.Join(r.skillRoot(), filepath.Clean(args.Path))
 			if data, err := os.ReadFile(full); err == nil {
 				if looksBinary(data) {
@@ -841,33 +854,35 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 				}
 				return string(data), nil
 			}
-			// Fall through to sandbox executor on miss — gives the
-			// model a chance to read pre-mounted skill files inside
-			// the sandbox (/skills/<name>/...) when the path resolved
-			// against the host dir doesn't exist.
-		}
-		// Host-home paths (`~/...`, `/Users/...`, `/home/...`) on
-		// self-hosted installs go to the operator's actual disk; the
-		// chatter is the operator there and the sandbox FS doesn't
-		// have these paths anyway. Hosted deployments fall through to
-		// the sandbox so chatters can't reach the daemon's home dir.
-		if !buildinfo.IsHostedDeploy() {
-			if full, ok := hostHomePath(args.Path); ok {
-				if data, err := os.ReadFile(full); err == nil {
-					if looksBinary(data) {
-						return binaryRefusal(args.Path, len(data)), nil
-					}
-					return string(data), nil
-				} else {
-					return "", fmt.Errorf("host read %s: %w", full, err)
-				}
+			// Fall through to sandbox so pre-mounted skills under
+			// /skills/<name>/ inside the container are still reachable.
+			out, err := ex.ReadFile(ctx, args.Path)
+			if err == nil && looksBinary([]byte(out)) {
+				return binaryRefusal(args.Path, len(out)), nil
 			}
+			return MetaSandboxPrefix + out, err
+		case RouteHostFS:
+			full, ok := hostHomePath(args.Path)
+			if !ok {
+				full = args.Path // explicit absolute non-home path
+			}
+			data, err := os.ReadFile(full)
+			if err != nil {
+				return "", fmt.Errorf("host read %s: %w", full, err)
+			}
+			if looksBinary(data) {
+				return binaryRefusal(args.Path, len(data)), nil
+			}
+			return string(data), nil
+		case RouteRefuseSuggestSandbox:
+			return "", fmt.Errorf("%s", errSandboxRequiredMessage)
+		default: // RouteSandbox (and RouteSystemStore handled above out-of-band)
+			out, err := ex.ReadFile(ctx, args.Path)
+			if err == nil && looksBinary([]byte(out)) {
+				return binaryRefusal(args.Path, len(out)), nil
+			}
+			return MetaSandboxPrefix + out, err
 		}
-		out, err := ex.ReadFile(ctx, args.Path)
-		if err == nil && looksBinary([]byte(out)) {
-			return binaryRefusal(args.Path, len(out)), nil
-		}
-		return MetaSandboxPrefix + out, err
 	})
 
 	r.Register("write_file", "Write content to a file (creates directories as needed)", map[string]interface{}{
@@ -888,50 +903,46 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 		if err := json.Unmarshal(rawArgs, &args); err != nil {
 			return "", fmt.Errorf("parse args: %w", err)
 		}
-		if r.systemFileStore != nil && r.agentID != "" && isSingleSegmentSystemFile(args.Path) {
+		switch r.routeFor(args.Path, OpWrite) {
+		case RouteSystemStore:
 			name := filepath.Clean(args.Path)
 			if err := r.systemFileStore.SaveWorkspaceFile(ctx, r.agentID, r.systemFileUserID(name), name, []byte(args.Content)); err != nil {
 				return "", fmt.Errorf("system file save: %w", err)
 			}
 			return fmt.Sprintf("Written %d bytes to %s", len(args.Content), name), nil
-		}
-		if r.workspaceStore != nil && r.agentID != "" && r.isWorkspacePath(args.Path) {
+		case RouteWorkspaceStore:
 			if err := r.workspaceStore.Put(ctx, r.agentID, r.projectID, r.sessionID, args.Path,
 				strings.NewReader(args.Content), int64(len(args.Content)), ""); err != nil {
 				return "", fmt.Errorf("workspace put: %w", err)
 			}
 			return fmt.Sprintf("Written %d bytes to %s", len(args.Content), args.Path), nil
-		}
-		// Skill scaffolding (skill-creator's `skills/<name>/...`) must
-		// land on host disk where SkillsLoader scans, NOT in the
-		// ephemeral sandbox FS. Without this intercept the file goes
-		// to /home/user/skills/... inside E2B and is gone on next
-		// session — which is why skill-creator silently failed in
-		// cloud mode before. writeSkillToHost also mirrors to the
-		// workspace store so sibling pods pick it up.
-		if r.isSkillPath(args.Path) && r.skillRoot() != "" {
+		case RouteSkillStore:
+			// Skill scaffolding (skill-creator's `skills/<name>/...`) lands
+			// on host disk where SkillsLoader scans + mirrors to OSS, NOT
+			// in the ephemeral sandbox FS. writeSkillToHost handles both.
 			full, err := r.writeSkillToHost(ctx, args.Path, args.Content)
 			if err != nil {
 				return "", err
 			}
 			return fmt.Sprintf("Written %d bytes to %s", len(args.Content), full), nil
-		}
-		// Host-home paths on self-hosted installs land on the
-		// operator's actual disk. See read-side comment for why this
-		// is gated on IsHostedDeploy().
-		if !buildinfo.IsHostedDeploy() {
-			if full, ok := hostHomePath(args.Path); ok {
-				if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-					return "", fmt.Errorf("create directory: %w", err)
-				}
-				if err := os.WriteFile(full, []byte(args.Content), 0o644); err != nil {
-					return "", fmt.Errorf("host write %s: %w", full, err)
-				}
-				return fmt.Sprintf("Written %d bytes to %s", len(args.Content), full), nil
+		case RouteHostFS:
+			full, ok := hostHomePath(args.Path)
+			if !ok {
+				full = args.Path
 			}
+			if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+				return "", fmt.Errorf("create directory: %w", err)
+			}
+			if err := os.WriteFile(full, []byte(args.Content), 0o644); err != nil {
+				return "", fmt.Errorf("host write %s: %w", full, err)
+			}
+			return fmt.Sprintf("Written %d bytes to %s", len(args.Content), full), nil
+		case RouteRefuseSuggestSandbox:
+			return "", fmt.Errorf("%s", errSandboxRequiredMessage)
+		default: // RouteSandbox
+			out, err := ex.WriteFile(ctx, args.Path, args.Content)
+			return MetaSandboxPrefix + out, err
 		}
-		out, err := ex.WriteFile(ctx, args.Path, args.Content)
-		return MetaSandboxPrefix + out, err
 	})
 
 	r.Register("list_dir", "List files and directories in a path", map[string]interface{}{
@@ -948,7 +959,8 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 		if err := json.Unmarshal(rawArgs, &args); err != nil {
 			return "", fmt.Errorf("parse args: %w", err)
 		}
-		if r.workspaceStore != nil && r.agentID != "" && r.isWorkspacePath(args.Path) {
+		switch r.routeFor(args.Path, OpList) {
+		case RouteWorkspaceStore:
 			objs, err := r.workspaceStore.List(ctx, r.agentID, r.projectID, r.sessionID)
 			if err == nil {
 				prefix := strings.Trim(filepath.ToSlash(filepath.Clean(args.Path)), "/")
@@ -979,32 +991,39 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 				}
 				return sb.String(), nil
 			}
-		}
-		// Host-home dir on self-hosted installs.
-		if !buildinfo.IsHostedDeploy() {
-			if full, ok := hostHomePath(args.Path); ok {
-				entries, err := os.ReadDir(full)
-				if err != nil {
-					return "", fmt.Errorf("host list %s: %w", full, err)
-				}
-				var sb strings.Builder
-				for _, e := range entries {
-					if e.IsDir() {
-						fmt.Fprintf(&sb, "d %s/\n", e.Name())
-						continue
-					}
-					info, ierr := e.Info()
-					if ierr != nil {
-						fmt.Fprintf(&sb, "f %s\n", e.Name())
-						continue
-					}
-					fmt.Fprintf(&sb, "f %s (%d bytes)\n", e.Name(), info.Size())
-				}
-				return sb.String(), nil
+			// Store error → fall through to sandbox so a freshly-written
+			// sandbox-only dir is still listable.
+			out, err := ex.ListDir(ctx, args.Path)
+			return MetaSandboxPrefix + out, err
+		case RouteHostFS:
+			full, ok := hostHomePath(args.Path)
+			if !ok {
+				full = args.Path
 			}
+			entries, err := os.ReadDir(full)
+			if err != nil {
+				return "", fmt.Errorf("host list %s: %w", full, err)
+			}
+			var sb strings.Builder
+			for _, e := range entries {
+				if e.IsDir() {
+					fmt.Fprintf(&sb, "d %s/\n", e.Name())
+					continue
+				}
+				info, ierr := e.Info()
+				if ierr != nil {
+					fmt.Fprintf(&sb, "f %s\n", e.Name())
+					continue
+				}
+				fmt.Fprintf(&sb, "f %s (%d bytes)\n", e.Name(), info.Size())
+			}
+			return sb.String(), nil
+		case RouteRefuseSuggestSandbox:
+			return "", fmt.Errorf("%s", errSandboxRequiredMessage)
+		default: // RouteSandbox / RouteSystemStore (no list semantics) / RouteSkillStore
+			out, err := ex.ListDir(ctx, args.Path)
+			return MetaSandboxPrefix + out, err
 		}
-		out, err := ex.ListDir(ctx, args.Path)
-		return MetaSandboxPrefix + out, err
 	})
 
 	r.Register("edit_file", editDescription, editSchema, func(ctx context.Context, rawArgs json.RawMessage) (string, error) {
@@ -1013,11 +1032,29 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 			return "", fmt.Errorf("parse args: %w", err)
 		}
 
-		// Identity files live in the systemFileStore (Postgres in cloud
-		// deployments) — the sandbox FS doesn't have them. Read+write must
-		// hit the same backend, otherwise a successful edit on disk would
-		// be invisible to the next read that goes through the store.
-		if r.systemFileStore != nil && r.agentID != "" && isSingleSegmentSystemFile(args.Path) {
+		// editSandboxRMW is the read-modify-write fallback through the
+		// sandbox executor. Used when the store route misses or for any
+		// path routeFor sends to the sandbox.
+		editSandboxRMW := func() (string, error) {
+			content, err := ex.ReadFile(ctx, args.Path)
+			if err != nil {
+				return "", err
+			}
+			if looksBinary([]byte(content)) {
+				return binaryRefusal(args.Path, len(content)), nil
+			}
+			updated, count, err := applyEdit(args.Path, content, args.OldString, args.NewString, args.ReplaceAll)
+			if err != nil {
+				return "", err
+			}
+			if _, err := ex.WriteFile(ctx, args.Path, updated); err != nil {
+				return "", err
+			}
+			return MetaSandboxPrefix + fmt.Sprintf("Edited %s (%d replacement(s))", args.Path, count), nil
+		}
+
+		switch r.routeFor(args.Path, OpWrite) {
+		case RouteSystemStore:
 			name := filepath.Clean(args.Path)
 			uid := r.systemFileUserID(name)
 			data, err := r.systemFileStore.GetWorkspaceFile(ctx, r.agentID, uid, name)
@@ -1032,9 +1069,7 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 				return "", fmt.Errorf("system file save: %w", err)
 			}
 			return fmt.Sprintf("Edited %s (%d replacement(s))", name, count), nil
-		}
-
-		if r.workspaceStore != nil && r.agentID != "" && r.isWorkspacePath(args.Path) {
+		case RouteWorkspaceStore:
 			rc, err := r.workspaceStore.Get(ctx, r.agentID, r.projectID, r.sessionID, args.Path)
 			if err == nil {
 				data, readErr := io.ReadAll(rc)
@@ -1054,53 +1089,40 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 					return fmt.Sprintf("Edited %s (%d replacement(s))", args.Path, count), nil
 				}
 			}
-			// Fall through to sandbox executor on store miss.
-		}
-
-		// Host-home edit on self-hosted installs: read+write must use
-		// the same backend, so a host-home path stays on os.* through
-		// the whole edit instead of mixing host-read with sandbox-write.
-		if !buildinfo.IsHostedDeploy() {
-			if full, ok := hostHomePath(args.Path); ok {
-				data, err := os.ReadFile(full)
-				if err != nil {
-					return "", fmt.Errorf("host read %s: %w", full, err)
-				}
-				if looksBinary(data) {
-					return binaryRefusal(args.Path, len(data)), nil
-				}
-				updated, count, err := applyEdit(args.Path, string(data), args.OldString, args.NewString, args.ReplaceAll)
-				if err != nil {
-					return "", err
-				}
-				if err := os.WriteFile(full, []byte(updated), 0o644); err != nil {
-					return "", fmt.Errorf("host write %s: %w", full, err)
-				}
-				return fmt.Sprintf("Edited %s (%d replacement(s))", full, count), nil
+			// Store miss → sandbox RMW so a freshly-created file (not yet
+			// mirrored) is still editable.
+			return editSandboxRMW()
+		case RouteSkillStore:
+			// Skill files have no in-place edit semantics here today; fall
+			// through to the sandbox RMW which can read /skills/<name>/...
+			// from the read-only mount and write through (write will fail
+			// at the FS layer if the mount is RO; that's the right error
+			// to surface to the model).
+			return editSandboxRMW()
+		case RouteHostFS:
+			full, ok := hostHomePath(args.Path)
+			if !ok {
+				full = args.Path
 			}
+			data, err := os.ReadFile(full)
+			if err != nil {
+				return "", fmt.Errorf("host read %s: %w", full, err)
+			}
+			if looksBinary(data) {
+				return binaryRefusal(args.Path, len(data)), nil
+			}
+			updated, count, err := applyEdit(args.Path, string(data), args.OldString, args.NewString, args.ReplaceAll)
+			if err != nil {
+				return "", err
+			}
+			if err := os.WriteFile(full, []byte(updated), 0o644); err != nil {
+				return "", fmt.Errorf("host write %s: %w", full, err)
+			}
+			return fmt.Sprintf("Edited %s (%d replacement(s))", full, count), nil
+		case RouteRefuseSuggestSandbox:
+			return "", fmt.Errorf("%s", errSandboxRequiredMessage)
+		default: // RouteSandbox
+			return editSandboxRMW()
 		}
-
-		// Read-modify-write through the sandbox executor for paths that
-		// don't belong to a store (skills/, /tmp/, ad-hoc scripts, …).
-		// post-exec sync mirrors the resulting file back to workspace.Store
-		// just like a write_file call would.
-		content, err := ex.ReadFile(ctx, args.Path)
-		if err != nil {
-			return "", err
-		}
-		if looksBinary([]byte(content)) {
-			return binaryRefusal(args.Path, len(content)), nil
-		}
-		updated, count, err := applyEdit(args.Path, content, args.OldString, args.NewString, args.ReplaceAll)
-		if err != nil {
-			return "", err
-		}
-		// Discard the executor's confirmation string — we synthesise a
-		// "(N replacement(s))" message that's more informative than the
-		// generic write echo.
-		if _, err := ex.WriteFile(ctx, args.Path, updated); err != nil {
-			return "", err
-		}
-		return MetaSandboxPrefix + fmt.Sprintf("Edited %s (%d replacement(s))", args.Path, count), nil
 	})
 }
