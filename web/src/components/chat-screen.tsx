@@ -326,7 +326,7 @@ function isPendingPlanContent(content: string): boolean {
 // "<n>/<total>" counter, and the full list expands on click. Hidden
 // entirely when no items exist (caller's responsibility — keeps this
 // dumb-component pure).
-function TodoPanel({ items }: { items: TodoItem[] }) {
+function TodoPanel({ items, active }: { items: TodoItem[]; active: boolean }) {
   const [open, setOpen] = useState(true);
   const total = items.length;
   const doneCount = items.filter((i) => i.done).length;
@@ -352,8 +352,13 @@ function TodoPanel({ items }: { items: TodoItem[] }) {
           >
             {allDone ? (
               <Check className="size-4 shrink-0 text-emerald-600" />
-            ) : (
+            ) : active ? (
               <div className="size-4 shrink-0 rounded-full border-2 border-amber-500 border-t-transparent animate-spin" />
+            ) : (
+              // Paused: agent isn't streaming. Show a static amber ring
+              // so the "where we are" cue is visible without implying
+              // ongoing work.
+              <div className="size-4 shrink-0 rounded-full border-2 border-amber-500/70" />
             )}
             <span className="font-medium tabular-nums text-muted-foreground">
               {doneCount}/{total}
@@ -382,7 +387,11 @@ function TodoPanel({ items }: { items: TodoItem[] }) {
                     {it.done ? (
                       <Check className="mt-0.5 size-3.5 shrink-0 text-emerald-600" />
                     ) : isCurrent ? (
-                      <div className="mt-0.5 size-3.5 shrink-0 rounded-full border-2 border-amber-500 border-t-transparent animate-spin" />
+                      active ? (
+                        <div className="mt-0.5 size-3.5 shrink-0 rounded-full border-2 border-amber-500 border-t-transparent animate-spin" />
+                      ) : (
+                        <div className="mt-0.5 size-3.5 shrink-0 rounded-full border-2 border-amber-500/70" />
+                      )
                     ) : (
                       <div className="mt-1 size-2.5 shrink-0 rounded-full border border-muted-foreground/40" />
                     )}
@@ -1898,7 +1907,7 @@ export function ChatScreen() {
             not buried at the top behind a long scroll history. Auto-
             hides when the file doesn't exist or has no checkbox items. */}
         {!isEmpty && todoItems.length > 0 && (
-          <TodoPanel items={todoItems} />
+          <TodoPanel items={todoItems} active={sending} />
         )}
 
         {/* Input */}
