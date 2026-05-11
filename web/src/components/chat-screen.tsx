@@ -337,63 +337,69 @@ function TodoPanel({ items }: { items: TodoItem[] }) {
   const currentIdx = allDone ? total - 1 : items.findIndex((i) => !i.done);
   const current = currentIdx >= 0 ? items[currentIdx] : null;
   return (
-    <div className="shrink-0 border-t border-border bg-muted/30 px-4 py-2">
+    // Wrapper keeps the panel aligned with the composer's max-w-2xl
+    // column. Only the inner div carries border/background, so the
+    // surrounding chat area stays clean — no full-width strip across
+    // the page.
+    <div className="shrink-0 px-4 pt-2">
       <div className="mx-auto max-w-2xl">
-        <button
-          type="button"
-          onClick={() => setOpen((v) => !v)}
-          className="flex w-full items-center gap-2 text-left text-sm"
-          aria-expanded={open}
-        >
-          {allDone ? (
-            <Check className="size-4 shrink-0 text-emerald-600" />
-          ) : (
-            <div className="size-4 shrink-0 rounded-full border-2 border-amber-500 border-t-transparent animate-spin" />
-          )}
-          <span className="font-medium tabular-nums text-muted-foreground">
-            {doneCount}/{total}
-          </span>
-          <span className="truncate flex-1">
-            {current ? current.text : "Plan checklist"}
-          </span>
-          {open ? (
-            <ChevronDown className="size-4 shrink-0 text-muted-foreground" />
-          ) : (
-            <ChevronRight className="size-4 shrink-0 text-muted-foreground" />
-          )}
-        </button>
-        {open && (
-          <ol className="mt-2 space-y-1 text-sm">
-            {items.map((it, i) => {
-              const isCurrent = i === currentIdx && !it.done;
-              return (
-                <li
-                  key={i}
-                  className={
-                    "flex items-start gap-2 rounded px-1.5 py-0.5 " +
-                    (isCurrent ? "bg-amber-500/10" : "")
-                  }
-                >
-                  {it.done ? (
-                    <Check className="mt-0.5 size-3.5 shrink-0 text-emerald-600" />
-                  ) : isCurrent ? (
-                    <div className="mt-0.5 size-3.5 shrink-0 rounded-full border-2 border-amber-500 border-t-transparent animate-spin" />
-                  ) : (
-                    <div className="mt-1 size-2.5 shrink-0 rounded-full border border-muted-foreground/40" />
-                  )}
-                  <span
+        <div className="rounded-lg border border-border bg-muted/40 px-3 py-2 shadow-sm">
+          <button
+            type="button"
+            onClick={() => setOpen((v) => !v)}
+            className="flex w-full items-center gap-2 text-left text-sm"
+            aria-expanded={open}
+          >
+            {allDone ? (
+              <Check className="size-4 shrink-0 text-emerald-600" />
+            ) : (
+              <div className="size-4 shrink-0 rounded-full border-2 border-amber-500 border-t-transparent animate-spin" />
+            )}
+            <span className="font-medium tabular-nums text-muted-foreground">
+              {doneCount}/{total}
+            </span>
+            <span className="truncate flex-1">
+              {current ? current.text : "Plan checklist"}
+            </span>
+            {open ? (
+              <ChevronDown className="size-4 shrink-0 text-muted-foreground" />
+            ) : (
+              <ChevronRight className="size-4 shrink-0 text-muted-foreground" />
+            )}
+          </button>
+          {open && (
+            <ol className="mt-2 space-y-1 border-t border-border/60 pt-2 text-sm">
+              {items.map((it, i) => {
+                const isCurrent = i === currentIdx && !it.done;
+                return (
+                  <li
+                    key={i}
                     className={
-                      (it.done ? "line-through text-muted-foreground/70 " : "") +
-                      (isCurrent ? "font-medium" : "")
+                      "flex items-start gap-2 rounded px-1.5 py-0.5 " +
+                      (isCurrent ? "bg-amber-500/10" : "")
                     }
                   >
-                    {it.text}
-                  </span>
-                </li>
-              );
-            })}
-          </ol>
-        )}
+                    {it.done ? (
+                      <Check className="mt-0.5 size-3.5 shrink-0 text-emerald-600" />
+                    ) : isCurrent ? (
+                      <div className="mt-0.5 size-3.5 shrink-0 rounded-full border-2 border-amber-500 border-t-transparent animate-spin" />
+                    ) : (
+                      <div className="mt-1 size-2.5 shrink-0 rounded-full border border-muted-foreground/40" />
+                    )}
+                    <span
+                      className={
+                        (it.done ? "line-through text-muted-foreground/70 " : "") +
+                        (isCurrent ? "font-medium" : "")
+                      }
+                    >
+                      {it.text}
+                    </span>
+                  </li>
+                );
+              })}
+            </ol>
+          )}
+        </div>
       </div>
     </div>
   );
