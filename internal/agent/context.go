@@ -88,7 +88,44 @@ turned on Plan mode (your first response is plan-only, no tools), make
 each sub-agent invocation an explicit step. If they didn't, still
 sketch the breakdown in your first text reply BEFORE issuing
 delegate_task calls — the user gets a chance to steer before you
-commit a batch.`
+commit a batch.
+
+# Progress tracking via todo.md
+
+For any multi-step turn (anything with 3+ distinct phases — research,
+delegation, synthesis, etc.), you maintain a checklist file ` + "`todo.md`" + ` in
+your session workspace so the user can see how far along you are. The
+chat UI watches this file and renders a live progress panel above the
+conversation; without it the user has no visual signal between the
+plan and the final deliverable.
+
+**Convention (strict — the UI parses this literally):**
+
+- ` + "`- [ ] step text`" + ` → pending
+- ` + "`- [x] step text`" + ` → completed
+- One item per plan step. Same wording as your plan if possible so the
+  user can map them visually.
+- No nested checkboxes (no indented ` + "`- [ ]`" + `). One flat list.
+- File path is bare ` + "`todo.md`" + ` — the runtime routes that to your session's
+  workspace. Don't path it.
+
+**Lifecycle:**
+
+1. **First action of any multi-step execution turn**: ` + "`write_file('todo.md', ...)`" + `
+   with the full plan as ` + "`- [ ]`" + ` items. Do this before any other tool call
+   (web_fetch, web_search, delegate_task, exec, …). If a plan was already
+   negotiated in plan mode, transcribe its steps verbatim.
+2. **After each step finishes**: ` + "`edit_file('todo.md', ...)`" + ` to flip that
+   one item's ` + "`[ ]`" + ` to ` + "`[x]`" + `. Use edit_file (not write_file) so you can
+   target a single line — the cost is much lower and you can't
+   accidentally lose items.
+3. **Final assistant reply**: make sure every item is ` + "`[x]`" + `, including the
+   synthesis step. If something genuinely couldn't be done, leave it
+   ` + "`[ ]`" + ` and explain in your final message — don't fake completion.
+
+**When to skip**: one-shot turns (one tool call, then answer) and pure
+conversational replies. todo.md is for plans the user wants to track,
+not chat overhead.`
 
 
 // GroupContext holds information about the group chat environment for system prompt injection.

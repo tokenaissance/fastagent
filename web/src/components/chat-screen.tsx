@@ -5,7 +5,7 @@ import { useRouter, usePathname } from "next/navigation";
 import { useAgentIdFromURL } from "@/hooks/use-agent-id";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { getAgent, getChatHistoryWithCursor, getChatSessions, getMe, listAgentFiles, listProjects, renameChatSession, revealAgentWorkspace, sendChatStream, uploadAgentFiles, getAuthToken, getSkills, type ChatHistoryMessage, type ChatStreamEvent, type SkillInfo, type ToolResultMetadata, type WorkspaceFile } from "@/lib/api";
+import { getAgent, getChatHistoryWithCursor, getChatSessions, getChatTodo, getMe, listAgentFiles, listProjects, renameChatSession, revealAgentWorkspace, sendChatStream, uploadAgentFiles, getAuthToken, getSkills, type ChatHistoryMessage, type ChatStreamEvent, type SkillInfo, type TodoItem, type ToolResultMetadata, type WorkspaceFile } from "@/lib/api";
 import { Bot, Send, Copy, Check, Pencil, Wrench, ChevronDown, ChevronRight, Download, X, File, FileText, FolderSearch, Image as ImageIcon, FileCode, Film, Music, Puzzle, SlidersHorizontal, ShieldCheck, Paperclip, Square, FolderOpen, RefreshCw, Eye, Code2, RotateCcw, ListChecks } from "lucide-react";
 import Link from "next/link";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
@@ -297,6 +297,85 @@ function buildChatMessages(history: ChatHistoryMessage[]): ChatMessage[] {
 //   /agents/<aid>/project/<pid>            — fresh chat in a project
 //
 // Reading from `usePathname()` (instead of accepting props from the
+// TodoPanel renders the per-session todo.md the agent maintains as a
+// live progress checklist above the conversation. "Current step" is
+// the first unchecked item — we surface it as a single line with a
+// "<n>/<total>" counter, and the full list expands on click. Hidden
+// entirely when no items exist (caller's responsibility — keeps this
+// dumb-component pure).
+function TodoPanel({ items }: { items: TodoItem[] }) {
+  const [open, setOpen] = useState(true);
+  const total = items.length;
+  const doneCount = items.filter((i) => i.done).length;
+  const allDone = doneCount === total;
+  // First unchecked item is the live "in progress" step. When the
+  // checklist is fully checked, fall through to the last item so the
+  // collapsed header still says something concrete.
+  const currentIdx = allDone ? total - 1 : items.findIndex((i) => !i.done);
+  const current = currentIdx >= 0 ? items[currentIdx] : null;
+  return (
+    <div className="shrink-0 border-b border-border bg-muted/30 px-4 py-2">
+      <div className="mx-auto max-w-2xl">
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          className="flex w-full items-center gap-2 text-left text-sm"
+          aria-expanded={open}
+        >
+          {allDone ? (
+            <Check className="size-4 shrink-0 text-emerald-600" />
+          ) : (
+            <div className="size-4 shrink-0 rounded-full border-2 border-amber-500 border-t-transparent animate-spin" />
+          )}
+          <span className="font-medium tabular-nums text-muted-foreground">
+            {doneCount}/{total}
+          </span>
+          <span className="truncate flex-1">
+            {current ? current.text : "Plan checklist"}
+          </span>
+          {open ? (
+            <ChevronDown className="size-4 shrink-0 text-muted-foreground" />
+          ) : (
+            <ChevronRight className="size-4 shrink-0 text-muted-foreground" />
+          )}
+        </button>
+        {open && (
+          <ol className="mt-2 space-y-1 text-sm">
+            {items.map((it, i) => {
+              const isCurrent = i === currentIdx && !it.done;
+              return (
+                <li
+                  key={i}
+                  className={
+                    "flex items-start gap-2 rounded px-1.5 py-0.5 " +
+                    (isCurrent ? "bg-amber-500/10" : "")
+                  }
+                >
+                  {it.done ? (
+                    <Check className="mt-0.5 size-3.5 shrink-0 text-emerald-600" />
+                  ) : isCurrent ? (
+                    <div className="mt-0.5 size-3.5 shrink-0 rounded-full border-2 border-amber-500 border-t-transparent animate-spin" />
+                  ) : (
+                    <div className="mt-1 size-2.5 shrink-0 rounded-full border border-muted-foreground/40" />
+                  )}
+                  <span
+                    className={
+                      (it.done ? "line-through text-muted-foreground/70 " : "") +
+                      (isCurrent ? "font-medium" : "")
+                    }
+                  >
+                    {it.text}
+                  </span>
+                </li>
+              );
+            })}
+          </ol>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // page tree) is what lets the component instance survive sidebar
 // navigations — sessionId / projectId become reactive values that
 // update in place rather than gating a remount.
@@ -356,6 +435,10 @@ export function ChatScreen() {
   // a wrong-direction exploration. Auto-resets to false after each
   // send so it doesn't stick across normal turns.
   const [planMode, setPlanMode] = useState(false);
+  // todo.md state for the current session — agent maintains the file,
+  // we re-fetch on every write_file/edit_file event that touches
+  // todo.md plus once at mount. Empty `items` hides the panel.
+  const [todoItems, setTodoItems] = useState<TodoItem[]>([]);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [filesSheetOpen, setFilesSheetOpen] = useState(false);
   const [sessionTitle, setSessionTitle] = useState<string>("");
@@ -822,6 +905,15 @@ export function ChatScreen() {
     // Close the SSE gate for this sessionId; reopens once the history
     // fetch lands and subscribeSinceRef has been set to the real cursor.
     setLoadedSessionId(null);
+    // Reset the todo panel on session change so the previous chat's
+    // checklist doesn't briefly flash before the new one's fetch lands.
+    setTodoItems([]);
+    // Refresh todo.md alongside the history fetch. We don't gate the
+    // rest of the load on it — a 404 (no todo.md yet) is the normal
+    // empty-session case.
+    getChatTodo(selectedAgent, sessionId)
+      .then((todo) => setTodoItems(todo.items))
+      .catch(() => setTodoItems([]));
     let aborted = false;
     getChatHistoryWithCursor(selectedAgent, sessionId)
       .then(async ({ history, latestEventSeq }) => {
@@ -1124,6 +1216,24 @@ export function ChatScreen() {
                 }
               } catch { /* ignore bad args */ }
             }
+            // Refresh the todo panel whenever a file-mutation tool just
+            // touched todo.md. We inspect arguments rather than poll on
+            // every tool_result so the network cost stays proportional
+            // to actual updates (a long run with 50 web_search calls
+            // doesn't trigger 50 refetches).
+            if (tc && (tc.name === "write_file" || tc.name === "edit_file" || tc.name === "apply_patch")) {
+              try {
+                const args = JSON.parse(tc.arguments);
+                const path: string =
+                  (typeof args?.path === "string" ? args.path : "") ||
+                  (typeof args?.file_path === "string" ? args.file_path : "");
+                if (path && /(^|\/)todo\.md$/i.test(path)) {
+                  getChatTodo(selectedAgent, sessionId)
+                    .then((todo) => setTodoItems(todo.items))
+                    .catch(() => {});
+                }
+              } catch { /* ignore bad args */ }
+            }
             const groupId = curGroupId;
             const calls = [...curCalls];
             setMessages((prev) => {
@@ -1418,6 +1528,12 @@ export function ChatScreen() {
           (isEmpty ? " justify-center" : "")
         }
       >
+      {/* Live progress panel: agent maintains a per-session `todo.md`
+          checklist and we render it here above the conversation. Auto-
+          hides when the file doesn't exist or has no checkbox items. */}
+      {!isEmpty && todoItems.length > 0 && (
+        <TodoPanel items={todoItems} />
+      )}
       {/* Messages */}
         <div
           className={

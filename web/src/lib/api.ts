@@ -683,6 +683,33 @@ export interface ChatHistoryMessage {
   imageUrls?: string[];
 }
 
+export interface TodoItem {
+  text: string;
+  done: boolean;
+}
+
+export interface TodoState {
+  items: TodoItem[];
+  raw: string;
+}
+
+// getChatTodo fetches the per-session todo.md the agent maintains.
+// Returns {items: [], raw: ""} when no file exists yet (fresh session
+// or a turn that didn't use the todo convention) — caller should hide
+// the panel in that case.
+export async function getChatTodo(agentId: string, sessionId: string): Promise<TodoState> {
+  if (!agentId || !sessionId) return { items: [], raw: "" };
+  const res = await apiFetch(
+    `/api/chat/todo?agentId=${encodeURIComponent(agentId)}&sessionId=${encodeURIComponent(sessionId)}`,
+  );
+  if (!res.ok) return { items: [], raw: "" };
+  const data = await res.json().catch(() => ({}));
+  return {
+    items: Array.isArray(data?.items) ? data.items : [],
+    raw: typeof data?.raw === "string" ? data.raw : "",
+  };
+}
+
 export async function getChatHistory(agentId: string, sessionId: string): Promise<ChatHistoryMessage[]> {
   const res = await apiFetch(`/api/chat/history?agentId=${encodeURIComponent(agentId)}&sessionId=${encodeURIComponent(sessionId)}`);
   if (!res.ok) return [];

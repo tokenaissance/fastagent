@@ -11,6 +11,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -1188,6 +1190,123 @@ func (s *Server) handleChatSubscribe(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		}
 	}
+}
+
+// handleChatTodo reads the per-session todo.md the agent maintains and
+// returns it as both raw markdown and a parsed checklist. We resolve
+// the session key → (chatID, projectID) here so the frontend doesn't
+// need to know the on-disk path layout (`sessions/<chat>/todo.md` vs
+// `projects/<pid>/<chat>/todo.md`).
+//
+// A missing file is not an error — fresh sessions or runs that don't
+// use the todo convention return {items: [], raw: ""}. Frontend hides
+// the panel when items is empty.
+func (s *Server) handleChatTodo(w http.ResponseWriter, r *http.Request) {
+	agentID := r.URL.Query().Get("agentId")
+	sessionID := r.URL.Query().Get("sessionId")
+	ag := s.resolveAgent(r, agentID)
+	if ag == nil {
+		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "agent not found"})
+		return
+	}
+	if sessionID == "" {
+		jsonResponse(w, http.StatusOK, map[string]any{"items": []any{}, "raw": ""})
+		return
+	}
+
+	// Build the agent-relative path. Project chats live under
+	// projects/<pid>/<chat>/, plain chats under sessions/<chat>/. The
+	// agent's workdir resolves bare filenames to its session subdir, so
+	// a `write_file("todo.md", ...)` from the agent lands at one of
+	// these two paths — same shape that handleAgentFileList already
+	// surfaces.
+	chatID := s.workspaceSessionScope(r.Context(), ag.Name(), sessionID)
+	projectID := s.resolveSessionProject(r.Context(), r, ag.Name(), sessionID)
+	var relPath string
+	switch {
+	case projectID != "" && chatID != "":
+		relPath = "projects/" + projectID + "/" + chatID + "/todo.md"
+	case chatID != "":
+		relPath = "sessions/" + chatID + "/todo.md"
+	default:
+		jsonResponse(w, http.StatusOK, map[string]any{"items": []any{}, "raw": ""})
+		return
+	}
+
+	raw, err := s.readWorkspaceFileBytes(r.Context(), ag.Name(), relPath)
+	if err != nil {
+		// 404 / not-yet-written / FS miss — return empty rather than
+		// surfacing the error; the panel just stays hidden until the
+		// agent writes one.
+		jsonResponse(w, http.StatusOK, map[string]any{"items": []any{}, "raw": ""})
+		return
+	}
+	items := parseTodoMarkdown(string(raw))
+	jsonResponse(w, http.StatusOK, map[string]any{
+		"items": items,
+		"raw":   string(raw),
+	})
+}
+
+// readWorkspaceFileBytes reads a single agent-relative file via the
+// workspace store, falling back to the local FS layout when no store
+// is wired. Bare path-string interface used only by the todo endpoint
+// — workspaceStore.Get expects (projectID, chatID) but here we already
+// baked them into the path, so pass empties.
+func (s *Server) readWorkspaceFileBytes(ctx context.Context, agentID, relPath string) ([]byte, error) {
+	if s.workspaceStore != nil {
+		rc, err := s.workspaceStore.Get(ctx, agentID, "", "", relPath)
+		if err != nil {
+			return nil, err
+		}
+		defer rc.Close()
+		return io.ReadAll(rc)
+	}
+	home, err := config.HomeDir()
+	if err != nil {
+		return nil, err
+	}
+	root := filepath.Join(home, "workspaces", agentID)
+	abs := filepath.Join(root, filepath.Clean("/"+relPath))
+	if !strings.HasPrefix(abs, root+string(os.PathSeparator)) {
+		return nil, fmt.Errorf("path escape")
+	}
+	return os.ReadFile(abs)
+}
+
+// parseTodoMarkdown extracts checkbox lines from a todo.md body and
+// returns them as structured items. Conventions:
+//
+//	- [ ] text   → pending
+//	- [x] text   → completed
+//	- [X] text   → completed (case-insensitive)
+//
+// Anything else (heading lines, blank lines, non-checkbox bullets) is
+// ignored — todo.md doubles as a human-readable plan document, so we
+// don't force a rigid schema. Indented checkboxes are NOT supported
+// in v1 (no sub-tasks); flatten them in the model's nudge if needed.
+func parseTodoMarkdown(s string) []map[string]any {
+	out := []map[string]any{}
+	for _, line := range strings.Split(s, "\n") {
+		trim := strings.TrimLeft(line, " \t")
+		if !strings.HasPrefix(trim, "- [") && !strings.HasPrefix(trim, "* [") {
+			continue
+		}
+		if len(trim) < 6 {
+			continue
+		}
+		box := trim[3]
+		rest := strings.TrimSpace(trim[5:])
+		if rest == "" {
+			continue
+		}
+		done := box == 'x' || box == 'X'
+		out = append(out, map[string]any{
+			"text": rest,
+			"done": done,
+		})
+	}
+	return out
 }
 
 func (s *Server) handleChatHistory(w http.ResponseWriter, r *http.Request) {

@@ -836,6 +836,11 @@ func planModeNudge() string {
 		"That's the only way the execution turn stays inside its " +
 		"iteration budget; trying to do all of it directly will burn the " +
 		"cap on exploration and never reach synthesis.\n\n" +
+		"Your VERY FIRST execution action (next turn) should be " +
+		"`write_file('todo.md', <plan as - [ ] items>)` so the user sees " +
+		"a live progress panel as you work. Mention this in the plan as " +
+		"an explicit Step 0 (or fold it into Step 1) — the UI requires " +
+		"the file to render anything.\n\n" +
 		"Output a numbered plan with 3-7 steps. Each step is one or two " +
 		"sentences describing the action plus the tool you'll use, e.g. " +
 		"\"Step 3: Use `delegate_task` to find 10 solo insurance agents in " +
