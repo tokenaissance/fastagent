@@ -337,7 +337,7 @@ function TodoPanel({ items }: { items: TodoItem[] }) {
   const currentIdx = allDone ? total - 1 : items.findIndex((i) => !i.done);
   const current = currentIdx >= 0 ? items[currentIdx] : null;
   return (
-    <div className="shrink-0 border-b border-border bg-muted/30 px-4 py-2">
+    <div className="shrink-0 border-t border-border bg-muted/30 px-4 py-2">
       <div className="mx-auto max-w-2xl">
         <button
           type="button"
@@ -1565,12 +1565,6 @@ export function ChatScreen() {
           (isEmpty ? " justify-center" : "")
         }
       >
-      {/* Live progress panel: agent maintains a per-session `todo.md`
-          checklist and we render it here above the conversation. Auto-
-          hides when the file doesn't exist or has no checkbox items. */}
-      {!isEmpty && todoItems.length > 0 && (
-        <TodoPanel items={todoItems} />
-      )}
       {/* Messages */}
         <div
           className={
@@ -1781,7 +1775,7 @@ export function ChatScreen() {
                             className="h-8 gap-1.5"
                           >
                             <Check className="h-3.5 w-3.5" />
-                            继续执行
+                            Run plan
                           </Button>
                           <Button
                             size="sm"
@@ -1799,10 +1793,10 @@ export function ChatScreen() {
                             className="h-8 gap-1.5"
                           >
                             <X className="h-3.5 w-3.5" />
-                            调整方案
+                            Edit
                           </Button>
                           <span className="text-xs text-muted-foreground">
-                            点继续执行授权 agent 跑完整套；点调整在下方写改动。
+                            Run plan to authorize the agent end-to-end, or Edit to revise below.
                           </span>
                         </div>
                       )}
@@ -1891,6 +1885,15 @@ export function ChatScreen() {
             <div ref={messagesEndRef} />
           </div>
         </div>
+
+        {/* Live progress panel: agent maintains a per-session `todo.md`
+            checklist and we render it here right above the composer so
+            the user's eye is on the next step they're about to authorize,
+            not buried at the top behind a long scroll history. Auto-
+            hides when the file doesn't exist or has no checkbox items. */}
+        {!isEmpty && todoItems.length > 0 && (
+          <TodoPanel items={todoItems} />
+        )}
 
         {/* Input */}
         <div className="shrink-0 px-4 pb-6 pt-2">

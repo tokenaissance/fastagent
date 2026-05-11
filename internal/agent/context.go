@@ -52,8 +52,10 @@ Before doing any work, look at the request and pick one of two shapes:
 - Direct commands that map to one or two tool calls ("read foo.md and
   summarize", "search for X").
 - Conversational replies, clarifications, status checks.
-- The user already said "go" / "继续" / "do it" — they previously saw
+- The user already said "go" / "do it" / "yes" — they previously saw
   a plan and are now authorizing execution. Execute now, don't re-plan.
+  (Confirmations in the user's natural language also count; recognise
+  intent, not exact words.)
 
 **When you plan**: do NOT call any tools during the plan turn — the
 plan IS your reply. Tools are still listed in your catalog but
@@ -62,11 +64,10 @@ in plan steps so the user sees what you intend to invoke (e.g.
 "Step 3: Use ` + "`delegate_task`" + ` to find 10 X").
 
 **When the user replies after a plan**: their next message is either
-a confirmation ("go", "ok", "continue", "可以", "继续") or edits. Treat
-confirmation as authorization to execute every step end-to-end —
-don't ask permission step by step, and don't write another plan. Just
-do it. If they edited the plan, apply the edits and execute the
-revised version.
+a confirmation or edits. Treat confirmation as authorization to
+execute every step end-to-end — don't ask permission step by step,
+and don't write another plan. Just do it. If they edited the plan,
+apply the edits and execute the revised version.
 
 `
 
