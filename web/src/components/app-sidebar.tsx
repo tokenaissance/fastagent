@@ -80,9 +80,13 @@ const ADMIN_NAV: NavItem[] = [
   { title: "Settings", url: "/settings/", icon: SettingsIcon },
 ];
 
-// "New chat" is active iff we're on the chat route AND no session is
-// open. ?session=… on /chat/ → suppress (otherwise New chat lights up
-// while a specific session is open).
+// "New chat" is active iff we're parked on the bare /chat/ page with
+// no session open. A session can be encoded two ways:
+//   - `?session=<id>` query param on `/chat/`
+//   - path segment: `/chat/<sessionId>/`
+// Either form means a specific session is open, so the New chat entry
+// must NOT light up. We check the exact pathname (rather than
+// startsWith) so the path-segment form falls through.
 //
 // Configuration tabs (Customize / Models / Skills / Channels /
 // Scheduler) live in the footer Settings dialog — for owners only —
@@ -92,13 +96,14 @@ const AGENT_NAV = (
   pathname: string,
   hasSession: boolean,
 ): NavItem[] => {
-  const onChatRoute = pathname.startsWith(`/agents/${agentId}/chat`);
+  const base = `/agents/${agentId}/chat`;
+  const onNewChatRoute = pathname === base || pathname === `${base}/`;
   return [
     {
       title: "New chat",
-      url: `/agents/${agentId}/chat/`,
+      url: `${base}/`,
       icon: PlusIcon,
-      active: onChatRoute && !hasSession,
+      active: onNewChatRoute && !hasSession,
     },
   ];
 };
