@@ -781,6 +781,131 @@ func renderClientParams(params map[string]any) string {
 		"```json\n" + string(blob) + "\n```"
 }
 
+// isPlanMode reports whether the inbound message asked for plan-only
+// output (no tool calls, just a numbered plan the user reviews before
+// authorizing real work). Truthy values: bool true, string "true"/"1",
+// any non-zero number. The frontend posts `params: {planMode: true}`.
+func isPlanMode(params map[string]any) bool {
+	v, ok := params["planMode"]
+	if !ok {
+		return false
+	}
+	switch t := v.(type) {
+	case bool:
+		return t
+	case string:
+		return t == "true" || t == "1"
+	case float64:
+		return t != 0
+	case int:
+		return t != 0
+	}
+	return false
+}
+
+// planModeNudge is the system message we prepend on plan-mode turns.
+// Spells out the contract: tools are server-side disabled so don't
+// attempt them; emit a numbered plan in 3-7 steps; close with one
+// "reply to execute" line so the user knows what to do next. Earlier
+// drafts mentioned "draft", "thinking", "thoughts" — those kept
+// surfacing as soft suggestions and the model would still call tools.
+// Hard "do not" + explaining tools are unavailable proved the only
+// reliable phrasing across deepseek-flash / sonnet / gpt.
+func planModeNudge() string {
+	return "# PLAN MODE — output a plan only\n\n" +
+		"The user has switched on plan mode for this message. They want " +
+		"to see what you intend to do BEFORE any real work happens.\n\n" +
+		"Tools are DISABLED for this response — do not attempt to call " +
+		"any tool, it will fail. Produce no code, no tool output, no " +
+		"sample results.\n\n" +
+		"Output a numbered plan with 3-7 steps. Each step is one " +
+		"sentence describing a concrete action (e.g. \"Step 1: Fetch " +
+		"moclaw.ai's homepage and pricing page to extract product " +
+		"positioning\"). Group related micro-actions into a single step " +
+		"— a plan is a roadmap, not a transcript.\n\n" +
+		"End with exactly one line: \"Reply with 'go' to execute, or " +
+		"tell me what to change.\"\n\n" +
+		"Do not start the work. Do not apologize for needing a plan. " +
+		"Just the plan."
+}
+
+// handlePlanMode is the single-shot plan-only path: store the user
+// message, ask the model for a plan with tools disabled, persist + emit
+// the response with planMode metadata so the UI can badge the bubble.
+// No iteration loop, no cap, no tool execution. On the next turn (sent
+// without the planMode flag) the regular HandleMessage path executes
+// against the full session including this plan.
+func (a *Agent) handlePlanMode(ctx context.Context, msg bus.InboundMessage) string {
+	chatterUID := a.chatterUserID(msg)
+	ctx = sandbox.WithUserID(ctx, chatterUID)
+	sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID, msg.ProjectID)
+	defer padOrphanToolResults(sess)
+
+	// Mirror the regular path's user-message construction so multimodal
+	// + IM-bridge payloads (PhotoURL / PhotoURLs) land in session
+	// history the same way they would on a non-plan turn.
+	userMsg := provider.Message{Role: "user", Content: msg.Text}
+	imageURLs := msg.PhotoURLs
+	if msg.PhotoURL != "" {
+		imageURLs = append([]string{msg.PhotoURL}, imageURLs...)
+	}
+	if len(imageURLs) > 0 {
+		userMsg.Content = ""
+		var parts []provider.ContentPart
+		if msg.Text != "" {
+			parts = append(parts, provider.ContentPart{Type: "text", Text: msg.Text})
+		}
+		for _, u := range imageURLs {
+			parts = append(parts, provider.ContentPart{
+				Type: "image_url", ImageURL: &provider.ImageURL{URL: u, Detail: "auto"},
+			})
+		}
+		userMsg.ContentParts = parts
+	}
+	sess.Append(userMsg)
+
+	if a.provider == nil {
+		noProviderMsg := "Agent is not configured with a usable LLM provider. Check that cfg.Providers contains the prefix referenced by model `" + a.model + "`."
+		emitEvent(ctx, ChatEvent{Type: "error", Data: map[string]any{"message": noProviderMsg}})
+		emitEvent(ctx, ChatEvent{Type: "done"})
+		return noProviderMsg
+	}
+
+	systemPrompt := a.ctxBuilder.BuildSystemPrompt()
+	messages := []provider.Message{
+		{Role: "system", Content: systemPrompt},
+		{Role: "system", Content: planModeNudge()},
+	}
+	messages = append(messages, sess.GetMessages()...)
+	if a.piiScrubEnabled {
+		messages = privacy.ScrubMessages(messages)
+	}
+
+	resp, err := a.provider.Chat(ctx, messages, nil, a.model, a.maxTokens, a.temperature)
+	if err != nil {
+		slog.Error("plan-mode chat failed", "agent", a.name, "error", err)
+		emitEvent(ctx, ChatEvent{Type: "error", Data: map[string]any{"message": err.Error()}})
+		emitEvent(ctx, ChatEvent{Type: "done"})
+		return "Sorry, I couldn't draft the plan — the LLM call failed."
+	}
+
+	planMeta := map[string]any{"planMode": true}
+	sess.Append(provider.Message{
+		Role:         "assistant",
+		Content:      resp.Content,
+		Thinking:     resp.Thinking,
+		Metadata:     planMeta,
+		Timestamp:    time.Now().UnixMilli(),
+		RawAssistant: resp.RawAssistant,
+	})
+	emitEvent(ctx, ChatEvent{Type: "content", Data: map[string]any{
+		"content":  resp.Content,
+		"metadata": planMeta,
+	}})
+	emitEvent(ctx, ChatEvent{Type: "done"})
+	return resp.Content
+}
+
 // HandleMessage processes an inbound message through the ReAct loop.
 func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) string {
 	// Check for slash commands first
@@ -788,6 +913,17 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		emitEvent(ctx, ChatEvent{Type: "content", Data: map[string]any{"content": result.reply}})
 		emitEvent(ctx, ChatEvent{Type: "done"})
 		return result.reply
+	}
+
+	// Plan mode short-circuits the ReAct loop: tools off, the model
+	// emits a numbered plan, the user reviews it and replies normally
+	// (no planMode flag) on the next turn to execute. Lets users catch
+	// the agent before it burns the iteration budget exploring the
+	// wrong direction — the failure mode we saw on long research
+	// prompts where deepseek-flash spent 95 messages exploring and
+	// never produced a deliverable.
+	if isPlanMode(msg.Params) {
+		return a.handlePlanMode(ctx, msg)
 	}
 
 	chatterUID := a.chatterUserID(msg)

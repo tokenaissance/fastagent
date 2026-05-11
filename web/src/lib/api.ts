@@ -862,6 +862,10 @@ export interface ToolResultMetadata {
   // under-budget and may be incomplete.
   iterationCapReached?: boolean;
   iterationCapValue?: number;
+  // Stamped on assistant messages produced by plan mode (composer toggle).
+  // The bubble is a plan, not an execution result — UI shows a distinct
+  // badge so the user knows to review it and reply with "go" (or edits).
+  planMode?: boolean;
 }
 
 export interface ChatStreamEvent {
@@ -894,6 +898,11 @@ export async function sendChatStream(
   // Server stamps it on the first SaveSession; subsequent turns ignore
   // it (the row is authoritative).
   projectId?: string,
+  // params is a free-form blob the backend forwards as
+  // bus.InboundMessage.Params. The agent loop reads recognized keys
+  // (planMode etc.) directly; unrecognized keys land in a "Client
+  // Parameters" system message via renderClientParams.
+  params?: Record<string, unknown>,
 ): Promise<void> {
   const res = await apiFetch("/api/chat/stream", {
     method: "POST",
@@ -904,6 +913,7 @@ export async function sendChatStream(
       projectId: projectId || undefined,
       message,
       imageUrls: imageUrls ?? [],
+      params: params && Object.keys(params).length > 0 ? params : undefined,
     }),
     signal,
   });
