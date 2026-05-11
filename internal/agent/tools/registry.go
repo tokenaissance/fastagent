@@ -331,6 +331,36 @@ func (r *Registry) RegisterFrom(name, description string, parameters interface{}
 	}
 }
 
+// RegisterSerial registers a tool that must never have two invocations
+// running concurrently even when the model emits N calls in one round.
+// Concurrent callers serialize on a per-tool mutex baked into the fn
+// wrapper, so the agent loop / SDK executor stay unaware — they still
+// fan out goroutines, the goroutines just queue at the mutex.
+//
+// Use for tools that drive shared state and don't survive parallel
+// access: the delegate_task sub-agent loop (single sandbox /
+// single camoufox daemon → siblings trample each other's browser
+// navigation), single-file write tools that conflict on the same path,
+// any wrapper around a process that holds an exclusive resource.
+//
+// The wrapper does NOT serialize *different* tools — a serial
+// delegate_task running in parallel with a web_search is fine. The
+// per-tool mutex only blocks same-tool concurrency.
+func (r *Registry) RegisterSerial(name, description string, parameters interface{}, fn ToolFunc) {
+	r.RegisterSerialFrom(name, description, parameters, fn, SourceBuiltin)
+}
+
+// RegisterSerialFrom is RegisterSerial with an explicit source.
+func (r *Registry) RegisterSerialFrom(name, description string, parameters interface{}, fn ToolFunc, source ToolSource) {
+	mu := &sync.Mutex{}
+	wrapped := func(ctx context.Context, args json.RawMessage) (string, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		return fn(ctx, args)
+	}
+	r.RegisterFrom(name, description, parameters, wrapped, source)
+}
+
 // HasBuiltin returns true if a built-in tool with the given name exists.
 func (r *Registry) HasBuiltin(name string) bool {
 	t, ok := r.tools[name]

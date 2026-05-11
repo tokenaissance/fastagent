@@ -24,23 +24,35 @@ type delegateTaskArgs struct {
 // in tests or for agent flavors where sub-agent fan-out doesn't make
 // sense).
 //
-// The tool description deliberately explains the WHY (parent's context
-// stays clean, sub-agent gets a fresh iteration budget) so the model
-// reaches for it on long fan-out tasks instead of cramming everything
-// into its own loop. The "no nesting" line is critical — without it
-// flash-tier models try to recursively delegate and burn through
+// Registered as SERIAL: two delegate_task calls cannot run
+// concurrently within one agent. Sub-agents share the parent's single
+// sandbox + single camoufox-cli daemon — running 5 in parallel meant
+// they trampled each other's browser navigation state, got back
+// snapshots of pages other siblings just navigated to, and produced
+// garbage. Serialization trades fan-out wall time (5 × N min instead
+// of N min) for actually-correct results.
+//
+// The tool description explains both the WHY of delegation (parent's
+// context stays clean, sub-agent gets a fresh iteration budget) and
+// the serial-execution contract so the model doesn't expect parallel
+// throughput from fan-out. The "no nesting" line is critical — without
+// it flash-tier models try to recursively delegate and burn through
 // budgets exponentially.
 func RegisterDelegateTask(r *Registry, runner SubagentRunner) {
 	if runner == nil {
 		return
 	}
-	r.Register("delegate_task",
+	r.RegisterSerial("delegate_task",
 		"Spawn a sub-agent with its OWN context and OWN iteration budget to run a single bounded sub-task. "+
 			"Use this when the user's request decomposes into several large independent chunks "+
 			"(e.g. \"find 10 leads matching X\" then \"find another 10 matching Y\" then \"write 5 emails from this data\"). "+
 			"Each sub-agent gets a fresh tool-iteration budget so you don't burn yours exploring, and your own context "+
 			"stays clean of the dozens of intermediate tool results the sub-agent goes through. "+
-			"\n\nThe sub-agent runs against the same tools and provider you have (minus delegate_task itself — no nesting). "+
+			"\n\n**Sub-agents run SERIALLY, not in parallel.** Even if you emit 5 delegate_task calls in one round, "+
+			"they execute one at a time — they share the single sandbox + single browser daemon, so parallel "+
+			"execution would trample each other's state. Expect the wall-clock time of a fan-out to be N × the single-"+
+			"sub-agent time, not 1× it. Plan accordingly: smaller per-sub-agent scope is better than fewer, larger calls.\n\n"+
+			"The sub-agent runs against the same tools and provider you have (minus delegate_task itself — no nesting). "+
 			"It cannot see your prior conversation, so pass everything it needs in the `task` arg: criteria, search hints, "+
 			"earlier findings to build on, output format. Sub-agents are best for tasks that produce a self-contained "+
 			"artifact (a table, a draft email, a structured summary). "+
