@@ -3,11 +3,22 @@ package agent
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/fastclaw-ai/fastclaw/internal/provider"
 )
+
+// subagentDefaultTimeout caps the wall time one subagent can spend on
+// its loop, independent of how long the parent's overall turn has left.
+// Big enough for ~15-20 camoufox-cli-driven iterations including cold-
+// start. Smaller than agentTurnTimeout so a parallel fan-out where one
+// subagent goes slow doesn't take the rest down with it; parent ctx
+// cancel still propagates so a genuinely killed parent kills every
+// subagent.
+const subagentDefaultTimeout = 15 * time.Minute
 
 // RunSubagent implements tools.SubagentRunner so the delegate_task tool
 // can call back into the Agent without creating an import cycle.
@@ -50,6 +61,13 @@ func (a *Agent) runSubagentLoop(ctx context.Context, task string, maxIterations 
 	if maxIterations <= 0 {
 		maxIterations = 20
 	}
+
+	// Each subagent gets its own bounded ctx so a slow sibling can't
+	// drain the rest of a parallel fan-out. Parent cancel still wins —
+	// we're wrapping, not detaching.
+	subCtx, cancel := context.WithTimeout(ctx, subagentDefaultTimeout)
+	defer cancel()
+	ctx = subCtx
 
 	systemPrompt := a.ctxBuilder.BuildSystemPrompt() + subagentSystemSuffix()
 	messages := []provider.Message{
@@ -101,6 +119,15 @@ func (a *Agent) runSubagentLoop(ctx context.Context, task string, maxIterations 
 
 		resp, err := a.provider.Chat(ctx, llmMsgs, callTools, a.model, a.maxTokens, a.temperature)
 		if err != nil {
+			// If the ctx itself expired, the parent caller has more
+			// useful framing than "context deadline exceeded" mid-
+			// stream — surface the timeout explicitly so the parent
+			// agent can decide to retry with a tighter task scope.
+			if errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
+				return "", fmt.Errorf(
+					"subagent ran out of its %s wall-time budget at iteration %d — task was too large; the parent should retry with a tighter scope or lower max_iterations",
+					subagentDefaultTimeout, i+1)
+			}
 			return "", fmt.Errorf("subagent chat failed at iteration %d: %w", i+1, err)
 		}
 

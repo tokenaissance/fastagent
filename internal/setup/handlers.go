@@ -909,10 +909,14 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 }
 
 // agentTurnTimeout is the upper bound on how long an agent goroutine
-// is allowed to run after the client connection drops. Long enough for
-// realistic multi-step ReAct turns (several minutes of LLM + tool
-// time), bounded so runaway loops don't pin a goroutine forever.
-const agentTurnTimeout = 15 * time.Minute
+// is allowed to run after the client connection drops. Bumped to 45m
+// after fan-out delegate_task work (6 parallel subagents × ~10m each
+// driving camoufox-cli) routinely blew through the prior 15m budget
+// in the middle of a Chat call, surfacing as "context deadline
+// exceeded" to every sibling at once. 45m is comfortably above a
+// realistic max-parallel fan-out with browser automation; still
+// bounded so a genuine runaway loop doesn't pin a goroutine forever.
+const agentTurnTimeout = 45 * time.Minute
 
 func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	var req chatRequest
