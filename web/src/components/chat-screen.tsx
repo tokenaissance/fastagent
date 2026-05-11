@@ -430,11 +430,6 @@ export function ChatScreen() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
-  // Plan-mode toggle: user enables it on a per-message basis to get a
-  // numbered plan back BEFORE the agent burns the iteration budget on
-  // a wrong-direction exploration. Auto-resets to false after each
-  // send so it doesn't stick across normal turns.
-  const [planMode, setPlanMode] = useState(false);
   // todo.md state for the current session — agent maintains the file,
   // we re-fetch on every write_file/edit_file event that touches
   // todo.md plus once at mount. Empty `items` hides the panel.
@@ -1258,12 +1253,7 @@ export function ChatScreen() {
             break;
           }
         }
-      }, abortRef.current.signal, imageDataUrls, projectIdHint, planMode ? { planMode: true } : undefined);
-      // One-shot: plan toggle resets after the request fires so the
-      // user doesn't get stuck producing plans on every subsequent
-      // message. The plan they got back is now in history; the next
-      // send executes normally.
-      if (planMode) setPlanMode(false);
+      }, abortRef.current.signal, imageDataUrls, projectIdHint);
       // Diff the workspace against the pre-turn snapshot so files
       // produced by *exec* (e.g. a Python script that saves PDFs) get
       // surfaced too — `turnFiles` only catches write_file tool calls
@@ -1390,7 +1380,7 @@ export function ChatScreen() {
       setSending(false);
       textareaRef.current?.focus();
     }
-  }, [input, attachments, selectedAgent, sessionId, sending, loadSessions, pathname, router, urlProjectId, planMode]);
+  }, [input, attachments, selectedAgent, sessionId, sending, loadSessions, pathname, router, urlProjectId]);
 
   const handleStop = useCallback(() => {
     abortRef.current?.abort();
@@ -1955,23 +1945,6 @@ export function ChatScreen() {
                           disabled={!selectedAgent || sending || isReadOnlyChannel}
                         />
                       </label>
-                      <button
-                        type="button"
-                        onClick={() => setPlanMode((v) => !v)}
-                        disabled={!selectedAgent || sending || isReadOnlyChannel}
-                        title={planMode
-                          ? "Plan mode ON: next send returns a numbered plan only (no tool calls). Click to turn off."
-                          : "Plan mode: ask for a numbered plan first so you can review before the agent burns its iteration budget."}
-                        aria-pressed={planMode}
-                        className={`flex h-9 shrink-0 items-center gap-1.5 rounded-full border px-3 text-xs transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
-                          planMode
-                            ? "border-amber-500/50 bg-amber-500/15 text-amber-900 dark:text-amber-200"
-                            : "border-border text-muted-foreground hover:bg-muted hover:text-foreground"
-                        }`}
-                      >
-                        <ListChecks className="h-3.5 w-3.5" />
-                        <span>Plan</span>
-                      </button>
                       {urlProjectId && projectInfo && (
                         <div
                           className="flex h-9 min-w-0 items-center gap-1.5 rounded-full border border-border px-3 text-xs text-muted-foreground"
@@ -2026,23 +1999,6 @@ export function ChatScreen() {
                       disabled={!selectedAgent || sending || isReadOnlyChannel}
                     />
                   </label>
-                  <button
-                    type="button"
-                    onClick={() => setPlanMode((v) => !v)}
-                    disabled={!selectedAgent || sending || isReadOnlyChannel}
-                    title={planMode
-                      ? "Plan mode ON: next send returns a numbered plan only. Click to turn off."
-                      : "Plan mode: ask for a plan first."}
-                    aria-pressed={planMode}
-                    className={`flex h-8 shrink-0 items-center gap-1 rounded-lg px-2 text-xs transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
-                      planMode
-                        ? "bg-amber-500/15 text-amber-900 dark:text-amber-200 ring-1 ring-amber-500/40"
-                        : "text-muted-foreground hover:bg-muted hover:text-foreground"
-                    }`}
-                  >
-                    <ListChecks className="h-3.5 w-3.5" />
-                    <span>Plan</span>
-                  </button>
                   <textarea
                     ref={textareaRef}
                     value={input}

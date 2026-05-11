@@ -24,6 +24,52 @@ var bootstrapFiles = []string{
 	"IDENTITY.md",
 }
 
+// autoPlanPrompt teaches the agent to decide on its own whether the
+// user's request warrants a plan-before-execute turn vs an immediate
+// answer/action. Replaces the explicit Plan toggle in the composer —
+// users shouldn't have to know the term "plan mode" or remember to
+// flip a switch on long prompts. The model has all the context to
+// make this call.
+const autoPlanPrompt = `# Decide whether to plan before acting
+
+Before doing any work, look at the request and pick one of two shapes:
+
+**Plan first** (emit a numbered plan, no tool calls, end with "Reply ` + "`go`" + ` to execute, or tell me what to change."):
+
+- Request decomposes into 3+ distinct phases (research → synthesis →
+  delivery; or "find N X across K categories then write Y for each").
+- Long structured deliverable expected (table with many rows, multi-
+  section report, multiple emails).
+- Mentions a number that implies repetition ("find 50 leads", "review
+  these 8 docs", "draft emails for each of the following").
+- Anything that would naturally use ` + "`delegate_task`" + ` for fan-out, or
+  that you can see hitting the iteration cap if you try to one-shot
+  it.
+
+**Skip the plan, act immediately** for:
+
+- Single-shot questions ("what is X?", "calculate Y", "fix this bug").
+- Direct commands that map to one or two tool calls ("read foo.md and
+  summarize", "search for X").
+- Conversational replies, clarifications, status checks.
+- The user already said "go" / "继续" / "do it" — they previously saw
+  a plan and are now authorizing execution. Execute now, don't re-plan.
+
+**When you plan**: do NOT call any tools during the plan turn — the
+plan IS your reply. Tools are still listed in your catalog but
+deliberately holding off lets the user steer. Reference tool names
+in plan steps so the user sees what you intend to invoke (e.g.
+"Step 3: Use ` + "`delegate_task`" + ` to find 10 X").
+
+**When the user replies after a plan**: their next message is either
+a confirmation ("go", "ok", "continue", "可以", "继续") or edits. Treat
+confirmation as authorization to execute every step end-to-end —
+don't ask permission step by step, and don't write another plan. Just
+do it. If they edited the plan, apply the edits and execute the
+revised version.
+
+`
+
 // taskDelegationPrompt teaches the agent when to reach for delegate_task.
 // Without this, even when the tool description is in the tool catalog,
 // flash-tier models keep cramming all the work into their own loop and
@@ -364,11 +410,12 @@ Then in your final reply, write: ![](/workspace/output.png)`
 		parts = append(parts, sandboxPrompt)
 	}
 
-	// Task delegation guidance — only injected when the registry will
-	// actually surface `delegate_task` (always, in the current build,
-	// but kept conditional so flavors that disable it don't get a stale
-	// reference). Reaches the model before bootstrap files so it shapes
-	// the planning step rather than reading like a footer.
+	// Auto-plan + task delegation guidance — both shape how the model
+	// approaches multi-step work, so they live ahead of bootstrap files
+	// (which can carry agent-specific persona overrides). Order matters:
+	// auto-plan covers the "do I plan or act?" branch first, delegation
+	// then teaches the planning model what tool to write into the steps.
+	parts = append(parts, autoPlanPrompt)
 	parts = append(parts, taskDelegationPrompt)
 
 	// 3. Bootstrap files
