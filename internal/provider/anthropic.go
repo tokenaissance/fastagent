@@ -578,16 +578,33 @@ func (p *AnthropicProvider) parseSSE(body io.Reader) (*Response, error) {
 	}
 
 	// Fallback: some non-Claude models served via anthropic-compat
-	// endpoints (e.g. MiMo) emit Claude's training-format tool-call XML
-	// inside a text content block instead of returning a real tool_use
-	// block. Recover those calls so the agent loop can still dispatch
-	// tools, and strip the XML from the visible content.
-	if len(result.ToolCalls) == 0 {
-		if cleaned, calls := extractLeakedToolCalls(result.Content); len(calls) > 0 {
+	// endpoints (e.g. MiMo, DeepSeek-flash) emit Claude-style tool-call
+	// XML inside a text content block. Two failure modes we need to
+	// guard separately:
+	//
+	//   1. XML INSTEAD OF a structured tool_use → we have to synthesize
+	//      tool calls from the XML, otherwise the agent loop sees a
+	//      text-only response and treats it as a final answer.
+	//
+	//   2. XML ALONGSIDE a structured tool_use (DeepSeek-flash echoes
+	//      its intended call as text every iteration) → the structural
+	//      calls already drive execution, but the textual DSML rides
+	//      along as assistant.content. That bloats every turn's prompt
+	//      and, worse, in the subagent cap-reached forced-delivery path
+	//      it ships back to the parent as the subagent's "final answer"
+	//      — surfacing as raw DSML in the chat UI.
+	//
+	// So strip the XML from content unconditionally; only synthesize
+	// tool calls when there aren't already structured ones to dispatch.
+	if cleaned, calls := extractLeakedToolCalls(result.Content); cleaned != result.Content {
+		result.Content = cleaned
+		if len(result.ToolCalls) == 0 && len(calls) > 0 {
 			slog.Warn("recovered leaked tool-call XML from text content",
 				"count", len(calls))
-			result.Content = cleaned
 			result.ToolCalls = calls
+		} else if len(calls) > 0 {
+			slog.Debug("stripped leaked tool-call XML echoing a structured tool_use",
+				"echo_count", len(calls), "structured_count", len(result.ToolCalls))
 		}
 	}
 
