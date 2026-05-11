@@ -488,6 +488,24 @@ func (p *OpenAIProvider) parseSSE(reader io.Reader) (*Response, error) {
 		}
 	}
 
+	// Same leaked-XML recovery the Anthropic provider does — DeepSeek-flash
+	// served via api.deepseek.com (openai-chat compat, not the anthropic
+	// route) emits its tool calls as DSML-style text instead of, or in
+	// addition to, the structured tool_calls field. Strip the XML from
+	// content unconditionally; synthesize tool calls from it only when
+	// the structured channel was empty.
+	if cleaned, calls := extractLeakedToolCalls(result.Content); cleaned != result.Content {
+		result.Content = cleaned
+		if len(result.ToolCalls) == 0 && len(calls) > 0 {
+			slog.Warn("recovered leaked tool-call XML from text content (openai-chat)",
+				"count", len(calls))
+			result.ToolCalls = calls
+		} else if len(calls) > 0 {
+			slog.Debug("stripped leaked tool-call XML echoing a structured tool_use (openai-chat)",
+				"echo_count", len(calls), "structured_count", len(result.ToolCalls))
+		}
+	}
+
 	// Capture raw assistant message for cache-safe replay.
 	// Reconstruct the exact message format the API would expect back.
 	// reasoning_content must round-trip for DeepSeek's thinking mode
