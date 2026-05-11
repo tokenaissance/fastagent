@@ -7,11 +7,14 @@ import {
   adminUpdateUser,
   adminDeleteUser,
   adminResetPassword,
+  getRegistration,
+  setRegistration,
 } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent } from "@/components/ui/card";
+import { Switch } from "@/components/ui/switch";
 import {
   Table,
   TableBody,
@@ -71,6 +74,7 @@ export default function AdminUsersPage() {
   const [deleteTarget, setDeleteTarget] = useState<UserRow | null>(null);
   const [resetTarget, setResetTarget] = useState<UserRow | null>(null);
   const [resetPwd, setResetPwd] = useState("");
+  const [regOpen, setRegOpen] = useState<boolean | null>(null);
 
   async function refresh() {
     setError("");
@@ -80,7 +84,23 @@ export default function AdminUsersPage() {
   }
   useEffect(() => {
     refresh();
+    getRegistration()
+      .then((r) => setRegOpen(!!r.open))
+      .catch(() => setRegOpen(false));
   }, []);
+
+  async function toggleRegistration(next: boolean) {
+    // Optimistic flip; revert on error so the UI never lies about the
+    // backend state.
+    setRegOpen(next);
+    try {
+      const r = await setRegistration(next);
+      setRegOpen(!!r.open);
+    } catch {
+      setRegOpen(!next);
+      setError("Failed to update registration setting");
+    }
+  }
 
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
@@ -150,6 +170,26 @@ export default function AdminUsersPage() {
           Add User
         </Button>
       </div>
+
+      <Card>
+        <CardContent className="pt-6">
+          <div className="flex items-center justify-between gap-4">
+            <div className="space-y-1">
+              <p className="text-sm font-medium">Open registration</p>
+              <p className="text-xs text-muted-foreground">
+                When on, anyone with the URL can create an account via /signup.
+                When off, only you can add users from this page.
+              </p>
+            </div>
+            <Switch
+              checked={!!regOpen}
+              onCheckedChange={toggleRegistration}
+              disabled={regOpen === null}
+              aria-label="Toggle public registration"
+            />
+          </div>
+        </CardContent>
+      </Card>
 
       {error && (
         <Card className="border-destructive/40 bg-destructive/5">

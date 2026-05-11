@@ -309,7 +309,9 @@ func (sl *SkillsLoader) BuildSkillsSummary(skills []Skill) string {
 const skillsDirective = `<skill_usage_rules>
 The skills listed below are pre-installed for this agent. Each skill's full SKILL.md is included inline. To invoke one, run its main script via the exec tool and pass arguments on stdin as JSON; the SKILL.md describes args and return shape.
 
-The sandbox image already has: python3 + pip, node + npm + npx, the agent-browser CLI (run as ` + "`agent-browser open <url>`" + `; uses Chromium via /usr/bin/chromium-browser), git, curl, requests / pillow / beautifulsoup4 / lxml. DO NOT reinstall any of these — wasted tool calls and timeouts. If you see "command not found", check the spelling before reaching for npm/pip.
+The sandbox image already has: python3 + pip, uv + uvx, node + npm + npx, the camoufox-cli anti-detect browser (run as ` + "`camoufox-cli open <url>`" + ` then ` + "`camoufox-cli snapshot -i`" + ` for refs; Camoufox/Firefox is pre-downloaded), git, curl, requests / pillow / beautifulsoup4 / lxml. DO NOT reinstall any of these — wasted tool calls and timeouts. If you see "command not found", check the spelling before reaching for npm/pip.
+
+HTML preview: when the user asks to see / preview a web artifact, write the final HTML into the workspace and tell them the filename — the chat UI auto-renders .html files in a sandboxed iframe (CSS, JS, images, fonts work; cross-origin fetch from null origin does not). For source projects with a package.json (React, Vue, Vite, Next, …), run the project's build first (` + "`pnpm i && pnpm build`" + ` or the documented command) and point at the resulting ` + "`dist/index.html`" + ` (or equivalent). Live dev servers (` + "`vite dev`" + `, ` + "`next dev`" + `, ` + "`npm run dev`" + `) are NOT reachable from the browser — do not start them; they will hang and waste turns.
 
 When the inline skills don't cover what the user asked for, follow this order BEFORE running any package install (pip / npm / apt / brew / cargo / gem / go install / …) via exec:
 

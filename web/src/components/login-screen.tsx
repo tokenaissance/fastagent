@@ -1,7 +1,8 @@
 "use client";
 
-import { useState } from "react";
-import { login as apiLogin } from "@/lib/api";
+import { useEffect, useState } from "react";
+import Link from "next/link";
+import { login as apiLogin, getStatus } from "@/lib/api";
 
 interface LoginScreenProps {
   onSuccess: () => void;
@@ -12,6 +13,15 @@ export function LoginScreen({ onSuccess }: LoginScreenProps) {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [registrationOpen, setRegistrationOpen] = useState(false);
+
+  useEffect(() => {
+    let aborted = false;
+    getStatus()
+      .then((s) => { if (!aborted) setRegistrationOpen(!!s.registrationOpen); })
+      .catch(() => { /* leave default false — sign-up link stays hidden */ });
+    return () => { aborted = true; };
+  }, []);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -66,6 +76,14 @@ export function LoginScreen({ onSuccess }: LoginScreenProps) {
             {loading ? "Signing in..." : "Sign in"}
           </button>
         </form>
+        {registrationOpen && (
+          <p className="text-center text-sm text-zinc-500">
+            Don&apos;t have an account?{" "}
+            <Link href="/signup" className="text-violet-400 hover:text-violet-300">
+              Sign up
+            </Link>
+          </p>
+        )}
       </div>
     </div>
   );

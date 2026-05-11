@@ -20,6 +20,27 @@ func (g *Gateway) InvalidateUser(userID string) {
 	slog.Info("user space invalidated; will reload on next access", "user", userID)
 }
 
+// InvalidateAgent drops every cached UserSpace that currently holds the
+// given agent — owner's space (always preloaded by loadUserSpace) plus
+// any foreign space that lazy-attached via EnsureAgent (super_admin
+// browsing, public-link viewer, apikey caller). Used after agent-scope
+// settings / provider writes so non-owner viewers don't keep stale
+// rc.Model / providers until the 30-minute idle eviction kicks in.
+func (g *Gateway) InvalidateAgent(agentID string) {
+	if g.users == nil || agentID == "" {
+		return
+	}
+	for _, sp := range g.users.all() {
+		if sp.Agents == nil {
+			continue
+		}
+		if sp.Agents.AgentByID(agentID) != nil {
+			g.users.invalidate(sp.UserID)
+		}
+	}
+	slog.Info("agent invalidated; affected user spaces dropped", "agent", agentID)
+}
+
 // ReloadAgents is kept on Gateway for callers (admin API after agent CRUD)
 // that want to force a refresh of every loaded space. The new model lazy-
 // loads on every auth, so the practical effect is just dropping caches.

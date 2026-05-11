@@ -541,6 +541,7 @@ func (s *Server) invalidateScope(sc, scopeID string) {
 	}
 	type globalInvalidator interface{ ReloadAgents() error }
 	type userInvalidator interface{ InvalidateUser(string) }
+	type agentInvalidator interface{ InvalidateAgent(string) }
 	switch sc {
 	case scope.System:
 		if r, ok := s.userResolver.(globalInvalidator); ok {
@@ -551,8 +552,16 @@ func (s *Server) invalidateScope(sc, scopeID string) {
 			r.InvalidateUser(scopeID)
 		}
 	case scope.Agent:
-		// Agent-scoped writes affect the owning user. Find the agent's
-		// owner and drop that user's cached UserSpace.
+		// Agent-scoped writes (provider, channel, setting) affect every
+		// cached UserSpace that holds the agent — owner plus any foreign
+		// caller that lazy-attached it via EnsureAgent. InvalidateAgent
+		// walks the registry and drops them all; falling back to the
+		// owner-only invalidate keeps behavior consistent for resolvers
+		// that don't implement the newer hook.
+		if r, ok := s.userResolver.(agentInvalidator); ok {
+			r.InvalidateAgent(scopeID)
+			return
+		}
 		ctx := context.Background()
 		if all, err := s.dataStore.ListAllAgents(ctx); err == nil {
 			for _, ar := range all {

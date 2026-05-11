@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Build the fastclaw-sandbox runtime image used by the agent's exec
-# sandbox. Bundles Python + Node + Chromium so skills like
-# agent-browser work without `npm i -g` round-trips on first use.
+# sandbox. Bundles Python + Node + Camoufox (anti-detect Firefox) so
+# the camoufox-cli skill works on the first turn without any pip/npm
+# round-trips.
 #
 # Usage:
 #   deploy/docker/sandbox/build.sh                      # local build, tag latest
@@ -11,14 +12,14 @@
 #                                                       # multi-arch buildx
 #
 # After building, point the gateway at it via Settings → Sandbox →
-# Image, or during onboard. Default: fastclaw/sandbox:latest.
+# Image, or during onboard. Default: thinkany/fastclaw-sandbox:latest.
 
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/../../.." && pwd)
 
-IMAGE_NAME=${IMAGE_NAME:-fastclaw/sandbox}
+IMAGE_NAME=${IMAGE_NAME:-thinkany/fastclaw-sandbox}
 TAG=latest
 PUSH=0
 PLATFORM=""

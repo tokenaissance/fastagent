@@ -139,6 +139,7 @@ export default function OnboardPage() {
   const [displayName, setDisplayName] = useState("");
 
   // Provider
+  const [providerEnabled, setProviderEnabled] = useState(true);
   const [providerKey, setProviderKey] = useState("openai");
   const [providerName, setProviderName] = useState("openai");
   const [apiBase, setApiBase] = useState(PROVIDERS.openai.apiBase);
@@ -204,6 +205,9 @@ export default function OnboardPage() {
     setSubmitting(true);
     // The user can rename a preset provider; we still slugify whatever
     // they typed (lowercase, hyphens) so it's a clean key in the DB.
+    // When providerEnabled is false, send empty provider/apiKey/model so
+    // the backend's `if req.Provider != "" && req.APIKey != ""` guard skips
+    // the provider+defaults write entirely (handlers_admin.go:240).
     const finalProviderName =
       providerName.trim().toLowerCase().replace(/\s+/g, "-") || providerKey;
     const res = await onboard({
@@ -211,12 +215,12 @@ export default function OnboardPage() {
       email,
       password,
       displayName,
-      provider: finalProviderName,
-      apiBase,
-      apiKey,
-      apiType,
-      authType,
-      model,
+      provider: providerEnabled ? finalProviderName : "",
+      apiBase: providerEnabled ? apiBase : "",
+      apiKey: providerEnabled ? apiKey : "",
+      apiType: providerEnabled ? apiType : "",
+      authType: providerEnabled ? authType : "",
+      model: providerEnabled ? model : "",
       agentName,
       sandboxEnabled,
       sandboxBackend: sandboxEnabled ? sandboxBackend : undefined,
@@ -252,7 +256,8 @@ export default function OnboardPage() {
       email.trim() !== "" &&
       password.length >= 6 &&
       password === passwordConfirm,
-    apiKey.trim() !== "" && model.trim() !== "" && apiBase.trim() !== "" && testStatus === "ok",
+    !providerEnabled ||
+      (apiKey.trim() !== "" && model.trim() !== "" && apiBase.trim() !== "" && testStatus === "ok"),
     agentName.trim() !== "",
     sandboxValid,
     true,
@@ -282,6 +287,8 @@ export default function OnboardPage() {
 
         {step === 2 && (
           <ProviderStep
+            enabled={providerEnabled}
+            setEnabled={setProviderEnabled}
             providerKey={providerKey}
             onProviderChange={handleProviderChange}
             providerName={providerName}
@@ -536,6 +543,8 @@ function AdminStep(props: {
 }
 
 function ProviderStep(props: {
+  enabled: boolean;
+  setEnabled: (v: boolean) => void;
   providerKey: string;
   onProviderChange: (v: string) => void;
   providerName: string;
@@ -564,10 +573,30 @@ function ProviderStep(props: {
         </CardTitle>
         <CardDescription>
           Connect at least one model. You can add more (and per-user/per-agent
-          overrides) from the Providers page later.
+          overrides) from the Providers page later — or skip and configure
+          everything from there.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-sm font-medium">Configure a provider now</p>
+            <p className="text-xs text-muted-foreground">
+              Off = skip; you can add providers from the Providers page later.
+            </p>
+          </div>
+          <Switch checked={props.enabled} onCheckedChange={props.setEnabled} />
+        </div>
+        {props.enabled && <Separator />}
+        {!props.enabled && (
+          <p className="text-xs text-muted-foreground">
+            Skipping — the admin account and agent will be created without a
+            default model. Add one from{" "}
+            <span className="font-mono">Providers</span> after launch.
+          </p>
+        )}
+        {props.enabled && (
+        <>
         <div className="grid gap-3 sm:grid-cols-2">
           <div className="space-y-1.5">
             <Label>Provider</Label>
@@ -684,6 +713,8 @@ function ProviderStep(props: {
             <span className="text-xs text-destructive">{props.testError}</span>
           )}
         </div>
+        </>
+        )}
       </CardContent>
     </Card>
   );

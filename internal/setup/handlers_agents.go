@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime"
 	"net/http"
 	"os"
 	"os/exec"
@@ -288,8 +289,8 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Name        string  `json:"name,omitempty"`
 		Description *string `json:"description,omitempty"` // ptr so empty-string clears it
-		Model       string  `json:"model,omitempty"`
-		IsPublic    *bool   `json:"isPublic,omitempty"` // ptr so caller can leave it unchanged
+		Model       *string `json:"model,omitempty"`       // ptr so empty-string clears the agent-scope override
+		IsPublic    *bool   `json:"isPublic,omitempty"`    // ptr so caller can leave it unchanged
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
@@ -315,17 +316,21 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-	// Per-agent model override is its own configs row now. Empty string
-	// means "no change" (matches the original column-write semantics);
-	// to clear an existing override the caller must explicitly hit the
-	// scoped settings endpoint with an empty value.
-	if req.Model != "" {
-		if err := s.saveAgentScopeModel(r, rec.ID, req.Model); err != nil {
+	// Per-agent model override is its own configs row. nil = caller didn't
+	// touch it (e.g. a name-only patch); empty string = explicit "clear my
+	// override and fall back to user/system defaults" — the Models page's
+	// "Clear override" button relies on this. Non-empty saves the row.
+	if req.Model != nil {
+		if err := s.saveAgentScopeModel(r, rec.ID, *req.Model); err != nil {
 			jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 			return
 		}
 	}
-	s.invalidateUser(rec.UserID)
+	// invalidateAgent (not invalidateUser) so super_admin / public-link
+	// viewers / apikey callers that lazy-attached this agent into their
+	// own UserSpace also drop their stale rc.Model — without this they
+	// keep firing the previous model until the 30-min idle eviction.
+	s.invalidateAgent(rec.ID)
 	jsonResponse(w, http.StatusOK, map[string]any{
 		"agent": map[string]any{
 			"id":       rec.ID,
@@ -400,7 +405,10 @@ func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-	s.invalidateUser(rec.UserID)
+	// Drop the agent from every cached UserSpace, not just the owner's,
+	// so foreign callers stop resolving the now-deleted agent through
+	// EnsureAgent's lazy-attach path.
+	s.invalidateAgent(rec.ID)
 	jsonResponse(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -956,6 +964,13 @@ func (s *Server) handleAgentFile(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusForbidden, map[string]any{"error": "path escape"})
 		return
 	}
+	// ServeFile sets Content-Type from the mime database itself; we just
+	// add the CSP sandbox for HTML on top — same rationale as in
+	// setFileResponseHeaders above.
+	if ext := strings.ToLower(filepath.Ext(rel)); ext == ".html" || ext == ".htm" {
+		w.Header().Set("Content-Security-Policy", "sandbox allow-scripts")
+	}
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	http.ServeFile(w, r, abs)
 }
 
@@ -966,8 +981,29 @@ func (s *Server) serveFileFromWorkspaceStore(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	defer rc.Close()
-	w.Header().Set("Content-Type", "application/octet-stream")
+	setFileResponseHeaders(w, path)
 	io.Copy(w, rc)
+}
+
+// setFileResponseHeaders picks the right Content-Type for a user-produced
+// workspace file and locks down agent-generated HTML so it can't reach the
+// app's cookies/storage even if the user opens the URL in a bare tab. The
+// Content-Type derived from the extension is what lets iframes render the
+// file (octet-stream → about:blank, since iframes don't sniff). The CSP
+// `sandbox` header is the same protection the chat preview gets via the
+// iframe `sandbox` attribute, but applied at the HTTP layer so it kicks in
+// no matter how the file is loaded.
+func setFileResponseHeaders(w http.ResponseWriter, path string) {
+	ext := strings.ToLower(filepath.Ext(path))
+	ctype := mime.TypeByExtension(ext)
+	if ctype == "" {
+		ctype = "application/octet-stream"
+	}
+	w.Header().Set("Content-Type", ctype)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if ext == ".html" || ext == ".htm" {
+		w.Header().Set("Content-Security-Policy", "sandbox allow-scripts")
+	}
 }
 
 func (s *Server) handleAgentFileUpload(w http.ResponseWriter, r *http.Request) {
@@ -1047,6 +1083,22 @@ func (s *Server) invalidateUser(userID string) {
 		r.InvalidateUser(userID)
 	}
 	slog.Debug("invalidated user space", "user", userID)
+}
+
+// invalidateAgent drops every cached UserSpace that holds this agent —
+// owner plus any foreign caller that lazy-attached via EnsureAgent
+// (super_admin chat, public-link viewer, apikey user). Use this after
+// writes that mutate the agent's resolved runtime (agents.defaults,
+// agent-scope providers); plain user-scope writes can stick with
+// invalidateUser.
+func (s *Server) invalidateAgent(agentID string) {
+	if agentID == "" || s.userResolver == nil {
+		return
+	}
+	if r, ok := s.userResolver.(interface{ InvalidateAgent(string) }); ok {
+		r.InvalidateAgent(agentID)
+	}
+	slog.Debug("invalidated user spaces holding agent", "agent", agentID)
 }
 
 // requireOwnerOrSuperAdmin guards endpoints that mutate another user's

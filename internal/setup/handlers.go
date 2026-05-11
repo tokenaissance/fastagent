@@ -18,6 +18,7 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/agent"
 	"github.com/fastclaw-ai/fastclaw/internal/api"
 	"github.com/fastclaw-ai/fastclaw/internal/auth"
+	"github.com/fastclaw-ai/fastclaw/internal/buildinfo"
 	"github.com/fastclaw-ai/fastclaw/internal/bus"
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 	"github.com/fastclaw-ai/fastclaw/internal/provider"
@@ -363,13 +364,15 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	resp := map[string]any{
-		"configured": configured,
-		"running":    s.userResolver != nil,
-		"port":       s.port,
-		"agents":     []any{},
-		"channels":   []any{},
-		"provider":   nil,
-		"uptime":     formatDuration(time.Since(s.startedAt)),
+		"configured":       configured,
+		"registrationOpen": s.registrationOpen(r),
+		"running":          s.userResolver != nil,
+		"port":             s.port,
+		"version":          buildinfo.Version,
+		"agents":           []any{},
+		"channels":         []any{},
+		"provider":         nil,
+		"uptime":           formatDuration(time.Since(s.startedAt)),
 	}
 	ident, authed := auth.FromContext(r.Context())
 	if !authed {

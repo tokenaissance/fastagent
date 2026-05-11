@@ -62,6 +62,39 @@ var editSchema = map[string]interface{}{
 
 const editDescription = "Edit a file by replacing an exact substring. Prefer this over write_file when changing only part of a file (especially identity files like SOUL.md / MEMORY.md): it's cheaper, can't drop unrelated content, and validates the replacement was applied. old_string must match a unique substring unless replace_all is true; new_string must differ from old_string. Read the file first if you're unsure of the exact text."
 
+// validateFileTargetPath rejects path arguments to write-like ops that
+// can't refer to a single file. Empty strings, directory-suffix paths
+// ("foo/"), and the special directory aliases (".", "..", "/") all slip
+// through the downstream routing (isWorkspacePath treats "" as workspace-
+// scoped because filepath.Clean("") == ".") and end up at os.OpenFile on
+// the session directory, surfacing a cryptic "is a directory" error.
+// Refusing early gives the model an actionable, tool-shaped message
+// instead.
+func validateFileTargetPath(path string) error {
+	if strings.TrimSpace(path) == "" {
+		return fmt.Errorf("path is required and must include a filename")
+	}
+	if strings.HasSuffix(path, "/") || strings.HasSuffix(path, string(filepath.Separator)) {
+		return fmt.Errorf("path %q ends in a separator; include a filename at the end", path)
+	}
+	switch filepath.Clean(path) {
+	case ".", "..", "/":
+		return fmt.Errorf("path %q is a directory, not a file; include a filename", path)
+	}
+	return nil
+}
+
+// asIsDirToolError detects the "is a directory" failure mode (raised when
+// a write/edit resolves to an existing directory rather than a file) and
+// promotes it to a tool-level message the model can recover from. Falls
+// back to the caller's wrapped error otherwise.
+func asIsDirToolError(opName, path string, err error) error {
+	if err != nil && strings.Contains(err.Error(), "is a directory") {
+		return fmt.Errorf("%s: %q resolves to a directory; include a filename in the path", opName, path)
+	}
+	return nil
+}
+
 // applyEdit performs the in-memory string replacement that backs edit_file.
 // Centralised so every backend (filesystem, workspaceStore, systemFileStore,
 // sandbox executor) shares the same uniqueness / not-found / no-op rules.
@@ -531,6 +564,9 @@ func makeWriteFile(r *Registry) ToolFunc {
 		if err := json.Unmarshal(rawArgs, &args); err != nil {
 			return "", fmt.Errorf("parse args: %w", err)
 		}
+		if err := validateFileTargetPath(args.Path); err != nil {
+			return "", fmt.Errorf("write_file: %w", err)
+		}
 
 		// When a workspace store is configured, route userRoot-destined
 		// writes through it. Identity files (systemRoot) still hit the
@@ -539,6 +575,9 @@ func makeWriteFile(r *Registry) ToolFunc {
 		if r.workspaceStore != nil && r.agentID != "" && r.isWorkspacePath(args.Path) {
 			if err := r.workspaceStore.Put(ctx, r.agentID, r.projectID, r.sessionID, args.Path,
 				strings.NewReader(args.Content), int64(len(args.Content)), ""); err != nil {
+				if friendly := asIsDirToolError("write_file", args.Path, err); friendly != nil {
+					return "", friendly
+				}
 				return "", fmt.Errorf("workspace put: %w", err)
 			}
 			return fmt.Sprintf("Written %d bytes to %s", len(args.Content), args.Path), nil
@@ -592,6 +631,9 @@ func makeWriteFile(r *Registry) ToolFunc {
 		}
 
 		if err := os.WriteFile(fullPath, []byte(args.Content), 0o644); err != nil {
+			if friendly := asIsDirToolError("write_file", args.Path, err); friendly != nil {
+				return "", friendly
+			}
 			return "", fmt.Errorf("write file: %w", err)
 		}
 
@@ -604,6 +646,9 @@ func makeEditFile(r *Registry) ToolFunc {
 		var args editFileArgs
 		if err := json.Unmarshal(rawArgs, &args); err != nil {
 			return "", fmt.Errorf("parse args: %w", err)
+		}
+		if err := validateFileTargetPath(args.Path); err != nil {
+			return "", fmt.Errorf("edit_file: %w", err)
 		}
 
 		// Mirror makeWriteFile's routing precedence: workspace store first
@@ -630,6 +675,9 @@ func makeEditFile(r *Registry) ToolFunc {
 			}
 			if err := r.workspaceStore.Put(ctx, r.agentID, r.projectID, r.sessionID, args.Path,
 				strings.NewReader(updated), int64(len(updated)), ""); err != nil {
+				if friendly := asIsDirToolError("edit_file", args.Path, err); friendly != nil {
+					return "", friendly
+				}
 				return "", fmt.Errorf("workspace put: %w", err)
 			}
 			return fmt.Sprintf("Edited %s (%d replacement(s))", args.Path, count), nil
@@ -903,6 +951,9 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 		if err := json.Unmarshal(rawArgs, &args); err != nil {
 			return "", fmt.Errorf("parse args: %w", err)
 		}
+		if err := validateFileTargetPath(args.Path); err != nil {
+			return "", fmt.Errorf("write_file: %w", err)
+		}
 		switch r.routeFor(args.Path, OpWrite) {
 		case RouteSystemStore:
 			name := filepath.Clean(args.Path)
@@ -913,6 +964,9 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 		case RouteWorkspaceStore:
 			if err := r.workspaceStore.Put(ctx, r.agentID, r.projectID, r.sessionID, args.Path,
 				strings.NewReader(args.Content), int64(len(args.Content)), ""); err != nil {
+				if friendly := asIsDirToolError("write_file", args.Path, err); friendly != nil {
+					return "", friendly
+				}
 				return "", fmt.Errorf("workspace put: %w", err)
 			}
 			return fmt.Sprintf("Written %d bytes to %s", len(args.Content), args.Path), nil
@@ -1031,6 +1085,9 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 		if err := json.Unmarshal(rawArgs, &args); err != nil {
 			return "", fmt.Errorf("parse args: %w", err)
 		}
+		if err := validateFileTargetPath(args.Path); err != nil {
+			return "", fmt.Errorf("edit_file: %w", err)
+		}
 
 		// editSandboxRMW is the read-modify-write fallback through the
 		// sandbox executor. Used when the store route misses or for any
@@ -1084,6 +1141,9 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 					}
 					if err := r.workspaceStore.Put(ctx, r.agentID, r.projectID, r.sessionID, args.Path,
 						strings.NewReader(updated), int64(len(updated)), ""); err != nil {
+						if friendly := asIsDirToolError("edit_file", args.Path, err); friendly != nil {
+							return "", friendly
+						}
 						return "", fmt.Errorf("workspace put: %w", err)
 					}
 					return fmt.Sprintf("Edited %s (%d replacement(s))", args.Path, count), nil

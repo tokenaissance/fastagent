@@ -334,6 +334,9 @@ func (sp *UserSpace) EnsureAgent(ctx context.Context, st store.Store, mb *bus.Me
 			if ovr.MaxToolIterations > 0 {
 				rc.MaxToolIterations = ovr.MaxToolIterations
 			}
+			if ovr.MaxParallelToolCalls > 0 {
+				rc.MaxParallelToolCalls = ovr.MaxParallelToolCalls
+			}
 			if ovr.Thinking != "" {
 				rc.Thinking = ovr.Thinking
 			}
@@ -371,6 +374,9 @@ func (sp *UserSpace) EnsureAgent(ctx context.Context, st store.Store, mb *bus.Me
 		}
 		if ovr.MaxToolIterations > 0 {
 			rc.MaxToolIterations = ovr.MaxToolIterations
+		}
+		if ovr.MaxParallelToolCalls > 0 {
+			rc.MaxParallelToolCalls = ovr.MaxParallelToolCalls
 		}
 		if ovr.Thinking != "" {
 			rc.Thinking = ovr.Thinking
@@ -539,6 +545,9 @@ func loadUserSpace(ctx context.Context, userID string, mb *bus.MessageBus, st st
 			}
 			if agentOverride.MaxToolIterations > 0 {
 				rc.MaxToolIterations = agentOverride.MaxToolIterations
+			}
+			if agentOverride.MaxParallelToolCalls > 0 {
+				rc.MaxParallelToolCalls = agentOverride.MaxParallelToolCalls
 			}
 			if agentOverride.Thinking != "" {
 				rc.Thinking = agentOverride.Thinking

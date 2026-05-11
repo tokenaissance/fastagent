@@ -119,7 +119,7 @@ data:
   # is E2B (remote) — or leave it disabled. To enable: set the
   # E2B_API_KEY in fastclaw-secrets above and uncomment the lines below.
   # FASTCLAW_SANDBOX_BACKEND: "e2b"
-  # FASTCLAW_SANDBOX_IMAGE: "fastclaw/sandbox:latest"   # used when running an E2B custom template
+  # FASTCLAW_SANDBOX_IMAGE: "thinkany/fastclaw-sandbox:latest"   # used when running an E2B custom template
 
 ---
 # =================== Application (usually no edits) =====================

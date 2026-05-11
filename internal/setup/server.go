@@ -207,6 +207,9 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("POST /api/me/password", auth(s.handleChangeMyPassword))
 	mux.HandleFunc("POST /api/test-provider", opt(s.handleTestProvider))
 	mux.HandleFunc("POST /api/onboard", s.handleOnboard)
+	mux.HandleFunc("POST /api/register", s.handleRegister)
+	mux.HandleFunc("GET /api/admin/registration", admin(s.handleGetRegistration))
+	mux.HandleFunc("PUT /api/admin/registration", admin(s.handleSetRegistration))
 
 	// Per-user config (system_settings + scoped providers/channels).
 	mux.HandleFunc("GET /api/config", auth(s.handleGetConfig))
