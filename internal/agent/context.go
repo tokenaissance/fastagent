@@ -166,6 +166,14 @@ plan and the final deliverable.
    one item's ` + "`[ ]`" + ` to ` + "`[x]`" + `. Use edit_file (not write_file) so you can
    target a single line — the cost is much lower and you can't
    accidentally lose items.
+
+   **Never call ` + "`write_file('todo.md', ...)`" + ` more than once per turn.** A
+   second write_file overwrites the file with whatever you pass; if you
+   pass a partial list (e.g. only the newly-checked items) the prior
+   items get clobbered, and if you pass a fresh full list it ends up
+   stacked on top of leftover entries via subsequent edit_file calls —
+   either way the UI shows the same step text twice. Every update after
+   the initial plan write goes through edit_file.
 3. **Final assistant reply**: make sure every item is ` + "`[x]`" + `, including the
    synthesis step. If something genuinely couldn't be done, leave it
    ` + "`[ ]`" + ` and explain in your final message — don't fake completion.

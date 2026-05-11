@@ -1289,8 +1289,17 @@ func (s *Server) readWorkspaceFileBytes(ctx context.Context, agentID, relPath st
 // ignored — todo.md doubles as a human-readable plan document, so we
 // don't force a rigid schema. Indented checkboxes are NOT supported
 // in v1 (no sub-tasks); flatten them in the model's nudge if needed.
+//
+// Duplicate-text entries get merged: first occurrence wins the slot,
+// `done` is OR'd across all occurrences. This is defensive — the
+// convention says use edit_file to flip a single item, but if the
+// model accidentally re-runs write_file and stacks old + new lists,
+// we'd otherwise show the same step twice. Progress (done=true) is
+// sticky on merge so a later pending duplicate can't regress an
+// already-checked item.
 func parseTodoMarkdown(s string) []map[string]any {
 	out := []map[string]any{}
+	idx := map[string]int{}
 	for _, line := range strings.Split(s, "\n") {
 		trim := strings.TrimLeft(line, " \t")
 		if !strings.HasPrefix(trim, "- [") && !strings.HasPrefix(trim, "* [") {
@@ -1305,6 +1314,13 @@ func parseTodoMarkdown(s string) []map[string]any {
 			continue
 		}
 		done := box == 'x' || box == 'X'
+		if i, ok := idx[rest]; ok {
+			if done {
+				out[i]["done"] = true
+			}
+			continue
+		}
+		idx[rest] = len(out)
 		out = append(out, map[string]any{
 			"text": rest,
 			"done": done,
