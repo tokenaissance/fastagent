@@ -265,6 +265,12 @@ func NewAgentWithSkillsCfg(rc config.ResolvedAgent, prov provider.Provider, mb *
 		costTracker:       eng.costTracker,
 	}
 
+	// delegate_task lets the parent agent fan a bounded subtask out to a
+	// fresh sub-agent context (own iteration budget, isolated messages).
+	// Registered after ag is built because the tool callback closes over
+	// ag.RunSubagent — couldn't wire it inside RegisterExecWithSkillEnv's
+	// pre-Agent block. Self-disables when runner is nil.
+	tools.RegisterDelegateTask(registry, ag)
 
 	// Connect MCP servers and register their tools
 	if len(rc.MCPServers) > 0 {
