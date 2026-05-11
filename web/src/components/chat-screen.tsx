@@ -2297,6 +2297,19 @@ function ToolCallGroup({ msg, surfacedSrcs, agentId, sessionId, nested = false, 
                       {(() => {
                         try {
                           const args = JSON.parse(tc.arguments);
+                          // delegate_task's `task` arg always opens with
+                          // the same boilerplate ("You are a B2B lead
+                          // researcher…"); the differentiating part is a
+                          // markdown heading further down ("## Target:
+                          // <industry>"). Surface that line instead of
+                          // the head so a fan-out of N delegates doesn't
+                          // look like N copies of the same call.
+                          if (tc.name === "delegate_task" && typeof args.task === "string") {
+                            const m = args.task.match(/^#+\s*Target:\s*(.+)$/m) ||
+                                      args.task.match(/^#+\s+(.+)$/m);
+                            if (m) return m[1].trim();
+                            return args.task.replace(/\s+/g, " ").slice(0, 120);
+                          }
                           return Object.values(args).join(", ");
                         } catch {
                           return tc.arguments;
