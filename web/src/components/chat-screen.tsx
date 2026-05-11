@@ -288,6 +288,29 @@ function buildChatMessages(history: ChatHistoryMessage[]): ChatMessage[] {
   return msgs;
 }
 
+// isPendingPlanContent recognises the closing line we instructed the
+// model to emit on plan-first turns ("Reply `go` to execute, or tell
+// me what to change." or its Chinese rendering). Used to decide
+// whether to show the inline approve / cancel buttons under an
+// assistant bubble. Loose match — model wording drifts but the
+// signal is always "go" near "execute / 执行" in the last few lines.
+function isPendingPlanContent(content: string): boolean {
+  if (!content) return false;
+  // Tail-only check so a long plan with the word "go" in step 3 doesn't
+  // false-positive — the model only ever closes with the cue line, never
+  // opens with it.
+  const lines = content.split("\n");
+  const tail = lines.slice(Math.max(0, lines.length - 4)).join(" ");
+  // English: "Reply `go` to execute" / "Reply 'go' to run"
+  if (/reply[^.]*?\bgo\b[^.]*?(execute|run)/i.test(tail)) return true;
+  // Chinese: "请回复 go 开始执行" / "回复 go 执行"
+  if (/回复[^。]*?go[^。]*?(执行|开始)/.test(tail)) return true;
+  // Generic safety net: closing imperative with `go` + execute keyword
+  // very close together. Tighter than just "go" appearing anywhere.
+  if (/[`'"]go[`'"][^\n]{0,40}(execute|执行)/i.test(tail)) return true;
+  return false;
+}
+
 // Parse the per-route ids out of the pathname. ChatScreen is mounted
 // once at the agent layout level and stays alive across these routes:
 //
@@ -971,8 +994,13 @@ export function ChatScreen() {
     }
   }, [input]);
 
-  const handleSend = useCallback(async () => {
-    const text = input.trim();
+  const handleSend = useCallback(async (overrideText?: string) => {
+    // overrideText lets caller post a message that didn't come from
+    // the composer (e.g. the plan-approval button clicking "go"). When
+    // present it bypasses the input field entirely — composer state
+    // stays as the user left it.
+    const composerText = (overrideText ?? input).trim();
+    const text = composerText;
     // Allow sending with attachments only (no text), but require at least one.
     if ((!text && attachments.length === 0) || !selectedAgent || sending) return;
 
@@ -1059,7 +1087,12 @@ export function ChatScreen() {
       ? (text ? `${breadcrumb}\n${text}` : breadcrumb)
       : text;
 
-    setInput("");
+    // Only clear the composer when the send came from it. Override
+    // sends (plan-approval button etc.) leave whatever the user was
+    // typing alone.
+    if (overrideText === undefined) {
+      setInput("");
+    }
     setMessages((prev) => [
       ...prev,
       {
@@ -1503,6 +1536,20 @@ export function ChatScreen() {
   // Once any message exists the layout swings back to the standard
   // "scroll above, sticky composer at bottom" shape.
   const isEmpty = messages.length === 0;
+  // Compute the id of the latest agent bubble that's a pending plan
+  // (numbered plan + "Reply `go` to execute" footer), only when no
+  // user message has followed it. This is the single bubble that gets
+  // the inline approve/cancel buttons; older plans further up the
+  // history never get buttons re-rendered on them.
+  const pendingPlanId: string | null = (() => {
+    if (sending) return null;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (m.role === "user") return null; // user already replied → plan is no longer pending
+      if (m.role === "agent" && isPendingPlanContent(m.content)) return m.id;
+    }
+    return null;
+  })();
   // Hero title is the same on both the bare agent home and a project
   // landing page — Manus-style "what can I do" prompt. Project pages
   // render a small info card UNDER the hero (folder + name + meta)
@@ -1722,6 +1769,40 @@ export function ChatScreen() {
                           <span className="font-medium">Plan only — review before executing.</span>
                           <span className="opacity-80">
                             Tools were disabled for this turn. Reply with &quot;go&quot; (or edits) to run it.
+                          </span>
+                        </div>
+                      )}
+                      {msg.role === "agent" && msg.id === pendingPlanId && (
+                        <div className="mt-3 flex flex-wrap items-center gap-2">
+                          <Button
+                            size="sm"
+                            onClick={() => handleSend("go")}
+                            disabled={sending}
+                            className="h-8 gap-1.5"
+                          >
+                            <Check className="h-3.5 w-3.5" />
+                            继续执行
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => {
+                              // No payload sent — user is rejecting the
+                              // plan. Focus the composer with a hint so
+                              // they type what to change; the buttons
+                              // re-render once the next assistant reply
+                              // matches the pending-plan signal again.
+                              setInput("");
+                              textareaRef.current?.focus();
+                            }}
+                            disabled={sending}
+                            className="h-8 gap-1.5"
+                          >
+                            <X className="h-3.5 w-3.5" />
+                            调整方案
+                          </Button>
+                          <span className="text-xs text-muted-foreground">
+                            点继续执行授权 agent 跑完整套；点调整在下方写改动。
                           </span>
                         </div>
                       )}
@@ -1968,7 +2049,7 @@ export function ChatScreen() {
                       </Button>
                     ) : (
                       <Button
-                        onClick={handleSend}
+                        onClick={() => handleSend()}
                         disabled={(!input.trim() && attachments.length === 0) || !selectedAgent || isReadOnlyChannel}
                         size="icon"
                         className="h-9 w-9 shrink-0 rounded-full"
@@ -2028,7 +2109,7 @@ export function ChatScreen() {
                     </Button>
                   ) : (
                     <Button
-                      onClick={handleSend}
+                      onClick={() => handleSend()}
                       disabled={(!input.trim() && attachments.length === 0) || !selectedAgent || isReadOnlyChannel}
                       size="icon"
                       className="h-8 w-8 shrink-0 rounded-lg"
