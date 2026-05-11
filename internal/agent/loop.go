@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -809,6 +811,94 @@ func isPlanMode(params map[string]any) bool {
 	return false
 }
 
+// looksLikeComplexFirstTurn is the server-side heuristic that decides
+// whether a fresh-session user message is "Wayne-class" — long, multi-
+// section, asks for a structured deliverable — and should be force-
+// routed through plan mode even though the user didn't toggle it.
+//
+// Trusting the LLM to self-detect via the system prompt's autoPlanPrompt
+// proved unreliable (especially with flash-tier models that just dive
+// into web_fetch). This is a backstop: tight enough to not trigger on
+// "hi, what can you do" but loose enough to catch the lead-research /
+// research-then-synthesize / find-N-of-X shape.
+//
+// Returns true iff ALL of:
+//   - message length >= 400 chars (rules out short Qs that happen to
+//     contain numbers in passing)
+//   - signal count >= 2 among:
+//     · 3+ numbered section markers (一、二、三、… or 1./2./3.)
+//     · explicit count >= 10 ("50 leads" / "找 50 个" / "list 20")
+//     · multi-line bullet list (4+ "- " / "* " lines)
+//     · keywords typical of structured-deliverable prompts
+//       (ICP / 表格 / table / list of / draft N / 报告 / report)
+//
+// Two-signal threshold keeps the false-positive rate low: a long but
+// open-ended discussion ("explain how X works in detail") trips at
+// most one signal and stays in normal mode.
+func looksLikeComplexFirstTurn(text string) bool {
+	if len(text) < 400 {
+		return false
+	}
+	signals := 0
+
+	// Section markers: Chinese 一、 through 十、 plus Western "1." "2." "3."
+	// at line starts. Want at least three to count.
+	cnSections := regexp.MustCompile(`[一二三四五六七八九十][、。．]`)
+	if len(cnSections.FindAllString(text, -1)) >= 3 {
+		signals++
+	} else {
+		// Look for ordered-list openers at the start of distinct lines.
+		// Three "1. … 2. … 3. …" pattern is enough.
+		ordered := regexp.MustCompile(`(?m)^\s*[1-9][.\)、]\s+`)
+		if len(ordered.FindAllString(text, -1)) >= 3 {
+			signals++
+		}
+	}
+
+	// Explicit numeric count >= 10 + repetition word.
+	countRe := regexp.MustCompile(`(?i)(\d{2,})\s*(个|名|位|leads?|items?|rows?|emails?|prospects?|clients?|companies)`)
+	if m := countRe.FindStringSubmatch(text); len(m) >= 2 {
+		if n, err := strconv.Atoi(m[1]); err == nil && n >= 10 {
+			signals++
+		}
+	} else {
+		// Variant: "find / list / draft / 找 / 写 / 挖掘" + number
+		findRe := regexp.MustCompile(`(?i)(find|list|draft|search|挖掘|找|写|生成|寻找)[^\n]{0,20}\d{2,}`)
+		if findRe.MatchString(text) {
+			signals++
+		}
+	}
+
+	// Bullet list of 4+ distinct items — strong "structured asks" signal.
+	bullets := regexp.MustCompile(`(?m)^\s*[-*]\s+\S`)
+	if len(bullets.FindAllString(text, -1)) >= 4 {
+		signals++
+	}
+
+	// Structured-deliverable keywords. ICP / table / report / 表格 / 报告 /
+	// 模板 / template / each of. Cheap one-shot scan.
+	kwRe := regexp.MustCompile(`(?i)(ICP|表格|table\b|报告|report\b|deliverable|each of|每一个|每个).{0,40}(table|表|list|report|报告|each|delivery|交付|outputs?|输出)?`)
+	if kwRe.MatchString(text) {
+		// Cap a single-keyword to one signal so a message that just
+		// mentions "ICP" doesn't ride three matches into auto-plan.
+		signals++
+	}
+
+	return signals >= 2
+}
+
+// sessionAlreadyEngaged reports whether the session already has an
+// assistant reply. We only auto-plan on the FIRST user message of a
+// session — re-planning every long follow-up would be obnoxious.
+func sessionAlreadyEngaged(sess *session.Session) bool {
+	for _, m := range sess.GetMessages() {
+		if m.Role == "assistant" && (m.Content != "" || len(m.ToolCalls) > 0) {
+			return true
+		}
+	}
+	return false
+}
+
 // planModeNudge is the system message we prepend on plan-mode turns.
 // Spells out the contract: tools are server-side disabled THIS turn so
 // don't attempt them; they WILL be available on the next turn when the
@@ -984,6 +1074,27 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		emitEvent(ctx, ChatEvent{Type: "content", Data: map[string]any{"content": result.reply}})
 		emitEvent(ctx, ChatEvent{Type: "done"})
 		return result.reply
+	}
+
+	// Auto-trigger plan mode when the FIRST user message of a session
+	// looks like a Wayne-class structured-deliverable request (long,
+	// numbered sections, asks for 10+ rows/leads, etc.). Trusting the
+	// LLM's autoPlanPrompt to self-detect was unreliable on flash-tier
+	// models — they kept diving straight into web_fetch. The heuristic
+	// only fires on the first turn of a session so a user mid-execution
+	// asking a long follow-up doesn't get re-planned.
+	if !isPlanMode(msg.Params) && msg.Text != "" {
+		sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID, msg.ProjectID)
+		if !sessionAlreadyEngaged(sess) && looksLikeComplexFirstTurn(msg.Text) {
+			slog.Info("auto-routing to plan mode",
+				"agent", a.name,
+				"chat_id", msg.ChatID,
+				"len", len(msg.Text))
+			if msg.Params == nil {
+				msg.Params = map[string]any{}
+			}
+			msg.Params["planMode"] = true
+		}
 	}
 
 	// Plan mode short-circuits the ReAct loop: tools off, the model
