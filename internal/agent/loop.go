@@ -810,29 +810,78 @@ func isPlanMode(params map[string]any) bool {
 }
 
 // planModeNudge is the system message we prepend on plan-mode turns.
-// Spells out the contract: tools are server-side disabled so don't
-// attempt them; emit a numbered plan in 3-7 steps; close with one
-// "reply to execute" line so the user knows what to do next. Earlier
-// drafts mentioned "draft", "thinking", "thoughts" — those kept
-// surfacing as soft suggestions and the model would still call tools.
-// Hard "do not" + explaining tools are unavailable proved the only
-// reliable phrasing across deepseek-flash / sonnet / gpt.
+// Spells out the contract: tools are server-side disabled THIS turn so
+// don't attempt them; they WILL be available on the next turn when the
+// user says "go" — so reference tool names by name in the plan when a
+// step needs one. Earlier drafts only said "tools are disabled" without
+// the "but they exist for execution" half, and the model dutifully
+// wrote plans that didn't reference any tools (including delegate_task,
+// which is exactly the tool we wrote to make these plans work). The
+// model also gets a tool catalog injected as a separate system message
+// so it has the full surface to reference, not just whatever it
+// remembers from the global system prompt.
 func planModeNudge() string {
 	return "# PLAN MODE — output a plan only\n\n" +
 		"The user has switched on plan mode for this message. They want " +
 		"to see what you intend to do BEFORE any real work happens.\n\n" +
-		"Tools are DISABLED for this response — do not attempt to call " +
-		"any tool, it will fail. Produce no code, no tool output, no " +
-		"sample results.\n\n" +
-		"Output a numbered plan with 3-7 steps. Each step is one " +
-		"sentence describing a concrete action (e.g. \"Step 1: Fetch " +
-		"moclaw.ai's homepage and pricing page to extract product " +
-		"positioning\"). Group related micro-actions into a single step " +
-		"— a plan is a roadmap, not a transcript.\n\n" +
+		"Tools are DISABLED for this response only — do not attempt to call " +
+		"any tool, it will fail. They WILL be available on the next turn " +
+		"when the user replies (the available set is listed in the tool " +
+		"catalog system message). Reference tool names by name in the " +
+		"plan so the execution turn knows what you intend to invoke at " +
+		"each step.\n\n" +
+		"For multi-chunk fan-out work (find N leads in K categories, " +
+		"summarize each of M docs, draft P emails, etc.) explicitly plan " +
+		"to use `delegate_task` and write out the per-call task scope. " +
+		"That's the only way the execution turn stays inside its " +
+		"iteration budget; trying to do all of it directly will burn the " +
+		"cap on exploration and never reach synthesis.\n\n" +
+		"Output a numbered plan with 3-7 steps. Each step is one or two " +
+		"sentences describing the action plus the tool you'll use, e.g. " +
+		"\"Step 3: Use `delegate_task` to find 10 solo insurance agents in " +
+		"the US Sun Belt — owner-operated, mobile-phone preferred. " +
+		"Expected output: a markdown table.\". Group related micro-" +
+		"actions into a single step — a plan is a roadmap, not a " +
+		"transcript.\n\n" +
 		"End with exactly one line: \"Reply with 'go' to execute, or " +
 		"tell me what to change.\"\n\n" +
 		"Do not start the work. Do not apologize for needing a plan. " +
 		"Just the plan."
+}
+
+// buildToolCatalogForPlan builds a compact "what tools are available
+// for the execution turn" reference, injected as its own system message
+// during plan mode. We pass tools=nil to the LLM in plan mode so the
+// model can't accidentally call any — but that also means the model
+// can't *see* the tool registry at all, which empirically caused it to
+// write plans that omitted delegate_task entirely (it didn't know the
+// tool existed). The catalog brings that knowledge back as plain text
+// without surfacing a callable schema.
+//
+// Format: name + first-sentence summary, one per line. Truncate long
+// descriptions hard — the model only needs enough to decide whether
+// the tool fits a plan step, not enough to construct the call.
+func buildToolCatalogForPlan(toolDefs []provider.Tool) string {
+	if len(toolDefs) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("# Tool catalog (reference only — tools are disabled THIS turn, available next turn)\n\n")
+	b.WriteString("When your plan needs one of these, name it explicitly in the relevant step.\n\n")
+	for _, t := range toolDefs {
+		name := t.Function.Name
+		desc := strings.TrimSpace(t.Function.Description)
+		// First sentence only — keep the catalog scannable. Fall back to
+		// the first 160 chars if no period is found (some tool descs are
+		// run-on paragraphs).
+		if idx := strings.IndexAny(desc, ".\n"); idx > 0 && idx < 200 {
+			desc = strings.TrimSpace(desc[:idx])
+		} else if len(desc) > 200 {
+			desc = strings.TrimSpace(desc[:200]) + "…"
+		}
+		fmt.Fprintf(&b, "- `%s` — %s\n", name, desc)
+	}
+	return b.String()
 }
 
 // handlePlanMode is the single-shot plan-only path: store the user
@@ -878,9 +927,20 @@ func (a *Agent) handlePlanMode(ctx context.Context, msg bus.InboundMessage) stri
 	}
 
 	systemPrompt := a.ctxBuilder.BuildSystemPrompt()
+	// Tool catalog injection: plan mode passes tools=nil to the LLM so
+	// it can't accidentally call anything, but that also hides the
+	// registry from the planning model. Without this, plans were written
+	// as if delegate_task / web_search / camoufox-cli didn't exist —
+	// which defeated the whole point of having Plan mode set up fan-out
+	// work for the execution turn.
+	toolDefs := a.registry.Definitions()
+	catalog := buildToolCatalogForPlan(toolDefs)
 	messages := []provider.Message{
 		{Role: "system", Content: systemPrompt},
 		{Role: "system", Content: planModeNudge()},
+	}
+	if catalog != "" {
+		messages = append(messages, provider.Message{Role: "system", Content: catalog})
 	}
 	messages = append(messages, sess.GetMessages()...)
 	if a.piiScrubEnabled {
