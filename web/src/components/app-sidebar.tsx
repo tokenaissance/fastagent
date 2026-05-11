@@ -27,6 +27,7 @@ import {
   SettingsIcon,
   SparklesIcon,
   UsersIcon,
+  WrenchIcon,
 } from "lucide-react";
 import {
   getAgent,
@@ -73,6 +74,7 @@ const ADMIN_NAV: NavItem[] = [
   { title: "Agents", url: "/agents/", icon: BotIcon },
   { title: "Models", url: "/models/", icon: BrainIcon },
   { title: "Skills", url: "/skills/", icon: SparklesIcon },
+  { title: "Tools", url: "/tools/", icon: WrenchIcon },
   { title: "Users", url: "/admin/users/", icon: UsersIcon },
   { title: "API Keys", url: "/apikeys/", icon: KeyRoundIcon },
   { title: "Settings", url: "/settings/", icon: SettingsIcon },
