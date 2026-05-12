@@ -20,25 +20,31 @@ import (
 // a (channel, accountID, chatID) triple. session_key is the per-session
 // opaque id; the triple identifies "where" the conversation lives.
 type Session struct {
-	mu                sync.Mutex
-	Messages          []provider.Message
-	LastConsolidated  int // index of last consolidated message
-	filePath          string
-	snapshot          []provider.Message // undo snapshot
-	store             SessionStore
-	userID            string
-	agentID           string
-	sessionKey        string
-	channel           string
-	accountID         string
-	chatID            string
+	mu               sync.Mutex
+	Messages         []provider.Message
+	LastConsolidated int // index of last consolidated message
+	filePath         string
+	snapshot         []provider.Message // undo snapshot
+	store            SessionStore
+	userID           string
+	agentID          string
+	sessionKey       string
+	channel          string
+	accountID        string
+	chatID           string
 	// projectID, when non-empty, is stamped on every SaveSession write
 	// for this session. Set on the FIRST turn of a brand-new chat that
 	// arrived with a project hint (URL `?project=<pid>`); for existing
 	// rows it's read back via Manager.Get and late-bound here so the
 	// next save preserves it.
-	projectID         string
+	projectID string
 }
+
+// SessionKey returns the opaque session_key this Session is bound to.
+// Exposed so per-turn plumbing (e.g. the tool registry binding for
+// goal-scoped tools) can address the right row without re-resolving
+// the (channel, account, chat) quadruple every time.
+func (s *Session) SessionKey() string { return s.sessionKey }
 
 // ctx returns a context tagged with this Session's user so the store layer
 // can scope SQL by user_id. Falls back to context.Background() when no
@@ -548,11 +554,11 @@ type WebSession struct {
 	// ProjectID groups this chat under a per-(user, agent) project
 	// folder. Empty = loose chat. Surfaced so the sidebar can section
 	// chats by project.
-	ProjectID    string `json:"projectId,omitempty"`
-	Title        string `json:"title"`
-	Preview      string `json:"preview"`
-	CreatedAt    int64  `json:"createdAt"` // unix ms
-	UpdatedAt    int64  `json:"updatedAt"` // unix ms
+	ProjectID string `json:"projectId,omitempty"`
+	Title     string `json:"title"`
+	Preview   string `json:"preview"`
+	CreatedAt int64  `json:"createdAt"` // unix ms
+	UpdatedAt int64  `json:"updatedAt"` // unix ms
 	// ThumbnailURL is the first image_url attached to the FIRST user
 	// turn of the session, surfaced so the sidebar can show "image +
 	// text" instead of just the text label for multimodal chats.

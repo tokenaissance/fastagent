@@ -1128,6 +1128,11 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	// wired) the executor used by exec/read_file/list_dir is tied to a
 	// session-private container.
 	a.bindSession(ctx, msg.Channel, msg.ChatID, msg.ProjectID)
+	// Plumb the persistent session_key for goal-scoped tools.
+	// SetSessionID above uses msg.ChatID (the channel-level chat
+	// identifier); goal tools need the durable session.Session.SessionKey
+	// to address rows in agent_goals.
+	a.registry.SetGoalSessionKey(sess.SessionKey())
 
 	// Safety net for client-aborted turns: if the loop exits with a
 	// tool_use that never got its matching tool_result appended (the
@@ -1709,6 +1714,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 	a.refreshSkillsFromStore(chatterUID)
 	sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID, msg.ProjectID)
 	a.bindSession(ctx, msg.Channel, msg.ChatID, msg.ProjectID)
+	a.registry.SetGoalSessionKey(sess.SessionKey())
 
 	// Same orphan-tool_use safety net as HandleMessage. The streaming path
 	// previously lacked this, so loop detection (which appends an assistant

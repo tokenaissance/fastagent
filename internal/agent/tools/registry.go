@@ -79,6 +79,13 @@ type Registry struct {
 	// reminder lands in the right web/Telegram/Discord thread.
 	messageChannel string
 	messageChatID  string
+	// goalSessionKey is the persistent session_key (session.Session's
+	// opaque identifier) for the in-flight turn — distinct from
+	// sessionID above, which is just the channel's chatID. Goal tools
+	// look up the active goal by (agentID, goalSessionKey), so an
+	// empty value means "no goal context plumbed; tools error out".
+	// Set per-turn by the agent loop via SetGoalSessionKey.
+	goalSessionKey string
 	// systemFileStore is the optional durable store for identity files
 	// (SOUL.md, IDENTITY.md, USER.md, MEMORY.md, ...). In cloud/K8s
 	// deployments Server.readIdentityFile / writeIdentityFile go through
@@ -275,6 +282,17 @@ func (r *Registry) MessageChannel() string { return r.messageChannel }
 // MessageChatID returns the chat/session id of the in-flight turn,
 // or "" if not set.
 func (r *Registry) MessageChatID() string { return r.messageChatID }
+
+// SetGoalSessionKey records the persistent session_key for the
+// in-flight turn so goal tools (get_goal / create_goal / update_goal)
+// can address the right row. Called by the agent loop right after
+// resolving the session.
+func (r *Registry) SetGoalSessionKey(key string) { r.goalSessionKey = key }
+
+// GoalSessionKey returns the persistent session_key of the in-flight
+// turn. Empty when the turn happened outside a chat context (e.g.
+// agent boot) — goal tools treat that as "no goal can exist here".
+func (r *Registry) GoalSessionKey() string { return r.goalSessionKey }
 
 type registeredTool struct {
 	def    provider.Tool
