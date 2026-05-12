@@ -9,10 +9,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
-	_ "github.com/lib/pq"          // PostgreSQL driver
-	_ "modernc.org/sqlite"         // SQLite driver (pure Go)
+	_ "github.com/lib/pq"  // PostgreSQL driver
+	_ "modernc.org/sqlite" // SQLite driver (pure Go)
 )
 
 // DBStore implements Store using a SQL database (PostgreSQL or SQLite).
@@ -426,7 +427,7 @@ func (d *DBStore) migrateCronJobsAddUserID(ctx context.Context) error {
 // `<channel>_<chatID>` convention (web_<sid>, wechat_<openid>, …), so the
 // backfill splits on the first underscore. account_id has no historical
 // source — pre-feature installs only ran one bot per channel anyway, so
-// leaving it '' is correct for those rows. New sessions written after
+// leaving it ” is correct for those rows. New sessions written after
 // this migration always populate the full triple explicitly.
 func (d *DBStore) migrateSessionsAddChannelTriple(ctx context.Context) error {
 	has, err := d.tableHasColumn(ctx, "sessions", "channel")
@@ -621,14 +622,14 @@ func (d *DBStore) migrateUsersAppUserCols(ctx context.Context) error {
 	return nil
 }
 
-// migrateAgentFilesDropTemplate clears the legacy user_id='' template
+// migrateAgentFilesDropTemplate clears the legacy user_id=” template
 // rows from agent_files. Each row is reparented to the agent's owner
 // when no per-user row already exists for that (agent_id, filename) —
 // preserves existing content as the owner's personal copy. After this
 // pass the table holds (agent_id, real_user_id, filename) tuples only;
 // any "shared SOUL.md across all users" use case should live in a local
 // FS file at <agent_home>/<name>, which the runtime falls back to.
-// Idempotent: re-runs find no user_id='' rows and exit clean.
+// Idempotent: re-runs find no user_id=” rows and exit clean.
 func (d *DBStore) migrateAgentFilesDropTemplate(ctx context.Context) error {
 	rows, err := d.db.QueryContext(ctx,
 		`SELECT agent_files.agent_id, agent_files.filename, agent_files.content, agents.user_id
@@ -1224,6 +1225,35 @@ func (d *DBStore) migrationSQL() []string {
 			PRIMARY KEY (user_id, agent_id, project_id)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_projects_listing ON projects (user_id, agent_id, updated_at DESC)`,
+		// agent_goals backs the /goal feature: one persistent objective
+		// per (agent, session). The UNIQUE (agent_id, session_key)
+		// constraint is the source of truth for "this session already
+		// has a goal" — CreateGoal translates the conflict into
+		// ErrGoalAlreadyExists.
+		//
+		// last_accounted_token_usage is JSONB-style: stored as TEXT for
+		// SQLite compatibility, decoded into agent.TokenUsage by the
+		// callers. Keeping it opaque means the goal_token_delta math
+		// can grow new usage fields without a schema bump.
+		`CREATE TABLE IF NOT EXISTS agent_goals (
+			id TEXT PRIMARY KEY,
+			agent_id TEXT NOT NULL,
+			session_key TEXT NOT NULL,
+			owner_user_id TEXT NOT NULL,
+			objective TEXT NOT NULL,
+			status TEXT NOT NULL DEFAULT 'active',
+			token_budget BIGINT,
+			tokens_used BIGINT NOT NULL DEFAULT 0,
+			last_accounted_token_usage TEXT NOT NULL DEFAULT '',
+			time_used_seconds BIGINT NOT NULL DEFAULT 0,
+			last_accounted_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			safety_max_iterations INTEGER NOT NULL DEFAULT 100,
+			iterations INTEGER NOT NULL DEFAULT 0,
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_goals_session ON agent_goals (agent_id, session_key)`,
+		`CREATE INDEX IF NOT EXISTS idx_agent_goals_owner ON agent_goals (owner_user_id, status, updated_at DESC)`,
 	}
 }
 
@@ -2682,6 +2712,190 @@ func scanCronJobs(rows *sql.Rows) ([]CronJobRecord, error) {
 		jobs = append(jobs, j)
 	}
 	return jobs, rows.Err()
+}
+
+// --- Agent goals ---
+//
+// All goal columns ride together on every CRUD path — there's no
+// partial-update API beyond UpdateGoalObjective. Mutations are
+// expected to happen via "read, mutate domain object, write back",
+// not via a bag of field updates. Keeps GoalRuntime's accounting
+// logic in Go rather than scattered across UPDATE … SET fragments.
+const goalSelectCols = `id, agent_id, session_key, owner_user_id, objective, status, token_budget, tokens_used, last_accounted_token_usage, time_used_seconds, last_accounted_at, safety_max_iterations, iterations, created_at, updated_at`
+
+func (d *DBStore) CreateGoal(ctx context.Context, g *GoalRecord) error {
+	if g.AgentID == "" || g.SessionKey == "" {
+		return errors.New("store: goal.agent_id and session_key are required")
+	}
+	if g.OwnerUserID == "" {
+		return errors.New("store: goal.owner_user_id is required")
+	}
+	now := time.Now().UTC()
+	if g.CreatedAt.IsZero() {
+		g.CreatedAt = now
+	}
+	if g.UpdatedAt.IsZero() {
+		g.UpdatedAt = now
+	}
+	if g.LastAccountedAt.IsZero() {
+		g.LastAccountedAt = now
+	}
+	if g.Status == "" {
+		g.Status = "active"
+	}
+	if g.SafetyMaxIterations == 0 {
+		g.SafetyMaxIterations = 100
+	}
+	usage := string(g.LastAccountedTokenUsage)
+	_, err := d.db.ExecContext(ctx,
+		fmt.Sprintf(`INSERT INTO agent_goals (id, agent_id, session_key, owner_user_id, objective, status, token_budget, tokens_used, last_accounted_token_usage, time_used_seconds, last_accounted_at, safety_max_iterations, iterations, created_at, updated_at)
+			VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)`,
+			d.ph(1), d.ph(2), d.ph(3), d.ph(4), d.ph(5), d.ph(6), d.ph(7), d.ph(8), d.ph(9), d.ph(10), d.ph(11), d.ph(12), d.ph(13), d.ph(14), d.ph(15)),
+		g.ID, g.AgentID, g.SessionKey, g.OwnerUserID, g.Objective, g.Status,
+		g.TokenBudget, g.TokensUsed, usage, g.TimeUsedSeconds, g.LastAccountedAt,
+		g.SafetyMaxIterations, g.Iterations, g.CreatedAt, g.UpdatedAt)
+	if err != nil {
+		if isUniqueViolation(err) {
+			return ErrGoalAlreadyExists
+		}
+		return err
+	}
+	return nil
+}
+
+func (d *DBStore) GetGoalBySession(ctx context.Context, agentID, sessionKey string) (*GoalRecord, error) {
+	row := d.db.QueryRowContext(ctx,
+		fmt.Sprintf(`SELECT `+goalSelectCols+` FROM agent_goals WHERE agent_id = %s AND session_key = %s`,
+			d.ph(1), d.ph(2)),
+		agentID, sessionKey)
+	return scanGoal(row)
+}
+
+func (d *DBStore) GetGoalByID(ctx context.Context, goalID string) (*GoalRecord, error) {
+	row := d.db.QueryRowContext(ctx,
+		fmt.Sprintf(`SELECT `+goalSelectCols+` FROM agent_goals WHERE id = %s`, d.ph(1)),
+		goalID)
+	return scanGoal(row)
+}
+
+func (d *DBStore) UpdateGoal(ctx context.Context, g *GoalRecord) error {
+	if g.ID == "" {
+		return errors.New("store: goal.id is required for UpdateGoal")
+	}
+	g.UpdatedAt = time.Now().UTC()
+	usage := string(g.LastAccountedTokenUsage)
+	res, err := d.db.ExecContext(ctx,
+		fmt.Sprintf(`UPDATE agent_goals
+			SET status = %s, token_budget = %s, tokens_used = %s, last_accounted_token_usage = %s,
+				time_used_seconds = %s, last_accounted_at = %s, iterations = %s,
+				safety_max_iterations = %s, updated_at = %s
+			WHERE id = %s`,
+			d.ph(1), d.ph(2), d.ph(3), d.ph(4), d.ph(5), d.ph(6), d.ph(7), d.ph(8), d.ph(9), d.ph(10)),
+		g.Status, g.TokenBudget, g.TokensUsed, usage,
+		g.TimeUsedSeconds, g.LastAccountedAt, g.Iterations,
+		g.SafetyMaxIterations, g.UpdatedAt, g.ID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (d *DBStore) UpdateGoalObjective(ctx context.Context, goalID, objective string) error {
+	res, err := d.db.ExecContext(ctx,
+		fmt.Sprintf(`UPDATE agent_goals SET objective = %s, updated_at = %s WHERE id = %s`,
+			d.ph(1), d.ph(2), d.ph(3)),
+		objective, time.Now().UTC(), goalID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (d *DBStore) DeleteGoal(ctx context.Context, goalID string) error {
+	_, err := d.db.ExecContext(ctx,
+		fmt.Sprintf(`DELETE FROM agent_goals WHERE id = %s`, d.ph(1)), goalID)
+	return err
+}
+
+func (d *DBStore) ListGoalsByOwner(ctx context.Context, ownerUserID string, limit int) ([]GoalRecord, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := d.db.QueryContext(ctx,
+		fmt.Sprintf(`SELECT `+goalSelectCols+` FROM agent_goals WHERE owner_user_id = %s ORDER BY updated_at DESC LIMIT %s`,
+			d.ph(1), d.ph(2)),
+		ownerUserID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []GoalRecord
+	for rows.Next() {
+		g, err := scanGoalFromRows(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *g)
+	}
+	return out, rows.Err()
+}
+
+// scanGoal reads one row (from QueryRow) into a GoalRecord. Returns
+// ErrNotFound (via scanErr) when the query matched nothing.
+func scanGoal(row *sql.Row) (*GoalRecord, error) {
+	var g GoalRecord
+	var tokenBudget sql.NullInt64
+	if err := row.Scan(&g.ID, &g.AgentID, &g.SessionKey, &g.OwnerUserID, &g.Objective, &g.Status,
+		&tokenBudget, &g.TokensUsed, &g.LastAccountedTokenUsage, &g.TimeUsedSeconds,
+		&g.LastAccountedAt, &g.SafetyMaxIterations, &g.Iterations, &g.CreatedAt, &g.UpdatedAt); err != nil {
+		return nil, scanErr(err)
+	}
+	if tokenBudget.Valid {
+		g.TokenBudget = &tokenBudget.Int64
+	}
+	return &g, nil
+}
+
+func scanGoalFromRows(rows *sql.Rows) (*GoalRecord, error) {
+	var g GoalRecord
+	var tokenBudget sql.NullInt64
+	if err := rows.Scan(&g.ID, &g.AgentID, &g.SessionKey, &g.OwnerUserID, &g.Objective, &g.Status,
+		&tokenBudget, &g.TokensUsed, &g.LastAccountedTokenUsage, &g.TimeUsedSeconds,
+		&g.LastAccountedAt, &g.SafetyMaxIterations, &g.Iterations, &g.CreatedAt, &g.UpdatedAt); err != nil {
+		return nil, err
+	}
+	if tokenBudget.Valid {
+		g.TokenBudget = &tokenBudget.Int64
+	}
+	return &g, nil
+}
+
+// isUniqueViolation reports whether err is a UNIQUE-constraint
+// violation in either Postgres (SQLSTATE 23505) or SQLite (substring
+// "UNIQUE constraint failed"). Both drivers expose enough detail in
+// the error text to identify this without importing driver packages.
+func isUniqueViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	// Postgres lib/pq surfaces "pq: duplicate key value violates unique constraint"
+	if strings.Contains(msg, "duplicate key value") {
+		return true
+	}
+	// modernc.org/sqlite reports "UNIQUE constraint failed: <table>.<col>"
+	if strings.Contains(msg, "UNIQUE constraint failed") {
+		return true
+	}
+	return false
 }
 
 var _ Store = (*DBStore)(nil)

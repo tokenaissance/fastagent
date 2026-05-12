@@ -195,8 +195,30 @@ type Store interface {
 	// next job is due instead of polling.
 	GetNextDueTime(ctx context.Context) (time.Time, error)
 
+	// --- Goals (per agent × session) ---
+	//
+	// At most one row per (agent_id, session_key); enforced by a
+	// UNIQUE index. CreateGoal returns ErrGoalAlreadyExists when the
+	// pair is taken; callers must DeleteGoal first to start a new one.
+	CreateGoal(ctx context.Context, g *GoalRecord) error
+	GetGoalBySession(ctx context.Context, agentID, sessionKey string) (*GoalRecord, error)
+	GetGoalByID(ctx context.Context, goalID string) (*GoalRecord, error)
+	// UpdateGoal writes mutable fields back. Caller-immutable fields
+	// (ID, AgentID, SessionKey, OwnerUserID, Objective, CreatedAt) are
+	// ignored — Objective edits go through UpdateGoalObjective so the
+	// runtime can fire the objective_updated continuation.
+	UpdateGoal(ctx context.Context, g *GoalRecord) error
+	UpdateGoalObjective(ctx context.Context, goalID, objective string) error
+	DeleteGoal(ctx context.Context, goalID string) error
+	ListGoalsByOwner(ctx context.Context, ownerUserID string, limit int) ([]GoalRecord, error)
+
 	Close() error
 }
+
+// ErrGoalAlreadyExists is returned by CreateGoal when the
+// (agent_id, session_key) UNIQUE constraint trips. Callers translate
+// this to a user-visible "clear the existing goal first" error.
+var ErrGoalAlreadyExists = errors.New("goal already exists for this session")
 
 // UserRecord is one row of the users table.
 //
@@ -207,15 +229,15 @@ type Store interface {
 // identifier (free-form). Together they give each external end-user a
 // stable fastclaw user_id without anyone logging in.
 type UserRecord struct {
-	ID           string    `json:"id"`
-	Username     string    `json:"username"`
-	Email        string    `json:"email"`
-	PasswordHash string    `json:"-"`
-	DisplayName  string    `json:"displayName,omitempty"`
-	Role         string    `json:"role"`   // "super_admin" | "user" | "app_user"
-	Status       string    `json:"status"` // "active" | "disabled"
-	APIKeyID     string    `json:"apikeyId,omitempty"`
-	ExternalID   string    `json:"externalId,omitempty"`
+	ID           string `json:"id"`
+	Username     string `json:"username"`
+	Email        string `json:"email"`
+	PasswordHash string `json:"-"`
+	DisplayName  string `json:"displayName,omitempty"`
+	Role         string `json:"role"`   // "super_admin" | "user" | "app_user"
+	Status       string `json:"status"` // "active" | "disabled"
+	APIKeyID     string `json:"apikeyId,omitempty"`
+	ExternalID   string `json:"externalId,omitempty"`
 	// AvatarURL is a self-contained data: URL ("data:image/png;base64,...")
 	// stored inline to avoid a separate blob path. Cap is enforced by the
 	// handler at write time (256KB by default). Empty means "no avatar"
@@ -293,9 +315,9 @@ type AgentRecord struct {
 // move once it's created. Multiple session rows can share the same
 // triple; the active one for IM routing is resolved by max(updated_at).
 type SessionRecord struct {
-	Channel   string           `json:"channel,omitempty"`
-	AccountID string           `json:"accountId,omitempty"`
-	ChatID    string           `json:"chatId,omitempty"`
+	Channel   string `json:"channel,omitempty"`
+	AccountID string `json:"accountId,omitempty"`
+	ChatID    string `json:"chatId,omitempty"`
 	// ProjectID groups sessions sharing a workspace folder; empty =
 	// loose chat (each session gets its own per-chat sandbox dir).
 	// Like the channel triple it's persisted on INSERT only and
@@ -376,10 +398,10 @@ const (
 //   - kind says which family this row belongs to
 //   - (user_id, agent_id) says who owns it; the empty-string defaults
 //     give us four natural ownership levels:
-//       ('', '')   = system / global
-//       (X, '')    = user X's private config
-//       ('', Y)    = agent Y's "official" config (anyone using Y inherits)
-//       (X, Y)     = user X's per-agent override on agent Y (multi-tenant)
+//     (”, ”)   = system / global
+//     (X, ”)    = user X's private config
+//     (”, Y)    = agent Y's "official" config (anyone using Y inherits)
+//     (X, Y)     = user X's per-agent override on agent Y (multi-tenant)
 //   - name is the lookup handle inside that family (provider key,
 //     channel type, or setting namespace)
 //   - data is the family-specific JSON payload
@@ -452,6 +474,38 @@ func (r ConfigRecord) LegacyScopeID() string {
 	}
 }
 
+// GoalRecord is the persisted shape of a /goal target. One per
+// (agent, session) — UNIQUE index enforces it. See
+// internal/agent/goal for the domain type and rationale.
+type GoalRecord struct {
+	ID          string `json:"id"`
+	AgentID     string `json:"agentId"`
+	SessionKey  string `json:"sessionKey"`
+	OwnerUserID string `json:"ownerUserId"`
+
+	Objective string `json:"objective"`
+	Status    string `json:"status"` // active | paused | budget_limited | complete
+
+	// TokenBudget is nil for unbounded goals. Stored as a nullable
+	// BIGINT column.
+	TokenBudget *int64 `json:"tokenBudget,omitempty"`
+	TokensUsed  int64  `json:"tokensUsed"`
+
+	// LastAccountedTokenUsage is the cumulative SDK Usage at the moment
+	// we last folded a delta into TokensUsed. Stored as JSONB so we
+	// don't have to bump the schema every time the SDK grows a new
+	// usage field.
+	LastAccountedTokenUsage []byte `json:"lastAccountedTokenUsage,omitempty"`
+
+	TimeUsedSeconds int64     `json:"timeUsedSeconds"`
+	LastAccountedAt time.Time `json:"lastAccountedAt"`
+
+	SafetyMaxIterations int `json:"safetyMaxIterations"`
+	Iterations          int `json:"iterations"`
+
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
+}
 
 // CronJobRecord holds a scheduled job. agent_id is mandatory; user_id is
 // also stored so "list a user's crons" doesn't need a join against
@@ -478,7 +532,6 @@ type CronJobRecord struct {
 	FailureCount int       `json:"failureCount,omitempty"`
 	CreatedAt    time.Time `json:"createdAt"`
 }
-
 
 // StorageType identifies the storage backend.
 type StorageType string
