@@ -39,6 +39,7 @@ func (a *StoreAdapter) GetSession(ctx context.Context, agentID, sessionKey strin
 			Metadata:     m.Metadata,
 			Thinking:     m.Thinking,
 			RawAssistant: m.RawAssistant,
+			Origin:       m.Origin,
 		}
 		// ToolCalls / ContentParts are stored as interface{} so a
 		// JSON round-trip leaves them as []interface{} / map nests.
@@ -163,6 +164,7 @@ func sessionMessageFromProvider(m provider.Message) store.SessionMessage {
 		Timestamp:    time.Now(),
 		Thinking:     m.Thinking,
 		RawAssistant: m.RawAssistant,
+		Origin:       m.Origin,
 	}
 	if len(m.ToolCalls) > 0 {
 		out.ToolCalls = m.ToolCalls
@@ -186,6 +188,7 @@ func providerMessageFromStored(m store.SessionMessage) provider.Message {
 		Metadata:     m.Metadata,
 		Thinking:     m.Thinking,
 		RawAssistant: m.RawAssistant,
+		Origin:       m.Origin,
 	}
 	if m.ToolCalls != nil {
 		if raw, err := json.Marshal(m.ToolCalls); err == nil {

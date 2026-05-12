@@ -339,6 +339,11 @@ type SessionMessage struct {
 	Timestamp    time.Time              `json:"timestamp"`
 	Thinking     string                 `json:"thinking,omitempty"`
 	RawAssistant json.RawMessage        `json:"rawAssistant,omitempty"`
+	// Origin mirrors provider.Message.Origin — empty for genuine user
+	// / assistant messages, non-empty for runtime-injected ones
+	// (currently only "goal_context"). Stored as a column on
+	// session_messages (see migrateSessionMessagesAddOrigin).
+	Origin string `json:"origin,omitempty"`
 }
 
 // SessionEventRecord is one row of session_events — a single delta the

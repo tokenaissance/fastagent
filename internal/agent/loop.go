@@ -516,6 +516,13 @@ func (a *Agent) WebChatHistory(sessionId string) []map[string]any {
 	msgs := sess.ArchivedMessages()
 	var history []map[string]any
 	for _, m := range msgs {
+		// Hide runtime-injected messages (currently only goal_context
+		// continuations). They live in the session for the LLM's
+		// benefit; surfacing them to the user would expose audit
+		// scaffolding the user never typed.
+		if m.Origin != provider.OriginUser {
+			continue
+		}
 		switch m.Role {
 		case "user":
 			// Multimodal user turns store text inside ContentParts and
@@ -1634,9 +1641,14 @@ func padOrphanToolResults(sess *session.Session) {
 func (a *Agent) runPostTurn(ctx context.Context, msg bus.InboundMessage, messages []provider.Message, toolCallCount int) {
 	a.turnCount++
 
-	// Index user/assistant messages in FTS
+	// Index user/assistant messages in FTS. Skip runtime-injected
+	// messages (e.g. goal_context continuations) — they're synthetic
+	// audit prompts, not searchable conversation content.
 	if a.ftsStore != nil {
 		for _, m := range messages {
+			if m.Origin != provider.OriginUser {
+				continue
+			}
 			if m.Role == "user" || m.Role == "assistant" {
 				_ = a.ftsStore.Index(a.name, "", m.Role, m.Content, time.Now())
 			}

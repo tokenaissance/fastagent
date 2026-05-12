@@ -126,6 +126,29 @@ func (d *DBStore) Migrate(ctx context.Context) error {
 	if err := d.migrateSessionsAddProjectID(ctx); err != nil {
 		return fmt.Errorf("migrate sessions.project_id: %w", err)
 	}
+	if err := d.migrateSessionMessagesAddOrigin(ctx); err != nil {
+		return fmt.Errorf("migrate session_messages.origin: %w", err)
+	}
+	return nil
+}
+
+// migrateSessionMessagesAddOrigin retrofits the origin column onto
+// legacy session_messages tables. Empty default = pre-existing user /
+// assistant messages keep working unchanged. Non-empty marks runtime-
+// injected rows (currently only "goal_context") so the WebChatHistory
+// reader can skip them. Idempotent.
+func (d *DBStore) migrateSessionMessagesAddOrigin(ctx context.Context) error {
+	has, err := d.tableHasColumn(ctx, "session_messages", "origin")
+	if err != nil {
+		return err
+	}
+	if has {
+		return nil
+	}
+	if _, err := d.db.ExecContext(ctx,
+		`ALTER TABLE session_messages ADD COLUMN origin TEXT NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("add column: %w", err)
+	}
 	return nil
 }
 
@@ -1098,6 +1121,11 @@ func (d *DBStore) migrationSQL() []string {
 			metadata TEXT NOT NULL DEFAULT '',
 			thinking TEXT NOT NULL DEFAULT '',
 			raw_assistant TEXT NOT NULL DEFAULT '',
+			-- origin marks runtime-injected rows (currently only
+			-- "goal_context"). Empty = real user / assistant exchange.
+			-- WebChatHistory + FTS skip non-empty origin to keep
+			-- synthetic prompts out of user-visible / searchable views.
+			origin TEXT NOT NULL DEFAULT '',
 			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			PRIMARY KEY (user_id, agent_id, session_key, seq)
 		)`,
@@ -1889,24 +1917,24 @@ func (d *DBStore) AppendSessionMessage(ctx context.Context, userID, agentID, ses
 	if d.dialect == "postgres" {
 		_, err := d.db.ExecContext(ctx,
 			`INSERT INTO session_messages
-				(user_id, agent_id, session_key, seq, role, content, content_parts, tool_calls, tool_call_id, name, metadata, thinking, raw_assistant, created_at)
-			SELECT $1, $2, $3, COALESCE(MAX(seq), -1) + 1, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
+				(user_id, agent_id, session_key, seq, role, content, content_parts, tool_calls, tool_call_id, name, metadata, thinking, raw_assistant, origin, created_at)
+			SELECT $1, $2, $3, COALESCE(MAX(seq), -1) + 1, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
 				FROM session_messages
 				WHERE user_id = $1 AND agent_id = $2 AND session_key = $3`,
 			userID, agentID, sessionKey,
 			msg.Role, msg.Content, string(contentParts), string(toolCalls),
-			msg.ToolCallID, msg.Name, string(metadata), msg.Thinking, rawAssistant, ts)
+			msg.ToolCallID, msg.Name, string(metadata), msg.Thinking, rawAssistant, msg.Origin, ts)
 		return err
 	}
 	_, err := d.db.ExecContext(ctx,
 		`INSERT INTO session_messages
-			(user_id, agent_id, session_key, seq, role, content, content_parts, tool_calls, tool_call_id, name, metadata, thinking, raw_assistant, created_at)
-		SELECT ?, ?, ?, COALESCE(MAX(seq), -1) + 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+			(user_id, agent_id, session_key, seq, role, content, content_parts, tool_calls, tool_call_id, name, metadata, thinking, raw_assistant, origin, created_at)
+		SELECT ?, ?, ?, COALESCE(MAX(seq), -1) + 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 			FROM session_messages
 			WHERE user_id = ? AND agent_id = ? AND session_key = ?`,
 		userID, agentID, sessionKey,
 		msg.Role, msg.Content, string(contentParts), string(toolCalls),
-		msg.ToolCallID, msg.Name, string(metadata), msg.Thinking, rawAssistant, ts,
+		msg.ToolCallID, msg.Name, string(metadata), msg.Thinking, rawAssistant, msg.Origin, ts,
 		userID, agentID, sessionKey)
 	return err
 }
@@ -2016,7 +2044,7 @@ func (d *DBStore) LatestSessionEventSeq(ctx context.Context, userID, agentID, se
 // to sessions.messages should check len() and decide.
 func (d *DBStore) ListSessionMessages(ctx context.Context, userID, agentID, sessionKey string) ([]SessionMessage, error) {
 	rows, err := d.db.QueryContext(ctx,
-		fmt.Sprintf(`SELECT role, content, content_parts, tool_calls, tool_call_id, name, metadata, thinking, raw_assistant, created_at
+		fmt.Sprintf(`SELECT role, content, content_parts, tool_calls, tool_call_id, name, metadata, thinking, raw_assistant, origin, created_at
 			FROM session_messages
 			WHERE user_id = %s AND agent_id = %s AND session_key = %s
 			ORDER BY seq ASC`, d.ph(1), d.ph(2), d.ph(3)),
@@ -2029,7 +2057,7 @@ func (d *DBStore) ListSessionMessages(ctx context.Context, userID, agentID, sess
 	for rows.Next() {
 		var m SessionMessage
 		var contentParts, toolCalls, metadata, rawAssistant string
-		if err := rows.Scan(&m.Role, &m.Content, &contentParts, &toolCalls, &m.ToolCallID, &m.Name, &metadata, &m.Thinking, &rawAssistant, &m.Timestamp); err != nil {
+		if err := rows.Scan(&m.Role, &m.Content, &contentParts, &toolCalls, &m.ToolCallID, &m.Name, &metadata, &m.Thinking, &rawAssistant, &m.Origin, &m.Timestamp); err != nil {
 			return nil, err
 		}
 		if contentParts != "" && contentParts != "null" {

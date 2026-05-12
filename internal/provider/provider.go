@@ -6,6 +6,16 @@ import (
 	"strings"
 )
 
+// Origin tags a Message that was produced by the runtime rather than a
+// real user / model exchange. Empty means "this came from the user
+// (or the model in response to the user)" — the common case. Hooks
+// that filter user-visible history or skip FTS indexing for runtime
+// inserts gate on this.
+const (
+	OriginUser        = "" // default — pre-existing producers stay correct without edits
+	OriginGoalContext = "goal_context"
+)
+
 // Message represents a chat message.
 // When storing in session, keep ALL fields exactly as returned by the LLM
 // to ensure prompt cache hits on subsequent turns.
@@ -30,6 +40,15 @@ type Message struct {
 	// parsed fields — guarantees prompt cache hits by maintaining byte-identical prefix.
 	// Only set on role="assistant" messages.
 	RawAssistant json.RawMessage `json:"_raw,omitempty"`
+
+	// Origin distinguishes runtime-injected messages from real user /
+	// assistant exchanges. Empty (OriginUser) is the default. Currently
+	// only OriginGoalContext is set, by the GoalRuntime continuation
+	// path. User-visible history (WebChatHistory) and the FTS index
+	// filter on this so synthetic prompts don't pollute either view.
+	// The field rides as part of the JSONB sessions.messages working
+	// set and as a column on the structured session_messages archive.
+	Origin string `json:"origin,omitempty"`
 }
 
 // TextContent returns the message's user-visible text. Falls back to
@@ -77,7 +96,7 @@ func StripAttachedPrefix(s string) string {
 
 // ContentPart represents a part of multimodal content.
 type ContentPart struct {
-	Type     string    `json:"type"`                // "text" or "image_url"
+	Type     string    `json:"type"` // "text" or "image_url"
 	Text     string    `json:"text,omitempty"`
 	ImageURL *ImageURL `json:"image_url,omitempty"`
 }
