@@ -125,9 +125,20 @@ func compressOlderMessages(messages []provider.Message, prov provider.Provider, 
 	cutoff := len(messages) - PruneTurnAge
 	olderMessages := messages[:cutoff]
 
-	// Build a text representation of older messages for summarization
+	// Build a text representation of older messages for summarization.
+	// Skip runtime-injected messages (currently only goal_context
+	// continuations): their content is synthetic audit scaffolding,
+	// not conversation worth summarizing — and the latest one is
+	// already preserved verbatim in the recent tail below, so the
+	// model never loses the current audit context. This is the
+	// pinned-head protection design §5.3 (b) calls for: old
+	// goal_context messages are dropped entirely from the
+	// compaction output; the live one rides through unchanged.
 	var text string
 	for _, m := range olderMessages {
+		if m.Origin != provider.OriginUser {
+			continue
+		}
 		text += fmt.Sprintf("[%s] %s\n", m.Role, m.Content)
 	}
 
