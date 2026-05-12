@@ -488,6 +488,13 @@ type GoalRecord struct {
 	SessionKey  string `json:"sessionKey"`
 	OwnerUserID string `json:"ownerUserId"`
 
+	// Routing tuple — see goal.Goal for the rationale. Continuations
+	// publish onto this address so the prompt lands in the right chat.
+	Channel   string `json:"channel,omitempty"`
+	AccountID string `json:"accountId,omitempty"`
+	ChatID    string `json:"chatId,omitempty"`
+	ProjectID string `json:"projectId,omitempty"`
+
 	Objective string `json:"objective"`
 	Status    string `json:"status"` // active | paused | budget_limited | complete
 

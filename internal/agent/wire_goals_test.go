@@ -141,3 +141,73 @@ func TestGoalManagerLifecycleAfterWire(t *testing.T) {
 // package — re-use that one). The compile-time check below catches
 // drift if the goal.Store interface grows.
 var _ goal.Store = (*memGoalStore)(nil)
+
+// TestGoalTriggerHookGatesOnUserSource: the PostTurn trigger must
+// fire only on genuine user turns. Otherwise a cron tick / sub-agent
+// spawn / runtime-injected goal_continuation would each trigger
+// another continuation and we'd loop forever.
+func TestGoalTriggerHookGatesOnUserSource(t *testing.T) {
+	a := newAgentForWireTest(t)
+	a.WireGoals(&memGoalStore{})
+	t.Cleanup(a.goalManager.Shutdown)
+
+	hook := a.goalTriggerHook(true)
+	// The trigger never directly creates work on the bus — it just
+	// pokes GoalManager.Ensure(). The observable side effect we can
+	// assert in a unit test is the ActiveCount on the manager: a
+	// non-user source must NOT create a runtime.
+	for _, src := range []string{
+		bus.SourceCron, bus.SourceHeartbeat, bus.SourceSubAgent, bus.SourceGoalContinuation,
+	} {
+		hook(t.Context(), &HookContext{
+			Source:         src,
+			GoalSessionKey: "s-source-test-" + src,
+		})
+	}
+	if got := a.goalManager.ActiveCount(); got != 0 {
+		t.Errorf("non-user-source hooks created %d runtimes, want 0", got)
+	}
+
+	// And the converse: a genuine user turn does create one.
+	hook(t.Context(), &HookContext{
+		Source:         bus.SourceUser,
+		GoalSessionKey: "s-user",
+	})
+	if got := a.goalManager.ActiveCount(); got != 1 {
+		t.Errorf("user-source hook created %d runtimes, want 1", got)
+	}
+}
+
+// TestGoalTriggerHookSkipsUpdateGoalTool: the AfterToolCall trigger
+// has to skip update_goal — by the time that fires, the goal is
+// Complete, so a continuation probe is wasted work. (Functionally
+// harmless because maybeContinue would no-op on a non-Active goal,
+// but the skip avoids ever spinning a runtime for a finished goal.)
+func TestGoalTriggerHookSkipsUpdateGoalTool(t *testing.T) {
+	a := newAgentForWireTest(t)
+	a.WireGoals(&memGoalStore{})
+	t.Cleanup(a.goalManager.Shutdown)
+
+	hook := a.goalTriggerHook(false /* AfterToolCall doesn't gate on source */)
+	hook(t.Context(), &HookContext{
+		ToolName:       "update_goal",
+		GoalSessionKey: "s-1",
+	})
+	if got := a.goalManager.ActiveCount(); got != 0 {
+		t.Errorf("update_goal tool should not produce a trigger; got %d runtimes", got)
+	}
+}
+
+// TestGoalTriggerHookNoOpWithoutSessionKey is the safety net for
+// boot-time / out-of-chat callbacks: no GoalSessionKey → no work.
+func TestGoalTriggerHookNoOpWithoutSessionKey(t *testing.T) {
+	a := newAgentForWireTest(t)
+	a.WireGoals(&memGoalStore{})
+	t.Cleanup(a.goalManager.Shutdown)
+
+	hook := a.goalTriggerHook(true)
+	hook(t.Context(), &HookContext{Source: bus.SourceUser, GoalSessionKey: ""})
+	if got := a.goalManager.ActiveCount(); got != 0 {
+		t.Errorf("empty session key should not create a runtime; got %d", got)
+	}
+}

@@ -129,6 +129,32 @@ func (d *DBStore) Migrate(ctx context.Context) error {
 	if err := d.migrateSessionMessagesAddOrigin(ctx); err != nil {
 		return fmt.Errorf("migrate session_messages.origin: %w", err)
 	}
+	if err := d.migrateAgentGoalsAddRouting(ctx); err != nil {
+		return fmt.Errorf("migrate agent_goals routing: %w", err)
+	}
+	return nil
+}
+
+// migrateAgentGoalsAddRouting retrofits channel/account_id/chat_id/
+// project_id onto legacy agent_goals tables. All four default to ''
+// — pre-existing rows had no continuation infrastructure attached
+// anyway, so the empty value just means "no routing recorded; can't
+// auto-continue this goal" and the GoalRuntime publish path bails
+// safely. Idempotent.
+func (d *DBStore) migrateAgentGoalsAddRouting(ctx context.Context) error {
+	for _, col := range []string{"channel", "account_id", "chat_id", "project_id"} {
+		has, err := d.tableHasColumn(ctx, "agent_goals", col)
+		if err != nil {
+			return err
+		}
+		if has {
+			continue
+		}
+		if _, err := d.db.ExecContext(ctx,
+			fmt.Sprintf(`ALTER TABLE agent_goals ADD COLUMN %s TEXT NOT NULL DEFAULT ''`, col)); err != nil {
+			return fmt.Errorf("add column %s: %w", col, err)
+		}
+	}
 	return nil
 }
 
@@ -1268,6 +1294,13 @@ func (d *DBStore) migrationSQL() []string {
 			agent_id TEXT NOT NULL,
 			session_key TEXT NOT NULL,
 			owner_user_id TEXT NOT NULL,
+			-- Routing tuple, stamped at create time so a continuation
+			-- can publish onto the same bus address the original turn
+			-- arrived on. Mirrors cron_jobs' channel/chat_id columns.
+			channel TEXT NOT NULL DEFAULT '',
+			account_id TEXT NOT NULL DEFAULT '',
+			chat_id TEXT NOT NULL DEFAULT '',
+			project_id TEXT NOT NULL DEFAULT '',
 			objective TEXT NOT NULL,
 			status TEXT NOT NULL DEFAULT 'active',
 			token_budget BIGINT,
@@ -2749,7 +2782,7 @@ func scanCronJobs(rows *sql.Rows) ([]CronJobRecord, error) {
 // expected to happen via "read, mutate domain object, write back",
 // not via a bag of field updates. Keeps GoalRuntime's accounting
 // logic in Go rather than scattered across UPDATE … SET fragments.
-const goalSelectCols = `id, agent_id, session_key, owner_user_id, objective, status, token_budget, tokens_used, last_accounted_token_usage, time_used_seconds, last_accounted_at, safety_max_iterations, iterations, created_at, updated_at`
+const goalSelectCols = `id, agent_id, session_key, owner_user_id, channel, account_id, chat_id, project_id, objective, status, token_budget, tokens_used, last_accounted_token_usage, time_used_seconds, last_accounted_at, safety_max_iterations, iterations, created_at, updated_at`
 
 func (d *DBStore) CreateGoal(ctx context.Context, g *GoalRecord) error {
 	if g.AgentID == "" || g.SessionKey == "" {
@@ -2776,10 +2809,12 @@ func (d *DBStore) CreateGoal(ctx context.Context, g *GoalRecord) error {
 	}
 	usage := string(g.LastAccountedTokenUsage)
 	_, err := d.db.ExecContext(ctx,
-		fmt.Sprintf(`INSERT INTO agent_goals (id, agent_id, session_key, owner_user_id, objective, status, token_budget, tokens_used, last_accounted_token_usage, time_used_seconds, last_accounted_at, safety_max_iterations, iterations, created_at, updated_at)
-			VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)`,
-			d.ph(1), d.ph(2), d.ph(3), d.ph(4), d.ph(5), d.ph(6), d.ph(7), d.ph(8), d.ph(9), d.ph(10), d.ph(11), d.ph(12), d.ph(13), d.ph(14), d.ph(15)),
-		g.ID, g.AgentID, g.SessionKey, g.OwnerUserID, g.Objective, g.Status,
+		fmt.Sprintf(`INSERT INTO agent_goals (id, agent_id, session_key, owner_user_id, channel, account_id, chat_id, project_id, objective, status, token_budget, tokens_used, last_accounted_token_usage, time_used_seconds, last_accounted_at, safety_max_iterations, iterations, created_at, updated_at)
+			VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)`,
+			d.ph(1), d.ph(2), d.ph(3), d.ph(4), d.ph(5), d.ph(6), d.ph(7), d.ph(8), d.ph(9), d.ph(10), d.ph(11), d.ph(12), d.ph(13), d.ph(14), d.ph(15), d.ph(16), d.ph(17), d.ph(18), d.ph(19)),
+		g.ID, g.AgentID, g.SessionKey, g.OwnerUserID,
+		g.Channel, g.AccountID, g.ChatID, g.ProjectID,
+		g.Objective, g.Status,
 		g.TokenBudget, g.TokensUsed, usage, g.TimeUsedSeconds, g.LastAccountedAt,
 		g.SafetyMaxIterations, g.Iterations, g.CreatedAt, g.UpdatedAt)
 	if err != nil {
@@ -2881,7 +2916,9 @@ func (d *DBStore) ListGoalsByOwner(ctx context.Context, ownerUserID string, limi
 func scanGoal(row *sql.Row) (*GoalRecord, error) {
 	var g GoalRecord
 	var tokenBudget sql.NullInt64
-	if err := row.Scan(&g.ID, &g.AgentID, &g.SessionKey, &g.OwnerUserID, &g.Objective, &g.Status,
+	if err := row.Scan(&g.ID, &g.AgentID, &g.SessionKey, &g.OwnerUserID,
+		&g.Channel, &g.AccountID, &g.ChatID, &g.ProjectID,
+		&g.Objective, &g.Status,
 		&tokenBudget, &g.TokensUsed, &g.LastAccountedTokenUsage, &g.TimeUsedSeconds,
 		&g.LastAccountedAt, &g.SafetyMaxIterations, &g.Iterations, &g.CreatedAt, &g.UpdatedAt); err != nil {
 		return nil, scanErr(err)
@@ -2895,7 +2932,9 @@ func scanGoal(row *sql.Row) (*GoalRecord, error) {
 func scanGoalFromRows(rows *sql.Rows) (*GoalRecord, error) {
 	var g GoalRecord
 	var tokenBudget sql.NullInt64
-	if err := rows.Scan(&g.ID, &g.AgentID, &g.SessionKey, &g.OwnerUserID, &g.Objective, &g.Status,
+	if err := rows.Scan(&g.ID, &g.AgentID, &g.SessionKey, &g.OwnerUserID,
+		&g.Channel, &g.AccountID, &g.ChatID, &g.ProjectID,
+		&g.Objective, &g.Status,
 		&tokenBudget, &g.TokensUsed, &g.LastAccountedTokenUsage, &g.TimeUsedSeconds,
 		&g.LastAccountedAt, &g.SafetyMaxIterations, &g.Iterations, &g.CreatedAt, &g.UpdatedAt); err != nil {
 		return nil, err

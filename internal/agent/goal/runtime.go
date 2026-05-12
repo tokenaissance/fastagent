@@ -2,6 +2,7 @@ package goal
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sync"
 	"time"
@@ -158,14 +159,30 @@ func (gr *GoalRuntime) markActivity() {
 	gr.accountingLock.Unlock()
 }
 
-// maybeContinue is the continuation entry point. Step 1 (this commit)
-// stubs it: log + record activity, exit without injecting anything.
-// Step 3 implements the full gate sequence (feature on, not plan-mode,
-// no queued input, goal status Active, then publish to bus.Inbound).
+// maybeContinue is the continuation entry point. Reads the current
+// goal, runs the gate cascade, and (on success) publishes a
+// continuation prompt onto the bus. The gates mirror Codex's
+// goal_continuation_candidate_if_active:
+//
+//   - continuationLock: try-acquire; collapse concurrent triggers
+//   - goal exists for this session
+//   - goal status is Active (BudgetLimited / Complete / Paused all
+//     no-op here; budget_limit publishes happen on the transition
+//     edge in the token-accounting hook, not on every later trigger)
+//   - goal has routing info recorded (legacy rows from before the
+//     routing migration would otherwise publish a malformed inbound)
+//
+// Past those gates the prompt is rendered fresh each iteration —
+// that's deliberate: tokens_used / time_used_seconds have moved on,
+// so the budget snapshot the model sees is always current.
+//
+// Errors land at warn level rather than blocking the run loop;
+// continuation is best-effort and a transient store glitch just
+// means the next trigger will retry.
 func (gr *GoalRuntime) maybeContinue(ctx context.Context) {
-	// Try-acquire the continuation lock. If a previous attempt is
-	// still in flight (shouldn't be — maybeContinue is fast for now —
-	// but will matter once it does real work), just skip.
+	// Try-acquire the continuation lock. Two near-simultaneous
+	// triggers collapse into one publish instead of racing onto the
+	// bus and stacking two duplicate prompts.
 	select {
 	case gr.continuationLock <- struct{}{}:
 		defer func() { <-gr.continuationLock }()
@@ -173,10 +190,33 @@ func (gr *GoalRuntime) maybeContinue(ctx context.Context) {
 		return
 	}
 	gr.markActivity()
-	// Stubbed for step 1 — the real gate cascade + bus injection
-	// land in step 3 once GoalManager and the agent-loop trigger
-	// wiring are in place.
-	slog.Debug("goal runtime: maybeContinue stub", "session_key", gr.sessionKey)
+
+	g, err := gr.store.GetGoalBySession(ctx, gr.agentID, gr.sessionKey)
+	if errors.Is(err, ErrNotFound) {
+		return
+	}
+	if err != nil {
+		slog.Warn("goal runtime: load goal failed",
+			"agent_id", gr.agentID, "session_key", gr.sessionKey, "error", err)
+		return
+	}
+	if g.Status != StatusActive {
+		return
+	}
+	if g.Channel == "" && g.ChatID == "" {
+		// Legacy row from before the routing migration backfilled
+		// these fields. Without routing info the publish below would
+		// emit a message no channel adapter knows how to route.
+		slog.Warn("goal runtime: skipping continuation — goal has no routing info",
+			"agent_id", gr.agentID, "session_key", gr.sessionKey, "goal_id", g.ID)
+		return
+	}
+
+	prompt := ContinuationPrompt(g)
+	if !PublishContinuation(gr.bus, g, prompt) {
+		slog.Warn("goal runtime: bus full, dropped continuation",
+			"agent_id", gr.agentID, "session_key", gr.sessionKey)
+	}
 }
 
 // GoalManager owns the per-session GoalRuntime goroutines. One

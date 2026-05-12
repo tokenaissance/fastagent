@@ -6,6 +6,7 @@ import (
 	"log/slog"
 
 	"github.com/fastclaw-ai/fastclaw/internal/agent/goal"
+	"github.com/fastclaw-ai/fastclaw/internal/bus"
 	"github.com/fastclaw-ai/fastclaw/internal/provider"
 )
 
@@ -27,7 +28,14 @@ import (
 // failure here would otherwise leak into the agent's response path,
 // and the goal will just see the same delta on the next call.
 // Errors are logged at warn so they're visible in operations.
-func NewTokenAccountingHook(st goal.Store, agentID string) HookFunc {
+//
+// When the fold flips a goal to BudgetLimited, the hook publishes
+// the budget_limit prompt directly. This is the only path on which
+// budget_limit fires — GoalRuntime.maybeContinue handles only the
+// Active → continuation case. The transition is observed exactly
+// once (FoldUsage's "non-active goals are skipped" gate guarantees
+// the same delta doesn't re-trigger on the next call).
+func NewTokenAccountingHook(st goal.Store, mb *bus.MessageBus, agentID string) HookFunc {
 	if st == nil {
 		return nil
 	}
@@ -80,6 +88,15 @@ func NewTokenAccountingHook(st goal.Store, agentID string) HookFunc {
 			slog.Info("goal budget exhausted",
 				"agent", agentID, "session_key", hc.GoalSessionKey,
 				"tokens_used", g.TokensUsed, "token_budget", *g.TokenBudget)
+			// Publish the budget_limit prompt onto the bus. The
+			// resulting inbound turn lets the model wrap up
+			// gracefully. mb is allowed to be nil (e.g. test
+			// harnesses); the publish helper degrades safely.
+			prompt := goal.BudgetLimitPrompt(g)
+			if !goal.PublishContinuation(mb, g, prompt) {
+				slog.Warn("goal accounting: bus full, budget_limit prompt dropped",
+					"agent", agentID, "session_key", hc.GoalSessionKey)
+			}
 		}
 	}
 }

@@ -77,8 +77,9 @@ type Registry struct {
 	// scheduler later fires, it routes the synthesized inbound message
 	// back to the same channel/chatID the user was talking on, so the
 	// reminder lands in the right web/Telegram/Discord thread.
-	messageChannel string
-	messageChatID  string
+	messageChannel   string
+	messageChatID    string
+	messageAccountID string
 	// goalSessionKey is the persistent session_key (session.Session's
 	// opaque identifier) for the in-flight turn — distinct from
 	// sessionID above, which is just the channel's chatID. Goal tools
@@ -282,6 +283,26 @@ func (r *Registry) MessageChannel() string { return r.messageChannel }
 // MessageChatID returns the chat/session id of the in-flight turn,
 // or "" if not set.
 func (r *Registry) MessageChatID() string { return r.messageChatID }
+
+// SetMessageAccountID records the channel-account id (e.g. which
+// Telegram bot, which Discord guild, "" for web) the in-flight turn
+// arrived on. Stored separately from SetMessageContext because the
+// existing setter (channel, chatID) is on a settled API surface
+// other tools use; tacking accountID onto it would mean a cascading
+// signature change everywhere that calls it.
+func (r *Registry) SetMessageAccountID(accountID string) {
+	r.messageAccountID = accountID
+}
+
+// MessageAccountID returns the channel account for the in-flight
+// turn. Goal continuations use it to publish back onto the same
+// (channel, accountID, chatID) the original turn arrived on.
+func (r *Registry) MessageAccountID() string { return r.messageAccountID }
+
+// MessageProjectID returns the project scope for the in-flight turn,
+// or "" for a loose chat. Set by SetProjectID; exposed here so goal
+// tools can stamp it onto goal rows at create time.
+func (r *Registry) MessageProjectID() string { return r.projectID }
 
 // SetGoalSessionKey records the persistent session_key for the
 // in-flight turn so goal tools (get_goal / create_goal / update_goal)

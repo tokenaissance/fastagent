@@ -59,6 +59,20 @@ type Goal struct {
 	SessionKey  string
 	OwnerUserID string
 
+	// Routing tuple stamped at create time. GoalRuntime.maybeContinue
+	// publishes the continuation prompt back onto the same bus
+	// address the original turn arrived on, mirroring how cron jobs
+	// store their (Channel, AccountID, ChatID) so the fired reminder
+	// lands in the right chat. ProjectID is included so workspace.Store
+	// + sandbox routing pick the same per-project scoping the original
+	// turn used. Denormalized rather than looked up via session.Store
+	// so a continuation works even if the original session row was
+	// later deleted / archived.
+	Channel   string
+	AccountID string
+	ChatID    string
+	ProjectID string
+
 	Objective string
 	Status    Status
 

@@ -138,6 +138,14 @@ func makeCreateGoal(st goal.Store, r *Registry, agentID, ownerUserID string) Too
 			AgentID:     agentID,
 			SessionKey:  sessionKey,
 			OwnerUserID: ownerUserID,
+			// Routing tuple — read from the registry's per-turn state,
+			// not from args. The model is not allowed to forge a goal
+			// onto a different channel / chat than the one it's
+			// currently serving.
+			Channel:     r.MessageChannel(),
+			AccountID:   r.MessageAccountID(),
+			ChatID:      r.MessageChatID(),
+			ProjectID:   r.MessageProjectID(),
 			Objective:   objective,
 			Status:      goal.StatusActive,
 			TokenBudget: a.TokenBudget,

@@ -3,10 +3,12 @@ package agent
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 
 	"github.com/fastclaw-ai/fastclaw/internal/agent/goal"
+	"github.com/fastclaw-ai/fastclaw/internal/bus"
 	"github.com/fastclaw-ai/fastclaw/internal/provider"
 )
 
@@ -81,6 +83,32 @@ func seedActiveGoal(t *testing.T, st *memGoalStore, budget int64) (agentID, sess
 	return g.AgentID, g.SessionKey
 }
 
+// seedActiveGoalWithRouting is seedActiveGoal + the routing tuple
+// the budget_limit publish path needs. Existing tests that don't
+// exercise the publish path keep using seedActiveGoal; the bus
+// publish gate (g.Channel == "" && g.ChatID == "") would otherwise
+// swallow the call silently and the new assertions would pass for
+// the wrong reason.
+func seedActiveGoalWithRouting(t *testing.T, st *memGoalStore, budget int64) (agentID, sessionKey string) {
+	t.Helper()
+	b := budget
+	g := &goal.Goal{
+		ID:          "g-test",
+		AgentID:     "agent-A",
+		SessionKey:  "s-test",
+		OwnerUserID: "user-1",
+		Channel:     "web",
+		ChatID:      "chat-1",
+		Objective:   "x",
+		Status:      goal.StatusActive,
+		TokenBudget: &b,
+	}
+	if err := st.CreateGoal(context.Background(), g); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	return g.AgentID, g.SessionKey
+}
+
 func makeAfterModelCall(sessionKey string, u *provider.Usage) *HookContext {
 	return &HookContext{
 		Point:          AfterModelCall,
@@ -92,7 +120,7 @@ func makeAfterModelCall(sessionKey string, u *provider.Usage) *HookContext {
 func TestTokenAccountingHookFoldsUsage(t *testing.T) {
 	st := &memGoalStore{}
 	agentID, sessionKey := seedActiveGoal(t, st, 1_000_000)
-	hook := NewTokenAccountingHook(st, agentID)
+	hook := NewTokenAccountingHook(st, nil, agentID)
 
 	hook(context.Background(), makeAfterModelCall(sessionKey, &provider.Usage{
 		InputTokens: 200, CacheReadInputTokens: 50, OutputTokens: 30,
@@ -110,7 +138,7 @@ func TestTokenAccountingHookFoldsUsage(t *testing.T) {
 func TestTokenAccountingHookFlipsBudgetLimited(t *testing.T) {
 	st := &memGoalStore{}
 	agentID, sessionKey := seedActiveGoal(t, st, 100)
-	hook := NewTokenAccountingHook(st, agentID)
+	hook := NewTokenAccountingHook(st, nil, agentID)
 
 	hook(context.Background(), makeAfterModelCall(sessionKey, &provider.Usage{
 		InputTokens: 50, OutputTokens: 60,
@@ -122,9 +150,63 @@ func TestTokenAccountingHookFlipsBudgetLimited(t *testing.T) {
 	}
 }
 
+// TestTokenAccountingHookPublishesBudgetLimit pins the
+// transition-edge publish: when the hook flips a goal to
+// BudgetLimited, the budget_limit prompt must be queued on the bus
+// so the next inbound turn lets the model wrap up gracefully.
+// Without this, a budget_limited goal would just stop silently mid-
+// turn with no closing message.
+func TestTokenAccountingHookPublishesBudgetLimit(t *testing.T) {
+	st := &memGoalStore{}
+	agentID, sessionKey := seedActiveGoalWithRouting(t, st, 100)
+	mb := bus.New()
+	hook := NewTokenAccountingHook(st, mb, agentID)
+
+	hook(context.Background(), makeAfterModelCall(sessionKey, &provider.Usage{
+		InputTokens: 50, OutputTokens: 60,
+	}))
+
+	select {
+	case msg := <-mb.Inbound:
+		if msg.Source != bus.SourceGoalContinuation {
+			t.Errorf("Source = %q, want goal_continuation", msg.Source)
+		}
+		if !strings.Contains(msg.Text, "budget_limited") {
+			t.Errorf("budget_limit prompt missing status word:\n%s", msg.Text)
+		}
+		if msg.Channel != "web" || msg.ChatID != "chat-1" {
+			t.Errorf("routing mismatch: channel=%q chat=%q (want web/chat-1)",
+				msg.Channel, msg.ChatID)
+		}
+	default:
+		t.Fatal("hook flipped to budget_limited but didn't publish a wrap-up prompt")
+	}
+}
+
+// TestTokenAccountingHookSilentOnNonExhaustingCall is the inverse:
+// a normal call that doesn't cross the budget threshold must NOT
+// publish anything. Bus traffic = "hook saw exhaustion edge", not
+// "hook ran".
+func TestTokenAccountingHookSilentOnNonExhaustingCall(t *testing.T) {
+	st := &memGoalStore{}
+	agentID, sessionKey := seedActiveGoalWithRouting(t, st, 100_000)
+	mb := bus.New()
+	hook := NewTokenAccountingHook(st, mb, agentID)
+
+	hook(context.Background(), makeAfterModelCall(sessionKey, &provider.Usage{
+		InputTokens: 50, OutputTokens: 60,
+	}))
+
+	select {
+	case msg := <-mb.Inbound:
+		t.Fatalf("non-exhausting call must not publish; got %+v", msg)
+	default:
+	}
+}
+
 func TestTokenAccountingHookSkipsWhenNoGoalSession(t *testing.T) {
 	st := &memGoalStore{}
-	hook := NewTokenAccountingHook(st, "agent-A")
+	hook := NewTokenAccountingHook(st, nil, "agent-A")
 	// Empty GoalSessionKey — agent ran outside a chat context (e.g.
 	// boot-time warmup). Hook must no-op rather than crash on a
 	// missing row.
@@ -141,7 +223,7 @@ func TestTokenAccountingHookSkipsWhenNoGoalSession(t *testing.T) {
 func TestTokenAccountingHookSkipsWhenNoUsage(t *testing.T) {
 	st := &memGoalStore{}
 	agentID, sessionKey := seedActiveGoal(t, st, 1000)
-	hook := NewTokenAccountingHook(st, agentID)
+	hook := NewTokenAccountingHook(st, nil, agentID)
 
 	// Response.Usage is nil — provider didn't report (Ollama etc.).
 	// We deliberately don't error; we just skip folding.
@@ -161,7 +243,7 @@ func TestTokenAccountingHookSkipsOnError(t *testing.T) {
 	// and any usage on it shouldn't count.
 	st := &memGoalStore{}
 	agentID, sessionKey := seedActiveGoal(t, st, 1000)
-	hook := NewTokenAccountingHook(st, agentID)
+	hook := NewTokenAccountingHook(st, nil, agentID)
 
 	hook(context.Background(), &HookContext{
 		Point:          AfterModelCall,
@@ -179,7 +261,7 @@ func TestTokenAccountingHookSkipsWhenNoGoalRow(t *testing.T) {
 	// A turn happens on a session with no goal — hook must not error
 	// loudly. ErrNotFound is the expected path here.
 	st := &memGoalStore{}
-	hook := NewTokenAccountingHook(st, "agent-A")
+	hook := NewTokenAccountingHook(st, nil, "agent-A")
 	hook(context.Background(), makeAfterModelCall("s-no-goal", &provider.Usage{OutputTokens: 100}))
 	// No row to inspect — just confirming no panic.
 }
@@ -191,7 +273,7 @@ func TestTokenAccountingHookOnlyFiresOnAfterModelCall(t *testing.T) {
 	// turn twice.
 	st := &memGoalStore{}
 	agentID, sessionKey := seedActiveGoal(t, st, 1000)
-	hook := NewTokenAccountingHook(st, agentID)
+	hook := NewTokenAccountingHook(st, nil, agentID)
 
 	for _, point := range []HookPoint{BeforeModelCall, BeforeToolCall, AfterToolCall, PostTurn} {
 		hook(context.Background(), &HookContext{
@@ -211,7 +293,7 @@ func TestTokenAccountingHookNilStoreReturnsNil(t *testing.T) {
 	// boot — when goal feature isn't wired, NewTokenAccountingHook
 	// just returns a nil func and the registration is a no-op (the
 	// hook registry's Run skips nil entries).
-	if h := NewTokenAccountingHook(nil, "agent"); h != nil {
+	if h := NewTokenAccountingHook(nil, nil, "agent"); h != nil {
 		t.Errorf("expected nil HookFunc for nil store, got %T", h)
 	}
 }
@@ -225,7 +307,7 @@ func TestTokenAccountingHookSkipsZeroDelta(t *testing.T) {
 	agentID, sessionKey := seedActiveGoal(t, st, 1000)
 	st.saveErr = errors.New("save should not be reached") // re-set after seed
 
-	hook := NewTokenAccountingHook(st, agentID)
+	hook := NewTokenAccountingHook(st, nil, agentID)
 	hook(context.Background(), makeAfterModelCall(sessionKey, &provider.Usage{
 		InputTokens: 100, CacheReadInputTokens: 100,
 	}))

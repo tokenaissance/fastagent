@@ -515,10 +515,52 @@ func (a *Agent) WireGoals(st goal.Store) {
 	// the goal feature.
 	a.goalManager.Start(context.Background())
 
-	if hook := NewTokenAccountingHook(st, a.name); hook != nil {
+	if hook := NewTokenAccountingHook(st, a.messageBus, a.name); hook != nil {
 		a.hooks.Register(AfterModelCall, hook)
 	}
 	tools.RegisterGoalTools(a.registry, st, a.name, a.ownerUserID)
+
+	// Trigger sites. Both fire GoalManager.Ensure(...).Trigger() so
+	// idle GoalRuntimes wake up and re-check whether continuation is
+	// due. The PostTurn site is the primary continuation driver
+	// (genuine user turns); AfterToolCall keeps the loop moving while
+	// the model chains tool calls, so a long ReAct chain doesn't sit
+	// without a single trigger probe between turn-start and
+	// turn-finish.
+	a.hooks.Register(PostTurn, a.goalTriggerHook(true /*onlyUserSource*/))
+	a.hooks.Register(AfterToolCall, a.goalTriggerHook(false /*onlyUserSource*/))
+}
+
+// goalTriggerHook builds a HookFunc that wakes the GoalRuntime for
+// the in-flight session. When onlyUserSource is true, the hook
+// short-circuits on non-user turns (cron / heartbeat / sub-agent /
+// goal_continuation) — otherwise cron's wakeup would spuriously
+// drive goal continuation forward. AfterToolCall fires inside the
+// turn (Source is fixed for the turn duration) so the same gate
+// applies, but tool callbacks also include update_goal itself —
+// triggering after update_goal is wasted work because the goal is
+// now Complete and maybeContinue will no-op.
+func (a *Agent) goalTriggerHook(onlyUserSource bool) HookFunc {
+	return func(ctx context.Context, hc *HookContext) {
+		if onlyUserSource && hc.Source != bus.SourceUser {
+			return
+		}
+		if hc.ToolName == "update_goal" {
+			return
+		}
+		if hc.GoalSessionKey == "" {
+			return
+		}
+		gm := a.goalManager
+		if gm == nil {
+			return
+		}
+		gr := gm.Ensure(hc.GoalSessionKey, a.name, a.ownerUserID)
+		if gr == nil {
+			return
+		}
+		gr.Trigger()
+	}
 }
 
 // GoalManager exposes the running GoalManager (or nil when /goal is
@@ -1197,6 +1239,12 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	// identifier); goal tools need the durable session.Session.SessionKey
 	// to address rows in agent_goals.
 	a.registry.SetGoalSessionKey(sess.SessionKey())
+	// AccountID is set separately from SetMessageContext (channel,
+	// chatID) so goal continuations can publish back on the exact
+	// (channel, accountID, chatID) triple the inbound arrived on —
+	// required for multi-bot channels (e.g. several Telegram bots
+	// sharing one chat thread by id).
+	a.registry.SetMessageAccountID(msg.AccountID)
 
 	// Safety net for client-aborted turns: if the loop exits with a
 	// tool_use that never got its matching tool_result appended (the
@@ -1502,12 +1550,13 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 
 			// Hook: AfterToolCall
 			a.hooks.Run(ctx, &HookContext{
-				AgentName:  a.name,
-				Point:      AfterToolCall,
-				ToolName:   r.toolName,
-				ToolResult: resultContent,
-				Error:      r.err,
-				UserID:     a.ownerUserID,
+				AgentName:      a.name,
+				Point:          AfterToolCall,
+				ToolName:       r.toolName,
+				ToolResult:     resultContent,
+				Error:          r.err,
+				UserID:         a.ownerUserID,
+				GoalSessionKey: a.registry.GoalSessionKey(),
 			})
 
 			if r.err != nil {
@@ -1726,18 +1775,19 @@ func (a *Agent) runPostTurn(ctx context.Context, msg bus.InboundMessage, message
 
 	// Fire PostTurn hooks
 	a.hooks.Run(ctx, &HookContext{
-		AgentName:     a.name,
-		Point:         PostTurn,
-		Messages:      messages,
-		TurnCount:     a.turnCount,
-		ToolCallCount: toolCallCount,
-		Workspace:     a.homePath,
-		UserID:        a.ownerUserID,
-		Channel:       msg.Channel,
-		AccountID:     msg.AccountID,
-		ChatID:        msg.ChatID,
-		ProjectID:     msg.ProjectID,
-		Source:        msg.Source,
+		AgentName:      a.name,
+		Point:          PostTurn,
+		Messages:       messages,
+		TurnCount:      a.turnCount,
+		ToolCallCount:  toolCallCount,
+		Workspace:      a.homePath,
+		UserID:         a.ownerUserID,
+		Channel:        msg.Channel,
+		AccountID:      msg.AccountID,
+		ChatID:         msg.ChatID,
+		ProjectID:      msg.ProjectID,
+		Source:         msg.Source,
+		GoalSessionKey: a.registry.GoalSessionKey(),
 	})
 
 	// Auto-persist memory every N turns
@@ -1779,6 +1829,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 	sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID, msg.ProjectID)
 	a.bindSession(ctx, msg.Channel, msg.ChatID, msg.ProjectID)
 	a.registry.SetGoalSessionKey(sess.SessionKey())
+	a.registry.SetMessageAccountID(msg.AccountID)
 
 	// Same orphan-tool_use safety net as HandleMessage. The streaming path
 	// previously lacked this, so loop detection (which appends an assistant
@@ -1977,7 +2028,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 		for idx, r := range results {
 			tc := resp.ToolCalls[idx]
 			resultContent, meta := extractToolMeta(r.result)
-			a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: AfterToolCall, ToolName: r.toolName, ToolResult: resultContent, Error: r.err, UserID: a.ownerUserID})
+			a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: AfterToolCall, ToolName: r.toolName, ToolResult: resultContent, Error: r.err, UserID: a.ownerUserID, GoalSessionKey: a.registry.GoalSessionKey()})
 
 			if r.err != nil {
 				slog.Warn("tool execution error", "agent", a.name, "name", r.toolName, "error", r.err)
