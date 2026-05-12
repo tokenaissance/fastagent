@@ -532,17 +532,24 @@ func (a *Agent) WireGoals(st goal.Store) {
 }
 
 // goalTriggerHook builds a HookFunc that wakes the GoalRuntime for
-// the in-flight session. When onlyUserSource is true, the hook
-// short-circuits on non-user turns (cron / heartbeat / sub-agent /
-// goal_continuation) — otherwise cron's wakeup would spuriously
-// drive goal continuation forward. AfterToolCall fires inside the
-// turn (Source is fixed for the turn duration) so the same gate
-// applies, but tool callbacks also include update_goal itself —
-// triggering after update_goal is wasted work because the goal is
-// now Complete and maybeContinue will no-op.
+// the in-flight session. Gating rules:
+//
+//   - Source: skip cron / heartbeat / sub-agent / continuation
+//     self-loops. Set onlyUserSource=true for PostTurn; AfterToolCall
+//     inherits the parent turn's Source via fire-site plumbing.
+//   - Plan mode: a plan-only turn is the user reviewing a plan —
+//     auto-continuing behind them defeats the point.
+//   - update_goal tool: the call's whole job is to mark the goal
+//     Complete; triggering after it is wasted work.
+//   - Lazy Ensure: don't spin a runtime per session that has no goal.
+//     If a runtime already exists, just Trigger; otherwise do a
+//     cheap store read first and skip when no row.
 func (a *Agent) goalTriggerHook(onlyUserSource bool) HookFunc {
 	return func(ctx context.Context, hc *HookContext) {
 		if onlyUserSource && hc.Source != bus.SourceUser {
+			return
+		}
+		if hc.IsPlanMode {
 			return
 		}
 		if hc.ToolName == "update_goal" {
@@ -555,11 +562,26 @@ func (a *Agent) goalTriggerHook(onlyUserSource bool) HookFunc {
 		if gm == nil {
 			return
 		}
-		gr := gm.Ensure(hc.GoalSessionKey, a.name, a.ownerUserID)
-		if gr == nil {
+		// Fast path: a runtime already exists for this session. Just
+		// poke it — no store read needed.
+		if gr := gm.Get(hc.GoalSessionKey); gr != nil {
+			gr.Trigger()
 			return
 		}
-		gr.Trigger()
+		// Slow path: no runtime yet. Check the store before spinning
+		// one up — sessions that never set a goal would otherwise get
+		// an idle goroutine per turn that hangs around for 30 min.
+		if a.goalStore == nil {
+			return
+		}
+		g, err := a.goalStore.GetGoalBySession(ctx, a.name, hc.GoalSessionKey)
+		if err != nil || g == nil || g.Status != goal.StatusActive {
+			return
+		}
+		gr := gm.Ensure(hc.GoalSessionKey, a.name, a.ownerUserID)
+		if gr != nil {
+			gr.Trigger()
+		}
 	}
 }
 
@@ -1557,6 +1579,8 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 				Error:          r.err,
 				UserID:         a.ownerUserID,
 				GoalSessionKey: a.registry.GoalSessionKey(),
+				IsPlanMode:     isPlanMode(msg.Params),
+				Source:         msg.Source,
 			})
 
 			if r.err != nil {
@@ -1788,6 +1812,7 @@ func (a *Agent) runPostTurn(ctx context.Context, msg bus.InboundMessage, message
 		ProjectID:      msg.ProjectID,
 		Source:         msg.Source,
 		GoalSessionKey: a.registry.GoalSessionKey(),
+		IsPlanMode:     isPlanMode(msg.Params),
 	})
 
 	// Auto-persist memory every N turns
@@ -2028,7 +2053,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 		for idx, r := range results {
 			tc := resp.ToolCalls[idx]
 			resultContent, meta := extractToolMeta(r.result)
-			a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: AfterToolCall, ToolName: r.toolName, ToolResult: resultContent, Error: r.err, UserID: a.ownerUserID, GoalSessionKey: a.registry.GoalSessionKey()})
+			a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: AfterToolCall, ToolName: r.toolName, ToolResult: resultContent, Error: r.err, UserID: a.ownerUserID, GoalSessionKey: a.registry.GoalSessionKey(), IsPlanMode: isPlanMode(msg.Params), Source: msg.Source})
 
 			if r.err != nil {
 				slog.Warn("tool execution error", "agent", a.name, "name", r.toolName, "error", r.err)

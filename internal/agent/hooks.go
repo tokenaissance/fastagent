@@ -60,6 +60,13 @@ type HookContext struct {
 	// it to look up the active goal (if any) for this session. Empty
 	// when the turn happened outside a chat context.
 	GoalSessionKey string
+
+	// IsPlanMode reports whether this turn ran in plan-mode (model
+	// emits a plan, doesn't act). Goal trigger hooks gate on this so
+	// a plan-only turn doesn't auto-fire a continuation behind the
+	// user's back — plan mode exists precisely to let the user review
+	// before more work happens.
+	IsPlanMode bool
 }
 
 // HookFunc is a function that runs at a hook point.

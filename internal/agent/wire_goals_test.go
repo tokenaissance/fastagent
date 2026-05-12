@@ -148,27 +148,38 @@ var _ goal.Store = (*memGoalStore)(nil)
 // another continuation and we'd loop forever.
 func TestGoalTriggerHookGatesOnUserSource(t *testing.T) {
 	a := newAgentForWireTest(t)
-	a.WireGoals(&memGoalStore{})
+	// Pre-seed an active goal so the lazy-Ensure gate (no goal → no
+	// runtime) doesn't swallow the user-source assertion below.
+	st := &memGoalStore{}
+	_ = st.CreateGoal(t.Context(), &goal.Goal{
+		ID:         "g-fixture",
+		AgentID:    a.name,
+		SessionKey: "s-user",
+		Channel:    "web",
+		ChatID:     "c",
+		Status:     goal.StatusActive,
+	})
+	a.WireGoals(st)
 	t.Cleanup(a.goalManager.Shutdown)
 
 	hook := a.goalTriggerHook(true)
-	// The trigger never directly creates work on the bus — it just
-	// pokes GoalManager.Ensure(). The observable side effect we can
-	// assert in a unit test is the ActiveCount on the manager: a
-	// non-user source must NOT create a runtime.
+	// Non-user sources must short-circuit at the Source gate, BEFORE
+	// the store read — so even with a seeded goal they shouldn't
+	// spin a runtime.
 	for _, src := range []string{
 		bus.SourceCron, bus.SourceHeartbeat, bus.SourceSubAgent, bus.SourceGoalContinuation,
 	} {
 		hook(t.Context(), &HookContext{
 			Source:         src,
-			GoalSessionKey: "s-source-test-" + src,
+			GoalSessionKey: "s-user", // same key the goal is on
 		})
 	}
 	if got := a.goalManager.ActiveCount(); got != 0 {
 		t.Errorf("non-user-source hooks created %d runtimes, want 0", got)
 	}
 
-	// And the converse: a genuine user turn does create one.
+	// And the converse: a genuine user turn DOES spin a runtime when
+	// a goal exists.
 	hook(t.Context(), &HookContext{
 		Source:         bus.SourceUser,
 		GoalSessionKey: "s-user",

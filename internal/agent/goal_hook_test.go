@@ -58,7 +58,14 @@ func (m *memGoalStore) UpdateGoal(_ context.Context, g *goal.Goal) error {
 	return nil
 }
 func (m *memGoalStore) UpdateObjective(context.Context, string, string) error { return nil }
-func (m *memGoalStore) DeleteGoal(context.Context, string) error              { return nil }
+func (m *memGoalStore) DeleteGoal(_ context.Context, goalID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.row != nil && m.row.ID == goalID {
+		m.row = nil
+	}
+	return nil
+}
 func (m *memGoalStore) ListGoalsByOwner(context.Context, string, int) ([]*goal.Goal, error) {
 	return nil, nil
 }

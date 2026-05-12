@@ -39,6 +39,14 @@ func (a *Agent) handleSlashCommand(msg bus.InboundMessage) slashResult {
 		}
 
 	case "/new", "/reset":
+		// Clear any goal attached to the OLD session_key — design
+		// §6 chose "fresh session = clean state" over "goal follows
+		// chat". Runs before the web short-circuit too, so frontend-
+		// driven /new also reaps the goal row.
+		if a.goalStore != nil {
+			oldKey := a.resolveSessionKey(msg)
+			a.clearGoalForSession(oldKey)
+		}
 		if msg.Channel == "web" {
 			// For web channel, don't delete the session file — frontend handles new session creation
 			return slashResult{handled: true, reply: "__NEW_SESSION__"}
@@ -84,6 +92,9 @@ func (a *Agent) handleSlashCommand(msg bus.InboundMessage) slashResult {
 			return slashResult{handled: true, reply: fmt.Sprintf("Current model: `%s`\n\nUsage: /model <model-name>\nExample: /model gpt-4o-mini", a.model)}
 		}
 		return a.slashModel(msg, args[0])
+
+	case "/goal":
+		return a.slashGoal(msg, args)
 
 	case "/help":
 		return slashResult{handled: true, reply: a.slashHelp()}
@@ -383,6 +394,13 @@ Personality & Model
   /personality        — List available personalities
   /personality <name> — Switch personality (SOUL-<name>.md)
   /model <name>       — Switch LLM model
+
+Goal (persistent multi-turn objective)
+  /goal <objective> — Create a goal; agent self-continues until done
+  /goal             — Show current goal status
+  /goal pause       — Pause continuation
+  /goal resume      — Resume a paused goal
+  /goal clear       — Delete the goal
 
 Info
   /help           — Show this help
