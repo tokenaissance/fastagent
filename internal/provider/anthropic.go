@@ -148,8 +148,8 @@ func toAnthropicMessages(msgs []Message) (string, []anthropicMessage) {
 					blocks = append(blocks, map[string]interface{}{
 						"type": "image",
 						"source": map[string]string{
-							"type":       "url",
-							"url":        part.ImageURL.URL,
+							"type": "url",
+							"url":  part.ImageURL.URL,
 						},
 					})
 				}
@@ -272,10 +272,10 @@ type anthropicContentBlockStart struct {
 }
 
 type anthropicContentBlockEntry struct {
-	Type  string `json:"type"` // "text" or "tool_use"
-	ID    string `json:"id,omitempty"`
-	Name  string `json:"name,omitempty"`
-	Text  string `json:"text,omitempty"`
+	Type  string          `json:"type"` // "text" or "tool_use"
+	ID    string          `json:"id,omitempty"`
+	Name  string          `json:"name,omitempty"`
+	Text  string          `json:"text,omitempty"`
 	Input json.RawMessage `json:"input,omitempty"`
 }
 
@@ -291,6 +291,64 @@ type anthropicDeltaContent struct {
 	PartialJSON string `json:"partial_json,omitempty"`
 	Thinking    string `json:"thinking,omitempty"`
 	Signature   string `json:"signature,omitempty"`
+}
+
+// anthropicUsage matches the usage block Anthropic ships on
+// message_start (with the prompt-side totals) and message_delta (with
+// the final output count). All fields are cumulative — message_delta's
+// output_tokens is the running total, not an increment.
+type anthropicUsage struct {
+	InputTokens              int `json:"input_tokens"`
+	OutputTokens             int `json:"output_tokens"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+}
+
+// anthropicMessageStart is `{type: "message_start", message: {usage: ...}}`.
+// Anthropic emits the prompt-side counts (input + cache) and a placeholder
+// output_tokens here; the final output_tokens lands on message_delta.
+type anthropicMessageStart struct {
+	Type    string `json:"type"`
+	Message struct {
+		Usage anthropicUsage `json:"usage"`
+	} `json:"message"`
+}
+
+// anthropicMessageDelta is `{type: "message_delta", usage: ...}`. The
+// usage block here carries the final output_tokens count plus any
+// cache field updates Anthropic decided to refine.
+type anthropicMessageDelta struct {
+	Type  string         `json:"type"`
+	Usage anthropicUsage `json:"usage"`
+}
+
+// mergeUsage folds incremental usage updates into running totals. The
+// caller starts with a zero anthropicUsage, then merges each event's
+// usage into it: message_start gives input + cache + initial output;
+// message_delta refines output (and occasionally caches). max() picks
+// the larger of old vs new so a smaller follow-up doesn't undo a
+// larger earlier report.
+func mergeUsage(dst *anthropicUsage, src anthropicUsage) {
+	dst.InputTokens = max(dst.InputTokens, src.InputTokens)
+	dst.OutputTokens = max(dst.OutputTokens, src.OutputTokens)
+	dst.CacheCreationInputTokens = max(dst.CacheCreationInputTokens, src.CacheCreationInputTokens)
+	dst.CacheReadInputTokens = max(dst.CacheReadInputTokens, src.CacheReadInputTokens)
+}
+
+// toUsage normalizes anthropicUsage into the provider's shape. Returns
+// nil when the accumulator is fully zero — that means no usage events
+// landed (request errored before message_start, etc.) and there's
+// nothing meaningful to report.
+func (u anthropicUsage) toUsage() *Usage {
+	if u.InputTokens == 0 && u.OutputTokens == 0 && u.CacheReadInputTokens == 0 && u.CacheCreationInputTokens == 0 {
+		return nil
+	}
+	return &Usage{
+		InputTokens:              u.InputTokens,
+		OutputTokens:             u.OutputTokens,
+		CacheReadInputTokens:     u.CacheReadInputTokens,
+		CacheCreationInputTokens: u.CacheCreationInputTokens,
+	}
 }
 
 func (p *AnthropicProvider) Chat(ctx context.Context, messages []Message, tools []Tool, model string, maxTokens int, temperature float64) (*Response, error) {
@@ -349,6 +407,7 @@ func (p *AnthropicProvider) ChatStream(ctx context.Context, messages []Message, 
 			signature string
 		}
 		blocks := make(map[int]*blockState)
+		var usage anthropicUsage
 
 		for scanner.Scan() {
 			line := scanner.Text()
@@ -363,6 +422,18 @@ func (p *AnthropicProvider) ChatStream(ctx context.Context, messages []Message, 
 			}
 
 			switch event.Type {
+			case "message_start":
+				var ms anthropicMessageStart
+				if json.Unmarshal([]byte(data), &ms) == nil {
+					mergeUsage(&usage, ms.Message.Usage)
+				}
+
+			case "message_delta":
+				var md anthropicMessageDelta
+				if json.Unmarshal([]byte(data), &md) == nil {
+					mergeUsage(&usage, md.Usage)
+				}
+
 			case "content_block_start":
 				var cbs anthropicContentBlockStart
 				if json.Unmarshal([]byte(data), &cbs) == nil {
@@ -440,6 +511,7 @@ func (p *AnthropicProvider) ChatStream(ctx context.Context, messages []Message, 
 					Thinking:          thinkingText,
 					ThinkingSignature: thinkingSig,
 					Done:              true,
+					Usage:             usage.toUsage(),
 				}:
 				case <-ctx.Done():
 				}
@@ -460,6 +532,7 @@ func (p *AnthropicProvider) parseSSE(body io.Reader) (*Response, error) {
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
 	var contentBuilder strings.Builder
+	var usage anthropicUsage
 
 	type blockState struct {
 		blockType string
@@ -485,6 +558,25 @@ func (p *AnthropicProvider) parseSSE(body io.Reader) (*Response, error) {
 		}
 
 		switch event.Type {
+		case "message_start":
+			// Carries the prompt-side counts (input + cache fields) and
+			// a placeholder output_tokens. Merge into our accumulator
+			// so the final usage we report is well-formed even on
+			// short responses where message_delta only refines output.
+			var ms anthropicMessageStart
+			if json.Unmarshal([]byte(data), &ms) == nil {
+				mergeUsage(&usage, ms.Message.Usage)
+			}
+
+		case "message_delta":
+			// Carries the final output_tokens. May also refine cache
+			// counts. mergeUsage takes max() so an earlier larger
+			// value on any field isn't clobbered by a smaller one.
+			var md anthropicMessageDelta
+			if json.Unmarshal([]byte(data), &md) == nil {
+				mergeUsage(&usage, md.Usage)
+			}
+
 		case "content_block_start":
 			var cbs anthropicContentBlockStart
 			if json.Unmarshal([]byte(data), &cbs) == nil {
@@ -530,6 +622,7 @@ func (p *AnthropicProvider) parseSSE(body io.Reader) (*Response, error) {
 
 	result := &Response{
 		Content: contentBuilder.String(),
+		Usage:   usage.toUsage(),
 	}
 	var thinkingBuilder strings.Builder
 	var thinkingSig string

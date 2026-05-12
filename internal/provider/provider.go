@@ -133,12 +133,35 @@ type ToolFunction struct {
 	Parameters  interface{} `json:"parameters"`
 }
 
+// Usage carries per-call token accounting from the provider. Mirrors
+// the SDK's types.Usage shape so values copy across without remapping.
+//
+// Field semantics:
+//   - InputTokens: total prompt tokens billed (includes cached portion)
+//   - CacheReadInputTokens: portion of InputTokens served from cache
+//   - CacheCreationInputTokens: tokens written into the cache this call
+//   - OutputTokens: generated tokens
+//
+// goal-budget accounting subtracts CacheReadInputTokens from
+// InputTokens to get the non-cached portion. See goal.GoalTokenDelta.
+type Usage struct {
+	InputTokens              int
+	OutputTokens             int
+	CacheReadInputTokens     int
+	CacheCreationInputTokens int
+}
+
 // Response is the result of a Chat call.
 type Response struct {
 	Content      string
 	ToolCalls    []ToolCall
 	Thinking     string          // model's reasoning/thinking content (extracted for memory)
 	RawAssistant json.RawMessage // exact API response message JSON (for cache-safe replay)
+	// Usage is the token accounting reported by the provider. Nil when
+	// the provider didn't report any (e.g. some local Ollama setups);
+	// callers that gate on token counts (goal budgets) should detect
+	// nil and either downgrade or refuse the operation.
+	Usage *Usage
 }
 
 // HasToolCalls returns true if the response contains tool calls.
@@ -164,6 +187,10 @@ type StreamChunk struct {
 	// thinking mode) sees the correct top-level `reasoning_content` on
 	// replay, which it does not auto-generate.
 	RawAssistant json.RawMessage
+	// Usage is the final token accounting from the provider, set on
+	// the terminal (Done) chunk. Nil for mid-stream chunks and for
+	// providers that don't report usage on streaming responses.
+	Usage *Usage
 }
 
 // StreamReader reads streaming chunks from an LLM response.
