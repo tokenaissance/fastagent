@@ -14,6 +14,7 @@ import (
 
 	"github.com/codeany-ai/open-agent-sdk-go/costtracker"
 
+	"github.com/fastclaw-ai/fastclaw/internal/agent/goal"
 	"github.com/fastclaw-ai/fastclaw/internal/agent/tools"
 	"github.com/fastclaw-ai/fastclaw/internal/bus"
 	"github.com/fastclaw-ai/fastclaw/internal/config"
@@ -74,6 +75,14 @@ type Agent struct {
 	// so concurrent sessions of the same agent get isolated containers
 	// + isolated /workspace mounts.
 	sandboxPool sandbox.ExecutorPool
+
+	// goalStore + goalManager are the /goal feature's per-Agent state.
+	// Wired by WireGoals; nil on agents whose Manager didn't provide a
+	// data store (legacy single-user installs). When nil, the goal
+	// tools / hook are simply not registered, so a missing store
+	// silently degrades to "feature off" rather than crashing.
+	goalStore   goal.Store
+	goalManager *goal.GoalManager
 }
 
 // SetSandboxPool wires the per-(agent,session) executor pool. Called by
@@ -470,6 +479,61 @@ func (a *Agent) SetOwnerUserID(uid string) {
 // HookRegistry returns the agent's hook registry for external hook registration.
 func (a *Agent) HookRegistry() *HookRegistry {
 	return a.hooks
+}
+
+// WireGoals turns the /goal feature on for this Agent. Side effects:
+//
+//   - Stash the store + a freshly started GoalManager on the agent.
+//   - Register the AfterModelCall token-accounting hook (folds
+//     Response.Usage into the active goal, flips budget_limited on
+//     exhaust).
+//   - Register the three model-callable tools (get_goal, create_goal,
+//     update_goal).
+//
+// Must be called after SetOwnerUserID so the registered tools and
+// hook carry the right owner. Called by manager.buildAgent when a
+// data store is available. When the data store is absent (legacy
+// single-user installs) the feature is simply off and goal-related
+// reads return ErrNotFound — no crashing, no half-state.
+//
+// Idempotent: a second call replaces the previous wiring (cancels
+// the old GoalManager and registers fresh tools). In practice only
+// called once per Agent lifetime.
+func (a *Agent) WireGoals(st goal.Store) {
+	if st == nil {
+		return
+	}
+	if a.goalManager != nil {
+		a.goalManager.Shutdown()
+	}
+	a.goalStore = st
+	a.goalManager = goal.NewGoalManager(st, a.messageBus)
+	// Tying GoalManager's lifetime to a background context is fine
+	// for now — fastclaw doesn't have a per-agent teardown path, and
+	// GoalRuntime self-terminates after runtimeIdleShutdown so no
+	// goroutine accumulates indefinitely on agents that never touch
+	// the goal feature.
+	a.goalManager.Start(context.Background())
+
+	if hook := NewTokenAccountingHook(st, a.name); hook != nil {
+		a.hooks.Register(AfterModelCall, hook)
+	}
+	tools.RegisterGoalTools(a.registry, st, a.name, a.ownerUserID)
+}
+
+// GoalManager exposes the running GoalManager (or nil when /goal is
+// not wired). Slash handlers and REST endpoints use this to mint /
+// stop per-session runtimes when goals are created or cleared.
+func (a *Agent) GoalManager() *goal.GoalManager {
+	return a.goalManager
+}
+
+// GoalStore exposes the goal.Store wired into this agent (or nil
+// when /goal is not wired). Slash + REST handlers read/write
+// goals through this rather than reaching into the underlying
+// store.Store directly.
+func (a *Agent) GoalStore() goal.Store {
+	return a.goalStore
 }
 
 // RegisterWebSearchChain exposes the web_search tool to this agent using a

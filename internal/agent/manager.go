@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/fastclaw-ai/fastclaw/internal/agent/goal"
 	"github.com/fastclaw-ai/fastclaw/internal/agent/tools"
 	"github.com/fastclaw-ai/fastclaw/internal/bus"
 	"github.com/fastclaw-ai/fastclaw/internal/config"
@@ -213,6 +214,11 @@ func (m *Manager) buildAgent(rc config.ResolvedAgent, prov provider.Provider, mb
 		// at execute time (bindSession stamps them per-turn) so the
 		// fired message routes back to the originating chat.
 		tools.RegisterCronTools(ag.registry, m.opts.dataStore, m.uid, rc.ID)
+		// /goal feature: token-accounting hook + 3 model tools, all
+		// keyed on the agent's owner (set above by SetOwnerUserID).
+		// Same dataStore guard as cron because both features need the
+		// relational store; agents without one degrade quietly.
+		ag.WireGoals(goal.NewStoreAdapter(m.opts.dataStore))
 	}
 	return ag
 }
