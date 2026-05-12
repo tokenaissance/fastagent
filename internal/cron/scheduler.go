@@ -29,9 +29,9 @@ type Job struct {
 	Type        JobType `json:"type"`
 	Schedule    string  `json:"schedule"` // depends on type
 	AgentID     string  `json:"agentId"`
-	Channel     string  `json:"channel"`  // channel to send results back through
-	ChatID      string  `json:"chatId"`   // chat to send results to
-	Message     string  `json:"message"`  // message to send to the agent
+	Channel     string  `json:"channel"`               // channel to send results back through
+	ChatID      string  `json:"chatId"`                // chat to send results to
+	Message     string  `json:"message"`               // message to send to the agent
 	OwnerUserID string  `json:"ownerUserId,omitempty"` // fastclaw user that owns this job
 }
 
@@ -280,6 +280,7 @@ func (s *Scheduler) processDueJobs(ctx context.Context) {
 			AgentID:     j.AgentID,
 			Text:        text,
 			PeerKind:    "dm",
+			Source:      bus.SourceCron,
 		}
 
 		// Calculate next run based on job type.
@@ -452,6 +453,7 @@ func (s *Scheduler) fireJob(job Job) {
 		AgentID:     job.AgentID,
 		Text:        text,
 		PeerKind:    "dm",
+		Source:      bus.SourceCron,
 	}
 }
 
