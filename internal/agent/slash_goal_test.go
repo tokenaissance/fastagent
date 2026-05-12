@@ -214,7 +214,7 @@ func TestPlanModeGatesTrigger(t *testing.T) {
 	// Drain the runtime spawned by slashGoalCreate so we start clean.
 	a.goalManager.StopSession(key)
 
-	hook := a.goalTriggerHook(true /* PostTurn-style: gated on source */)
+	hook := a.goalTriggerHook(allowedContinuationSources)
 	hook(context.Background(), &HookContext{
 		Source:         bus.SourceUser,
 		GoalSessionKey: key,
@@ -231,7 +231,7 @@ func TestPlanModeGatesTrigger(t *testing.T) {
 // would get its own idle goroutine for up to 30 min.
 func TestTriggerLazyEnsureSkipsSessionsWithoutGoal(t *testing.T) {
 	a := newSlashTestAgent(t)
-	hook := a.goalTriggerHook(true)
+	hook := a.goalTriggerHook(allowedContinuationSources)
 	hook(context.Background(), &HookContext{
 		Source:         bus.SourceUser,
 		GoalSessionKey: "s-no-goal-here",

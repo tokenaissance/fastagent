@@ -88,12 +88,13 @@ func NewTokenAccountingHook(st goal.Store, mb *bus.MessageBus, agentID string) H
 			slog.Info("goal budget exhausted",
 				"agent", agentID, "session_key", hc.GoalSessionKey,
 				"tokens_used", g.TokensUsed, "token_budget", *g.TokenBudget)
-			// Publish the budget_limit prompt onto the bus. The
-			// resulting inbound turn lets the model wrap up
-			// gracefully. mb is allowed to be nil (e.g. test
-			// harnesses); the publish helper degrades safely.
+			// Publish the budget_limit prompt. PublishBudgetLimit
+			// tags the inbound with SourceGoalBudgetLimit so
+			// HandleMessage's "drop stale continuations" gate
+			// lets it through — the gate would otherwise see
+			// status=BudgetLimited and drop the wrap-up turn.
 			prompt := goal.BudgetLimitPrompt(g)
-			if !goal.PublishContinuation(mb, g, prompt) {
+			if !goal.PublishBudgetLimit(mb, g, prompt) {
 				slog.Warn("goal accounting: bus full, budget_limit prompt dropped",
 					"agent", agentID, "session_key", hc.GoalSessionKey)
 			}

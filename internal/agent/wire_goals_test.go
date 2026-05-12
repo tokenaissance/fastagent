@@ -162,12 +162,14 @@ func TestGoalTriggerHookGatesOnUserSource(t *testing.T) {
 	a.WireGoals(st)
 	t.Cleanup(a.goalManager.Shutdown)
 
-	hook := a.goalTriggerHook(true)
-	// Non-user sources must short-circuit at the Source gate, BEFORE
-	// the store read — so even with a seeded goal they shouldn't
-	// spin a runtime.
+	hook := a.goalTriggerHook(allowedContinuationSources)
+	// Non-allowed sources must short-circuit at the Source gate,
+	// BEFORE the store read — so even with a seeded goal they
+	// shouldn't spin a runtime. Cron / heartbeat / sub-agent /
+	// goal_budget_limit are excluded; goal_continuation IS allowed
+	// (it's how the loop chains itself).
 	for _, src := range []string{
-		bus.SourceCron, bus.SourceHeartbeat, bus.SourceSubAgent, bus.SourceGoalContinuation,
+		bus.SourceCron, bus.SourceHeartbeat, bus.SourceSubAgent, bus.SourceGoalBudgetLimit,
 	} {
 		hook(t.Context(), &HookContext{
 			Source:         src,
@@ -175,7 +177,7 @@ func TestGoalTriggerHookGatesOnUserSource(t *testing.T) {
 		})
 	}
 	if got := a.goalManager.ActiveCount(); got != 0 {
-		t.Errorf("non-user-source hooks created %d runtimes, want 0", got)
+		t.Errorf("non-allowed-source hooks created %d runtimes, want 0", got)
 	}
 
 	// And the converse: a genuine user turn DOES spin a runtime when
@@ -189,23 +191,31 @@ func TestGoalTriggerHookGatesOnUserSource(t *testing.T) {
 	}
 }
 
-// TestGoalTriggerHookSkipsUpdateGoalTool: the AfterToolCall trigger
-// has to skip update_goal — by the time that fires, the goal is
-// Complete, so a continuation probe is wasted work. (Functionally
-// harmless because maybeContinue would no-op on a non-Active goal,
-// but the skip avoids ever spinning a runtime for a finished goal.)
-func TestGoalTriggerHookSkipsUpdateGoalTool(t *testing.T) {
+// TestGoalTriggerHookAllowsContinuationChain: goal_continuation
+// must be in the allowed set — otherwise the loop wouldn't chain
+// itself past the first continuation (each continuation's PostTurn
+// would refuse to publish the next).
+func TestGoalTriggerHookAllowsContinuationChain(t *testing.T) {
 	a := newAgentForWireTest(t)
-	a.WireGoals(&memGoalStore{})
+	st := &memGoalStore{}
+	_ = st.CreateGoal(t.Context(), &goal.Goal{
+		ID:         "g-fixture",
+		AgentID:    a.name,
+		SessionKey: "s-1",
+		Channel:    "web",
+		ChatID:     "c",
+		Status:     goal.StatusActive,
+	})
+	a.WireGoals(st)
 	t.Cleanup(a.goalManager.Shutdown)
 
-	hook := a.goalTriggerHook(false /* AfterToolCall doesn't gate on source */)
+	hook := a.goalTriggerHook(allowedContinuationSources)
 	hook(t.Context(), &HookContext{
-		ToolName:       "update_goal",
+		Source:         bus.SourceGoalContinuation,
 		GoalSessionKey: "s-1",
 	})
-	if got := a.goalManager.ActiveCount(); got != 0 {
-		t.Errorf("update_goal tool should not produce a trigger; got %d runtimes", got)
+	if got := a.goalManager.ActiveCount(); got != 1 {
+		t.Errorf("goal_continuation should trigger to chain the loop; got %d runtimes", got)
 	}
 }
 
@@ -216,7 +226,7 @@ func TestGoalTriggerHookNoOpWithoutSessionKey(t *testing.T) {
 	a.WireGoals(&memGoalStore{})
 	t.Cleanup(a.goalManager.Shutdown)
 
-	hook := a.goalTriggerHook(true)
+	hook := a.goalTriggerHook(allowedContinuationSources)
 	hook(t.Context(), &HookContext{Source: bus.SourceUser, GoalSessionKey: ""})
 	if got := a.goalManager.ActiveCount(); got != 0 {
 		t.Errorf("empty session key should not create a runtime; got %d", got)

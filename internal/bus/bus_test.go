@@ -28,6 +28,7 @@ func TestSourceConstantsDistinct(t *testing.T) {
 		"SourceHeartbeat":        SourceHeartbeat,
 		"SourceSubAgent":         SourceSubAgent,
 		"SourceGoalContinuation": SourceGoalContinuation,
+		"SourceGoalBudgetLimit":  SourceGoalBudgetLimit,
 	}
 	seen := make(map[string]string, len(all))
 	for name, val := range all {

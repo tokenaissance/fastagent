@@ -18,6 +18,14 @@ const (
 	SourceHeartbeat        = "heartbeat"
 	SourceSubAgent         = "subagent"
 	SourceGoalContinuation = "goal_continuation"
+	// SourceGoalBudgetLimit is the wrap-up prompt published when a
+	// goal hits its token budget. Separate from GoalContinuation so
+	// HandleMessage's "drop continuations after pause/clear" gate
+	// doesn't accidentally swallow the budget_limit prompt — by the
+	// time the gate runs, the goal's status has already flipped to
+	// BudgetLimited, so the continuation-status gate would drop the
+	// wrap-up turn if both used the same Source.
+	SourceGoalBudgetLimit = "goal_budget_limit"
 )
 
 // InboundMessage represents a message received from a channel.

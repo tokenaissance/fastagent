@@ -175,8 +175,8 @@ func TestTokenAccountingHookPublishesBudgetLimit(t *testing.T) {
 
 	select {
 	case msg := <-mb.Inbound:
-		if msg.Source != bus.SourceGoalContinuation {
-			t.Errorf("Source = %q, want goal_continuation", msg.Source)
+		if msg.Source != bus.SourceGoalBudgetLimit {
+			t.Errorf("Source = %q, want goal_budget_limit", msg.Source)
 		}
 		if !strings.Contains(msg.Text, "budget_limited") {
 			t.Errorf("budget_limit prompt missing status word:\n%s", msg.Text)
