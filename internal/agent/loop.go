@@ -476,6 +476,12 @@ func (a *Agent) SetOwnerUserID(uid string) {
 	a.ownerUserID = uid
 }
 
+// OwnerUserID returns the agent's owning user ID — the user that
+// created / owns this agent. Exposed so REST handlers that mint
+// goal rows on the user's behalf can stamp ownership without
+// reaching into agent internals.
+func (a *Agent) OwnerUserID() string { return a.ownerUserID }
+
 // HookRegistry returns the agent's hook registry for external hook registration.
 func (a *Agent) HookRegistry() *HookRegistry {
 	return a.hooks

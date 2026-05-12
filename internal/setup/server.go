@@ -329,6 +329,14 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("DELETE /api/agents/{id}/cron/{jobId}", auth(s.handleDeleteAgentCronJob))
 	mux.HandleFunc("PUT /api/agents/{id}/cron/{jobId}", auth(s.handleToggleAgentCronJob))
 
+	// Per-agent /goal feature. POST body's `action` field selects
+	// create / pause / resume; DELETE clears. See handlers_goal.go
+	// for the body schema and the slash-parity contract.
+	mux.HandleFunc("GET /api/agents/{id}/goal", auth(s.handleGetAgentGoal))
+	mux.HandleFunc("POST /api/agents/{id}/goal", auth(s.handlePostAgentGoal))
+	mux.HandleFunc("DELETE /api/agents/{id}/goal", auth(s.handleDeleteAgentGoal))
+	mux.HandleFunc("GET /api/agents/{id}/goals", auth(s.handleListAgentGoals))
+
 	// Tasks
 	mux.HandleFunc("GET /api/tasks", auth(s.handleListTasks))
 
