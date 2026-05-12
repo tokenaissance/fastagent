@@ -54,6 +54,12 @@ type HookContext struct {
 	// only fire on user-originated turns (notably the goal trigger)
 	// gate on this.
 	Source string
+
+	// GoalSessionKey is the persistent session_key for the in-flight
+	// turn, populated alongside ChatID. The goal-accounting hook reads
+	// it to look up the active goal (if any) for this session. Empty
+	// when the turn happened outside a chat context.
+	GoalSessionKey string
 }
 
 // HookFunc is a function that runs at a hook point.
