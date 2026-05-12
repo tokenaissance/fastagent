@@ -135,6 +135,97 @@ func TestMaybeContinueSkipsWhenNoRouting(t *testing.T) {
 	}
 }
 
+// TestMaybeContinueSafetyCapFlipsBudgetLimited pins the runaway-
+// goal backstop the design promised: when Iterations crosses
+// SafetyMaxIterations, the runtime flips the goal to
+// BudgetLimited and publishes a wrap-up prompt (same edge
+// behavior as a real budget exhaustion). Without this, an
+// unbounded goal whose model never calls update_goal could
+// loop indefinitely — the cap was already on the struct but
+// never enforced.
+func TestMaybeContinueSafetyCapFlipsBudgetLimited(t *testing.T) {
+	st := newFakeRoutedStore()
+	g := newActiveRoutedGoal()
+	g.SafetyMaxIterations = 3
+	g.Iterations = 3 // at the cap
+	_ = st.CreateGoal(context.Background(), g)
+	mb := bus.New()
+	gr := NewGoalRuntime("s-1", "agent-A", "user-1", st, mb)
+
+	gr.maybeContinue(context.Background())
+
+	// Goal must have flipped to BudgetLimited in the store.
+	after, _ := st.GetGoalBySession(context.Background(), "agent-A", "s-1")
+	if after.Status != StatusBudgetLimited {
+		t.Errorf("status = %q, want budget_limited (safety cap)", after.Status)
+	}
+	// And a budget_limit-shaped message must be on the bus so the
+	// model gets a chance to wrap up.
+	select {
+	case msg := <-mb.Inbound:
+		if msg.Source != bus.SourceGoalBudgetLimit {
+			t.Errorf("Source = %q, want goal_budget_limit", msg.Source)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("safety cap should have published a wrap-up prompt")
+	}
+}
+
+// TestMaybeContinueSafetyCapZeroDisabled: SafetyMaxIterations=0
+// means "no cap" (defensive — old rows from before the field
+// was respected default to 0 in fresh installs but actually
+// CreateGoal defaults it to 100). The zero value must not
+// short-circuit the loop on iteration 0.
+func TestMaybeContinueSafetyCapZeroDisabled(t *testing.T) {
+	st := newFakeRoutedStore()
+	g := newActiveRoutedGoal()
+	g.SafetyMaxIterations = 0
+	g.Iterations = 50
+	_ = st.CreateGoal(context.Background(), g)
+	mb := bus.New()
+	gr := NewGoalRuntime("s-1", "agent-A", "user-1", st, mb)
+
+	gr.maybeContinue(context.Background())
+
+	// Regular continuation should publish; safety cap is disabled.
+	select {
+	case msg := <-mb.Inbound:
+		if msg.Source != bus.SourceGoalContinuation {
+			t.Errorf("Source = %q, want regular continuation (cap=0 means disabled)", msg.Source)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("expected regular continuation when cap=0")
+	}
+	after, _ := st.GetGoalBySession(context.Background(), "agent-A", "s-1")
+	if after.Status != StatusActive {
+		t.Errorf("status changed to %q with cap=0 (should stay active)", after.Status)
+	}
+}
+
+// TestMaybeContinueBelowSafetyCapStillFires: the cap is a hard
+// stop at >=, not a slow-ramp. One iteration before the cap
+// should still publish normally.
+func TestMaybeContinueBelowSafetyCapStillFires(t *testing.T) {
+	st := newFakeRoutedStore()
+	g := newActiveRoutedGoal()
+	g.SafetyMaxIterations = 10
+	g.Iterations = 9
+	_ = st.CreateGoal(context.Background(), g)
+	mb := bus.New()
+	gr := NewGoalRuntime("s-1", "agent-A", "user-1", st, mb)
+
+	gr.maybeContinue(context.Background())
+
+	select {
+	case msg := <-mb.Inbound:
+		if msg.Source != bus.SourceGoalContinuation {
+			t.Errorf("Source = %q, want regular continuation", msg.Source)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("9 < 10 should still produce a continuation")
+	}
+}
+
 // TestMaybeContinueLockCollapsesBursts: two near-simultaneous calls
 // must not both publish (the continuationLock try-acquire collapses
 // the second one). Otherwise PostTurn + AfterToolCall firing back

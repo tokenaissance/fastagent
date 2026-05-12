@@ -212,6 +212,31 @@ func (gr *GoalRuntime) maybeContinue(ctx context.Context) {
 		return
 	}
 
+	// Safety cap: stop a runaway goal that consumes near-zero
+	// tokens per turn (so the budget gate never triggers) but
+	// somehow keeps the loop spinning. Without a budget set the
+	// model can in principle loop forever on "let me audit once
+	// more"; SafetyMaxIterations is the design's documented
+	// hard backstop. Trip it the same way budget-exhausted goals
+	// exit — flip to BudgetLimited and publish the wrap-up prompt
+	// so the model gets one final turn to summarize honestly.
+	if g.SafetyMaxIterations > 0 && g.Iterations >= g.SafetyMaxIterations {
+		slog.Warn("goal runtime: safety iteration cap reached",
+			"agent_id", gr.agentID, "session_key", gr.sessionKey,
+			"iterations", g.Iterations, "cap", g.SafetyMaxIterations)
+		g.Status = StatusBudgetLimited
+		if err := gr.store.UpdateGoal(ctx, g); err != nil {
+			slog.Warn("goal runtime: failed to persist safety-cap transition",
+				"agent_id", gr.agentID, "session_key", gr.sessionKey, "error", err)
+			return
+		}
+		if !PublishBudgetLimit(gr.bus, g, BudgetLimitPrompt(g)) {
+			slog.Warn("goal runtime: bus full, dropped safety-cap wrap-up",
+				"agent_id", gr.agentID, "session_key", gr.sessionKey)
+		}
+		return
+	}
+
 	prompt := ContinuationPrompt(g)
 	if !PublishContinuation(gr.bus, g, prompt) {
 		slog.Warn("goal runtime: bus full, dropped continuation",
