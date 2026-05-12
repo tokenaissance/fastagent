@@ -29,36 +29,36 @@ import (
 
 // Agent is the ReAct agent loop.
 type Agent struct {
-	name              string
-	provider          provider.Provider
-	registry          *tools.Registry
-	sessions          *session.Manager
-	memory            *Memory
-	ctxBuilder        *ContextBuilder
-	mcpMgr            *mcp.Manager
-	hooks             *HookRegistry
+	name                 string
+	provider             provider.Provider
+	registry             *tools.Registry
+	sessions             *session.Manager
+	memory               *Memory
+	ctxBuilder           *ContextBuilder
+	mcpMgr               *mcp.Manager
+	hooks                *HookRegistry
 	model                string
 	maxTokens            int
 	temperature          float64
 	maxToolIterations    int
 	maxParallelToolCalls int // 0 = unlimited
 	thinking             string
-	homePath          string // agent's home: SOUL.md, sessions, memory, skills
-	workspacePath     string // working dir where agent creates user files
-	homeDir           string // FastClaw root, ~/.fastclaw
-	ownerUserID       string // the user that owns this agent (for hook namespacing)
-	skillsCfg         config.SkillsConfig
-	globalSkillsCfg   config.SkillsCfg
-	messageBus        *bus.MessageBus
-	subAgentSpawner   tools.SubAgentSpawner
-	ftsStore          *store.FTSStore
-	piiScrubEnabled   bool
-	memoryCfg         config.MemoryCfg
+	homePath             string // agent's home: SOUL.md, sessions, memory, skills
+	workspacePath        string // working dir where agent creates user files
+	homeDir              string // FastClaw root, ~/.fastclaw
+	ownerUserID          string // the user that owns this agent (for hook namespacing)
+	skillsCfg            config.SkillsConfig
+	globalSkillsCfg      config.SkillsCfg
+	messageBus           *bus.MessageBus
+	subAgentSpawner      tools.SubAgentSpawner
+	ftsStore             *store.FTSStore
+	piiScrubEnabled      bool
+	memoryCfg            config.MemoryCfg
 	// memoryStore is the optional Store-backed source of identity files
 	// (SOUL.md, IDENTITY.md, ...). Kept on the Agent so ReloadWorkspaceFiles
 	// can rewire a fresh ContextBuilder to keep reading from the Store
 	// instead of silently falling back to pod-local filesystem.
-	memoryStore       MemoryStore
+	memoryStore MemoryStore
 	// workspaceStore is optional; when set, SkillsLoader hydrates per-agent
 	// and global skill dirs from the object store on every turn so skills
 	// uploaded post-boot or on a sibling replica become visible here.
@@ -244,27 +244,27 @@ func NewAgentWithSkillsCfg(rc config.ResolvedAgent, prov provider.Provider, mb *
 	eng := newSDKEngine(rc.ID)
 
 	ag := &Agent{
-		name:              rc.ID,
-		provider:          prov,
-		registry:          registry,
-		sessions:          session.NewManager(rc.Home + "/sessions"),
-		memory:            memory,
-		ctxBuilder:        newContextBuilderWithSandbox(rc.Home, workspace, memory, skillsSummary, rc.Thinking, rc.Sandbox.Enabled, rc.Sandbox.Backend),
-		hooks:             hooks,
+		name:                 rc.ID,
+		provider:             prov,
+		registry:             registry,
+		sessions:             session.NewManager(rc.Home + "/sessions"),
+		memory:               memory,
+		ctxBuilder:           newContextBuilderWithSandbox(rc.Home, workspace, memory, skillsSummary, rc.Thinking, rc.Sandbox.Enabled, rc.Sandbox.Backend),
+		hooks:                hooks,
 		model:                rc.Model,
 		maxTokens:            rc.MaxTokens,
 		temperature:          rc.Temperature,
 		maxToolIterations:    rc.MaxToolIterations,
 		maxParallelToolCalls: rc.MaxParallelToolCalls,
 		thinking:             rc.Thinking,
-		homePath:          rc.Home,
-		workspacePath:     workspace,
-		homeDir:           homeDir,
-		skillsCfg:         rc.Skills,
-		globalSkillsCfg:   globalSkillsCfg,
-		messageBus:        mb,
-		engine:            eng,
-		costTracker:       eng.costTracker,
+		homePath:             rc.Home,
+		workspacePath:        workspace,
+		homeDir:              homeDir,
+		skillsCfg:            rc.Skills,
+		globalSkillsCfg:      globalSkillsCfg,
+		messageBus:           mb,
+		engine:               eng,
+		costTracker:          eng.costTracker,
 	}
 
 	// delegate_task lets the parent agent fan a bounded subtask out to a
@@ -830,7 +830,7 @@ func isPlanMode(params map[string]any) bool {
 //     · explicit count >= 10 ("50 leads" / "找 50 个" / "list 20")
 //     · multi-line bullet list (4+ "- " / "* " lines)
 //     · keywords typical of structured-deliverable prompts
-//       (ICP / 表格 / table / list of / draft N / 报告 / report)
+//     (ICP / 表格 / table / list of / draft N / 报告 / report)
 //
 // Two-signal threshold keeps the false-positive rate low: a long but
 // open-ended discussion ("explain how X works in detail") trips at
@@ -1276,7 +1276,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 			sess.Append(provider.Message{Role: "assistant", Content: resp.Content, Thinking: resp.Thinking, Timestamp: time.Now().UnixMilli(), RawAssistant: resp.RawAssistant})
 			emitEvent(ctx, ChatEvent{Type: "content", Data: map[string]any{"content": resp.Content}})
 			emitEvent(ctx, ChatEvent{Type: "done"})
-			a.runPostTurn(ctx, messages, totalToolCalls)
+			a.runPostTurn(ctx, msg, messages, totalToolCalls)
 			return resp.Content
 		}
 
@@ -1532,7 +1532,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		"metadata": capMeta,
 	}})
 	emitEvent(ctx, ChatEvent{Type: "done"})
-	a.runPostTurn(ctx, messages, totalToolCalls)
+	a.runPostTurn(ctx, msg, messages, totalToolCalls)
 	return finalContent
 }
 
@@ -1622,7 +1622,16 @@ func padOrphanToolResults(sess *session.Session) {
 }
 
 // runPostTurn fires PostTurn hooks and handles auto-persist and skills learning.
-func (a *Agent) runPostTurn(ctx context.Context, messages []provider.Message, toolCallCount int) {
+// msg is the InboundMessage that drove this turn — its (channel, account,
+// chat, project) plus Source ride along on the HookContext so PostTurn
+// hooks can route to session-scoped state and tell user-driven turns
+// apart from runtime-originated ones (cron, heartbeat, sub-agent, goal
+// continuation).
+//
+// FIXME: HandleMessageStream (the SSE path) does not call runPostTurn,
+// so PostTurn hooks never fire on web chat. Tracked separately — see
+// docs/design/goal.md §9.
+func (a *Agent) runPostTurn(ctx context.Context, msg bus.InboundMessage, messages []provider.Message, toolCallCount int) {
 	a.turnCount++
 
 	// Index user/assistant messages in FTS
@@ -1643,6 +1652,11 @@ func (a *Agent) runPostTurn(ctx context.Context, messages []provider.Message, to
 		ToolCallCount: toolCallCount,
 		Workspace:     a.homePath,
 		UserID:        a.ownerUserID,
+		Channel:       msg.Channel,
+		AccountID:     msg.AccountID,
+		ChatID:        msg.ChatID,
+		ProjectID:     msg.ProjectID,
+		Source:        msg.Source,
 	})
 
 	// Auto-persist memory every N turns
