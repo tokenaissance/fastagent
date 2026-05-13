@@ -145,7 +145,7 @@ export default function SkillsPage() {
             <Upload className="h-4 w-4 mr-2" />
             Upload Skills
           </Button>
-          <Button variant="outline" onClick={() => setInstallOpen(true)}>
+          <Button onClick={() => setInstallOpen(true)}>
             <Download className="h-4 w-4 mr-2" />
             Install Skill
           </Button>

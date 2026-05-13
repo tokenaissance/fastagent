@@ -22,8 +22,6 @@ import {
   ChevronDown,
   X,
   Plus,
-  KeyRound,
-  Link as LinkIcon,
 } from "lucide-react";
 import {
   getTools,
@@ -126,20 +124,6 @@ export default function ToolsPage() {
         />
       </aside>
       <div className="flex-1 min-w-0">
-        {active !== RUNTIME_ACTIVE && (
-          <div className="flex items-center justify-end mb-4">
-            <Button onClick={handleSave} disabled={saving} variant={saved ? "outline" : "default"}>
-              {saved ? (
-                <><Check className="h-4 w-4 mr-2" /> Saved</>
-              ) : saving ? (
-                <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> Saving…</>
-              ) : (
-                <><Save className="h-4 w-4 mr-2" /> Save</>
-              )}
-            </Button>
-          </div>
-        )}
-
         {error && active !== RUNTIME_ACTIVE && (
           <div className="mb-4 rounded-md border border-destructive/40 bg-destructive/10 px-4 py-2 text-sm text-destructive">
             {error}
@@ -166,6 +150,17 @@ export default function ToolsPage() {
             setProvider={updateProvider}
             tools={tools[activeCat.name] || {}}
             setTools={(patch) => updateCategory(activeCat.name, patch)}
+            saveButton={
+              <Button onClick={handleSave} disabled={saving} variant={saved ? "outline" : "default"}>
+                {saved ? (
+                  <><Check className="h-4 w-4 mr-2" /> Saved</>
+                ) : saving ? (
+                  <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> Saving…</>
+                ) : (
+                  <><Save className="h-4 w-4 mr-2" /> Save</>
+                )}
+              </Button>
+            }
           />
         ) : null}
       </div>
@@ -222,33 +217,78 @@ function CategoryPanel({
   setProvider,
   tools,
   setTools,
+  saveButton,
 }: {
   catalog: ToolCategoryCatalog;
   providers: Record<string, ToolProviderSettings>;
   setProvider: (name: string, patch: Partial<ToolProviderSettings>) => void;
   tools: ToolCategorySettings;
   setTools: (patch: Partial<ToolCategorySettings>) => void;
+  saveButton?: React.ReactNode;
 }) {
+  // Which provider's config to render. Default: the first one that
+  // already has a value, else the first provider in the catalog. The
+  // selector only swaps the visible config — every provider's state
+  // is still held in the parent `providers` map so a single Save
+  // persists every key the user has touched.
+  const firstConfigured = catalog.providers.find((p) => {
+    const s = providers[p.name];
+    return (s?.apiKey && s.apiKey.trim()) || (s?.endpoint && s.endpoint.trim());
+  });
+  const [selectedProvider, setSelectedProvider] = useState<string>(
+    firstConfigured?.name || catalog.providers[0]?.name || "",
+  );
+  const selected = catalog.providers.find((p) => p.name === selectedProvider);
+
   return (
     <div className="space-y-6">
-      <div>
-        <h3 className="text-xl font-semibold tracking-tight">{catalog.label}</h3>
-        <p className="text-sm text-muted-foreground mt-1">
-          Configure provider API keys and fallback order. Tools with no configured provider are hidden from agents.
-        </p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h3 className="text-xl font-semibold tracking-tight">{catalog.label}</h3>
+          <p className="text-sm text-muted-foreground mt-1">
+            Configure provider API keys and fallback order. Tools with no configured provider are hidden from agents.
+          </p>
+        </div>
+        {saveButton}
       </div>
 
-      {/* One card per provider */}
-      <div className="space-y-3">
-        {catalog.providers.map((p) => (
-          <ProviderCard
-            key={p.name}
-            provider={p}
-            settings={providers[p.name] || {}}
-            onChange={(patch) => setProvider(p.name, patch)}
-          />
-        ))}
-      </div>
+      {catalog.providers.length > 0 && (
+        <div className="rounded-lg border border-border bg-card">
+          <div className="p-5 space-y-4">
+            <div className="space-y-2">
+              <Label>Provider</Label>
+              <Select
+                value={selectedProvider}
+                onValueChange={(v) => v && setSelectedProvider(v)}
+              >
+                <SelectTrigger className="w-full">
+                  <SelectValue placeholder="Pick a provider">
+                    {(v: unknown) =>
+                      catalog.providers.find((p) => p.name === v)?.label ??
+                      (v as string) ??
+                      ""
+                    }
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectContent>
+                  {catalog.providers.map((p) => (
+                    <SelectItem key={p.name} value={p.name}>
+                      {p.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            {selected && (
+              <ProviderFields
+                provider={selected}
+                settings={providers[selected.name] || {}}
+                onChange={(patch) => setProvider(selected.name, patch)}
+              />
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Fallback chain editor */}
       <ChainEditor catalog={catalog} tools={tools} setTools={setTools} />
@@ -256,7 +296,7 @@ function CategoryPanel({
   );
 }
 
-function ProviderCard({
+function ProviderFields({
   provider,
   settings,
   onChange,
@@ -266,10 +306,6 @@ function ProviderCard({
   onChange: (patch: Partial<ToolProviderSettings>) => void;
 }) {
   const [showAdvanced, setShowAdvanced] = useState(false);
-  const hasValue =
-    (settings.apiKey && settings.apiKey.trim()) ||
-    (settings.endpoint && settings.endpoint.trim());
-
   const defaultModel = settings.options?.model || "";
 
   const setOption = (k: string, v: string) => {
@@ -280,92 +316,66 @@ function ProviderCard({
   };
 
   return (
-    <div
-      className={`rounded-lg border p-5 transition-colors ${
-        hasValue ? "border-primary/40 bg-card" : "border-border bg-card"
-      }`}
-    >
-      <div className="flex items-start justify-between gap-3 mb-3">
-        <div className="flex items-center gap-3">
-          <div className="flex h-9 w-9 items-center justify-center rounded-md bg-primary/10">
-            {provider.needsKey ? (
-              <KeyRound className="h-4 w-4 text-primary" />
-            ) : (
-              <LinkIcon className="h-4 w-4 text-primary" />
-            )}
-          </div>
-          <div>
-            <p className="text-sm font-medium">{provider.label}</p>
-            <p className="text-[11px] text-muted-foreground font-mono">{provider.name}</p>
-          </div>
-        </div>
-        {hasValue && (
-          <span className="text-[10px] uppercase tracking-wider text-primary/80 font-medium">
-            Configured
-          </span>
-        )}
-      </div>
-
-      <div className="space-y-2.5">
-        {provider.needsKey && (
-          <div>
-            <Label className="text-xs text-muted-foreground">API key</Label>
-            <Input
-              type="password"
-              placeholder="sk-…"
-              value={settings.apiKey || ""}
-              onChange={(e) => onChange({ apiKey: e.target.value })}
-              className="mt-1 font-mono text-sm"
-            />
-          </div>
-        )}
-        {provider.needsUrl && (
-          <div>
-            <Label className="text-xs text-muted-foreground">Endpoint</Label>
-            <Input
-              type="url"
-              placeholder="https://searxng.example.com"
-              value={settings.endpoint || ""}
-              onChange={(e) => onChange({ endpoint: e.target.value })}
-              className="mt-1 font-mono text-sm"
-            />
-          </div>
-        )}
-        {provider.models.length > 1 && (
-          <div>
-            <Label className="text-xs text-muted-foreground">Default model</Label>
-            <Select value={defaultModel} onValueChange={(v) => setOption("model", v || "")}>
-              <SelectTrigger className="mt-1 h-9">
-                <SelectValue placeholder="Pick a default model" />
-              </SelectTrigger>
-              <SelectContent>
-                {provider.models.map((m) => (
-                  <SelectItem key={m} value={m}>
-                    {m}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <p className="text-[10px] text-muted-foreground mt-1">
-              Used when the chain reference omits a model (e.g. just <code className="font-mono">{provider.name}</code>).
-            </p>
-          </div>
-        )}
-
-        <button
-          onClick={() => setShowAdvanced((v) => !v)}
-          className="text-[11px] text-muted-foreground hover:text-foreground transition-colors"
-        >
-          {showAdvanced ? "Hide" : "Show"} advanced options
-        </button>
-
-        {showAdvanced && (
-          <AdvancedOptionsEditor
-            options={settings.options || {}}
-            onChange={(next) => onChange({ options: next })}
+    <div className="space-y-3 pt-1">
+      {provider.needsKey && (
+        <div className="space-y-2">
+          <Label>API key</Label>
+          <Input
+            type="password"
+            placeholder="sk-…"
+            value={settings.apiKey || ""}
+            onChange={(e) => onChange({ apiKey: e.target.value })}
+            className="font-mono text-sm"
           />
-        )}
-      </div>
+        </div>
+      )}
+      {provider.needsUrl && (
+        <div className="space-y-2">
+          <Label>Endpoint</Label>
+          <Input
+            type="url"
+            placeholder="https://searxng.example.com"
+            value={settings.endpoint || ""}
+            onChange={(e) => onChange({ endpoint: e.target.value })}
+            className="font-mono text-sm"
+          />
+        </div>
+      )}
+      {provider.models.length > 1 && (
+        <div className="space-y-2">
+          <Label>Default model</Label>
+          <Select value={defaultModel} onValueChange={(v) => setOption("model", v || "")}>
+            <SelectTrigger>
+              <SelectValue placeholder="Pick a default model" />
+            </SelectTrigger>
+            <SelectContent>
+              {provider.models.map((m) => (
+                <SelectItem key={m} value={m}>
+                  {m}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <p className="text-[10px] text-muted-foreground">
+            Used when the chain reference omits a model (e.g. just{" "}
+            <code className="font-mono">{provider.name}</code>).
+          </p>
+        </div>
+      )}
+
+      <button
+        onClick={() => setShowAdvanced((v) => !v)}
+        className="text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+      >
+        {showAdvanced ? "Hide" : "Show"} advanced options
+      </button>
+
+      {showAdvanced && (
+        <AdvancedOptionsEditor
+          options={settings.options || {}}
+          onChange={(next) => onChange({ options: next })}
+        />
+      )}
     </div>
   );
 }

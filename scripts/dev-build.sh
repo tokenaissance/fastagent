@@ -8,5 +8,13 @@ cd web && pnpm build && cd ..
 rm -rf internal/setup/web
 cp -r web/out internal/setup/web
 
-# Build Go binary
-go build -ldflags "-X main.version=dev" -o tmp/fastclaw ./cmd/fastclaw
+# Build Go binary. Stamp the same version/commit/date that the release
+# Makefile sets — so dev binaries report a real `git describe` tag (e.g.
+# v0.32.0-3-gabc1234-dirty) instead of the hard-coded "dev" default.
+VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo "dev")
+COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+BUILDINFO=github.com/fastclaw-ai/fastclaw/internal/buildinfo
+LDFLAGS="-X main.version=$VERSION -X main.commit=$COMMIT -X main.date=$DATE \
+ -X $BUILDINFO.Version=$VERSION -X $BUILDINFO.Commit=$COMMIT -X $BUILDINFO.Date=$DATE"
+go build -ldflags "$LDFLAGS" -o tmp/fastclaw ./cmd/fastclaw

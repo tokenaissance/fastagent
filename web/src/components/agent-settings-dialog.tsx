@@ -5,6 +5,7 @@ import {
   BrainIcon,
   ClockIcon,
   IdCardIcon,
+  InfoIcon,
   Palette,
   RadioIcon,
   SparklesIcon,
@@ -23,6 +24,7 @@ import AgentChannelsPage from "@/app/agents/[id]/channels/page";
 import AgentSchedulerPage from "@/app/agents/[id]/scheduler/page";
 import AccountSettingsPage from "@/app/settings/account/page";
 import GeneralSettingsPage from "@/app/settings/general/page";
+import AboutSettingsPage from "@/app/settings/about/page";
 
 export type AgentSettingsTab =
   | "profile"
@@ -32,7 +34,8 @@ export type AgentSettingsTab =
   | "channels"
   | "scheduler"
   | "account"
-  | "general";
+  | "general"
+  | "about";
 
 type TabIcon = React.ComponentType<{ className?: string }>;
 
@@ -51,6 +54,7 @@ const AGENT_TABS: Array<{ id: AgentSettingsTab; label: string; icon: TabIcon }> 
 const USER_TABS: Array<{ id: AgentSettingsTab; label: string; icon: TabIcon }> = [
   { id: "account", label: "Account", icon: UserCog },
   { id: "general", label: "General", icon: Palette },
+  { id: "about", label: "About", icon: InfoIcon },
 ];
 
 // Tabbed configuration panel. Hosts both the per-agent pages
@@ -149,6 +153,11 @@ export function AgentSettingsDialog({
           {tab === "general" && (
             <div className="p-6 max-w-3xl">
               <GeneralSettingsPage />
+            </div>
+          )}
+          {tab === "about" && (
+            <div className="p-6 max-w-3xl">
+              <AboutSettingsPage />
             </div>
           )}
         </div>

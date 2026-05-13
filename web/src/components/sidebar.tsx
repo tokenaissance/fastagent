@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { useSearchParams } from "next/navigation";
 import { AppSidebar } from "@/components/app-sidebar";
 import {
   SidebarInset,
@@ -30,11 +31,30 @@ export function usePageHeader(node: React.ReactNode, deps: React.DependencyList 
 
 export function SidebarLayout({ children }: { children: React.ReactNode }) {
   const [headerNode, setHeaderNode] = React.useState<React.ReactNode>(null);
+  const searchParams = useSearchParams();
+  // `?actAs=<uid>` means an admin / agent owner is viewing another
+  // user's chat read-only. The platform sidebar belongs to the viewer's
+  // session, not the impersonated user — hiding it (and its collapse
+  // toggle) keeps the surface focused on the conversation being inspected.
+  const isActAsView = !!searchParams?.get("actAs");
 
   const headerCtx = React.useMemo<PageHeaderContextValue>(
     () => ({ setNode: setHeaderNode }),
     [],
   );
+
+  if (isActAsView) {
+    return (
+      <PageHeaderContext.Provider value={headerCtx}>
+        <div className="flex min-h-svh flex-col">
+          <header className="sticky top-0 z-20 flex h-12 items-center gap-2 bg-background/80 px-3 backdrop-blur">
+            {headerNode}
+          </header>
+          <div className="flex-1">{children}</div>
+        </div>
+      </PageHeaderContext.Provider>
+    );
+  }
 
   return (
     <PageHeaderContext.Provider value={headerCtx}>
