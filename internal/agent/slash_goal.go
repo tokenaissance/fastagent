@@ -75,7 +75,10 @@ func (a *Agent) slashGoalShow(msg bus.InboundMessage) slashResult {
 	if err != nil {
 		return slashResult{handled: true, reply: fmt.Sprintf("Error reading goal: %v", err)}
 	}
-	return slashResult{handled: true, reply: fmt.Sprintf("🎯 %s\n%s", g.Status, g.Objective)}
+	// Plain-text status — no emoji prefix or scaffolding. /goal is
+	// the only command that returns visible text on success; pause /
+	// resume / clear / create all stay silent.
+	return slashResult{handled: true, reply: fmt.Sprintf("%s: %s", g.Status, g.Objective)}
 }
 
 func (a *Agent) slashGoalCreate(msg bus.InboundMessage, objective string) slashResult {
@@ -109,32 +112,29 @@ func (a *Agent) slashGoalCreate(msg bus.InboundMessage, objective string) slashR
 	}
 
 	// Kick the runtime so the first continuation fires immediately
-	// off the user's own /goal turn instead of waiting for the next
-	// message. Brief acknowledgement on purpose — the first
-	// continuation's ReAct loop can take minutes (web_fetch, exec,
-	// etc.) and bus.Outbound only delivers the reply when the whole
-	// turn finishes. Without ANY feedback, users see their /goal
-	// bubble and then nothing for 2-4 minutes, and reasonably
-	// conclude the system is broken. One short line is enough.
+	// off the user's own /goal turn. Silent success — the
+	// continuation streaming back IS the conversational reply, same
+	// as if the user had typed the objective directly. Goal is
+	// transparent at the chat surface; no scaffolding text.
 	if a.goalManager != nil {
 		if gr := a.goalManager.Ensure(key, a.name, a.ownerUserID); gr != nil {
 			gr.Trigger()
 		}
 	}
-	return slashResult{handled: true, reply: "🎯 Goal set — agent is working on it."}
+	return slashResult{handled: true, reply: ""}
 }
 
 func (a *Agent) slashGoalPause(msg bus.InboundMessage) slashResult {
-	return a.transitionGoal(msg, goal.StatusActive, goal.StatusPaused,
-		"⏸ Paused.", "Not active.")
+	// Silent transition. Mistakes (Not active / no goal) still
+	// surface — see transitionGoal.
+	return a.transitionGoal(msg, goal.StatusActive, goal.StatusPaused, "", "Not active.")
 }
 
 func (a *Agent) slashGoalResume(msg bus.InboundMessage) slashResult {
-	res := a.transitionGoal(msg, goal.StatusPaused, goal.StatusActive,
-		"▶ Resumed.", "Not paused.")
-	// Triggering after a successful resume kicks the runtime so the
-	// next continuation fires without waiting for another user turn.
-	if res.handled && strings.HasPrefix(res.reply, "▶") && a.goalManager != nil {
+	res := a.transitionGoal(msg, goal.StatusPaused, goal.StatusActive, "", "Not paused.")
+	// Empty reply == success path; non-empty == wrongStateMsg or
+	// error. Trigger only on success.
+	if res.handled && res.reply == "" && a.goalManager != nil {
 		key := a.resolveSessionKey(msg)
 		if gr := a.goalManager.Ensure(key, a.name, a.ownerUserID); gr != nil {
 			gr.Trigger()
@@ -178,13 +178,11 @@ func (a *Agent) slashGoalClear(msg bus.InboundMessage) slashResult {
 		return slashResult{handled: true, reply: fmt.Sprintf("Error clearing goal: %v", err)}
 	}
 	// Stop the runtime so a future /goal in the same session starts
-	// with a fresh goroutine — without StopSession, the cached idle
-	// runtime would keep checking the now-deleted row until its 30
-	// min self-shutdown.
+	// with a fresh goroutine.
 	if a.goalManager != nil {
 		a.goalManager.StopSession(key)
 	}
-	return slashResult{handled: true, reply: "🗑 Goal cleared."}
+	return slashResult{handled: true, reply: ""}
 }
 
 // clearGoalForSession removes any goal attached to the named
