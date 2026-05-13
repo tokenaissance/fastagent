@@ -88,12 +88,6 @@ func NewTokenAccountingHook(st goal.Store, mb *bus.MessageBus, agentID string) H
 			slog.Info("goal budget exhausted",
 				"agent", agentID, "session_key", hc.GoalSessionKey,
 				"tokens_used", g.TokensUsed, "token_budget", *g.TokenBudget)
-			// Emit goal_status_changed so the badge updates the
-			// moment the flip happens, not on the next refresh.
-			// emitEvent piggybacks on the ongoing turn's streamCtx
-			// — hook fires AfterModelCall, well inside the SSE
-			// pipeline.
-			emitEvent(ctx, goalStatusChangedEvent(g, "budget_exhausted"))
 			// Publish the budget_limit prompt. PublishBudgetLimit
 			// tags the inbound with SourceGoalBudgetLimit so
 			// HandleMessage's "drop stale continuations" gate
@@ -105,48 +99,6 @@ func NewTokenAccountingHook(st goal.Store, mb *bus.MessageBus, agentID string) H
 					"agent", agentID, "session_key", hc.GoalSessionKey)
 			}
 		}
-	}
-}
-
-// NewGoalToolEventHook returns an AfterToolCall hook that watches for
-// successful update_goal calls and emits goal_status_changed. The tool
-// itself can't emit because it lives in the tools package and would
-// have to import agent (circular) to reach emitEvent — folding the
-// signal in here keeps the dependency one-way.
-//
-// Fires only on update_goal because that's the only model-visible
-// tool that mutates status. create_goal already emits via the slash /
-// REST event flow when used from those paths, and the model rarely
-// uses create_goal in practice (it's gated to "only when user/
-// developer explicitly asks").
-func NewGoalToolEventHook(st goal.Store, agentID string) HookFunc {
-	if st == nil {
-		return nil
-	}
-	return func(ctx context.Context, hc *HookContext) {
-		if hc.Point != AfterToolCall {
-			return
-		}
-		if hc.ToolName != "update_goal" {
-			return
-		}
-		if hc.Error != nil {
-			return
-		}
-		if hc.GoalSessionKey == "" {
-			return
-		}
-		g, err := st.GetGoalBySession(ctx, agentID, hc.GoalSessionKey)
-		if err != nil || g == nil {
-			return
-		}
-		// Only emit on the actual flip — defensive against
-		// update_goal becoming a no-op surface in a future schema
-		// (e.g. status=paused). Today it's complete-only.
-		if g.Status != goal.StatusComplete {
-			return
-		}
-		emitEvent(ctx, goalStatusChangedEvent(g, "model_completed"))
 	}
 }
 

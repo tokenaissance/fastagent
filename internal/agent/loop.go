@@ -524,9 +524,6 @@ func (a *Agent) WireGoals(st goal.Store) {
 	if hook := NewTokenAccountingHook(st, a.messageBus, a.name); hook != nil {
 		a.hooks.Register(AfterModelCall, hook)
 	}
-	if hook := NewGoalToolEventHook(st, a.name); hook != nil {
-		a.hooks.Register(AfterToolCall, hook)
-	}
 	tools.RegisterGoalTools(a.registry, st, a.name, a.ownerUserID)
 
 	// Trigger continuation only at turn boundaries (PostTurn), not
@@ -650,6 +647,30 @@ func (a *Agent) GoalStore() goal.Store {
 // token-accounting hook explicitly published when status flipped
 // to BudgetLimited; gating it on status==Active would drop the
 // wrap-up. Honoring it post-flip is correct.
+// sessionHasActiveGoal reports whether the session this inbound is
+// for has a goal in Active state. Used as a hard precedence rule
+// over auto-plan-mode: an active goal is an autonomous loop; plan-mode
+// is a "wait for human approval" gate. The two cannot coexist on the
+// same turn without breaking the goal's autonomy guarantee.
+//
+// Best-effort: a store error or missing session returns false (the
+// caller treats absence as "no active goal"). The check is one
+// indexed read per inbound turn — cheap enough to skip caching.
+func (a *Agent) sessionHasActiveGoal(ctx context.Context, msg bus.InboundMessage) bool {
+	if a.goalStore == nil || a.sessions == nil {
+		return false
+	}
+	sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID, msg.ProjectID)
+	if sess == nil {
+		return false
+	}
+	g, err := a.goalStore.GetGoalBySession(ctx, a.name, sess.SessionKey())
+	if err != nil || g == nil {
+		return false
+	}
+	return g.Status == goal.StatusActive
+}
+
 func (a *Agent) shouldProcessGoalContinuation(ctx context.Context, msg bus.InboundMessage) bool {
 	if msg.Source != bus.SourceGoalContinuation {
 		return true
@@ -758,23 +779,12 @@ func (a *Agent) WebChatHistory(sessionId string) []map[string]any {
 	msgs := sess.ArchivedMessages()
 	var history []map[string]any
 	for _, m := range msgs {
-		// Runtime-injected messages (currently only goal_context
-		// continuations) used to be hidden outright. That left the
-		// user looking at a string of assistant replies with no
-		// visible prompt and the agent appearing to talk to itself.
-		// Surface them with an explicit origin marker instead so the
-		// frontend can render them as collapsed system notes.
+		// Hide runtime-injected messages (currently only goal_context
+		// continuations). They live in the session for the LLM's
+		// benefit; surfacing them to the user would expose audit
+		// scaffolding the user never typed. Matches Codex's slash-only
+		// /goal UX — the audit prompt is internal-only.
 		if m.Origin != provider.OriginUser {
-			text := m.TextContent()
-			if text == "" {
-				continue
-			}
-			history = append(history, map[string]any{
-				"role":     "user",
-				"content":  text,
-				"origin":   m.Origin,
-				"internal": true, // hint for the UI to default-collapse
-			})
 			continue
 		}
 		switch m.Role {
@@ -1323,25 +1333,14 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	if !a.shouldProcessGoalContinuation(ctx, msg) {
 		slog.Debug("dropping stale goal continuation",
 			"agent", a.name, "channel", msg.Channel, "chat", msg.ChatID)
-		emitEvent(ctx, ChatEvent{Type: EventDone})
+		emitEvent(ctx, ChatEvent{Type: "done"})
 		return ""
 	}
-	// Emit a goal_iteration event for genuine goal continuations once
-	// they pass the staleness gate. Frontend listens for this to show
-	// "Goal continuing… (round N)" inline + refresh the badge's
-	// tokens-used display before the round's content actually streams.
-	a.emitGoalIterationIfContinuation(ctx, msg)
 
 	// Check for slash commands first
 	if result := a.handleSlashCommand(msg); result.handled {
-		// Out-of-band events first (e.g. goal_created from /goal foo)
-		// so the frontend can update sidebar / badge before the
-		// "done" event marks the turn settled.
-		for _, evt := range result.events {
-			emitEvent(ctx, evt)
-		}
-		emitEvent(ctx, ChatEvent{Type: EventContent, Data: map[string]any{"content": result.reply}})
-		emitEvent(ctx, ChatEvent{Type: EventDone})
+		emitEvent(ctx, ChatEvent{Type: "content", Data: map[string]any{"content": result.reply}})
+		emitEvent(ctx, ChatEvent{Type: "done"})
 		return result.reply
 	}
 
@@ -1996,19 +1995,9 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 			"agent", a.name, "channel", msg.Channel, "chat", msg.ChatID)
 		return a.stringStream("")
 	}
-	// Same goal_iteration emit as HandleMessage — keeps the SSE
-	// contract consistent regardless of which entry point the
-	// continuation lands on.
-	a.emitGoalIterationIfContinuation(ctx, msg)
 
 	// Reuse setup logic from HandleMessage
 	if result := a.handleSlashCommand(msg); result.handled {
-		// Fan out slash-issued events (e.g. /goal goal_created) via
-		// the hub so SSE subscribers see them; the StreamReader the
-		// caller gets back only carries the textual reply.
-		for _, evt := range result.events {
-			emitEvent(ctx, evt)
-		}
 		ch := make(chan provider.StreamChunk, 2)
 		go func() {
 			ch <- provider.StreamChunk{Content: result.reply, Done: true}

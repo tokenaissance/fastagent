@@ -8,36 +8,9 @@ import (
 
 // ChatEvent represents a real-time event emitted during the agent ReAct loop.
 type ChatEvent struct {
-	Type string         `json:"type"` // see EventType* constants
+	Type string         `json:"type"` // "content", "tool_call", "tool_result", "error", "done"
 	Data map[string]any `json:"data,omitempty"`
 }
-
-// Event type constants. Stringly-typed in the wire format so the
-// frontend's SSE consumer doesn't need a code-gen step, but using these
-// in Go code keeps emit sites grep-able and avoids typos.
-const (
-	EventContent    = "content"
-	EventToolCall   = "tool_call"
-	EventToolResult = "tool_result"
-	EventError      = "error"
-	EventDone       = "done"
-
-	// Goal lifecycle events — fan out so the frontend can render goal
-	// state (badge, progress, status changes) without polling.
-	//
-	//   goal_created          { goal: Goal }
-	//   goal_status_changed   { status, goal, reason? }
-	//   goal_iteration        { round, tokensUsed, tokenBudget?, status }
-	//   goal_cleared          { goalId }
-	//
-	// All four are scoped to the (user, agent, session) tuple via the
-	// EventHub key, so other tabs / SSE clients on the same session
-	// see them too.
-	EventGoalCreated       = "goal_created"
-	EventGoalStatusChanged = "goal_status_changed"
-	EventGoalIteration     = "goal_iteration"
-	EventGoalCleared       = "goal_cleared"
-)
 
 type chatEventsKey struct{}
 

@@ -120,11 +120,7 @@ func (a *Agent) slashGoalCreate(msg bus.InboundMessage, objective string) slashR
 	}
 
 	if weak {
-		return slashResult{
-			handled: true,
-			reply:   fmt.Sprintf("🎯 Goal created (paused for review).\n\n%s\n%s", formatGoalView(g), weakObjectiveHint()),
-			events:  []ChatEvent{goalCreatedEvent(g)},
-		}
+		return slashResult{handled: true, reply: fmt.Sprintf("🎯 Goal created (paused for review).\n\n%s\n%s", formatGoalView(g), weakObjectiveHint())}
 	}
 
 	// Mint + kick the runtime. The runtime would also come up via
@@ -136,11 +132,7 @@ func (a *Agent) slashGoalCreate(msg bus.InboundMessage, objective string) slashR
 			gr.Trigger()
 		}
 	}
-	return slashResult{
-		handled: true,
-		reply:   fmt.Sprintf("🎯 Goal set.\n\n%s", formatGoalView(g)),
-		events:  []ChatEvent{goalCreatedEvent(g)},
-	}
+	return slashResult{handled: true, reply: fmt.Sprintf("🎯 Goal set.\n\n%s", formatGoalView(g))}
 }
 
 // objectiveLooksWeak heuristically detects an under-specified
@@ -194,15 +186,13 @@ func weakObjectiveHint() string {
 func (a *Agent) slashGoalPause(msg bus.InboundMessage) slashResult {
 	return a.transitionGoal(msg, goal.StatusActive, goal.StatusPaused,
 		"⏸ Goal paused. Use `/goal resume` to continue.",
-		"Goal is not active — nothing to pause.",
-		"user_paused")
+		"Goal is not active — nothing to pause.")
 }
 
 func (a *Agent) slashGoalResume(msg bus.InboundMessage) slashResult {
 	res := a.transitionGoal(msg, goal.StatusPaused, goal.StatusActive,
 		"▶ Goal resumed.",
-		"Goal is not paused — `/goal` to see current status.",
-		"user_resumed")
+		"Goal is not paused — `/goal` to see current status.")
 	// Triggering after a successful resume kicks the runtime so the
 	// next continuation fires without waiting for another user turn.
 	if res.handled && strings.HasPrefix(res.reply, "▶") && a.goalManager != nil {
@@ -216,10 +206,8 @@ func (a *Agent) slashGoalResume(msg bus.InboundMessage) slashResult {
 
 // transitionGoal centralizes the "load goal → check it's in the
 // expected source state → flip → persist" pattern for pause/resume.
-// Returns a slashResult tailored to the outcome. On success emits a
-// goal_status_changed event tagged with reason so the frontend can
-// distinguish a user toggle from a runtime-driven transition.
-func (a *Agent) transitionGoal(msg bus.InboundMessage, from, to goal.Status, okMsg, wrongStateMsg, reason string) slashResult {
+// Returns a slashResult tailored to the outcome.
+func (a *Agent) transitionGoal(msg bus.InboundMessage, from, to goal.Status, okMsg, wrongStateMsg string) slashResult {
 	key := a.resolveSessionKey(msg)
 	g, err := a.goalStore.GetGoalBySession(context.Background(), a.name, key)
 	if errors.Is(err, goal.ErrNotFound) || g == nil {
@@ -235,11 +223,7 @@ func (a *Agent) transitionGoal(msg bus.InboundMessage, from, to goal.Status, okM
 	if err := a.goalStore.UpdateGoal(context.Background(), g); err != nil {
 		return slashResult{handled: true, reply: fmt.Sprintf("Error updating goal: %v", err)}
 	}
-	return slashResult{
-		handled: true,
-		reply:   okMsg,
-		events:  []ChatEvent{goalStatusChangedEvent(g, reason)},
-	}
+	return slashResult{handled: true, reply: okMsg}
 }
 
 func (a *Agent) slashGoalClear(msg bus.InboundMessage) slashResult {
@@ -251,7 +235,6 @@ func (a *Agent) slashGoalClear(msg bus.InboundMessage) slashResult {
 	if err != nil {
 		return slashResult{handled: true, reply: fmt.Sprintf("Error reading goal: %v", err)}
 	}
-	clearedID := g.ID
 	if err := a.goalStore.DeleteGoal(context.Background(), g.ID); err != nil {
 		return slashResult{handled: true, reply: fmt.Sprintf("Error clearing goal: %v", err)}
 	}
@@ -262,11 +245,7 @@ func (a *Agent) slashGoalClear(msg bus.InboundMessage) slashResult {
 	if a.goalManager != nil {
 		a.goalManager.StopSession(key)
 	}
-	return slashResult{
-		handled: true,
-		reply:   "🗑 Goal cleared.",
-		events:  []ChatEvent{goalClearedEvent(clearedID)},
-	}
+	return slashResult{handled: true, reply: "🗑 Goal cleared."}
 }
 
 // clearGoalForSession removes any goal attached to the named
