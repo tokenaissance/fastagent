@@ -164,11 +164,8 @@ func TestManagerShutdownStopsAll(t *testing.T) {
 	waitFor(t, time.Second, func() bool { return m.ActiveCount() == 0 })
 }
 
-// TestIdleTooLongFreshRuntimeIsNotIdle: a runtime built moments
-// ago must NOT idle-shutdown. Sanity check; without it nothing
-// pins that NewGoalRuntime seeds lastActivity to "now" — a future
-// refactor that defaults to zero time would silently kill every
-// fresh runtime on the next probe tick.
+// Fresh runtime must not be idle — guards NewGoalRuntime seeding
+// lastActivity to "now" rather than zero time.
 func TestIdleTooLongFreshRuntimeIsNotIdle(t *testing.T) {
 	gr := NewGoalRuntime("s-1", "agent", "user", fakeStore{}, bus.New())
 	if gr.idleTooLong() {
@@ -176,12 +173,9 @@ func TestIdleTooLongFreshRuntimeIsNotIdle(t *testing.T) {
 	}
 }
 
-// TestIdleTooLongAfterStaleness: when lastActivity is older than
-// runtimeIdleShutdown, idleTooLong must return true so the Run
-// loop's probe-tick branch returns and the goroutine exits. This
-// is the entire runtime-leak backstop in one assertion — paired
-// with the maybe_continue tests that pin "no-op probes don't
-// refresh lastActivity", the lifecycle story is closed.
+// Stale runtime → idleTooLong true → Run loop exits. Paired with
+// the maybeContinue "no-op probes don't refresh lastActivity"
+// tests, this closes the runtime-leak story.
 func TestIdleTooLongAfterStaleness(t *testing.T) {
 	gr := NewGoalRuntime("s-1", "agent", "user", fakeStore{}, bus.New())
 	gr.lastActivity = time.Now().Add(-2 * runtimeIdleShutdown)
@@ -190,15 +184,10 @@ func TestIdleTooLongAfterStaleness(t *testing.T) {
 	}
 }
 
-// TestIdleTooLongBoundary: the check uses `>` (strict), so a
-// runtime that's been idle for exactly runtimeIdleShutdown stays
-// alive one more tick. Pins the boundary so a future "let's tidy
-// the comparison to >=" change has to update this test
-// deliberately rather than accidentally tightening behavior.
+// `>` is strict — exactly-at-the-window stays alive one more
+// tick. Pinned so > → >= can't slip in silently.
 func TestIdleTooLongBoundary(t *testing.T) {
 	gr := NewGoalRuntime("s-1", "agent", "user", fakeStore{}, bus.New())
-	// Pin one nanosecond inside the window — anything not visibly
-	// past runtimeIdleShutdown must read as still alive.
 	gr.lastActivity = time.Now().Add(-runtimeIdleShutdown + time.Millisecond)
 	if gr.idleTooLong() {
 		t.Error("idleTooLong should be false at the inside edge of the window")

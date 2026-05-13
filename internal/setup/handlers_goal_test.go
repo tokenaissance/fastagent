@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -15,21 +16,10 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/store"
 )
 
-// These tests guard the REST /goal surface — handlers_goal.go was
-// previously untested end-to-end, relying on hand-eyeballing that
-// it mirrors slash_goal.go behavior. Now every public verb's happy
-// path and the high-traffic failure modes (auth, validation, state
-// conflict) are pinned. The fixture is intentionally heavy on
-// behavior assertions (DB state after each call) and light on
-// response-body shape — shape changes are cheap to fix; behavior
-// drift would silently break the dashboard.
-
-// goalTestFixture wires the bare minimum a Server needs to serve
-// the /goal handlers: a fresh in-memory DBStore, a seeded agent
-// row that the configured owner can claim, and the Server itself.
-// No userResolver — that means triggerGoalRuntime is a quiet no-op,
-// which is fine for these tests; the lifecycle hook is exercised
-// separately in wire_goals_test.go.
+// goalTestFixture wires the minimum a Server needs to serve the
+// /goal handlers: in-memory DBStore + seeded agent row owned by
+// ownerID. No userResolver, so triggerGoalRuntime is a quiet
+// no-op — runtime wiring is covered in wire_goals_test.go.
 type goalTestFixture struct {
 	t       *testing.T
 	srv     *Server
@@ -78,23 +68,17 @@ func (f *goalTestFixture) req(method, path string, body any) *http.Request {
 
 func (f *goalTestFixture) reqAs(uid, method, path string, body any) *http.Request {
 	f.t.Helper()
-	var bodyReader *bytes.Buffer
+	var br io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
 			f.t.Fatalf("marshal body: %v", err)
 		}
-		bodyReader = bytes.NewBuffer(b)
+		br = bytes.NewReader(b)
 	}
-	var r *http.Request
-	if bodyReader != nil {
-		r = httptest.NewRequest(method, path, bodyReader)
-	} else {
-		r = httptest.NewRequest(method, path, nil)
-	}
+	r := httptest.NewRequest(method, path, br)
 	r.SetPathValue("id", f.agentID)
-	r = r.WithContext(auth.WithIdentity(r.Context(), auth.Identity{UserID: uid}))
-	return r
+	return r.WithContext(auth.WithIdentity(r.Context(), auth.Identity{UserID: uid}))
 }
 
 // seedGoal inserts a goal directly via the store adapter, bypassing

@@ -672,51 +672,23 @@ func (a *Agent) shouldProcessGoalContinuation(ctx context.Context, msg bus.Inbou
 	return g.Status == goal.StatusActive
 }
 
-// originForInboundSource maps an inbound-message Source onto the
-// provider.Message.Origin that the resulting user-role message
-// should carry once it lands in session history. Returning
-// OriginGoalContext for the two goal-runtime sources is what
-// activates the three downstream filters (compaction summary
-// input, WebChatHistory, FTS) — without this mapping the Origin
-// field stays "" (OriginUser) on continuations and the filters
-// silently no-op, defeating §5.3 (b) pinned-head and §5.4 hidden-
-// from-user-history intent.
-func originForInboundSource(source string) string {
-	switch source {
-	case bus.SourceGoalContinuation, bus.SourceGoalBudgetLimit:
-		return provider.OriginGoalContext
-	default:
-		return provider.OriginUser
-	}
-}
-
-// buildUserMessage flattens an inbound message into the
-// user-role provider.Message that lands in session history.
-// Handles three things at once because they all share the same
-// "what does the wire payload turn into" question:
-//
-//  1. Origin tag — goal-runtime sources get OriginGoalContext so
-//     the compaction / WebChatHistory / FTS filters can recognize
-//     synthetic audit scaffolding (see originForInboundSource).
-//  2. Multimodal content flatten — PhotoURL (legacy IM single)
-//     and PhotoURLs (multi from web upload) merge into one
-//     ContentParts slice. The empty leading text part is skipped
-//     because some upstream providers reject content-less wire
-//     messages.
-//  3. Plain text passthrough — when no images, Content stays a
-//     bare string so the provider's transport sends the cheap
-//     single-string shape.
-//
-// Extracted so HandleMessage / HandleMessageStream / handlePlanMode
-// stay in sync without prose-comment hand-shaking; previously the
-// three sites were copy-pasted and the Origin fix had to land at
-// all three for the filters to fire at all (they silently no-op'd
-// for several commits before that catch).
+// buildUserMessage flattens an inbound message into the user-role
+// provider.Message that lands in session history. Tags Origin so
+// goal-runtime continuations get recognized by the compaction /
+// WebChatHistory / FTS filters (which check Origin != OriginUser),
+// and merges PhotoURL (legacy IM single) + PhotoURLs (web multi)
+// into one ContentParts slice. Image-only sends skip a leading
+// empty text part — some upstreams reject content-less wire messages.
 func buildUserMessage(msg bus.InboundMessage) provider.Message {
+	origin := provider.OriginUser
+	switch msg.Source {
+	case bus.SourceGoalContinuation, bus.SourceGoalBudgetLimit:
+		origin = provider.OriginGoalContext
+	}
 	userMsg := provider.Message{
 		Role:    "user",
 		Content: msg.Text,
-		Origin:  originForInboundSource(msg.Source),
+		Origin:  origin,
 	}
 	imageURLs := msg.PhotoURLs
 	if msg.PhotoURL != "" {

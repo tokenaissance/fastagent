@@ -8,45 +8,11 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/provider"
 )
 
-// TestOriginForInboundSource pins the Source → Origin mapping the
-// userMsg construction depends on. The bug it guards against was
-// real for several commits: the constant provider.OriginGoalContext
-// was defined and three downstream filters (compaction summary
-// input, WebChatHistory, FTS) checked `Origin != OriginUser`, but
-// the field was never assigned in production — so goal continuation
-// messages all carried "" and the filters silently no-op'd.
-func TestOriginForInboundSource(t *testing.T) {
-	cases := []struct {
-		source string
-		want   string
-	}{
-		{bus.SourceUser, provider.OriginUser},
-		{bus.SourceCron, provider.OriginUser},
-		{bus.SourceHeartbeat, provider.OriginUser},
-		{bus.SourceSubAgent, provider.OriginUser},
-		{bus.SourceGoalContinuation, provider.OriginGoalContext},
-		{bus.SourceGoalBudgetLimit, provider.OriginGoalContext},
-		{"", provider.OriginUser},
-		{"unknown_future_source", provider.OriginUser},
-	}
-	for _, tc := range cases {
-		t.Run(tc.source, func(t *testing.T) {
-			got := originForInboundSource(tc.source)
-			if got != tc.want {
-				t.Errorf("originForInboundSource(%q) = %q, want %q",
-					tc.source, got, tc.want)
-			}
-		})
-	}
-}
-
-// TestBuildUserMessageOriginPropagates ties the high-level
-// guarantee — "goal-runtime messages land in session history with
-// OriginGoalContext, real user turns land with OriginUser" —
-// directly to the function HandleMessage / HandleMessageStream /
-// handlePlanMode actually call. Replaces the previous "helper is
-// unit-tested but the three call sites are only hand-eyeballed"
-// gap.
+// Origin tagging guards the compaction / WebChatHistory / FTS
+// filters that check Origin != OriginUser. Before this was wired
+// the field stayed "" on goal continuations and all three filters
+// silently no-op'd. Cover every declared Source so a future
+// rename or added source is caught at build/test time.
 func TestBuildUserMessageOriginPropagates(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -55,15 +21,15 @@ func TestBuildUserMessageOriginPropagates(t *testing.T) {
 	}{
 		{"user turn", bus.SourceUser, provider.OriginUser},
 		{"cron tick", bus.SourceCron, provider.OriginUser},
+		{"heartbeat", bus.SourceHeartbeat, provider.OriginUser},
+		{"subagent", bus.SourceSubAgent, provider.OriginUser},
 		{"goal continuation", bus.SourceGoalContinuation, provider.OriginGoalContext},
 		{"goal budget-limit wrap-up", bus.SourceGoalBudgetLimit, provider.OriginGoalContext},
+		{"unknown future source", "unknown", provider.OriginUser},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := buildUserMessage(bus.InboundMessage{
-				Source: tc.source,
-				Text:   "hello",
-			})
+			got := buildUserMessage(bus.InboundMessage{Source: tc.source, Text: "hello"})
 			if got.Origin != tc.want {
 				t.Errorf("Origin = %q, want %q", got.Origin, tc.want)
 			}
@@ -71,29 +37,16 @@ func TestBuildUserMessageOriginPropagates(t *testing.T) {
 	}
 }
 
-// TestBuildUserMessagePlainText: no images → bare Content,
-// ContentParts left nil so the provider transport picks the
-// cheap single-string shape. The empty ContentParts assertion is
-// the load-bearing one: a regression that always emits parts —
-// even for text-only messages — would balloon every chat into
-// the heavier multimodal wire format.
+// Text-only message: Content stays a bare string and ContentParts
+// is nil so the provider sends the cheap single-string shape.
 func TestBuildUserMessagePlainText(t *testing.T) {
 	got := buildUserMessage(bus.InboundMessage{Text: "hi"})
-	if got.Role != "user" {
-		t.Errorf("Role = %q, want user", got.Role)
-	}
-	if got.Content != "hi" {
-		t.Errorf("Content = %q, want hi", got.Content)
-	}
-	if got.ContentParts != nil {
-		t.Errorf("ContentParts should be nil for text-only, got %v", got.ContentParts)
+	if got.Role != "user" || got.Content != "hi" || got.ContentParts != nil {
+		t.Errorf("plain-text shape wrong: %+v", got)
 	}
 }
 
-// TestBuildUserMessageSingleLegacyPhoto: the legacy IM bridge
-// path (PhotoURL, single image) must produce a ContentParts with
-// one text + one image_url. Three load-bearing checks: Content
-// blanked, ContentParts populated, image URL preserved exactly.
+// Legacy IM bridge PhotoURL → ContentParts with text + image.
 func TestBuildUserMessageSingleLegacyPhoto(t *testing.T) {
 	got := buildUserMessage(bus.InboundMessage{
 		Text:     "look",
@@ -114,8 +67,7 @@ func TestBuildUserMessageSingleLegacyPhoto(t *testing.T) {
 	}
 }
 
-// TestBuildUserMessageMultiplePhotoURLs: web upload path
-// (PhotoURLs, slice). Each URL must appear in order.
+// Web upload PhotoURLs slice — order must be preserved.
 func TestBuildUserMessageMultiplePhotoURLs(t *testing.T) {
 	got := buildUserMessage(bus.InboundMessage{
 		Text:      "caption",
@@ -135,30 +87,20 @@ func TestBuildUserMessageMultiplePhotoURLs(t *testing.T) {
 	}
 }
 
-// TestBuildUserMessageImageOnly: image with empty Text must NOT
-// produce a leading empty-text part. Some upstream providers
-// reject `[{text: ""}, {image_url}]` as a content-less wire
-// message — that's why the construction code special-cases the
-// empty-Text branch.
+// Image-only sends must NOT emit a leading {text: ""} part —
+// some upstreams reject content-less wire messages.
 func TestBuildUserMessageImageOnly(t *testing.T) {
 	got := buildUserMessage(bus.InboundMessage{
 		PhotoURL: "https://im.example/photo.jpg",
 	})
-	if len(got.ContentParts) != 1 {
-		t.Fatalf("expected 1 part (image only, no leading empty text), got %d: %+v",
-			len(got.ContentParts), got.ContentParts)
-	}
-	if got.ContentParts[0].Type != "image_url" {
-		t.Errorf("part[0] should be image_url, got %q", got.ContentParts[0].Type)
+	if len(got.ContentParts) != 1 || got.ContentParts[0].Type != "image_url" {
+		t.Errorf("image-only shape wrong: %+v", got.ContentParts)
 	}
 }
 
-// TestBuildUserMessageMergesPhotoURLAndPhotoURLs: both legacy
-// (PhotoURL) and modern (PhotoURLs) populated on the same message
-// — PhotoURL is prepended so it lands first in the order. The
-// scenario is a multimodal IM bridge that uses the new web shape
-// for batched uploads but still sets the legacy single field for
-// older clients.
+// PhotoURL (legacy single) is prepended before PhotoURLs (web
+// slice) — bridges that set both must see the legacy one land
+// first.
 func TestBuildUserMessageMergesPhotoURLAndPhotoURLs(t *testing.T) {
 	got := buildUserMessage(bus.InboundMessage{
 		Text:      "see attachments",
@@ -166,19 +108,15 @@ func TestBuildUserMessageMergesPhotoURLAndPhotoURLs(t *testing.T) {
 		PhotoURLs: []string{"https://web/second.png", "https://web/third.png"},
 	})
 	if len(got.ContentParts) != 4 {
-		t.Fatalf("expected 4 parts (text + 3 images), got %d", len(got.ContentParts))
+		t.Fatalf("expected 4 parts, got %d", len(got.ContentParts))
 	}
-	// PhotoURL (legacy single) is prepended → part[1].
 	if got.ContentParts[1].ImageURL.URL != "https://legacy/first.jpg" {
 		t.Errorf("legacy PhotoURL should be first image, got %q", got.ContentParts[1].ImageURL.URL)
 	}
 }
 
-// TestBuildUserMessageGoalContinuationWithText: the highest-stakes
-// combination — a goal continuation message must land with both
-// the OriginGoalContext tag AND the audit prompt text intact. Any
-// regression in either half re-opens a real bug (silent compaction
-// no-op or lost continuation content).
+// Goal continuation with body: Origin AND audit prompt text both
+// have to survive — the load-bearing combination.
 func TestBuildUserMessageGoalContinuationWithText(t *testing.T) {
 	got := buildUserMessage(bus.InboundMessage{
 		Source: bus.SourceGoalContinuation,
