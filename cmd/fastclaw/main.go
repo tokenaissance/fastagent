@@ -160,6 +160,12 @@ func runGateway(port int) error {
 	webSrv.SetUsageMeter(gw.Usage())
 	webSrv.SetAuth(authResolver)
 	webSrv.SetWebChannel(gw.WebChannel())
+	// Share the chat-event hub so the gateway's task closure (which
+	// processes cron / goal_continuation / heartbeat / sub-agent
+	// turns) can attach a streamCtx and stream events through the
+	// same SSE pipeline that user-typed turns use. Must be wired
+	// before gw.Run() starts the bus consumer.
+	gw.SetChatEvents(webSrv.ChatEventHub())
 
 	apiSrv := api.NewServer(&apiResolver{gw: gw}, authResolver, gwCfg)
 	webSrv.SetAPIServer(apiSrv)

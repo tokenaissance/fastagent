@@ -151,6 +151,14 @@ func (s *Server) chatEventHub() *agent.EventHub {
 	return s.chatEvents
 }
 
+// ChatEventHub exposes the hub to callers outside this package (the
+// gateway needs it to attach a stream pipeline onto bus-fired turns
+// so cron / goal continuations stream rather than land as one delayed
+// async bubble). Wraps chatEventHub's lazy-init.
+func (s *Server) ChatEventHub() *agent.EventHub {
+	return s.chatEventHub()
+}
+
 // authMiddleware wraps the auth.Resolver's Middleware. Required for every
 // authenticated route.
 func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
