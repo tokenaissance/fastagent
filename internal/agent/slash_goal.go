@@ -110,15 +110,17 @@ func (a *Agent) slashGoalCreate(msg bus.InboundMessage, objective string) slashR
 
 	// Kick the runtime so the first continuation fires immediately
 	// off the user's own /goal turn instead of waiting for the next
-	// message. The reply intentionally doesn't echo objective or
-	// status — the user just typed the objective, and the agent's
-	// first continuation is the real acknowledgement.
+	// message. Empty reply on purpose — the continuation streaming
+	// in is the acknowledgement. Two replies for one command (a
+	// "🎯 Goal set." confirmation plus the actual work response)
+	// felt like UI clutter; matching Codex's "type and it just
+	// starts" behaviour drops the confirmation.
 	if a.goalManager != nil {
 		if gr := a.goalManager.Ensure(key, a.name, a.ownerUserID); gr != nil {
 			gr.Trigger()
 		}
 	}
-	return slashResult{handled: true, reply: "🎯 Goal set."}
+	return slashResult{handled: true, reply: ""}
 }
 
 func (a *Agent) slashGoalPause(msg bus.InboundMessage) slashResult {
@@ -127,11 +129,17 @@ func (a *Agent) slashGoalPause(msg bus.InboundMessage) slashResult {
 }
 
 func (a *Agent) slashGoalResume(msg bus.InboundMessage) slashResult {
+	// Empty success reply for the same reason as create — the next
+	// continuation streaming in is the visible acknowledgement.
+	// wrongStateMsg stays loud so the user knows nothing happened
+	// when they resumed a goal that isn't paused.
 	res := a.transitionGoal(msg, goal.StatusPaused, goal.StatusActive,
-		"▶ Resumed.", "Not paused.")
+		"", "Not paused.")
 	// Triggering after a successful resume kicks the runtime so the
 	// next continuation fires without waiting for another user turn.
-	if res.handled && strings.HasPrefix(res.reply, "▶") && a.goalManager != nil {
+	// reply=="" signals the success path; non-empty means we hit
+	// wrongStateMsg or an error and shouldn't trigger.
+	if res.handled && res.reply == "" && a.goalManager != nil {
 		key := a.resolveSessionKey(msg)
 		if gr := a.goalManager.Ensure(key, a.name, a.ownerUserID); gr != nil {
 			gr.Trigger()

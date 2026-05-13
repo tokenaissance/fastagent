@@ -1337,9 +1337,15 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		return ""
 	}
 
-	// Check for slash commands first
+	// Check for slash commands first. Empty reply means "handled but
+	// intentionally silent" — /goal foo and /goal resume both fall
+	// through to a streaming continuation that IS the response, so
+	// emitting a separate content event would just clutter the chat
+	// with a redundant confirmation bubble.
 	if result := a.handleSlashCommand(msg); result.handled {
-		emitEvent(ctx, ChatEvent{Type: "content", Data: map[string]any{"content": result.reply}})
+		if result.reply != "" {
+			emitEvent(ctx, ChatEvent{Type: "content", Data: map[string]any{"content": result.reply}})
+		}
 		emitEvent(ctx, ChatEvent{Type: "done"})
 		return result.reply
 	}
@@ -1996,7 +2002,9 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 		return a.stringStream("")
 	}
 
-	// Reuse setup logic from HandleMessage
+	// Reuse setup logic from HandleMessage. Empty reply is "handled
+	// but silent" — see the HandleMessage twin. Still emit a Done
+	// chunk so callers waiting on the stream don't hang.
 	if result := a.handleSlashCommand(msg); result.handled {
 		ch := make(chan provider.StreamChunk, 2)
 		go func() {

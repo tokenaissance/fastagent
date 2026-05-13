@@ -72,8 +72,12 @@ func TestSlashGoalShowEmptySession(t *testing.T) {
 func TestSlashGoalCreateHappyPath(t *testing.T) {
 	a := newSlashTestAgent(t)
 	res := a.slashGoal(webMsg(), strongArgs())
-	if !strings.Contains(res.reply, "🎯 Goal set") {
-		t.Fatalf("expected success banner; got %s", res.reply)
+	// Successful create is intentionally silent — the streaming
+	// continuation IS the user-visible acknowledgement, so the
+	// slash reply stays empty to avoid a redundant confirmation
+	// bubble in the chat.
+	if !res.handled || res.reply != "" {
+		t.Fatalf("expected silent success; got handled=%v reply=%q", res.handled, res.reply)
 	}
 
 	// Verify the row landed with the right routing tuple.
@@ -112,8 +116,8 @@ func TestSlashGoalCreateWithoutObjectiveFails(t *testing.T) {
 
 func TestSlashGoalCreateRejectsDuplicate(t *testing.T) {
 	a := newSlashTestAgent(t)
-	if r := a.slashGoal(webMsg(), strongArgs()); !strings.Contains(r.reply, "🎯") {
-		t.Fatalf("seed: %s", r.reply)
+	if r := a.slashGoal(webMsg(), strongArgs()); !r.handled {
+		t.Fatalf("seed not handled: %s", r.reply)
 	}
 	res := a.slashGoal(webMsg(), strongArgs())
 	if !strings.Contains(res.reply, "already exists") {
@@ -134,8 +138,10 @@ func TestSlashGoalPauseResumeCycle(t *testing.T) {
 		t.Errorf("status after pause = %q, want paused", g.Status)
 	}
 
-	if r := a.slashGoal(webMsg(), []string{"resume"}); !strings.Contains(r.reply, "▶") {
-		t.Fatalf("resume: %s", r.reply)
+	// Resume success is silent (mirroring create) — assert handled
+	// + empty reply rather than looking for a confirmation glyph.
+	if r := a.slashGoal(webMsg(), []string{"resume"}); !r.handled || r.reply != "" {
+		t.Fatalf("resume: handled=%v reply=%q", r.handled, r.reply)
 	}
 	g, _ = a.goalStore.GetGoalBySession(context.Background(), a.name, key)
 	if g.Status != goal.StatusActive {
