@@ -45,11 +45,12 @@ func webMsg() bus.InboundMessage {
 	}
 }
 
-// strongObjective is the canonical "well-shaped" objective shared
-// by every test that needs the active path. It contains a verify
-// keyword + enough body to skip the §5.7 scaffold heuristic
-// (objectiveLooksWeak), so create lands the goal Active. Kept here
-// as a single string so the heuristic and the tests can't drift.
+// strongObjective is the canonical objective most slash tests use
+// when they don't care about objective content — anything non-empty
+// would do, but a stable string keeps test reply assertions diffable.
+// (Name is historical: there used to be a weak-objective heuristic
+// this string was specifically shaped to bypass; that heuristic was
+// removed, but the name kept its callers stable.)
 const strongObjective = "Translate fixture data into output.json; verify rows match expected count"
 
 // strongArgs splits strongObjective on whitespace — slash handlers
@@ -242,86 +243,27 @@ func TestTriggerLazyEnsureSkipsSessionsWithoutGoal(t *testing.T) {
 	}
 }
 
-// TestObjectiveLooksWeak pins the scaffold heuristic — design § 5.7's
-// bad example must trip the warning, the good example must not.
-// The heuristic exists precisely so users don't waste budget on
-// ill-formed objectives; if either of these flips, the UX
-// regresses.
-func TestObjectiveLooksWeak(t *testing.T) {
-	weak := []string{
-		"fix the slow dashboard",  // §5.7 bad example
-		"do the thing",            // short + no verify
-		"",                        // empty
-		"translate the README.md", // longer but no verify path
-	}
-	for _, o := range weak {
-		if !objectiveLooksWeak(o) {
-			t.Errorf("expected weak: %q", o)
-		}
-	}
-	strong := []string{
-		// §5.7 good example
-		"Reduce p95 render time of src/pages/dashboard.tsx to under 500ms; run scripts/perf-dashboard.ts to verify; do not memoize in src/lib/",
-		// Chinese — verify keyword in Chinese trips a CJK alternative
-		"把 README 翻译成英文放到 /tmp/readme.en.md，用 wc -l 验证行数一致，不要碰其他文件",
-		// English with explicit verify
-		"Migrate /internal/auth from JWT to OAuth2; existing tests in auth_test.go must pass",
-	}
-	for _, o := range strong {
-		if objectiveLooksWeak(o) {
-			t.Errorf("expected strong: %q", o)
-		}
-	}
-}
-
-// TestSlashGoalCreateWeakObjectiveAutoPause: a weak objective lands
-// the goal in Paused, the reply nudges the user toward verification.
-// Without auto-pause, agents would burn budget on under-specified
-// goals before the user notices the problem.
-func TestSlashGoalCreateWeakObjectiveAutoPause(t *testing.T) {
+// TestSlashGoalCreateLandsActiveAndTriggers: /goal foo creates the
+// goal Active (no weak-objective gate) and immediately wakes the
+// runtime so the first continuation publishes off the user's own
+// slash turn. Matches Codex's slash-only UX — "type /goal and it
+// just starts".
+func TestSlashGoalCreateLandsActiveAndTriggers(t *testing.T) {
 	a := newSlashTestAgent(t)
+	// Deliberately short + no verify keyword — would have been
+	// auto-paused under the old heuristic. New contract: starts.
 	res := a.slashGoal(webMsg(), []string{"fix", "the", "slow", "dashboard"})
 
-	if !strings.Contains(res.reply, "paused for review") {
-		t.Errorf("expected paused-for-review banner; got %s", res.reply)
-	}
-	if !strings.Contains(res.reply, "under-specified") {
-		t.Errorf("expected scaffold hint; got %s", res.reply)
-	}
-
-	key := a.resolveSessionKey(webMsg())
-	g, _ := a.goalStore.GetGoalBySession(context.Background(), a.name, key)
-	if g.Status != goal.StatusPaused {
-		t.Errorf("status = %q, want paused (weak objective scaffold)", g.Status)
-	}
-	// Crucially: no runtime spun up — the user hasn't approved yet,
-	// continuation would have been wasteful work.
-	if a.goalManager.Get(key) != nil {
-		t.Error("weak-objective create should NOT have started a runtime")
-	}
-}
-
-// TestSlashGoalCreateStrongObjectiveSkipsScaffold: the §5.7 good
-// example must bypass the scaffold, land Active, and trigger the
-// runtime — otherwise well-formed goals would suffer a needless
-// /goal resume step.
-func TestSlashGoalCreateStrongObjectiveSkipsScaffold(t *testing.T) {
-	a := newSlashTestAgent(t)
-	strong := strings.Fields(
-		"Reduce p95 render time of src/pages/dashboard.tsx to under 500ms; " +
-			"run scripts/perf-dashboard.ts to verify; do not memoize in src/lib/")
-	res := a.slashGoal(webMsg(), strong)
-
-	if strings.Contains(res.reply, "paused for review") {
-		t.Errorf("strong objective should not trigger scaffold; got %s", res.reply)
+	if strings.Contains(res.reply, "paused") {
+		t.Errorf("create should not auto-pause any objective; got %s", res.reply)
 	}
 	key := a.resolveSessionKey(webMsg())
 	g, _ := a.goalStore.GetGoalBySession(context.Background(), a.name, key)
-	if g.Status != goal.StatusActive {
-		t.Errorf("status = %q, want active", g.Status)
+	if g == nil || g.Status != goal.StatusActive {
+		t.Fatalf("status = %v, want active", g)
 	}
 	if a.goalManager.Get(key) == nil {
-		t.Error("strong-objective create should have spun a runtime")
+		t.Error("create should spin a runtime so the first continuation fires immediately")
 	}
 }
 

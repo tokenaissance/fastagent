@@ -102,16 +102,6 @@ func (a *Agent) slashGoalCreate(msg bus.InboundMessage, objective string) slashR
 		Objective:   objective,
 		Status:      goal.StatusActive,
 	}
-	// Scaffold: a too-short or verify-less objective gets created as
-	// Paused instead of Active. The user sees a nudge to add
-	// verification criteria + has to `/goal resume` (or clear+re-do)
-	// before continuation fires. Cheap heuristic — exact criteria
-	// are documented in objectiveLooksWeak; tuned not to false-
-	// positive on the well-shaped objectives in §5.7's example.
-	weak := objectiveLooksWeak(objective)
-	if weak {
-		g.Status = goal.StatusPaused
-	}
 	if err := a.goalStore.CreateGoal(context.Background(), g); err != nil {
 		if errors.Is(err, goal.ErrAlreadyExists) {
 			return slashResult{handled: true, reply: "A goal already exists for this session. Run `/goal clear` first, or `/goal` to inspect it."}
@@ -119,68 +109,20 @@ func (a *Agent) slashGoalCreate(msg bus.InboundMessage, objective string) slashR
 		return slashResult{handled: true, reply: fmt.Sprintf("Error creating goal: %v", err)}
 	}
 
-	if weak {
-		return slashResult{handled: true, reply: fmt.Sprintf("🎯 Goal created (paused for review).\n\n%s\n%s", formatGoalView(g), weakObjectiveHint())}
-	}
-
 	// Mint + kick the runtime. The runtime would also come up via
 	// the trigger hook on the next turn, but kicking it here means
 	// the very first continuation fires off the user's own /goal
-	// turn instead of waiting for them to send something else.
+	// turn instead of waiting for them to send something else. The
+	// continuation prompt's own audit checklist tells the model to
+	// ask the user for verification criteria when the objective is
+	// under-specified — no need for a slash-level heuristic to
+	// second-guess the user's wording before the loop even starts.
 	if a.goalManager != nil {
 		if gr := a.goalManager.Ensure(key, a.name, a.ownerUserID); gr != nil {
 			gr.Trigger()
 		}
 	}
 	return slashResult{handled: true, reply: fmt.Sprintf("🎯 Goal set.\n\n%s", formatGoalView(g))}
-}
-
-// objectiveLooksWeak heuristically detects an under-specified
-// objective. Heuristics in priority order:
-//
-//   - <40 chars total: too short to encode scope + verification
-//   - no English or Chinese verification keyword (verify / verified /
-//     check / test / 验证 / 检查 / 验收 / passes / expect / ensure):
-//     the user didn't tell the agent how to know it succeeded
-//
-// Tuned to false-negative on the design § 5.7 good example
-// ("Reduce p95 render time... run scripts/perf-dashboard.ts to
-// verify; do not memoize in src/lib/") and false-positive on its
-// bad example ("fix the slow dashboard"). Future drift in either
-// direction is fine — the only consequence is one extra /goal
-// resume keystroke for the user.
-func objectiveLooksWeak(objective string) bool {
-	if len(objective) < 40 {
-		return true
-	}
-	lower := strings.ToLower(objective)
-	keywords := []string{
-		"verify", "verified", "verification",
-		"check", "test", "tests",
-		"expect", "ensure", "assert",
-		"passes", "should",
-		// CJK markers — fastclaw is bilingual; without these a
-		// Chinese-speaking user's "用 X 验证" objective would
-		// always get flagged.
-		"验证", "检查", "验收", "确认",
-	}
-	for _, kw := range keywords {
-		if strings.Contains(lower, kw) || strings.Contains(objective, kw) {
-			return false
-		}
-	}
-	return true
-}
-
-func weakObjectiveHint() string {
-	return "⚠ This objective looks under-specified.\n" +
-		"For best results, add:\n" +
-		"  • Specific file paths / modules to touch\n" +
-		"  • An explicit verification path (a command, a test, a file existence check)\n" +
-		"  • Anything that should NOT be changed\n\n" +
-		"When you're ready:\n" +
-		"  `/goal resume`     — proceed with the current objective\n" +
-		"  `/goal clear`      — discard and re-create with a clearer one"
 }
 
 func (a *Agent) slashGoalPause(msg bus.InboundMessage) slashResult {
