@@ -690,6 +690,55 @@ func originForInboundSource(source string) string {
 	}
 }
 
+// buildUserMessage flattens an inbound message into the
+// user-role provider.Message that lands in session history.
+// Handles three things at once because they all share the same
+// "what does the wire payload turn into" question:
+//
+//  1. Origin tag — goal-runtime sources get OriginGoalContext so
+//     the compaction / WebChatHistory / FTS filters can recognize
+//     synthetic audit scaffolding (see originForInboundSource).
+//  2. Multimodal content flatten — PhotoURL (legacy IM single)
+//     and PhotoURLs (multi from web upload) merge into one
+//     ContentParts slice. The empty leading text part is skipped
+//     because some upstream providers reject content-less wire
+//     messages.
+//  3. Plain text passthrough — when no images, Content stays a
+//     bare string so the provider's transport sends the cheap
+//     single-string shape.
+//
+// Extracted so HandleMessage / HandleMessageStream / handlePlanMode
+// stay in sync without prose-comment hand-shaking; previously the
+// three sites were copy-pasted and the Origin fix had to land at
+// all three for the filters to fire at all (they silently no-op'd
+// for several commits before that catch).
+func buildUserMessage(msg bus.InboundMessage) provider.Message {
+	userMsg := provider.Message{
+		Role:    "user",
+		Content: msg.Text,
+		Origin:  originForInboundSource(msg.Source),
+	}
+	imageURLs := msg.PhotoURLs
+	if msg.PhotoURL != "" {
+		imageURLs = append([]string{msg.PhotoURL}, imageURLs...)
+	}
+	if len(imageURLs) == 0 {
+		return userMsg
+	}
+	userMsg.Content = ""
+	var parts []provider.ContentPart
+	if msg.Text != "" {
+		parts = append(parts, provider.ContentPart{Type: "text", Text: msg.Text})
+	}
+	for _, u := range imageURLs {
+		parts = append(parts, provider.ContentPart{
+			Type: "image_url", ImageURL: &provider.ImageURL{URL: u, Detail: "auto"},
+		})
+	}
+	userMsg.ContentParts = parts
+	return userMsg
+}
+
 // RegisterWebSearchChain exposes the web_search tool to this agent using a
 // provider chain (primary + fallbacks). Pass nil to skip — the tool won't
 // appear in the agent's tool list, so the model can't try to call it.
@@ -1219,24 +1268,7 @@ func (a *Agent) handlePlanMode(ctx context.Context, msg bus.InboundMessage) stri
 	// Mirror the regular path's user-message construction so multimodal
 	// + IM-bridge payloads (PhotoURL / PhotoURLs) land in session
 	// history the same way they would on a non-plan turn.
-	userMsg := provider.Message{Role: "user", Content: msg.Text, Origin: originForInboundSource(msg.Source)}
-	imageURLs := msg.PhotoURLs
-	if msg.PhotoURL != "" {
-		imageURLs = append([]string{msg.PhotoURL}, imageURLs...)
-	}
-	if len(imageURLs) > 0 {
-		userMsg.Content = ""
-		var parts []provider.ContentPart
-		if msg.Text != "" {
-			parts = append(parts, provider.ContentPart{Type: "text", Text: msg.Text})
-		}
-		for _, u := range imageURLs {
-			parts = append(parts, provider.ContentPart{
-				Type: "image_url", ImageURL: &provider.ImageURL{URL: u, Detail: "auto"},
-			})
-		}
-		userMsg.ContentParts = parts
-	}
+	userMsg := buildUserMessage(msg)
 	sess.Append(userMsg)
 
 	if a.provider == nil {
@@ -1401,27 +1433,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	// PhotoURL (single, used by IM bridges) or PhotoURLs (multi, used by
 	// the web chat upload path); flatten both into one content-parts
 	// slice so the provider sees `[text, image, image, …]`.
-	userMsg := provider.Message{Role: "user", Content: msg.Text, Origin: originForInboundSource(msg.Source)}
-	imageURLs := msg.PhotoURLs
-	if msg.PhotoURL != "" {
-		imageURLs = append([]string{msg.PhotoURL}, imageURLs...)
-	}
-	if len(imageURLs) > 0 {
-		userMsg.Content = ""
-		// Skip an empty leading text part — image-only sends used to
-		// produce `[{text: ""}, {image_url}, …]` which some upstreams
-		// reject as a content-less wire message.
-		var parts []provider.ContentPart
-		if msg.Text != "" {
-			parts = append(parts, provider.ContentPart{Type: "text", Text: msg.Text})
-		}
-		for _, u := range imageURLs {
-			parts = append(parts, provider.ContentPart{
-				Type: "image_url", ImageURL: &provider.ImageURL{URL: u, Detail: "auto"},
-			})
-		}
-		userMsg.ContentParts = parts
-	}
+	userMsg := buildUserMessage(msg)
 	sess.Append(userMsg)
 
 	// Context compaction: check if session messages are too large
@@ -1983,27 +1995,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: AfterSystemPrompt, UserID: a.ownerUserID})
 
 	// Store raw user message — same multi-image flatten as HandleMessage.
-	userMsg := provider.Message{Role: "user", Content: msg.Text, Origin: originForInboundSource(msg.Source)}
-	imageURLs := msg.PhotoURLs
-	if msg.PhotoURL != "" {
-		imageURLs = append([]string{msg.PhotoURL}, imageURLs...)
-	}
-	if len(imageURLs) > 0 {
-		userMsg.Content = ""
-		// Skip an empty leading text part — image-only sends used to
-		// produce `[{text: ""}, {image_url}, …]` which some upstreams
-		// reject as a content-less wire message.
-		var parts []provider.ContentPart
-		if msg.Text != "" {
-			parts = append(parts, provider.ContentPart{Type: "text", Text: msg.Text})
-		}
-		for _, u := range imageURLs {
-			parts = append(parts, provider.ContentPart{
-				Type: "image_url", ImageURL: &provider.ImageURL{URL: u, Detail: "auto"},
-			})
-		}
-		userMsg.ContentParts = parts
-	}
+	userMsg := buildUserMessage(msg)
 	sess.Append(userMsg)
 
 	sessionMsgs := sess.GetMessages()
