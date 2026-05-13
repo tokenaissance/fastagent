@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/fastclaw-ai/fastclaw/internal/agent/goal"
 	"github.com/fastclaw-ai/fastclaw/internal/agent/tools"
@@ -98,6 +99,40 @@ func TestSlashGoalCreateHappyPath(t *testing.T) {
 	// The slash handler should have spun a runtime and triggered it.
 	if a.goalManager.Get(key) == nil {
 		t.Error("expected GoalRuntime to be running after create")
+	}
+}
+
+// TestSlashGoalCreatePublishesContinuation pins the end-to-end:
+// /goal foo must push the first continuation onto bus.Inbound so
+// the gateway picks it up the same way it picks up cron messages.
+// If this regresses, the user types /goal and sees the slash reply
+// (silent now) followed by nothing at all — because nothing ever
+// hits the bus and the gateway never has work to dispatch.
+func TestSlashGoalCreatePublishesContinuation(t *testing.T) {
+	a := newSlashTestAgent(t)
+	a.slashGoal(webMsg(), strongArgs())
+
+	select {
+	case got := <-a.messageBus.Inbound:
+		if got.Source != bus.SourceGoalContinuation {
+			t.Errorf("Source = %q, want %q", got.Source, bus.SourceGoalContinuation)
+		}
+		if got.Channel != "web" || got.ChatID != "chat-1" {
+			t.Errorf("routing not stamped on continuation msg: channel=%q chat=%q",
+				got.Channel, got.ChatID)
+		}
+		if got.AgentID != a.name {
+			t.Errorf("AgentID = %q, want %q (gateway routeDM needs it)", got.AgentID, a.name)
+		}
+		if got.OwnerUserID != a.ownerUserID {
+			t.Errorf("OwnerUserID = %q, want %q (gateway needs it to resolve user space)",
+				got.OwnerUserID, a.ownerUserID)
+		}
+		if !strings.Contains(got.Text, "<goal_context>") {
+			t.Errorf("Text doesn't look like an audit prompt:\n%s", got.Text)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no continuation published to bus.Inbound within 2s — runtime.Trigger() / maybeContinue path is broken")
 	}
 }
 
