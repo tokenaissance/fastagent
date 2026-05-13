@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/fastclaw-ai/fastclaw/internal/agent/goal"
@@ -71,23 +70,23 @@ func (a *Agent) slashGoalShow(msg bus.InboundMessage) slashResult {
 	key := a.resolveSessionKey(msg)
 	g, err := a.goalStore.GetGoalBySession(context.Background(), a.name, key)
 	if errors.Is(err, goal.ErrNotFound) || g == nil {
-		return slashResult{handled: true, reply: "No goal set for this session.\n\nUse `/goal <objective>` to create one."}
+		return slashResult{handled: true, reply: "No goal set."}
 	}
 	if err != nil {
 		return slashResult{handled: true, reply: fmt.Sprintf("Error reading goal: %v", err)}
 	}
-	return slashResult{handled: true, reply: formatGoalView(g)}
+	return slashResult{handled: true, reply: fmt.Sprintf("🎯 %s\n%s", g.Status, g.Objective)}
 }
 
 func (a *Agent) slashGoalCreate(msg bus.InboundMessage, objective string) slashResult {
 	objective = strings.TrimSpace(objective)
 	if objective == "" {
-		return slashResult{handled: true, reply: "Usage: `/goal <objective>`\n\nExample: `/goal Translate README.md into English and save to /tmp/readme.en.md; verify the line count matches.`"}
+		return slashResult{handled: true, reply: "Usage: `/goal <objective>`"}
 	}
 
 	key := a.resolveSessionKey(msg)
 	if key == "" {
-		return slashResult{handled: true, reply: "Cannot create a goal here — no session context."}
+		return slashResult{handled: true, reply: "No session context."}
 	}
 
 	g := &goal.Goal{
@@ -104,37 +103,32 @@ func (a *Agent) slashGoalCreate(msg bus.InboundMessage, objective string) slashR
 	}
 	if err := a.goalStore.CreateGoal(context.Background(), g); err != nil {
 		if errors.Is(err, goal.ErrAlreadyExists) {
-			return slashResult{handled: true, reply: "A goal already exists for this session. Run `/goal clear` first, or `/goal` to inspect it."}
+			return slashResult{handled: true, reply: "Goal already exists; `/goal clear` first."}
 		}
 		return slashResult{handled: true, reply: fmt.Sprintf("Error creating goal: %v", err)}
 	}
 
-	// Mint + kick the runtime. The runtime would also come up via
-	// the trigger hook on the next turn, but kicking it here means
-	// the very first continuation fires off the user's own /goal
-	// turn instead of waiting for them to send something else. The
-	// continuation prompt's own audit checklist tells the model to
-	// ask the user for verification criteria when the objective is
-	// under-specified — no need for a slash-level heuristic to
-	// second-guess the user's wording before the loop even starts.
+	// Kick the runtime so the first continuation fires immediately
+	// off the user's own /goal turn instead of waiting for the next
+	// message. The reply intentionally doesn't echo objective or
+	// status — the user just typed the objective, and the agent's
+	// first continuation is the real acknowledgement.
 	if a.goalManager != nil {
 		if gr := a.goalManager.Ensure(key, a.name, a.ownerUserID); gr != nil {
 			gr.Trigger()
 		}
 	}
-	return slashResult{handled: true, reply: fmt.Sprintf("🎯 Goal set.\n\n%s", formatGoalView(g))}
+	return slashResult{handled: true, reply: "🎯 Goal set."}
 }
 
 func (a *Agent) slashGoalPause(msg bus.InboundMessage) slashResult {
 	return a.transitionGoal(msg, goal.StatusActive, goal.StatusPaused,
-		"⏸ Goal paused. Use `/goal resume` to continue.",
-		"Goal is not active — nothing to pause.")
+		"⏸ Paused.", "Not active.")
 }
 
 func (a *Agent) slashGoalResume(msg bus.InboundMessage) slashResult {
 	res := a.transitionGoal(msg, goal.StatusPaused, goal.StatusActive,
-		"▶ Goal resumed.",
-		"Goal is not paused — `/goal` to see current status.")
+		"▶ Resumed.", "Not paused.")
 	// Triggering after a successful resume kicks the runtime so the
 	// next continuation fires without waiting for another user turn.
 	if res.handled && strings.HasPrefix(res.reply, "▶") && a.goalManager != nil {
@@ -153,13 +147,13 @@ func (a *Agent) transitionGoal(msg bus.InboundMessage, from, to goal.Status, okM
 	key := a.resolveSessionKey(msg)
 	g, err := a.goalStore.GetGoalBySession(context.Background(), a.name, key)
 	if errors.Is(err, goal.ErrNotFound) || g == nil {
-		return slashResult{handled: true, reply: "No goal set for this session."}
+		return slashResult{handled: true, reply: "No goal set."}
 	}
 	if err != nil {
 		return slashResult{handled: true, reply: fmt.Sprintf("Error reading goal: %v", err)}
 	}
 	if g.Status != from {
-		return slashResult{handled: true, reply: wrongStateMsg + "\nCurrent status: " + string(g.Status)}
+		return slashResult{handled: true, reply: wrongStateMsg}
 	}
 	g.Status = to
 	if err := a.goalStore.UpdateGoal(context.Background(), g); err != nil {
@@ -172,7 +166,7 @@ func (a *Agent) slashGoalClear(msg bus.InboundMessage) slashResult {
 	key := a.resolveSessionKey(msg)
 	g, err := a.goalStore.GetGoalBySession(context.Background(), a.name, key)
 	if errors.Is(err, goal.ErrNotFound) || g == nil {
-		return slashResult{handled: true, reply: "No goal set for this session."}
+		return slashResult{handled: true, reply: "No goal set."}
 	}
 	if err != nil {
 		return slashResult{handled: true, reply: fmt.Sprintf("Error reading goal: %v", err)}
@@ -208,34 +202,6 @@ func (a *Agent) clearGoalForSession(sessionKey string) {
 	if a.goalManager != nil {
 		a.goalManager.StopSession(sessionKey)
 	}
-}
-
-// formatGoalView renders a Goal as a chat-friendly status block.
-// Mirrors the fields get_goal exposes to the model so the human and
-// the model see the same shape; just rearranged for terminal
-// readability.
-func formatGoalView(g *goal.Goal) string {
-	var sb strings.Builder
-	sb.WriteString("🎯 Goal\n")
-	sb.WriteString("─────────────────\n")
-	sb.WriteString("Status:      " + string(g.Status) + "\n")
-	sb.WriteString("Tokens used: " + strconv.FormatInt(g.TokensUsed, 10))
-	if g.TokenBudget != nil {
-		sb.WriteString(" / " + strconv.FormatInt(*g.TokenBudget, 10))
-		if remaining, ok := g.RemainingTokens(); ok {
-			sb.WriteString(" (" + strconv.FormatInt(remaining, 10) + " remaining)")
-		}
-	} else {
-		sb.WriteString(" / unbounded")
-	}
-	sb.WriteString("\n")
-	if g.TimeUsedSeconds > 0 {
-		sb.WriteString("Time spent:  " + strconv.FormatInt(g.TimeUsedSeconds, 10) + "s\n")
-	}
-	sb.WriteString("Iterations:  " + strconv.Itoa(g.Iterations) + "\n")
-	sb.WriteString("Objective:\n")
-	sb.WriteString("  " + g.Objective + "\n")
-	return sb.String()
 }
 
 // newGoalID mints a fresh opaque id for a Goal row. Mirrors the

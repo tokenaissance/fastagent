@@ -151,7 +151,7 @@ func TestSlashGoalPauseRejectsWrongState(t *testing.T) {
 	// Already paused — second pause must fail loudly so the user
 	// knows nothing changed.
 	res := a.slashGoal(webMsg(), []string{"pause"})
-	if !strings.Contains(res.reply, "not active") {
+	if !strings.Contains(res.reply, "Not active") {
 		t.Errorf("expected wrong-state hint; got %s", res.reply)
 	}
 }
@@ -178,8 +178,8 @@ func TestSlashGoalShowFormatsActive(t *testing.T) {
 	a := newSlashTestAgent(t)
 	a.slashGoal(webMsg(), strongArgs())
 	res := a.slashGoal(webMsg(), nil)
-	if !strings.Contains(res.reply, "Status:      active") {
-		t.Errorf("missing status line:\n%s", res.reply)
+	if !strings.Contains(res.reply, "active") {
+		t.Errorf("missing status:\n%s", res.reply)
 	}
 	if !strings.Contains(res.reply, strongObjective) {
 		t.Errorf("missing objective:\n%s", res.reply)
