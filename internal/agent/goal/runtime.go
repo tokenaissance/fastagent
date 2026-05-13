@@ -35,11 +35,19 @@ const runtimeIdleShutdown = 30 * time.Minute
 // a goal first appears for that session, torn down when the goal
 // enters a terminal state or the runtime sits idle long enough.
 //
-// Concurrency: trigger() is safe from any goroutine. continuation
+// Concurrency: Trigger() is safe from any goroutine. continuation
 // attempts are serialized by continuationLock (try-acquire — a
 // concurrent attempt just skips, rather than queuing up duplicates).
-// Accounting mutations are serialized by accountingLock (used by
-// phase 2 step 3 when token deltas land).
+// lastActivity reads/writes are serialized by activityLock.
+//
+// Token accounting (goal_hook.go) does its own read-modify-write
+// against the Store and is NOT held under any lock here. That's
+// safe today because AfterModelCall fires sequentially within a
+// session (the ReAct loop serializes model calls). If a future
+// change introduces parallel model calls on the same session
+// (e.g. sub-agent fan-out sharing GoalSessionKey), the hook will
+// need a per-session lock to avoid losing token deltas to a
+// read-modify-write race.
 type GoalRuntime struct {
 	sessionKey  string
 	agentID     string
@@ -54,10 +62,10 @@ type GoalRuntime struct {
 	// channel: send=acquire, recv=release.
 	continuationLock chan struct{}
 
-	// accountingLock serializes "read goal → fold token delta → write
-	// goal" so two AfterToolCall hooks on the same session can't
-	// interleave and lose updates. Wired in step 3.
-	accountingLock sync.Mutex
+	// activityLock protects lastActivity reads/writes from the Run
+	// loop's idle-check goroutine vs. Trigger / maybeContinue's
+	// markActivity calls.
+	activityLock sync.Mutex
 
 	// triggerCh wakes the Run loop. Buffered=1 so multiple events
 	// while the loop is busy collapse to a single wake-up.
@@ -66,9 +74,9 @@ type GoalRuntime struct {
 	// done is closed by Stop() to signal Run() to exit.
 	done chan struct{}
 
-	// lastActivity is the wall-clock of the most recent event (trigger
-	// or accounting). Read by the idle-shutdown check inside Run.
-	// Protected by accountingLock.
+	// lastActivity is the wall-clock of the most recent event
+	// (Trigger / activity-marking inside maybeContinue). Read by
+	// idleTooLong. Protected by activityLock.
 	lastActivity time.Time
 }
 
@@ -140,23 +148,22 @@ func (gr *GoalRuntime) Run(ctx context.Context) {
 	}
 }
 
-// idleTooLong reports whether no trigger / accounting activity has
+// idleTooLong reports whether no trigger / activity-marking has
 // landed in runtimeIdleShutdown. When true, Run exits and the manager
 // will recreate a fresh runtime if a new event arrives.
 func (gr *GoalRuntime) idleTooLong() bool {
-	gr.accountingLock.Lock()
-	defer gr.accountingLock.Unlock()
+	gr.activityLock.Lock()
+	defer gr.activityLock.Unlock()
 	return time.Since(gr.lastActivity) > runtimeIdleShutdown
 }
 
-// markActivity bumps the idle-shutdown timer. Called by Trigger /
-// accounting paths. Held briefly under accountingLock — that's the
-// same lock token-delta folding will use, so the activity timestamp
-// and the accounting baseline always advance together.
+// markActivity bumps the idle-shutdown timer. Called from
+// maybeContinue at the real-work sites so that no-op probes don't
+// keep terminal-state runtimes alive forever.
 func (gr *GoalRuntime) markActivity() {
-	gr.accountingLock.Lock()
+	gr.activityLock.Lock()
 	gr.lastActivity = time.Now()
-	gr.accountingLock.Unlock()
+	gr.activityLock.Unlock()
 }
 
 // maybeContinue is the continuation entry point. Reads the current
