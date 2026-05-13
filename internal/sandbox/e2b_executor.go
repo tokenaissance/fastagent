@@ -416,12 +416,20 @@ func parseConnectStream(data []byte) []json.RawMessage {
 }
 
 func (e *E2BExecutor) Exec(ctx context.Context, command string, timeout time.Duration) (string, error) {
-	result, err := e.execOnce(ctx, command, timeout)
+	// Match Docker's behavior: default cwd is /workspace, not the
+	// invoking user's $HOME. Without this, relative-path writes from
+	// agent commands (e.g. `camoufox-cli screenshot out.png`) land in
+	// /home/user/ and never make it to the host-visible workspace.
+	// Hydrate creates /workspace before any agent Exec runs, and
+	// recreate() re-hydrates after a sandbox replacement, so `cd` is
+	// guaranteed to succeed here.
+	wrapped := "cd /workspace && " + command
+	result, err := e.execOnce(ctx, wrapped, timeout)
 	if err != nil && strings.Contains(err.Error(), "HTTP 502") || strings.Contains(fmt.Sprint(err), "HTTP 404") {
 		if rerr := e.recreate(ctx); rerr != nil {
 			return "", fmt.Errorf("sandbox recreate failed: %w (original: %v)", rerr, err)
 		}
-		return e.execOnce(ctx, command, timeout)
+		return e.execOnce(ctx, wrapped, timeout)
 	}
 	return result, err
 }
