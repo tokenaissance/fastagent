@@ -160,23 +160,8 @@ type Gateway struct {
 	sandboxPool sandbox.ExecutorPool
 	usage       usage.Meter
 	envCfg      *config.EnvConfig
-	// chatEvents lets the bus-fired task path (cron / goal continuation /
-	// heartbeat / sub-agent on the web channel) deliver agent events into
-	// the same SSE pipeline a user-typed POST /api/chat turn would use.
-	// Wired by the setup server before gw.Run() starts consuming the bus.
-	// Nil-safe: when unset, runtime turns fall back to the legacy
-	// bus.Outbound → WebChannel "async bubble" path.
-	chatEvents *agent.EventHub
-	mu         sync.RWMutex
-	dedup      sync.Map
-}
-
-// SetChatEvents wires the agent event hub the setup server lazy-inits.
-// Must be called before Run() so the very first cron / goal continuation
-// turn streams through the hub rather than landing as one delayed
-// async bubble via OutboundMessage. Safe to call once.
-func (g *Gateway) SetChatEvents(h *agent.EventHub) {
-	g.chatEvents = h
+	mu          sync.RWMutex
+	dedup       sync.Map
 }
 
 // WebChannel returns the in-process fan-out for web SSE subscribers.
@@ -371,21 +356,6 @@ func New(env *config.EnvConfig) (*Gateway, error) {
 		// (pre-turn snapshot timing, store backends that don't preserve
 		// path stability, files overwritten in place, etc.).
 		turnStart := time.Now()
-
-		// Best-effort streamCtx attach for web-channel runtime turns
-		// (cron / goal_continuation / heartbeat / sub-agent). When
-		// the hub-key matches an open /api/chat/subscribe (chatter
-		// uid + agentID + sessionKey), the user sees events live;
-		// otherwise this is a no-op and the OutboundMessage push
-		// below delivers the reply as one final async bubble.
-		// User-typed web turns don't come through here — they go via
-		// HandleWebChatStream which attaches its own streamCtx.
-		if g.chatEvents != nil && task.Message.Channel == "web" {
-			sess := ag.Sessions().Get(task.Message.Channel, task.Message.AccountID, task.Message.ChatID, task.Message.ProjectID)
-			if sess != nil {
-				ctx = agent.ContextWithStream(ctx, nil, g.store, g.chatEvents, task.OwnerUserID, task.AgentID, sess.SessionKey())
-			}
-		}
 
 		reply := ag.HandleMessage(ctx, task.Message)
 		close(typingDone)
