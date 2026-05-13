@@ -11,9 +11,17 @@ import (
 )
 
 // slashResult holds the result of a slash command.
+//
+// events is an optional list of additional ChatEvents the handler wants
+// the caller (HandleMessage) to fan out *before* the standard content +
+// done pair. Slash handlers don't get a ctx, so this is how a slash
+// path can request out-of-band events (e.g. /goal emitting
+// goal_created so other tabs / the active sidebar update immediately,
+// not on next history refresh).
 type slashResult struct {
 	handled bool
 	reply   string
+	events  []ChatEvent
 }
 
 // handleSlashCommand checks if the message is a slash command and handles it.

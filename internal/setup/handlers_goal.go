@@ -150,6 +150,17 @@ func (s *Server) goalActionCreate(w http.ResponseWriter, r *http.Request, st goa
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "tokenBudget must be positive when provided"})
 		return
 	}
+	// Routing tuple is required so continuations land in the right
+	// chat. Without channel/chatId the goal row sits there with no
+	// way for GoalRuntime.maybeContinue to publish back — the
+	// slash path stamps these from the inbound message; REST has
+	// to supply them explicitly.
+	if body.Channel == "" || body.ChatID == "" {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{
+			"error": "channel and chatId are required so continuations can route back to the originating chat",
+		})
+		return
+	}
 	g := &goal.Goal{
 		ID:          newRESTGoalID(),
 		AgentID:     agentID,
@@ -172,6 +183,9 @@ func (s *Server) goalActionCreate(w http.ResponseWriter, r *http.Request, st goa
 		return
 	}
 	s.triggerGoalRuntime(r.Context(), agentID, body.SessionKey)
+	s.publishGoalEvent(ownerUserID, agentID, body.SessionKey, agent.EventGoalCreated, map[string]any{
+		"goal": goalRecordView(g),
+	})
 	jsonResponse(w, http.StatusCreated, map[string]any{"goal": g})
 }
 
@@ -202,6 +216,18 @@ func (s *Server) goalTransition(w http.ResponseWriter, r *http.Request, st goal.
 	// thing for both because maybeContinue re-reads status under the
 	// continuation lock.
 	s.triggerGoalRuntime(r.Context(), agentID, sessionKey)
+	reason := "external"
+	switch {
+	case from == goal.StatusActive && to == goal.StatusPaused:
+		reason = "user_paused"
+	case from == goal.StatusPaused && to == goal.StatusActive:
+		reason = "user_resumed"
+	}
+	s.publishGoalEvent(g.OwnerUserID, agentID, sessionKey, agent.EventGoalStatusChanged, map[string]any{
+		"goal":   goalRecordView(g),
+		"status": string(g.Status),
+		"reason": reason,
+	})
 	jsonResponse(w, http.StatusOK, map[string]any{"goal": g})
 }
 
@@ -238,6 +264,9 @@ func (s *Server) handleDeleteAgentGoal(w http.ResponseWriter, r *http.Request) {
 	if a := s.runningAgent(r, id); a != nil && a.GoalManager() != nil {
 		a.GoalManager().StopSession(sessionKey)
 	}
+	s.publishGoalEvent(g.OwnerUserID, id, sessionKey, agent.EventGoalCleared, map[string]any{
+		"goalId": g.ID,
+	})
 	jsonResponse(w, http.StatusOK, map[string]any{"ok": true, "deleted": true})
 }
 
@@ -295,6 +324,56 @@ func (s *Server) runningAgentByID(agentID string) *agent.Agent {
 		return a
 	}
 	return nil
+}
+
+// publishGoalEvent fans a goal lifecycle event onto the chat-event
+// hub so every SSE subscriber for this (user, agent, session) sees
+// it. REST mutations need this because they don't ride a HandleMessage
+// turn — without an explicit publish here, the only signal the
+// frontend would get is "the next GET /goal will return new state",
+// which loses the live-update guarantee the slash path enjoys via
+// emitEvent.
+//
+// No-ops when the hub hasn't been initialized (test rigs that didn't
+// install one). seq=-1 because REST mutations don't persist to
+// session_events — they're out-of-band UI signals, not transcript
+// fragments worth replaying on reconnect.
+func (s *Server) publishGoalEvent(userID, agentID, sessionKey, eventType string, data map[string]any) {
+	if s.chatEvents == nil {
+		return
+	}
+	s.chatEvents.Publish(userID, agentID, sessionKey, agent.EventEnvelope{
+		Seq:   -1,
+		Event: agent.ChatEvent{Type: eventType, Data: data},
+	})
+}
+
+// goalRecordView projects a domain *goal.Goal into the wire shape
+// the SSE payload carries. Kept in sync with agent.goalToView — the
+// REST handlers can't reach that one (it's package-private in
+// internal/agent) so the projection is duplicated here. If you add a
+// field there, mirror it here.
+func goalRecordView(g *goal.Goal) map[string]any {
+	if g == nil {
+		return nil
+	}
+	v := map[string]any{
+		"id":              g.ID,
+		"agentId":         g.AgentID,
+		"sessionKey":      g.SessionKey,
+		"objective":       g.Objective,
+		"status":          string(g.Status),
+		"tokensUsed":      g.TokensUsed,
+		"timeUsedSeconds": g.TimeUsedSeconds,
+		"iterations":      g.Iterations,
+	}
+	if g.TokenBudget != nil {
+		v["tokenBudget"] = *g.TokenBudget
+		if remaining, ok := g.RemainingTokens(); ok {
+			v["remainingTokens"] = remaining
+		}
+	}
+	return v
 }
 
 // newRESTGoalID mints a fresh opaque goal id. Same shape the slash

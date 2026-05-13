@@ -6,7 +6,10 @@ import { useAgentIdFromURL } from "@/hooks/use-agent-id";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { getAgent, getChatHistoryWithCursor, getChatSessions, getChatTodo, getMe, listAgentFiles, listProjects, renameChatSession, revealAgentWorkspace, sendChatStream, uploadAgentFiles, getAuthToken, getSkills, type ChatHistoryMessage, type ChatStreamEvent, type SkillInfo, type TodoItem, type ToolResultMetadata, type WorkspaceFile } from "@/lib/api";
-import { Bot, Send, Copy, Check, Pencil, Wrench, ChevronDown, ChevronRight, Download, X, File, FileText, FolderSearch, Image as ImageIcon, FileCode, Film, Music, Puzzle, SlidersHorizontal, ShieldCheck, Paperclip, Square, FolderOpen, RefreshCw, Eye, Code2, RotateCcw, ListChecks } from "lucide-react";
+import { useGoal } from "@/hooks/use-goal";
+import { GoalBadge } from "@/components/goal-badge";
+import { GoalCreateDialog } from "@/components/goal-create-dialog";
+import { Bot, Send, Copy, Check, Pencil, Wrench, ChevronDown, ChevronRight, Download, X, File, FileText, FolderSearch, Image as ImageIcon, FileCode, Film, Music, Puzzle, SlidersHorizontal, ShieldCheck, Paperclip, Square, FolderOpen, RefreshCw, Eye, Code2, RotateCcw, ListChecks, Target } from "lucide-react";
 import Link from "next/link";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -141,7 +144,7 @@ interface UserAttachment {
 
 interface ChatMessage {
   id: string;
-  role: "user" | "agent" | "tool-group";
+  role: "user" | "agent" | "tool-group" | "goal-context";
   content: string;
   timestamp: number;
   toolCalls?: { id: string; name: string; arguments: string; result?: string; metadata?: ToolResultMetadata }[];
@@ -211,6 +214,20 @@ function buildChatMessages(history: ChatHistoryMessage[]): ChatMessage[] {
   while (i < history.length) {
     const h = history[i];
     if (h.role === "user") {
+      // Runtime-injected user messages (origin="goal_context") get
+      // their own role so the renderer can show them as collapsed
+      // system notes — surfacing the audit prompt the /goal runtime
+      // synthesized, without making it look like the user typed it.
+      if (h.internal && h.origin === "goal_context") {
+        msgs.push({
+          id: `h-${i}`,
+          role: "goal-context",
+          content: h.content || "",
+          timestamp: 0,
+        });
+        i++;
+        continue;
+      }
       // Surface image attachments on history-loaded user bubbles. The
       // server emits `imageUrls` on user turns whose ContentParts had
       // image_url blocks; map them into UserAttachment entries so the
@@ -475,6 +492,11 @@ export function ChatScreen() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
+  // Goal state lives next to the chat session — sessionId IS the
+  // sessionKey on web (resolveOrMintKey: chatID == session_key for the
+  // web channel), so we feed it directly.
+  const goalState = useGoal(selectedAgent, sessionId);
+  const [goalDialogOpen, setGoalDialogOpen] = useState(false);
   // todo.md state for the current session — agent maintains the file,
   // we re-fetch on every write_file/edit_file event that touches
   // todo.md plus once at mount. Empty `items` hides the panel.
@@ -799,6 +821,20 @@ export function ChatScreen() {
                 tools: data.data?.tools,
               });
             }
+            break;
+          }
+          case "goal_created":
+          case "goal_status_changed":
+          case "goal_iteration":
+          case "goal_cleared": {
+            // Goal events have no chat-bubble side effect — they
+            // update the badge state via the useGoal hook. seq-claim
+            // so the second emit (POST-stream <-> subscribe overlap)
+            // doesn't double-bump iterationRound. Cast from the
+            // loose subscribe envelope to ChatStreamEvent — we
+            // already discriminated `data.type` in the switch above.
+            claim();
+            goalState.consume(data as ChatStreamEvent);
             break;
           }
           case "done": {
@@ -1360,6 +1396,16 @@ export function ChatScreen() {
             }
             break;
           }
+          case "goal_created":
+          case "goal_status_changed":
+          case "goal_iteration":
+          case "goal_cleared": {
+            // Same goal-event handler as the subscribe path. Both
+            // streams can fire — seq-dedupe upstream prevents
+            // double-consume.
+            goalState.consume(evt);
+            break;
+          }
           case "error": {
             // Surface backend errors as a chat bubble. Without this the
             // turn just hangs — the model failed (provider 4xx/5xx,
@@ -1656,6 +1702,30 @@ export function ChatScreen() {
           (isEmpty ? " justify-center" : "")
         }
       >
+      {/* Goal badge — only renders when this session has an active goal.
+          Hidden on the empty hero state to avoid pre-empting the
+          "what can I do for you?" prompt with goal scaffolding. */}
+      {!isEmpty && (
+        <GoalBadge
+          goal={goalState.goal}
+          iterationRound={goalState.iterationRound}
+          onPause={goalState.pause}
+          onResume={goalState.resume}
+          onClear={goalState.clear}
+        />
+      )}
+      <GoalCreateDialog
+        open={goalDialogOpen}
+        onOpenChange={setGoalDialogOpen}
+        onCreate={async (objective, tokenBudget) => {
+          await goalState.create({
+            objective,
+            tokenBudget,
+            channel: "web",
+            chatId: sessionId,
+          });
+        }}
+      />
       {/* Messages */}
         <div
           className={
@@ -1759,6 +1829,10 @@ export function ChatScreen() {
                       </div>,
                     );
                   }
+                  continue;
+                }
+                if (msg.role === "goal-context") {
+                  elements.push(<GoalContextNote key={msg.id} content={msg.content} />);
                   continue;
                 }
                 elements.push(renderRegularBubble(msg));
@@ -2188,6 +2262,25 @@ export function ChatScreen() {
                       disabled={!selectedAgent || sending || isReadOnlyView}
                     />
                   </label>
+                  {/* Goal trigger: opens the create dialog. Hidden
+                      when a goal already exists for this session — the
+                      badge above already exposes pause/resume/clear. */}
+                  {!goalState.goal && (
+                    <button
+                      type="button"
+                      onClick={() => setGoalDialogOpen(true)}
+                      disabled={!selectedAgent || sending || isReadOnlyView}
+                      className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors ${
+                        !selectedAgent || sending || isReadOnlyView
+                          ? "opacity-50 cursor-not-allowed"
+                          : "hover:bg-muted hover:text-foreground cursor-pointer"
+                      }`}
+                      aria-label="Set a goal"
+                      title="Set a goal — the agent self-continues until done"
+                    >
+                      <Target className="h-4 w-4" />
+                    </button>
+                  )}
                   <textarea
                     ref={textareaRef}
                     value={input}
@@ -3157,6 +3250,43 @@ function SlashMenu({
         <SlidersHorizontal className="h-3.5 w-3.5" />
         Manage Skills
       </Link>
+    </div>
+  );
+}
+
+// GoalContextNote renders a runtime-injected goal_context user
+// message as a folded system note instead of a regular user bubble.
+// Surfaces existence — so the user knows the agent is responding to a
+// synthesized audit prompt, not "talking to itself" — without the
+// audit prompt's verbose XML wrapper taking over the chat. Click to
+// expand for inspection / debugging.
+function GoalContextNote({ content }: { content: string }) {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <div className="flex justify-start">
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        className="flex items-start gap-2 rounded-md border border-dashed border-muted-foreground/30 bg-muted/30 px-3 py-1.5 text-xs text-muted-foreground hover:bg-muted/50 transition-colors max-w-[80%] text-left"
+        aria-expanded={expanded}
+      >
+        {expanded ? (
+          <ChevronDown className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+        ) : (
+          <ChevronRight className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+        )}
+        <span className="flex-1 min-w-0">
+          {expanded ? (
+            <pre className="whitespace-pre-wrap font-mono text-[11px] leading-relaxed">
+              {content}
+            </pre>
+          ) : (
+            <span>
+              Goal continuation prompt (runtime-injected) — click to view
+            </span>
+          )}
+        </span>
+      </button>
     </div>
   );
 }

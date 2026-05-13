@@ -524,6 +524,9 @@ func (a *Agent) WireGoals(st goal.Store) {
 	if hook := NewTokenAccountingHook(st, a.messageBus, a.name); hook != nil {
 		a.hooks.Register(AfterModelCall, hook)
 	}
+	if hook := NewGoalToolEventHook(st, a.name); hook != nil {
+		a.hooks.Register(AfterToolCall, hook)
+	}
 	tools.RegisterGoalTools(a.registry, st, a.name, a.ownerUserID)
 
 	// Trigger continuation only at turn boundaries (PostTurn), not
@@ -755,11 +758,23 @@ func (a *Agent) WebChatHistory(sessionId string) []map[string]any {
 	msgs := sess.ArchivedMessages()
 	var history []map[string]any
 	for _, m := range msgs {
-		// Hide runtime-injected messages (currently only goal_context
-		// continuations). They live in the session for the LLM's
-		// benefit; surfacing them to the user would expose audit
-		// scaffolding the user never typed.
+		// Runtime-injected messages (currently only goal_context
+		// continuations) used to be hidden outright. That left the
+		// user looking at a string of assistant replies with no
+		// visible prompt and the agent appearing to talk to itself.
+		// Surface them with an explicit origin marker instead so the
+		// frontend can render them as collapsed system notes.
 		if m.Origin != provider.OriginUser {
+			text := m.TextContent()
+			if text == "" {
+				continue
+			}
+			history = append(history, map[string]any{
+				"role":     "user",
+				"content":  text,
+				"origin":   m.Origin,
+				"internal": true, // hint for the UI to default-collapse
+			})
 			continue
 		}
 		switch m.Role {
@@ -1308,14 +1323,25 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	if !a.shouldProcessGoalContinuation(ctx, msg) {
 		slog.Debug("dropping stale goal continuation",
 			"agent", a.name, "channel", msg.Channel, "chat", msg.ChatID)
-		emitEvent(ctx, ChatEvent{Type: "done"})
+		emitEvent(ctx, ChatEvent{Type: EventDone})
 		return ""
 	}
+	// Emit a goal_iteration event for genuine goal continuations once
+	// they pass the staleness gate. Frontend listens for this to show
+	// "Goal continuing… (round N)" inline + refresh the badge's
+	// tokens-used display before the round's content actually streams.
+	a.emitGoalIterationIfContinuation(ctx, msg)
 
 	// Check for slash commands first
 	if result := a.handleSlashCommand(msg); result.handled {
-		emitEvent(ctx, ChatEvent{Type: "content", Data: map[string]any{"content": result.reply}})
-		emitEvent(ctx, ChatEvent{Type: "done"})
+		// Out-of-band events first (e.g. goal_created from /goal foo)
+		// so the frontend can update sidebar / badge before the
+		// "done" event marks the turn settled.
+		for _, evt := range result.events {
+			emitEvent(ctx, evt)
+		}
+		emitEvent(ctx, ChatEvent{Type: EventContent, Data: map[string]any{"content": result.reply}})
+		emitEvent(ctx, ChatEvent{Type: EventDone})
 		return result.reply
 	}
 
@@ -1326,7 +1352,31 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	// models — they kept diving straight into web_fetch. The heuristic
 	// only fires on the first turn of a session so a user mid-execution
 	// asking a long follow-up doesn't get re-planned.
-	if !isPlanMode(msg.Params) && msg.Text != "" {
+	//
+	// Two opt-outs that take precedence over the heuristic:
+	//
+	//   1. Runtime-originated turns (cron / heartbeat / sub-agent /
+	//      goal_continuation / goal_budget_limit). The /goal
+	//      continuation template has a 1./2./3./4. audit checklist +
+	//      the word "deliverables" — exactly what the heuristic was
+	//      designed to catch on real users. And the `/goal foo` slash
+	//      that precedes the first continuation doesn't `sess.Append`,
+	//      so sessionAlreadyEngaged is still false when the
+	//      continuation lands. Without this gate, every first
+	//      continuation gets force-routed into plan-mode.
+	//
+	//   2. Session has an active goal. plan-mode and goal are
+	//      semantically opposed — plan says "wait for me to approve",
+	//      goal says "iterate autonomously until done". If a goal is
+	//      running, even a user's regular turn shouldn't be forced
+	//      into plan-mode behind their back: that would interrupt the
+	//      autonomous loop, and (because handlePlanMode skips
+	//      runPostTurn) the goal-trigger hook wouldn't refire either —
+	//      30 s probe would be the only recovery. Goal takes
+	//      precedence, by design.
+	autoPlanEligible := (msg.Source == "" || msg.Source == bus.SourceUser) &&
+		!a.sessionHasActiveGoal(ctx, msg)
+	if autoPlanEligible && !isPlanMode(msg.Params) && msg.Text != "" {
 		sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID, msg.ProjectID)
 		if !sessionAlreadyEngaged(sess) && looksLikeComplexFirstTurn(msg.Text) {
 			slog.Info("auto-routing to plan mode",
@@ -1347,8 +1397,21 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	// wrong direction — the failure mode we saw on long research
 	// prompts where deepseek-flash spent 95 messages exploring and
 	// never produced a deliverable.
+	// Plan-mode is silently dropped when this session has an active
+	// goal. Goal is supposed to be autonomous — pausing for human
+	// approval mid-loop contradicts the contract. Strip the flag so
+	// downstream hooks see this turn as a normal one (IsPlanMode=false
+	// → goalTriggerHook re-fires PostTurn → continuation chain stays
+	// alive instead of waiting on the 30 s probe). To regain plan-mode
+	// behaviour during goal-driven work, /goal pause first.
 	if isPlanMode(msg.Params) {
-		return a.handlePlanMode(ctx, msg)
+		if a.sessionHasActiveGoal(ctx, msg) {
+			slog.Info("ignoring plan-mode flag — session has an active goal",
+				"agent", a.name, "chat_id", msg.ChatID)
+			delete(msg.Params, "planMode")
+		} else {
+			return a.handlePlanMode(ctx, msg)
+		}
 	}
 
 	chatterUID := a.chatterUserID(msg)
@@ -1933,9 +1996,19 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 			"agent", a.name, "channel", msg.Channel, "chat", msg.ChatID)
 		return a.stringStream("")
 	}
+	// Same goal_iteration emit as HandleMessage — keeps the SSE
+	// contract consistent regardless of which entry point the
+	// continuation lands on.
+	a.emitGoalIterationIfContinuation(ctx, msg)
 
 	// Reuse setup logic from HandleMessage
 	if result := a.handleSlashCommand(msg); result.handled {
+		// Fan out slash-issued events (e.g. /goal goal_created) via
+		// the hub so SSE subscribers see them; the StreamReader the
+		// caller gets back only carries the textual reply.
+		for _, evt := range result.events {
+			emitEvent(ctx, evt)
+		}
 		ch := make(chan provider.StreamChunk, 2)
 		go func() {
 			ch <- provider.StreamChunk{Content: result.reply, Done: true}

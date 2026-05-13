@@ -284,9 +284,37 @@ func TestHandlePostCreateDuplicateConflict(t *testing.T) {
 		Action:     "create",
 		SessionKey: "s-1",
 		Objective:  "second",
+		Channel:    "web",
+		ChatID:     "chat-1",
 	}))
 	if w.Code != http.StatusConflict {
 		t.Errorf("status = %d, want 409; body=%s", w.Code, w.Body.String())
+	}
+}
+
+// Routing tuple is now required at create time so continuations have
+// a valid bus address to publish back on. The validation lands before
+// the store call so a missing field surfaces as a clean 400 rather
+// than a silently-broken goal that the runtime would later skip with
+// "no routing info recorded".
+func TestHandlePostCreateRejectsMissingRouting(t *testing.T) {
+	f := newGoalTestFixture(t)
+	cases := []struct {
+		name string
+		body goalActionBody
+	}{
+		{"no channel", goalActionBody{Action: "create", SessionKey: "s-1", Objective: "x", ChatID: "chat-1"}},
+		{"no chatId", goalActionBody{Action: "create", SessionKey: "s-1", Objective: "x", Channel: "web"}},
+		{"neither", goalActionBody{Action: "create", SessionKey: "s-1", Objective: "x"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			f.srv.handlePostAgentGoal(w, f.req(http.MethodPost, "/api/agents/agent-A/goal", tc.body))
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("status = %d, want 400; body=%s", w.Code, w.Body.String())
+			}
+		})
 	}
 }
 

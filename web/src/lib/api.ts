@@ -693,6 +693,15 @@ export interface ChatHistoryMessage {
   // attachments. The chat UI renders these as inline thumbnails on
   // bubbles loaded from history.
   imageUrls?: string[];
+  // origin marks runtime-injected user-role messages (currently only
+  // "goal_context" — the audit prompt the /goal runtime synthesizes
+  // every continuation round). Empty for normal user messages.
+  origin?: string;
+  // internal: when true the UI should default-collapse this entry so
+  // it doesn't visually compete with the user's real messages.
+  // Combined with origin, distinguishes "the user typed this" from
+  // "the runtime injected this on the user's behalf".
+  internal?: boolean;
 }
 
 export interface TodoItem {
@@ -928,7 +937,17 @@ export interface ToolResultMetadata {
 }
 
 export interface ChatStreamEvent {
-  type: "content" | "tool_call" | "tool_result" | "error" | "done" | "subagent_progress";
+  type:
+    | "content"
+    | "tool_call"
+    | "tool_result"
+    | "error"
+    | "done"
+    | "subagent_progress"
+    | "goal_created"
+    | "goal_status_changed"
+    | "goal_iteration"
+    | "goal_cleared";
   // Per-session monotonic sequence assigned by chat_events. Lets the
   // chat page dedupe events arriving on both the active POST stream
   // and the parallel /api/chat/subscribe SSE connection. -1 means
@@ -947,7 +966,106 @@ export interface ChatStreamEvent {
     max?: number;
     phase?: "thinking" | "running" | "final-delivery" | "done";
     tools?: string[];
+    // goal_* events payload. The full goal snapshot rides on
+    // goal_created / goal_status_changed / goal_iteration; goal_cleared
+    // ships only the id since the row is gone by the time the event
+    // fires.
+    goal?: Goal;
+    status?: GoalStatus;
+    reason?: string;
+    goalId?: string;
+    iterations?: number;
+    tokensUsed?: number;
   };
+}
+
+// --- /goal feature ---
+
+export type GoalStatus = "active" | "paused" | "budget_limited" | "complete";
+
+export interface Goal {
+  id: string;
+  agentId: string;
+  sessionKey: string;
+  objective: string;
+  status: GoalStatus;
+  tokensUsed: number;
+  tokenBudget?: number;
+  remainingTokens?: number;
+  timeUsedSeconds: number;
+  iterations: number;
+}
+
+export async function getAgentGoal(agentId: string, sessionKey: string): Promise<Goal | null> {
+  if (!agentId || !sessionKey) return null;
+  const res = await apiFetch(
+    `/api/agents/${encodeURIComponent(agentId)}/goal?sessionKey=${encodeURIComponent(sessionKey)}`,
+  );
+  if (res.status === 404) return null;
+  if (!res.ok) return null;
+  const data = await res.json().catch(() => null);
+  return (data?.goal as Goal) ?? null;
+}
+
+export interface CreateGoalRequest {
+  sessionKey: string;
+  objective: string;
+  tokenBudget?: number;
+  channel: string;
+  chatId: string;
+  accountId?: string;
+  projectId?: string;
+}
+
+export async function createAgentGoal(agentId: string, req: CreateGoalRequest): Promise<Goal> {
+  const res = await apiFetch(`/api/agents/${encodeURIComponent(agentId)}/goal`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "create", ...req }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(typeof err?.error === "string" ? err.error : `create goal failed: ${res.status}`);
+  }
+  const data = await res.json();
+  return data.goal as Goal;
+}
+
+async function transitionAgentGoal(
+  agentId: string,
+  action: "pause" | "resume",
+  sessionKey: string,
+): Promise<Goal> {
+  const res = await apiFetch(`/api/agents/${encodeURIComponent(agentId)}/goal`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action, sessionKey }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(typeof err?.error === "string" ? err.error : `${action} goal failed: ${res.status}`);
+  }
+  const data = await res.json();
+  return data.goal as Goal;
+}
+
+export function pauseAgentGoal(agentId: string, sessionKey: string): Promise<Goal> {
+  return transitionAgentGoal(agentId, "pause", sessionKey);
+}
+
+export function resumeAgentGoal(agentId: string, sessionKey: string): Promise<Goal> {
+  return transitionAgentGoal(agentId, "resume", sessionKey);
+}
+
+export async function deleteAgentGoal(agentId: string, sessionKey: string): Promise<void> {
+  const res = await apiFetch(
+    `/api/agents/${encodeURIComponent(agentId)}/goal?sessionKey=${encodeURIComponent(sessionKey)}`,
+    { method: "DELETE" },
+  );
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(typeof err?.error === "string" ? err.error : `delete goal failed: ${res.status}`);
+  }
 }
 
 export async function sendChatStream(
