@@ -372,21 +372,18 @@ func New(env *config.EnvConfig) (*Gateway, error) {
 		// path stability, files overwritten in place, etc.).
 		turnStart := time.Now()
 
-		// Attach a stream pipeline for web-channel runtime turns
-		// (cron / goal_continuation / heartbeat / sub-agent). Without
-		// this, emitEvent calls inside HandleMessage have nothing to
-		// publish to — content / tool_call / tool_result events vanish
-		// and the user only sees the final reply as one delayed async
-		// bubble. With it, the existing /api/chat/subscribe SSE hub
-		// streams every event live, the same way a POST /api/chat turn
-		// does. User-typed web turns never come through this path (they
-		// go through HandleWebChatStream) so we don't double-attach.
-		webStreamed := false
+		// Best-effort streamCtx attach for web-channel runtime turns
+		// (cron / goal_continuation / heartbeat / sub-agent). When
+		// the hub-key matches an open /api/chat/subscribe (chatter
+		// uid + agentID + sessionKey), the user sees events live;
+		// otherwise this is a no-op and the OutboundMessage push
+		// below delivers the reply as one final async bubble.
+		// User-typed web turns don't come through here — they go via
+		// HandleWebChatStream which attaches its own streamCtx.
 		if g.chatEvents != nil && task.Message.Channel == "web" {
 			sess := ag.Sessions().Get(task.Message.Channel, task.Message.AccountID, task.Message.ChatID, task.Message.ProjectID)
 			if sess != nil {
 				ctx = agent.ContextWithStream(ctx, nil, g.store, g.chatEvents, task.OwnerUserID, task.AgentID, sess.SessionKey())
-				webStreamed = true
 			}
 		}
 
@@ -406,26 +403,12 @@ func New(env *config.EnvConfig) (*Gateway, error) {
 		// by filename so we don't double-send anything
 		// splitMediaFromReply already resolved.
 		items = appendRecentWorkspaceImages(ctx, g.workspace, task.AgentID, task.Message.ProjectID, task.Message.ChatID, turnStart, items)
-		// Skip the OutboundMessage Text push for web-channel runtime
-		// turns whose events already streamed via the hub above —
-		// otherwise the chat-screen's outbound handler would render
-		// the same reply a second time as a duplicate "async" bubble.
-		// MediaItems still flow because hub events don't carry binary
-		// attachments today; channels.WebChannel forwards them via the
-		// legacy subscribe path.
-		if webStreamed && len(items) == 0 {
-			return reply, nil
-		}
-		outText := text
-		if webStreamed {
-			outText = "" // strip text dup; let media ride alone
-		}
 		out := bus.OutboundMessage{
 			Channel:      task.Message.Channel,
 			AccountID:    task.AccountID,
 			AgentID:      task.AgentID,
 			ChatID:       task.Message.ChatID,
-			Text:         outText,
+			Text:         text,
 			ReplyToMsgID: task.Message.MessageID,
 			ParseMode:    "Markdown",
 			MediaItems:   items,
