@@ -672,6 +672,24 @@ func (a *Agent) shouldProcessGoalContinuation(ctx context.Context, msg bus.Inbou
 	return g.Status == goal.StatusActive
 }
 
+// originForInboundSource maps an inbound-message Source onto the
+// provider.Message.Origin that the resulting user-role message
+// should carry once it lands in session history. Returning
+// OriginGoalContext for the two goal-runtime sources is what
+// activates the three downstream filters (compaction summary
+// input, WebChatHistory, FTS) — without this mapping the Origin
+// field stays "" (OriginUser) on continuations and the filters
+// silently no-op, defeating §5.3 (b) pinned-head and §5.4 hidden-
+// from-user-history intent.
+func originForInboundSource(source string) string {
+	switch source {
+	case bus.SourceGoalContinuation, bus.SourceGoalBudgetLimit:
+		return provider.OriginGoalContext
+	default:
+		return provider.OriginUser
+	}
+}
+
 // RegisterWebSearchChain exposes the web_search tool to this agent using a
 // provider chain (primary + fallbacks). Pass nil to skip — the tool won't
 // appear in the agent's tool list, so the model can't try to call it.
@@ -1201,7 +1219,7 @@ func (a *Agent) handlePlanMode(ctx context.Context, msg bus.InboundMessage) stri
 	// Mirror the regular path's user-message construction so multimodal
 	// + IM-bridge payloads (PhotoURL / PhotoURLs) land in session
 	// history the same way they would on a non-plan turn.
-	userMsg := provider.Message{Role: "user", Content: msg.Text}
+	userMsg := provider.Message{Role: "user", Content: msg.Text, Origin: originForInboundSource(msg.Source)}
 	imageURLs := msg.PhotoURLs
 	if msg.PhotoURL != "" {
 		imageURLs = append([]string{msg.PhotoURL}, imageURLs...)
@@ -1383,7 +1401,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	// PhotoURL (single, used by IM bridges) or PhotoURLs (multi, used by
 	// the web chat upload path); flatten both into one content-parts
 	// slice so the provider sees `[text, image, image, …]`.
-	userMsg := provider.Message{Role: "user", Content: msg.Text}
+	userMsg := provider.Message{Role: "user", Content: msg.Text, Origin: originForInboundSource(msg.Source)}
 	imageURLs := msg.PhotoURLs
 	if msg.PhotoURL != "" {
 		imageURLs = append([]string{msg.PhotoURL}, imageURLs...)
@@ -1965,7 +1983,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: AfterSystemPrompt, UserID: a.ownerUserID})
 
 	// Store raw user message — same multi-image flatten as HandleMessage.
-	userMsg := provider.Message{Role: "user", Content: msg.Text}
+	userMsg := provider.Message{Role: "user", Content: msg.Text, Origin: originForInboundSource(msg.Source)}
 	imageURLs := msg.PhotoURLs
 	if msg.PhotoURL != "" {
 		imageURLs = append([]string{msg.PhotoURL}, imageURLs...)
