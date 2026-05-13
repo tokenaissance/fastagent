@@ -164,36 +164,6 @@ func TestManagerShutdownStopsAll(t *testing.T) {
 	waitFor(t, time.Second, func() bool { return m.ActiveCount() == 0 })
 }
 
-// Fresh runtime must not be idle — guards NewGoalRuntime seeding
-// lastActivity to "now" rather than zero time.
-func TestIdleTooLongFreshRuntimeIsNotIdle(t *testing.T) {
-	gr := NewGoalRuntime("s-1", "agent", "user", fakeStore{}, bus.New())
-	if gr.idleTooLong() {
-		t.Error("fresh runtime should not be idleTooLong")
-	}
-}
-
-// Stale runtime → idleTooLong true → Run loop exits. Paired with
-// the maybeContinue "no-op probes don't refresh lastActivity"
-// tests, this closes the runtime-leak story.
-func TestIdleTooLongAfterStaleness(t *testing.T) {
-	gr := NewGoalRuntime("s-1", "agent", "user", fakeStore{}, bus.New())
-	gr.lastActivity = time.Now().Add(-2 * runtimeIdleShutdown)
-	if !gr.idleTooLong() {
-		t.Errorf("idleTooLong should be true after %v of staleness", 2*runtimeIdleShutdown)
-	}
-}
-
-// `>` is strict — exactly-at-the-window stays alive one more
-// tick. Pinned so > → >= can't slip in silently.
-func TestIdleTooLongBoundary(t *testing.T) {
-	gr := NewGoalRuntime("s-1", "agent", "user", fakeStore{}, bus.New())
-	gr.lastActivity = time.Now().Add(-runtimeIdleShutdown + time.Millisecond)
-	if gr.idleTooLong() {
-		t.Error("idleTooLong should be false at the inside edge of the window")
-	}
-}
-
 // TestTriggerConcurrentSafe is a smoke test that the Trigger ↔ Stop
 // ↔ Run plumbing has no races under -race. The values don't matter;
 // the test is for the race detector.

@@ -5,24 +5,9 @@ import (
 	"errors"
 	"log/slog"
 	"sync"
-	"time"
 
 	"github.com/fastclaw-ai/fastclaw/internal/bus"
 )
-
-// idleProbeInterval is the safety-net cadence at which a GoalRuntime
-// re-checks its goal even if no Trigger() arrived. The primary path is
-// event-driven (Trigger from HandleMessage / AfterToolCall / external
-// mutation); this probe just catches the case where a trigger source
-// is misconfigured and the goal would otherwise sit forever. Tuned
-// large enough not to matter cost-wise.
-const idleProbeInterval = 30 * time.Second
-
-// runtimeIdleShutdown is how long a GoalRuntime can sit without any
-// event activity before it self-terminates. Without an evict hook on
-// session.Manager (see docs/design/goal.md §11 risk 10), this self-
-// shutdown is how we avoid leaking one goroutine per session forever.
-const runtimeIdleShutdown = 30 * time.Minute
 
 // GoalRuntime drives the continuation loop for a single session that
 // has an active goal. It owns no goal state of its own — the source
@@ -38,7 +23,6 @@ const runtimeIdleShutdown = 30 * time.Minute
 // Concurrency: Trigger() is safe from any goroutine. continuation
 // attempts are serialized by continuationLock (try-acquire — a
 // concurrent attempt just skips, rather than queuing up duplicates).
-// lastActivity reads/writes are serialized by activityLock.
 //
 // Token accounting (goal_hook.go) does its own read-modify-write
 // against the Store and is NOT held under any lock here. That's
@@ -62,22 +46,12 @@ type GoalRuntime struct {
 	// channel: send=acquire, recv=release.
 	continuationLock chan struct{}
 
-	// activityLock protects lastActivity reads/writes from the Run
-	// loop's idle-check goroutine vs. Trigger / maybeContinue's
-	// markActivity calls.
-	activityLock sync.Mutex
-
 	// triggerCh wakes the Run loop. Buffered=1 so multiple events
 	// while the loop is busy collapse to a single wake-up.
 	triggerCh chan struct{}
 
 	// done is closed by Stop() to signal Run() to exit.
 	done chan struct{}
-
-	// lastActivity is the wall-clock of the most recent event
-	// (Trigger / activity-marking inside maybeContinue). Read by
-	// idleTooLong. Protected by activityLock.
-	lastActivity time.Time
 }
 
 // NewGoalRuntime constructs a runtime bound to one session. Callers
@@ -93,7 +67,6 @@ func NewGoalRuntime(sessionKey, agentID, ownerUserID string, st Store, mb *bus.M
 		continuationLock: make(chan struct{}, 1),
 		triggerCh:        make(chan struct{}, 1),
 		done:             make(chan struct{}),
-		lastActivity:     time.Now(),
 	}
 }
 
@@ -124,12 +97,25 @@ func (gr *GoalRuntime) Stop() {
 // Run is the main event loop. Blocks until Stop() or the runtime
 // shuts itself down after runtimeIdleShutdown of inactivity. Designed
 // to be called as a goroutine by GoalManager.
+//
+// Only Trigger() fires continuations. The PostTurn hook in the agent
+// loop triggers after every HandleMessage turn — including the
+// continuation turns themselves — which is what chains the loop.
+// A periodic safety-net probe used to live here too; it was removed
+// because it had no path to cover (every code path that runs a goal
+// continuation lands in HandleMessage and fires PostTurn) and in
+// practice it caused a pileup: when one continuation's ReAct loop
+// ran longer than the probe period, the probe kept enqueueing fresh
+// continuations on top, so a 4 min /goal turn would leave 8 stale
+// continuations queued behind it before the first reply even reached
+// the user.
+//
+// idleTooLong / runtimeIdleShutdown now becomes a no-op too — once
+// PostTurn stops firing (e.g. the goal hit a terminal state), the
+// runtime simply sits idle until ctx is cancelled at shutdown.
 func (gr *GoalRuntime) Run(ctx context.Context) {
 	slog.Info("goal runtime started", "session_key", gr.sessionKey, "agent_id", gr.agentID)
 	defer slog.Info("goal runtime stopped", "session_key", gr.sessionKey, "agent_id", gr.agentID)
-
-	probe := time.NewTicker(idleProbeInterval)
-	defer probe.Stop()
 
 	for {
 		select {
@@ -139,31 +125,8 @@ func (gr *GoalRuntime) Run(ctx context.Context) {
 			return
 		case <-gr.triggerCh:
 			gr.maybeContinue(ctx)
-		case <-probe.C:
-			if gr.idleTooLong() {
-				return
-			}
-			gr.maybeContinue(ctx)
 		}
 	}
-}
-
-// idleTooLong reports whether no trigger / activity-marking has
-// landed in runtimeIdleShutdown. When true, Run exits and the manager
-// will recreate a fresh runtime if a new event arrives.
-func (gr *GoalRuntime) idleTooLong() bool {
-	gr.activityLock.Lock()
-	defer gr.activityLock.Unlock()
-	return time.Since(gr.lastActivity) > runtimeIdleShutdown
-}
-
-// markActivity bumps the idle-shutdown timer. Called from
-// maybeContinue at the real-work sites so that no-op probes don't
-// keep terminal-state runtimes alive forever.
-func (gr *GoalRuntime) markActivity() {
-	gr.activityLock.Lock()
-	gr.lastActivity = time.Now()
-	gr.activityLock.Unlock()
 }
 
 // maybeContinue is the continuation entry point. Reads the current
@@ -196,15 +159,6 @@ func (gr *GoalRuntime) maybeContinue(ctx context.Context) {
 	default:
 		return
 	}
-	// NB: markActivity is deliberately NOT called here. Calling it
-	// unconditionally meant every 30s probe — even on a goal that
-	// had long since gone Complete / Paused / Cleared — refreshed
-	// lastActivity and defeated the runtimeIdleShutdown backstop,
-	// so terminal-state runtimes leaked forever. Activity is now
-	// only marked at the real-work sites below, so a runtime whose
-	// goal no longer needs continuation will idle-shut down after
-	// runtimeIdleShutdown.
-
 	g, err := gr.store.GetGoalBySession(ctx, gr.agentID, gr.sessionKey)
 	if errors.Is(err, ErrNotFound) {
 		return
@@ -244,7 +198,6 @@ func (gr *GoalRuntime) maybeContinue(ctx context.Context) {
 				"agent_id", gr.agentID, "session_key", gr.sessionKey, "error", err)
 			return
 		}
-		gr.markActivity()
 		if !PublishBudgetLimit(gr.bus, g, BudgetLimitPrompt(g)) {
 			slog.Warn("goal runtime: bus full, dropped safety-cap wrap-up",
 				"agent_id", gr.agentID, "session_key", gr.sessionKey)
@@ -253,7 +206,6 @@ func (gr *GoalRuntime) maybeContinue(ctx context.Context) {
 	}
 
 	prompt := ContinuationPrompt(g)
-	gr.markActivity()
 	if !PublishContinuation(gr.bus, g, prompt) {
 		slog.Warn("goal runtime: bus full, dropped continuation",
 			"agent_id", gr.agentID, "session_key", gr.sessionKey)
