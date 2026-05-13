@@ -164,6 +164,47 @@ func TestManagerShutdownStopsAll(t *testing.T) {
 	waitFor(t, time.Second, func() bool { return m.ActiveCount() == 0 })
 }
 
+// TestIdleTooLongFreshRuntimeIsNotIdle: a runtime built moments
+// ago must NOT idle-shutdown. Sanity check; without it nothing
+// pins that NewGoalRuntime seeds lastActivity to "now" — a future
+// refactor that defaults to zero time would silently kill every
+// fresh runtime on the next probe tick.
+func TestIdleTooLongFreshRuntimeIsNotIdle(t *testing.T) {
+	gr := NewGoalRuntime("s-1", "agent", "user", fakeStore{}, bus.New())
+	if gr.idleTooLong() {
+		t.Error("fresh runtime should not be idleTooLong")
+	}
+}
+
+// TestIdleTooLongAfterStaleness: when lastActivity is older than
+// runtimeIdleShutdown, idleTooLong must return true so the Run
+// loop's probe-tick branch returns and the goroutine exits. This
+// is the entire runtime-leak backstop in one assertion — paired
+// with the maybe_continue tests that pin "no-op probes don't
+// refresh lastActivity", the lifecycle story is closed.
+func TestIdleTooLongAfterStaleness(t *testing.T) {
+	gr := NewGoalRuntime("s-1", "agent", "user", fakeStore{}, bus.New())
+	gr.lastActivity = time.Now().Add(-2 * runtimeIdleShutdown)
+	if !gr.idleTooLong() {
+		t.Errorf("idleTooLong should be true after %v of staleness", 2*runtimeIdleShutdown)
+	}
+}
+
+// TestIdleTooLongBoundary: the check uses `>` (strict), so a
+// runtime that's been idle for exactly runtimeIdleShutdown stays
+// alive one more tick. Pins the boundary so a future "let's tidy
+// the comparison to >=" change has to update this test
+// deliberately rather than accidentally tightening behavior.
+func TestIdleTooLongBoundary(t *testing.T) {
+	gr := NewGoalRuntime("s-1", "agent", "user", fakeStore{}, bus.New())
+	// Pin one nanosecond inside the window — anything not visibly
+	// past runtimeIdleShutdown must read as still alive.
+	gr.lastActivity = time.Now().Add(-runtimeIdleShutdown + time.Millisecond)
+	if gr.idleTooLong() {
+		t.Error("idleTooLong should be false at the inside edge of the window")
+	}
+}
+
 // TestTriggerConcurrentSafe is a smoke test that the Trigger ↔ Stop
 // ↔ Run plumbing has no races under -race. The values don't matter;
 // the test is for the race detector.
