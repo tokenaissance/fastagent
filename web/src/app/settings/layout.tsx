@@ -8,6 +8,7 @@ import { getMe } from "@/lib/api";
 const items = [
   { href: "/settings/general", label: "General", adminOnly: false },
   { href: "/settings/account", label: "Account", adminOnly: false },
+  { href: "/settings/about", label: "About", adminOnly: false },
   { href: "/settings/runtime", label: "Runtime", adminOnly: true },
 ];
 

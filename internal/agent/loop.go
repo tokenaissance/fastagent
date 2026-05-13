@@ -25,6 +25,7 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/session"
 	"github.com/fastclaw-ai/fastclaw/internal/store"
 	"github.com/fastclaw-ai/fastclaw/internal/toolproviders"
+	"github.com/fastclaw-ai/fastclaw/internal/usage"
 	"github.com/fastclaw-ai/fastclaw/internal/workspace"
 )
 
@@ -69,6 +70,10 @@ type Agent struct {
 	engine         *sdkEngine
 	costTracker    *costtracker.Tracker
 	agentID        string
+	// meter is the admin-level token meter. Non-nil only when the
+	// gateway wires it in via SetMeter at boot — local-only dev runs
+	// leave it nil and metering becomes a no-op via meterTokens().
+	meter usage.Meter
 	// sandboxPool is the per-user (agent + session) sandbox pool. Set
 	// once at boot/hot-reload by attachSandboxToAgents; bindSession
 	// pulls a session-scoped executor from it at the top of every turn
@@ -477,10 +482,126 @@ func (a *Agent) SetOwnerUserID(uid string) {
 }
 
 // OwnerUserID returns the agent's owning user ID — the user that
-// created / owns this agent. Exposed so REST handlers that mint
-// goal rows on the user's behalf can stamp ownership without
-// reaching into agent internals.
+// created / owns this agent. Exposed so callers that mint records
+// on the user's behalf (e.g. /goal slash) can stamp ownership
+// without reaching into agent internals.
 func (a *Agent) OwnerUserID() string { return a.ownerUserID }
+
+// SetMeter wires the admin token meter onto this agent. Called by the
+// gateway at boot / hot-reload so every Chat call lands a RecordTokens
+// invocation. Nil is fine — meterTokens() is a no-op when unset.
+func (a *Agent) SetMeter(m usage.Meter) { a.meter = m }
+
+// meterTokens records one Chat call's token counts. Safe to call with
+// zero usage (still bumps request_count). Errors are logged but never
+// propagated — metering must not break the chat path. The agent's
+// configured model string carries the provider prefix when a per-agent
+// override is set; we split it so the meter stores provider and model
+// in their own columns rather than mashing them together.
+func (a *Agent) meterTokens(ctx context.Context, sessionKey string, u provider.Usage) {
+	if a.meter == nil {
+		return
+	}
+	prov, mdl := provider.SplitProviderModel(a.model)
+	err := a.meter.RecordTokens(ctx, a.ownerUserID, a.agentID, sessionKey, prov, mdl,
+		usage.Tokens{
+			Input:         u.InputTokens,
+			Output:        u.OutputTokens,
+			CacheRead:     u.CacheReadTokens,
+			CacheCreation: u.CacheCreationTokens,
+		})
+	if err != nil {
+		slog.Warn("meter record failed", "agent", a.name, "error", err)
+	}
+}
+
+// streamChatToResponse is a drop-in replacement for provider.Chat that
+// pipes text chunks to the chat-event channel in real time via
+// content_delta events. The web UI subscriber appends each delta to
+// the in-flight assistant bubble so users see the answer materialize
+// token-by-token instead of waiting for the whole ReAct loop to
+// finish.
+//
+// Tool-calls / thinking / RawAssistant / Usage are extracted from the
+// final (Done=true) chunk so the returned *provider.Response matches
+// what provider.Chat would have produced — the caller's downstream
+// logic (HasToolCalls check, session.Append with thinking, meterTokens)
+// doesn't have to change.
+//
+// Use this at every site that previously called provider.Chat in the
+// HandleMessage path. Providers that don't actually stream still work
+// — they just deliver one big chunk on Done.
+func (a *Agent) streamChatToResponse(ctx context.Context, messages []provider.Message, tools []provider.Tool) (*provider.Response, error) {
+	sr, err := a.provider.ChatStream(ctx, messages, tools, a.model, a.maxTokens, a.temperature)
+	if err != nil {
+		return nil, err
+	}
+	var (
+		contentBuilder strings.Builder
+		toolCalls      []provider.ToolCall
+		thinking       string
+		thinkingSig    string
+		rawAssistant   json.RawMessage
+		streamUsage    provider.Usage
+	)
+	for {
+		chunk, ok := sr.Next()
+		if !ok {
+			break
+		}
+		if chunk.Content != "" {
+			contentBuilder.WriteString(chunk.Content)
+			// Push the incremental delta. The web chat panel
+			// appends it to the bubble in progress; consumers
+			// that only know about the legacy `content` event
+			// ignore unknown types and rely on the final
+			// emit (caller's responsibility) instead.
+			emitEvent(ctx, ChatEvent{
+				Type: "content_delta",
+				Data: map[string]any{"delta": chunk.Content},
+			})
+		}
+		if chunk.Done {
+			toolCalls = chunk.ToolCalls
+			if chunk.Thinking != "" {
+				thinking = chunk.Thinking
+			}
+			if chunk.ThinkingSignature != "" {
+				thinkingSig = chunk.ThinkingSignature
+			}
+			if len(chunk.RawAssistant) > 0 {
+				rawAssistant = chunk.RawAssistant
+			}
+			if chunk.Usage.InputTokens > 0 || chunk.Usage.OutputTokens > 0 ||
+				chunk.Usage.CacheReadTokens > 0 || chunk.Usage.CacheCreationTokens > 0 {
+				streamUsage = chunk.Usage
+			}
+		}
+	}
+	if err := sr.Err(); err != nil {
+		return nil, err
+	}
+	// Mirror what AnthropicProvider.parseSSE does when no
+	// RawAssistant was emitted but we still captured thinking text:
+	// pack {thinking, signature} as a thinking content-block so the
+	// next turn replays it correctly to extended-thinking models.
+	if len(rawAssistant) == 0 && thinking != "" {
+		if raw, err := json.Marshal(map[string]string{
+			"type":      "thinking",
+			"thinking":  thinking,
+			"signature": thinkingSig,
+		}); err == nil {
+			rawAssistant = raw
+		}
+	}
+	return &provider.Response{
+		Content:      contentBuilder.String(),
+		ToolCalls:    toolCalls,
+		Thinking:     thinking,
+		Usage:        streamUsage,
+		RawAssistant: rawAssistant,
+	}, nil
+}
 
 // HookRegistry returns the agent's hook registry for external hook registration.
 func (a *Agent) HookRegistry() *HookRegistry {
@@ -745,6 +866,13 @@ func (a *Agent) RegisterWebSearchChain(chain *toolproviders.Chain) {
 // RegisterImageGenChain exposes the image_gen tool to this agent.
 func (a *Agent) RegisterImageGenChain(chain *toolproviders.Chain) {
 	tools.RegisterImageGenChain(a.registry, chain)
+}
+
+// RegisterWebFetchChain swaps the agent's web_fetch backend for a
+// provider chain (e.g. direct → jina → firecrawl). Pass nil to keep the
+// legacy direct-only fetcher already wired during agent construction.
+func (a *Agent) RegisterWebFetchChain(chain *toolproviders.Chain) {
+	tools.RegisterWebFetchChain(a.registry, chain)
 }
 
 // RegisterTTSChain exposes the tts tool to this agent.
@@ -1296,13 +1424,14 @@ func (a *Agent) handlePlanMode(ctx context.Context, msg bus.InboundMessage) stri
 		messages = privacy.ScrubMessages(messages)
 	}
 
-	resp, err := a.provider.Chat(ctx, messages, nil, a.model, a.maxTokens, a.temperature)
+	resp, err := a.streamChatToResponse(ctx, messages, nil)
 	if err != nil {
 		slog.Error("plan-mode chat failed", "agent", a.name, "error", err)
 		emitEvent(ctx, ChatEvent{Type: "error", Data: map[string]any{"message": err.Error()}})
 		emitEvent(ctx, ChatEvent{Type: "done"})
 		return "Sorry, I couldn't draft the plan — the LLM call failed."
 	}
+	a.meterTokens(ctx, sess.Key(), resp.Usage)
 
 	planMeta := map[string]any{"planMode": true}
 	sess.Append(provider.Message{
@@ -1561,7 +1690,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 			})
 		}
 		dumpLLMRequest(a.name, a.model, llmMessages, callTools)
-		resp, err := a.provider.Chat(ctx, llmMessages, callTools, a.model, a.maxTokens, a.temperature)
+		resp, err := a.streamChatToResponse(ctx, llmMessages, callTools)
 
 		// Hook: AfterModelCall
 		hcAfter := &HookContext{AgentName: a.name, Point: AfterModelCall, Messages: messages, Response: resp, Error: err, StartTime: hcBefore.StartTime, ChatID: msg.ChatID, UserID: a.ownerUserID, GoalSessionKey: a.registry.GoalSessionKey()}
@@ -1573,6 +1702,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 			emitEvent(ctx, ChatEvent{Type: "done"})
 			return "Sorry, I encountered an error processing your request."
 		}
+		a.meterTokens(ctx, sess.Key(), resp.Usage)
 
 		if !resp.HasToolCalls() {
 			sess.Append(provider.Message{Role: "assistant", Content: resp.Content, Thinking: resp.Thinking, Timestamp: time.Now().UnixMilli(), RawAssistant: resp.RawAssistant})
@@ -1815,9 +1945,10 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		finalMessages = privacy.ScrubMessages(finalMessages)
 	}
 	finalContent := ""
-	finalResp, finalErr := a.provider.Chat(ctx, finalMessages, nil, a.model, a.maxTokens, a.temperature)
+	finalResp, finalErr := a.streamChatToResponse(ctx, finalMessages, nil)
 	if finalErr == nil {
 		finalContent = finalResp.Content
+		a.meterTokens(ctx, sess.Key(), finalResp.Usage)
 	}
 	if finalContent == "" {
 		// Synthesis call itself failed or returned empty — fall back to
@@ -2081,6 +2212,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 			slog.Error("LLM chat failed", "agent", a.name, "error", err)
 			return a.stringStream("Sorry, I encountered an error processing your request.")
 		}
+		a.meterTokens(ctx, sess.Key(), resp.Usage)
 
 		if !resp.HasToolCalls() {
 			// Final response - use streaming
@@ -2099,6 +2231,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 				var full strings.Builder
 				var thinking, thinkingSig string
 				var rawAssistant json.RawMessage
+				var streamUsage provider.Usage
 				for {
 					chunk, ok := sr.Next()
 					if !ok {
@@ -2116,12 +2249,17 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 					if len(chunk.RawAssistant) > 0 {
 						rawAssistant = chunk.RawAssistant
 					}
+					if chunk.Usage.InputTokens > 0 || chunk.Usage.OutputTokens > 0 ||
+						chunk.Usage.CacheReadTokens > 0 || chunk.Usage.CacheCreationTokens > 0 {
+						streamUsage = chunk.Usage
+					}
 					select {
 					case outCh <- chunk:
 					case <-ctx.Done():
 						return
 					}
 				}
+				a.meterTokens(ctx, sess.Key(), streamUsage)
 				msg := provider.Message{Role: "assistant", Content: full.String(), Thinking: thinking}
 				switch {
 				case len(rawAssistant) > 0:
@@ -2244,6 +2382,7 @@ func (a *Agent) streamFinalDeliveryAfterCap(ctx context.Context, messages []prov
 		var full strings.Builder
 		var thinking, thinkingSig string
 		var rawAssistant json.RawMessage
+		var streamUsage provider.Usage
 		for {
 			chunk, ok := sr.Next()
 			if !ok {
@@ -2261,12 +2400,17 @@ func (a *Agent) streamFinalDeliveryAfterCap(ctx context.Context, messages []prov
 			if len(chunk.RawAssistant) > 0 {
 				rawAssistant = chunk.RawAssistant
 			}
+			if chunk.Usage.InputTokens > 0 || chunk.Usage.OutputTokens > 0 ||
+				chunk.Usage.CacheReadTokens > 0 || chunk.Usage.CacheCreationTokens > 0 {
+				streamUsage = chunk.Usage
+			}
 			select {
 			case outCh <- chunk:
 			case <-ctx.Done():
 				return
 			}
 		}
+		a.meterTokens(ctx, sess.Key(), streamUsage)
 		content := full.String()
 		if content == "" {
 			content = fmt.Sprintf("I've reached the maximum number of tool iterations (%d) and couldn't synthesize a final response. The work above represents what I gathered before hitting the limit.", a.maxToolIterations)

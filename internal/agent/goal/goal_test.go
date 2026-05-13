@@ -7,7 +7,12 @@ import (
 )
 
 func TestGoalTokenDelta(t *testing.T) {
-	// Standard case: only output grew; non-cached input unchanged.
+	// TokenUsage.InputTokens is the *uncached* billable input by
+	// convention (the provider adapters normalize before storing into
+	// this shape). So GoalTokenDelta just sums InputTokens + Output
+	// deltas; CacheReadInputTokens rides along for debugging only.
+
+	// Standard case: only output grew.
 	d := GoalTokenDelta(
 		TokenUsage{InputTokens: 100, CacheReadInputTokens: 50, OutputTokens: 30},
 		TokenUsage{InputTokens: 100, CacheReadInputTokens: 50, OutputTokens: 20},
@@ -16,23 +21,22 @@ func TestGoalTokenDelta(t *testing.T) {
 		t.Fatalf("expected delta=10 (output 20→30), got %d", d)
 	}
 
-	// Cached input grew along with input — only non-cached portion counts.
+	// Cache grew but uncached input + output unchanged → 0.
 	d = GoalTokenDelta(
-		TokenUsage{InputTokens: 200, CacheReadInputTokens: 150, OutputTokens: 0},
+		TokenUsage{InputTokens: 100, CacheReadInputTokens: 150, OutputTokens: 0},
 		TokenUsage{InputTokens: 100, CacheReadInputTokens: 50, OutputTokens: 0},
 	)
-	// inputDelta=100, cachedDelta=100, nonCached=0, output=0 → 0
 	if d != 0 {
 		t.Fatalf("expected 0 when only cached input grew, got %d", d)
 	}
 
-	// Mixed: input +100, cache +60, output +5 → nonCached=40 + 5 = 45.
+	// Mixed: uncached input +100, output +5 → 105.
 	d = GoalTokenDelta(
-		TokenUsage{InputTokens: 200, CacheReadInputTokens: 110, OutputTokens: 5},
-		TokenUsage{InputTokens: 100, CacheReadInputTokens: 50, OutputTokens: 0},
+		TokenUsage{InputTokens: 200, OutputTokens: 5},
+		TokenUsage{InputTokens: 100, OutputTokens: 0},
 	)
-	if d != 45 {
-		t.Fatalf("expected 45, got %d", d)
+	if d != 105 {
+		t.Fatalf("expected 105, got %d", d)
 	}
 
 	// Defensive: negative deltas (counter reset) clamp to 0.

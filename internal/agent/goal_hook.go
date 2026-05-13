@@ -49,7 +49,15 @@ func NewTokenAccountingHook(st goal.Store, mb *bus.MessageBus, agentID string) H
 		if hc.GoalSessionKey == "" {
 			return
 		}
-		if hc.Response == nil || hc.Response.Usage == nil {
+		if hc.Response == nil {
+			return
+		}
+		// Treat the zero-value Usage as "provider didn't report" — same
+		// as the old nil check before provider.Usage became a value
+		// type. Budget enforcement is only meaningful when we have at
+		// least one non-zero count.
+		u := hc.Response.Usage
+		if u.InputTokens == 0 && u.OutputTokens == 0 && u.CacheReadTokens == 0 && u.CacheCreationTokens == 0 {
 			return
 		}
 
@@ -70,7 +78,7 @@ func NewTokenAccountingHook(st goal.Store, mb *bus.MessageBus, agentID string) H
 			return
 		}
 
-		usage := providerUsageToGoal(hc.Response.Usage)
+		usage := providerUsageToGoal(u)
 		result := goal.FoldUsage(g, &usage)
 		if result.Delta == 0 && !result.Exhausted {
 			// Nothing changed (e.g. all-cached prompt). Skip the
@@ -106,14 +114,11 @@ func NewTokenAccountingHook(st goal.Store, mb *bus.MessageBus, agentID string) H
 // goal.TokenUsage (int64 fields). Separate type so the goal package
 // doesn't have to import provider; the cost is one trivial copy at
 // the hook boundary.
-func providerUsageToGoal(u *provider.Usage) goal.TokenUsage {
-	if u == nil {
-		return goal.TokenUsage{}
-	}
+func providerUsageToGoal(u provider.Usage) goal.TokenUsage {
 	return goal.TokenUsage{
 		InputTokens:              int64(u.InputTokens),
 		OutputTokens:             int64(u.OutputTokens),
-		CacheReadInputTokens:     int64(u.CacheReadInputTokens),
-		CacheCreationInputTokens: int64(u.CacheCreationInputTokens),
+		CacheReadInputTokens:     int64(u.CacheReadTokens),
+		CacheCreationInputTokens: int64(u.CacheCreationTokens),
 	}
 }

@@ -184,15 +184,12 @@ export default function ApikeysPage() {
     <div className="p-6 space-y-6 max-w-5xl mx-auto">
       <div className="flex items-center justify-between">
         <div>
-          <div className="flex items-center gap-2">
-            <KeyRound className="size-5 text-muted-foreground" />
-            <h2 className="text-2xl font-semibold tracking-tight">API Keys</h2>
-          </div>
+          <h2 className="text-2xl font-semibold tracking-tight">API Keys</h2>
           <p className="text-sm text-muted-foreground mt-1">
             Issue programmatic credentials. Each key is scoped to a subset of your agents.
           </p>
         </div>
-        <Button variant="outline" onClick={openCreateDialog}>
+        <Button onClick={openCreateDialog}>
           <Plus className="h-4 w-4 mr-2" />
           Add API Key
         </Button>

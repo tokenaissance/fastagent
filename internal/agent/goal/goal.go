@@ -129,12 +129,17 @@ func (g *Goal) BudgetExhausted() bool {
 //   - Reasoning output isn't counted either, to match Codex. May revisit
 //     if real-world usage shows budgets going stale for thinking-heavy
 //     providers.
+//
+// provider.Usage.InputTokens is already the *uncached* prompt total —
+// the Anthropic adapter copies its `input_tokens` (which excludes
+// cache_read_input_tokens) directly, and the OpenAI adapter subtracts
+// prompt_tokens_details.cached_tokens before storing. So we just sum
+// InputTokens + OutputTokens here; CacheReadInputTokens stays on the
+// TokenUsage snapshot for debugging / dashboards only.
 func GoalTokenDelta(curr, baseline TokenUsage) int64 {
 	inputDelta := nonNeg(curr.InputTokens - baseline.InputTokens)
-	cachedInputDelta := nonNeg(curr.CacheReadInputTokens - baseline.CacheReadInputTokens)
 	outputDelta := nonNeg(curr.OutputTokens - baseline.OutputTokens)
-	nonCachedInput := nonNeg(inputDelta - cachedInputDelta)
-	return nonCachedInput + outputDelta
+	return inputDelta + outputDelta
 }
 
 func nonNeg(v int64) int64 {

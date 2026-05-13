@@ -24,7 +24,6 @@ import {
 } from "lucide-react";
 import { useTheme } from "@/components/theme-provider";
 import { logout as doLogout } from "@/lib/auth";
-import { getStatus } from "@/lib/api";
 
 export function NavUser({
   name = "Admin",
@@ -35,15 +34,6 @@ export function NavUser({
 }) {
   const { isMobile } = useSidebar();
   const { resolvedTheme, toggleTheme } = useTheme();
-  const [version, setVersion] = React.useState<string>("");
-
-  React.useEffect(() => {
-    let aborted = false;
-    getStatus()
-      .then((s) => { if (!aborted && s.version) setVersion(s.version); })
-      .catch(() => { /* version is non-critical; stay blank on failure */ });
-    return () => { aborted = true; };
-  }, []);
 
   const initials = name.slice(0, 2).toUpperCase();
 
@@ -102,11 +92,6 @@ export function NavUser({
               <span>{resolvedTheme === "dark" ? "Light mode" : "Dark mode"}</span>
             </DropdownMenuItem>
             <DropdownMenuSeparator />
-            {version && (
-              <div className="px-2 py-1.5 text-xs text-muted-foreground">
-                FastClaw <span className="font-mono">{version}</span>
-              </div>
-            )}
             <DropdownMenuItem
               onClick={() => {
                 doLogout();

@@ -36,6 +36,16 @@ PLATFORMS=(
     "windows/arm64"
 )
 
+# Stamp the same ldflags the Makefile uses so both main.* and
+# buildinfo.* read the real release tag — without this the About page
+# (which reads buildinfo.Version) would show "dev" even after upgrade.
+COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+BUILDINFO="${MODULE}/internal/buildinfo"
+LDFLAGS="-s -w \
+ -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.date=${DATE} \
+ -X ${BUILDINFO}.Version=${VERSION} -X ${BUILDINFO}.Commit=${COMMIT} -X ${BUILDINFO}.Date=${DATE}"
+
 for platform in "${PLATFORMS[@]}"; do
     os="${platform%/*}"
     arch="${platform#*/}"
@@ -49,12 +59,14 @@ for platform in "${PLATFORMS[@]}"; do
     echo "  Building ${os}/${arch}..."
 
     env GOOS="$os" GOARCH="$goarch" GOARM="$goarm" CGO_ENABLED=0 \
-        go build -ldflags="-s -w -X main.version=${VER}" \
+        go build -ldflags="${LDFLAGS}" \
         -o "${DIST_DIR}/${output}" \
         "./cmd/${BINARY}"
 
-    # Package
-    pkg_name="${BINARY}_${VER}_${os}_${arch}"
+    # Asset name is intentionally version-less (e.g. fastclaw_linux_amd64.tar.gz)
+    # so the in-binary `fastclaw upgrade` command (cmd_version.go) can find
+    # it via a stable suffix without parsing release tags.
+    pkg_name="${BINARY}_${os}_${arch}"
     pkg_dir="${DIST_DIR}/${pkg_name}"
     mkdir -p "$pkg_dir"
 

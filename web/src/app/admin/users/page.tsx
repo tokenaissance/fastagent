@@ -162,14 +162,14 @@ export default function AdminUsersPage() {
             Manage platform members. Each user gets isolated agents, sessions, and keys.
           </p>
         </div>
-        <Button variant="outline" onClick={openCreateDialog}>
+        <Button onClick={openCreateDialog}>
           <Plus className="h-4 w-4 mr-2" />
           Add User
         </Button>
       </div>
 
       <Card>
-        <CardContent className="pt-6">
+        <CardContent>
           <div className="flex items-center justify-between gap-4">
             <div className="space-y-1">
               <p className="text-sm font-medium">Open registration</p>

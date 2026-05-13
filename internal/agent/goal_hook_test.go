@@ -116,7 +116,7 @@ func seedActiveGoalWithRouting(t *testing.T, st *memGoalStore, budget int64) (ag
 	return g.AgentID, g.SessionKey
 }
 
-func makeAfterModelCall(sessionKey string, u *provider.Usage) *HookContext {
+func makeAfterModelCall(sessionKey string, u provider.Usage) *HookContext {
 	return &HookContext{
 		Point:          AfterModelCall,
 		Response:       &provider.Response{Usage: u},
@@ -129,13 +129,15 @@ func TestTokenAccountingHookFoldsUsage(t *testing.T) {
 	agentID, sessionKey := seedActiveGoal(t, st, 1_000_000)
 	hook := NewTokenAccountingHook(st, nil, agentID)
 
-	hook(context.Background(), makeAfterModelCall(sessionKey, &provider.Usage{
-		InputTokens: 200, CacheReadInputTokens: 50, OutputTokens: 30,
+	hook(context.Background(), makeAfterModelCall(sessionKey, provider.Usage{
+		InputTokens: 200, CacheReadTokens: 50, OutputTokens: 30,
 	}))
-	// delta = 150 + 30 = 180
+	// provider.Usage.InputTokens is already the uncached billable
+	// portion (Anthropic excludes cache_read by definition; OpenAI's
+	// adapter subtracts cached_tokens). So delta = 200 + 30 = 230.
 	g, _ := st.GetGoalBySession(context.Background(), agentID, sessionKey)
-	if g.TokensUsed != 180 {
-		t.Errorf("TokensUsed = %d, want 180", g.TokensUsed)
+	if g.TokensUsed != 230 {
+		t.Errorf("TokensUsed = %d, want 230", g.TokensUsed)
 	}
 	if g.Status != goal.StatusActive {
 		t.Errorf("status = %q, want active (1M budget not yet hit)", g.Status)
@@ -147,7 +149,7 @@ func TestTokenAccountingHookFlipsBudgetLimited(t *testing.T) {
 	agentID, sessionKey := seedActiveGoal(t, st, 100)
 	hook := NewTokenAccountingHook(st, nil, agentID)
 
-	hook(context.Background(), makeAfterModelCall(sessionKey, &provider.Usage{
+	hook(context.Background(), makeAfterModelCall(sessionKey, provider.Usage{
 		InputTokens: 50, OutputTokens: 60,
 	}))
 	g, _ := st.GetGoalBySession(context.Background(), agentID, sessionKey)
@@ -169,7 +171,7 @@ func TestTokenAccountingHookPublishesBudgetLimit(t *testing.T) {
 	mb := bus.New()
 	hook := NewTokenAccountingHook(st, mb, agentID)
 
-	hook(context.Background(), makeAfterModelCall(sessionKey, &provider.Usage{
+	hook(context.Background(), makeAfterModelCall(sessionKey, provider.Usage{
 		InputTokens: 50, OutputTokens: 60,
 	}))
 
@@ -200,7 +202,7 @@ func TestTokenAccountingHookSilentOnNonExhaustingCall(t *testing.T) {
 	mb := bus.New()
 	hook := NewTokenAccountingHook(st, mb, agentID)
 
-	hook(context.Background(), makeAfterModelCall(sessionKey, &provider.Usage{
+	hook(context.Background(), makeAfterModelCall(sessionKey, provider.Usage{
 		InputTokens: 50, OutputTokens: 60,
 	}))
 
@@ -219,7 +221,7 @@ func TestTokenAccountingHookSkipsWhenNoGoalSession(t *testing.T) {
 	// missing row.
 	hook(context.Background(), &HookContext{
 		Point:    AfterModelCall,
-		Response: &provider.Response{Usage: &provider.Usage{OutputTokens: 100}},
+		Response: &provider.Response{Usage: provider.Usage{OutputTokens: 100}},
 	})
 	// No-op — store should still be empty.
 	if st.row != nil {
@@ -254,7 +256,7 @@ func TestTokenAccountingHookSkipsOnError(t *testing.T) {
 
 	hook(context.Background(), &HookContext{
 		Point:          AfterModelCall,
-		Response:       &provider.Response{Usage: &provider.Usage{OutputTokens: 500}},
+		Response:       &provider.Response{Usage: provider.Usage{OutputTokens: 500}},
 		Error:          errors.New("rate limited"),
 		GoalSessionKey: sessionKey,
 	})
@@ -269,7 +271,7 @@ func TestTokenAccountingHookSkipsWhenNoGoalRow(t *testing.T) {
 	// loudly. ErrNotFound is the expected path here.
 	st := &memGoalStore{}
 	hook := NewTokenAccountingHook(st, nil, "agent-A")
-	hook(context.Background(), makeAfterModelCall("s-no-goal", &provider.Usage{OutputTokens: 100}))
+	hook(context.Background(), makeAfterModelCall("s-no-goal", provider.Usage{OutputTokens: 100}))
 	// No row to inspect — just confirming no panic.
 }
 
@@ -285,7 +287,7 @@ func TestTokenAccountingHookOnlyFiresOnAfterModelCall(t *testing.T) {
 	for _, point := range []HookPoint{BeforeModelCall, BeforeToolCall, AfterToolCall, PostTurn} {
 		hook(context.Background(), &HookContext{
 			Point:          point,
-			Response:       &provider.Response{Usage: &provider.Usage{OutputTokens: 100}},
+			Response:       &provider.Response{Usage: provider.Usage{OutputTokens: 100}},
 			GoalSessionKey: sessionKey,
 		})
 	}
@@ -315,8 +317,8 @@ func TestTokenAccountingHookSkipsZeroDelta(t *testing.T) {
 	st.saveErr = errors.New("save should not be reached") // re-set after seed
 
 	hook := NewTokenAccountingHook(st, nil, agentID)
-	hook(context.Background(), makeAfterModelCall(sessionKey, &provider.Usage{
-		InputTokens: 100, CacheReadInputTokens: 100,
+	hook(context.Background(), makeAfterModelCall(sessionKey, provider.Usage{
+		InputTokens: 100, CacheReadTokens: 100,
 	}))
 	// If the hook had called UpdateGoal, our memGoalStore would have
 	// returned saveErr and logged a warn — but the goal would have

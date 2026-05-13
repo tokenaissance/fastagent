@@ -437,9 +437,11 @@ export default function AgentsPage() {
                     </div>
                     <Badge
                       variant="outline"
-                      className="bg-muted/40 text-muted-foreground"
+                      className="max-w-[60%] bg-muted/40 text-muted-foreground"
                     >
-                      Owner: {agent.ownerUsername || agent.userId}
+                      <span className="truncate">
+                        Owner: {agent.ownerDisplayName || agent.ownerUsername || agent.userId}
+                      </span>
                     </Badge>
                   </div>
                   <p className="text-base font-medium mb-1 truncate">

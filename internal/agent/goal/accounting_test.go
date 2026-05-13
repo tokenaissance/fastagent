@@ -9,16 +9,20 @@ func TestFoldUsageActiveGoalAccumulates(t *testing.T) {
 		TokenBudget: &budget,
 		TokensUsed:  100,
 	}
+	// provider.Usage.InputTokens is already the uncached billable
+	// portion (Anthropic excludes cache_read_input_tokens by
+	// definition; OpenAI's parser subtracts cached_tokens before
+	// landing the value). So 200+30 = 230 here, with CacheRead carried
+	// alongside for informational use only.
 	r := FoldUsage(g, &TokenUsage{InputTokens: 200, CacheReadInputTokens: 50, OutputTokens: 30})
-	// nonCached=150, output=30 → delta=180
-	if r.Delta != 180 {
-		t.Errorf("Delta = %d, want 180", r.Delta)
+	if r.Delta != 230 {
+		t.Errorf("Delta = %d, want 230", r.Delta)
 	}
 	if r.Exhausted {
 		t.Errorf("not exhausted (used %d, budget %d)", g.TokensUsed, *g.TokenBudget)
 	}
-	if g.TokensUsed != 280 {
-		t.Errorf("TokensUsed = %d, want 280 (100 + 180)", g.TokensUsed)
+	if g.TokensUsed != 330 {
+		t.Errorf("TokensUsed = %d, want 330 (100 + 230)", g.TokensUsed)
 	}
 	if g.Iterations != 1 {
 		t.Errorf("Iterations = %d, want 1", g.Iterations)
@@ -53,12 +57,12 @@ func TestFoldUsageNilSafe(t *testing.T) {
 }
 
 func TestFoldUsageZeroDeltaSkipsBookkeeping(t *testing.T) {
-	// An all-cached prompt-only call has no goal-tokens; Iterations
-	// shouldn't tick and TokensUsed shouldn't move. Without this
-	// gate, "model gave a no-op answer" turns would still chip away
-	// at the safety-max-iterations counter.
+	// An all-cached prompt-only call has no billable input — the
+	// provider's adapter has already subtracted cached_tokens from
+	// InputTokens, so we get InputTokens=0 here. Iterations shouldn't
+	// tick and TokensUsed shouldn't move.
 	g := &Goal{Status: StatusActive, TokensUsed: 50}
-	r := FoldUsage(g, &TokenUsage{InputTokens: 100, CacheReadInputTokens: 100})
+	r := FoldUsage(g, &TokenUsage{InputTokens: 0, CacheReadInputTokens: 100})
 	if r.Delta != 0 {
 		t.Errorf("Delta = %d, want 0 (all input cached, no output)", r.Delta)
 	}

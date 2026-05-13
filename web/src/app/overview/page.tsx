@@ -1,35 +1,51 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
-import { getStatus, type StatusResponse } from "@/lib/api";
+  getStatus,
+  adminListChats,
+  getTools,
+  getConfig,
+  type StatusResponse,
+  type ToolsConfig,
+  type ConfigResponse,
+} from "@/lib/api";
 import {
-  Activity,
   Bot,
   Radio,
   Brain,
-  RefreshCw,
   Users,
+  MessagesSquare,
 } from "lucide-react";
-import { Button } from "@/components/ui/button";
 
 export default function OverviewPage() {
   const [status, setStatus] = useState<StatusResponse | null>(null);
+  const [chats, setChats] = useState<number | null>(null);
+  const [tools, setTools] = useState<ToolsConfig | null>(null);
+  const [runtime, setRuntime] = useState<ConfigResponse["sandbox"] | null>(null);
   const [loading, setLoading] = useState(true);
 
   const fetchStatus = () => {
     setLoading(true);
     getStatus()
-      .then(setStatus)
+      .then((s) => {
+        setStatus(s);
+        if (s.isAdmin) {
+          adminListChats()
+            .then((rows) => setChats(rows.length))
+            .catch(() => setChats(null));
+          getTools()
+            .then(setTools)
+            .catch(() => setTools(null));
+          // getConfig is super_admin-only on the backend; admins-but-not-
+          // super-admin will 403, in which case we just hide the Runtime
+          // row rather than treating it as an error.
+          getConfig()
+            .then((cfg) => setRuntime(cfg.sandbox ?? null))
+            .catch(() => setRuntime(null));
+        }
+      })
       .catch(() => setStatus(null))
       .finally(() => setLoading(false));
   };
@@ -49,38 +65,41 @@ export default function OverviewPage() {
   }
 
   // Hide empty / not-yet-connected sections so the dashboard reflects
-  // what's actually configured: Channels stat when none connected,
-  // Model column when no agent reports a model.
+  // what's actually configured: Channels stat when none connected.
   const channelCount = status?.channels?.length || 0;
   const showChannels = channelCount > 0;
-  const showAgentModel = (status?.agents || []).some((a) => a.model);
-  // Non-admins only need to see their agents — gateway plumbing (status,
-  // port, provider config, settings shortcut) is admin-only.
+  // Non-admins only need to see their agents — gateway plumbing (provider
+  // config, users, chats) is admin-only.
   const isAdmin = status?.isAdmin ?? false;
+
+  // Pretty-print the configured fallback chain for each tool category as
+  // "Web Search: Exa, Brave". A category with no configured provider is
+  // hidden — the Tools panel only surfaces what's actually wired up.
+  const toolSummary: { name: string; label: string; providers: string }[] = [];
+  if (tools) {
+    for (const cat of tools.categories) {
+      const cfg = tools.tools[cat.name];
+      const chain = [cfg?.primary, ...(cfg?.fallbacks || [])].filter(Boolean) as string[];
+      if (chain.length === 0) continue;
+      const labels = chain.map((ref) => {
+        const [pname] = ref.split("/");
+        return cat.providers.find((p) => p.name === pname)?.label || pname;
+      });
+      toolSummary.push({ name: cat.name, label: cat.label, providers: labels.join(", ") });
+    }
+  }
 
   return (
     <div className="p-6 space-y-6 max-w-5xl mx-auto">
       {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h2 className="text-2xl font-semibold tracking-tight">Dashboard</h2>
-          <p className="text-sm text-muted-foreground mt-1">
-            Monitor your FastClaw gateway
-          </p>
-        </div>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={fetchStatus}
-        >
-          <RefreshCw
-            className={`h-4 w-4 mr-2 ${loading ? "animate-spin" : ""}`}
-          />
-          Refresh
-        </Button>
+      <div>
+        <h2 className="text-2xl font-semibold tracking-tight">Dashboard</h2>
+        <p className="text-sm text-muted-foreground mt-1">
+          Monitor your FastClaw gateway
+        </p>
       </div>
 
-      {/* Stats Cards — Status + Agents shown to everyone; Users +
+      {/* Stats Cards — Agents shown to everyone; Users + Chats +
           Channels are gateway-management surfaces, admin-only. */}
       <div
         className={`grid gap-4 grid-cols-2 ${
@@ -91,38 +110,6 @@ export default function OverviewPage() {
             : "md:grid-cols-2"
         }`}
       >
-        {/* Status */}
-        <div className="rounded-lg border border-border bg-card p-5">
-          <div className="flex items-center justify-between mb-3">
-            <span className="text-sm text-muted-foreground">Status</span>
-            <div className="flex h-8 w-8 items-center justify-center rounded-full bg-emerald-500/10">
-              <Activity className="h-4 w-4 text-emerald-500" />
-            </div>
-          </div>
-          <div className="flex items-center gap-2">
-            <Badge
-              variant={status?.running ? "default" : "secondary"}
-              className={
-                status?.running
-                  ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border-emerald-500/20 hover:bg-emerald-500/15"
-                  : ""
-              }
-            >
-              <span
-                className={`mr-1.5 inline-block h-1.5 w-1.5 rounded-full ${
-                  status?.running ? "bg-emerald-500" : "bg-muted-foreground"
-                }`}
-              />
-              {status?.running ? "Running" : "Stopped"}
-            </Badge>
-          </div>
-          {status?.uptime && (
-            <p className="text-xs text-muted-foreground mt-2">
-              Uptime: {status.uptime}
-            </p>
-          )}
-        </div>
-
         {/* Agents */}
         <div className="rounded-lg border border-border bg-card p-5">
           <div className="flex items-center justify-between mb-3">
@@ -153,6 +140,22 @@ export default function OverviewPage() {
           </div>
         )}
 
+        {/* Chats — admin-only */}
+        {isAdmin && (
+          <div className="rounded-lg border border-border bg-card p-5">
+            <div className="flex items-center justify-between mb-3">
+              <span className="text-sm text-muted-foreground">Chats</span>
+              <div className="flex h-8 w-8 items-center justify-center rounded-full bg-amber-500/10">
+                <MessagesSquare className="h-4 w-4 text-amber-500" />
+              </div>
+            </div>
+            <p className="text-3xl font-semibold tracking-tight">
+              {chats ?? "—"}
+            </p>
+            <p className="text-xs text-muted-foreground mt-1">Total sessions</p>
+          </div>
+        )}
+
         {/* Channels — admin-only */}
         {isAdmin && showChannels && (
           <div className="rounded-lg border border-border bg-card p-5">
@@ -169,120 +172,63 @@ export default function OverviewPage() {
 
       </div>
 
-      {/* Agents & Provider — Provider is admin-only (LLM creds), so non-admins
-          see just the Agents card spanning full width. */}
-      <div className={`grid gap-4 ${isAdmin ? "md:grid-cols-2" : ""}`}>
-        {/* Agents */}
+      {/* Configuration — admin-only summary of the configured LLM model
+          and the wired-up tool providers. Hidden for non-admins. */}
+      {isAdmin && (
         <div className="rounded-lg border border-border bg-card">
           <div className="p-5 pb-3">
             <div className="flex items-center gap-2 mb-1">
-              <Bot className="h-4 w-4 text-primary" />
-              <h3 className="font-medium">Agents</h3>
+              <Brain className="h-4 w-4 text-amber-500" />
+              <h3 className="font-medium">Configuration</h3>
             </div>
             <p className="text-sm text-muted-foreground">
-              Configured AI agents
+              Model and tools wired into this gateway
             </p>
           </div>
-          <div className="px-2 pb-2 overflow-x-auto">
-            {status?.agents && status.agents.length > 0 ? (
-              <Table>
-                <TableHeader>
-                  <TableRow className="hover:bg-transparent">
-                    <TableHead className="text-muted-foreground h-9">Name</TableHead>
-                    {showAgentModel && (
-                      <TableHead className="text-muted-foreground h-9">Model</TableHead>
-                    )}
-                    <TableHead className="text-muted-foreground h-9 text-right">Status</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {status.agents.map((agent) => (
-                    <TableRow
-                      key={agent.id}
-                      className="hover:bg-muted/50 transition-colors"
-                    >
-                      <TableCell className="font-medium py-2.5">
-                        {agent.name || agent.id}
-                      </TableCell>
-                      {showAgentModel && (
-                        <TableCell className="py-2.5">
-                          {agent.model ? (
-                            <code className="bg-muted px-2 py-0.5 rounded font-mono text-xs">
-                              {agent.model}
-                            </code>
-                          ) : (
-                            <span className="text-xs text-muted-foreground">—</span>
-                          )}
-                        </TableCell>
-                      )}
-                      <TableCell className="text-right py-2.5">
-                        <Badge
-                          variant="outline"
-                          className="bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20"
-                        >
-                          Active
-                        </Badge>
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            ) : (
-              <p className="text-sm text-muted-foreground px-3 pb-3">No agents configured</p>
-            )}
-          </div>
-        </div>
-
-        {/* Provider — admin-only: surfaces gateway-wide LLM creds. */}
-        {isAdmin && (
-          <div className="rounded-lg border border-border bg-card">
-            <div className="p-5 pb-3">
-              <div className="flex items-center gap-2 mb-1">
-                <Brain className="h-4 w-4 text-amber-500" />
-                <h3 className="font-medium">Provider</h3>
-              </div>
-              <p className="text-sm text-muted-foreground">
-                LLM provider configuration
-              </p>
-            </div>
-            <div className="px-5 pb-5">
-              {status?.provider ? (
-                <div className="space-y-3">
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm text-muted-foreground">Provider</span>
-                    <span className="text-sm capitalize">
-                      {status.provider.name || "default"}
-                    </span>
-                  </div>
-                  <Separator />
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm text-muted-foreground">Model</span>
-                    <code className="text-sm font-mono bg-muted px-2 py-0.5 rounded">
-                      {status.provider.model}
-                    </code>
-                  </div>
-                  <Separator />
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm text-muted-foreground">API Base</span>
-                    <span className="text-sm font-mono truncate max-w-48">
-                      {status.provider.apiBase}
-                    </span>
-                  </div>
-                  <Separator />
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm text-muted-foreground">API Key</span>
-                    <span className="text-sm font-mono">
-                      {status.provider.apiKey}
-                    </span>
-                  </div>
-                </div>
+          <div className="px-5 pb-5 space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="text-sm text-muted-foreground">Model</span>
+              {status?.provider?.model ? (
+                <code className="text-sm font-mono bg-muted px-2 py-0.5 rounded">
+                  {status.provider.model}
+                </code>
               ) : (
-                <p className="text-sm text-muted-foreground">No provider configured</p>
+                <span className="text-sm text-muted-foreground">—</span>
               )}
             </div>
+            <Separator />
+            {toolSummary.length > 0 ? (
+              toolSummary.map((t) => (
+                <div key={t.name} className="space-y-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-sm text-muted-foreground">{t.label}</span>
+                    <span className="text-sm truncate">{t.providers}</span>
+                  </div>
+                  <Separator />
+                </div>
+              ))
+            ) : (
+              <>
+                <div className="flex items-center justify-between">
+                  <span className="text-sm text-muted-foreground">Tools</span>
+                  <span className="text-sm text-muted-foreground">None configured</span>
+                </div>
+                <Separator />
+              </>
+            )}
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-sm text-muted-foreground">Runtime</span>
+              <span className="text-sm truncate">
+                {runtime?.enabled
+                  ? `${runtime.backend === "e2b" ? "E2B" : "Docker"}${
+                      runtime.image ? ` (${runtime.image})` : ""
+                    }`
+                  : "Disabled"}
+              </span>
+            </div>
           </div>
-        )}
-      </div>
+        </div>
+      )}
     </div>
   );
 }

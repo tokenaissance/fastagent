@@ -44,13 +44,12 @@ type anthropicTool struct {
 }
 
 type anthropicRequest struct {
-	Model       string             `json:"model"`
-	Messages    []anthropicMessage `json:"messages"`
-	System      string             `json:"system,omitempty"`
-	MaxTokens   int                `json:"max_tokens"`
-	Temperature float64            `json:"temperature,omitempty"`
-	Stream      bool               `json:"stream"`
-	Tools       []anthropicTool    `json:"tools,omitempty"`
+	Model     string             `json:"model"`
+	Messages  []anthropicMessage `json:"messages"`
+	System    string             `json:"system,omitempty"`
+	MaxTokens int                `json:"max_tokens"`
+	Stream    bool               `json:"stream"`
+	Tools     []anthropicTool    `json:"tools,omitempty"`
 }
 
 // toAnthropicMessages converts provider Messages to Anthropic wire format.
@@ -59,9 +58,48 @@ func toAnthropicMessages(msgs []Message) (string, []anthropicMessage) {
 	var system string
 	var out []anthropicMessage
 
-	for _, m := range msgs {
+	// Anthropic rejects any tool_use whose tool_result doesn't appear
+	// in the immediately following message. The agent loop can produce
+	// this shape when loop detection / cap-reached synthesis injects a
+	// system or assistant message between the tool_use and the
+	// padOrphanToolResults pad. Reuse the openai-path scanner to flag
+	// orphan assistant tool_calls, then sweep the WHOLE message list
+	// for any tool replies whose tool_use we just decided to drop —
+	// the openai scanner only checks the immediate tool-run, which
+	// misses pad results that land after intervening non-tool messages.
+	// Session history stays untouched; this only affects wire build.
+	orphanAssistant, orphanTool := findOrphanToolCalls(msgs)
+	orphanIDs := map[string]bool{}
+	for i, m := range msgs {
+		if orphanAssistant[i] {
+			for _, id := range assistantToolCallIDs(m) {
+				orphanIDs[id] = true
+			}
+		}
+	}
+	if len(orphanIDs) > 0 {
+		for i, m := range msgs {
+			if m.Role == "tool" && orphanIDs[m.ToolCallID] {
+				orphanTool[i] = true
+			}
+		}
+	}
+
+	for i, m := range msgs {
 		if m.Role == "system" {
 			system = m.Content
+			continue
+		}
+		if orphanTool[i] {
+			continue
+		}
+		// If stripping orphan tool_calls would leave the assistant
+		// message with nothing to say (no text, no thinking, no
+		// content parts), drop it entirely. Anthropic rejects
+		// content-less messages with "expected a string or a list",
+		// so we can't just emit an empty hull.
+		if orphanAssistant[i] && m.Content == "" && len(m.ContentParts) == 0 &&
+			m.Thinking == "" && len(m.RawAssistant) == 0 {
 			continue
 		}
 
@@ -103,8 +141,11 @@ func toAnthropicMessages(msgs []Message) (string, []anthropicMessage) {
 			continue
 		}
 
-		// Assistant messages with tool calls
-		if m.Role == "assistant" && len(m.ToolCalls) > 0 {
+		// Assistant messages with tool calls. orphanAssistant flags
+		// the message whose tool_calls have no matching tool_result
+		// run — emit text-only in that case so the API doesn't reject
+		// the request for a dangling tool_use.
+		if m.Role == "assistant" && len(m.ToolCalls) > 0 && !orphanAssistant[i] {
 			var blocks []interface{}
 			if tb := thinkingBlockFor(m); tb != nil {
 				blocks = append(blocks, tb)
@@ -116,8 +157,14 @@ func toAnthropicMessages(msgs []Message) (string, []anthropicMessage) {
 				})
 			}
 			for _, tc := range m.ToolCalls {
-				var input interface{}
-				json.Unmarshal([]byte(tc.Function.Arguments), &input)
+				// Anthropic rejects tool_use blocks whose input isn't a
+				// JSON object — `Arguments` can land here as "" (model
+				// streamed a tool_use with empty input and no
+				// input_json_delta events ever fired), as `null`, or as
+				// a bare value like a string. Coerce all of those to an
+				// empty object so the historical message replays
+				// successfully. Real inputs round-trip unchanged.
+				input := parseToolInput(tc.Function.Arguments)
 				blocks = append(blocks, map[string]interface{}{
 					"type":  "tool_use",
 					"id":    tc.ID,
@@ -189,6 +236,34 @@ func toAnthropicMessages(msgs []Message) (string, []anthropicMessage) {
 	return system, out
 }
 
+// parseToolInput decodes a stored tool_use Arguments string into the
+// JSON object Anthropic's wire format requires. Anything that isn't
+// an object — empty string, null, JSON array, bare value — gets
+// coerced to the empty object {} so the message replays cleanly.
+// Real inputs round-trip unchanged.
+//
+// Why coerce: when Anthropic streams a tool_use whose input is `{}`,
+// it emits the placeholder in `content_block_start` but no
+// `input_json_delta` events follow (nothing to stream), so our
+// argsJSON accumulator stays "". That gets persisted to
+// session_messages.tool_calls and rejected on the next turn replay
+// with "tool_use.input: Input should be an object". Coercing at
+// wire-build time is cheap and also covers any other future shape
+// drift from non-Anthropic providers serving via Claude-compat.
+func parseToolInput(raw string) interface{} {
+	if raw == "" {
+		return map[string]interface{}{}
+	}
+	var v interface{}
+	if err := json.Unmarshal([]byte(raw), &v); err != nil {
+		return map[string]interface{}{}
+	}
+	if _, ok := v.(map[string]interface{}); !ok {
+		return map[string]interface{}{}
+	}
+	return v
+}
+
 // thinkingBlockFor returns a content-block map for an assistant message's
 // prior thinking, or nil if nothing to replay. Extended-thinking models
 // (real Anthropic, DeepSeek's /anthropic compat) reject the next turn when
@@ -224,13 +299,18 @@ func (p *AnthropicProvider) buildRequest(ctx context.Context, messages []Message
 		maxTokens = 4096
 	}
 
+	// Anthropic deprecated `temperature` on extended-thinking-capable
+	// models (Opus 4.x, Sonnet 4.5+, Haiku 4.5) — sending it returns a
+	// hard 400. Older models accept it but the system default 0.7 is
+	// rarely meaningfully tuned per-agent, so drop it on the wire across
+	// the board rather than gating per-model.
+	_ = temperature
 	req := anthropicRequest{
-		Model:       StripProviderPrefix(model),
-		Messages:    anthropicMsgs,
-		System:      system,
-		MaxTokens:   maxTokens,
-		Temperature: temperature,
-		Stream:      stream,
+		Model:     StripProviderPrefix(model),
+		Messages:  anthropicMsgs,
+		System:    system,
+		MaxTokens: maxTokens,
+		Stream:    stream,
 	}
 
 	if len(tools) > 0 {
@@ -293,62 +373,25 @@ type anthropicDeltaContent struct {
 	Signature   string `json:"signature,omitempty"`
 }
 
-// anthropicUsage matches the usage block Anthropic ships on
-// message_start (with the prompt-side totals) and message_delta (with
-// the final output count). All fields are cumulative — message_delta's
-// output_tokens is the running total, not an increment.
+// anthropicUsage mirrors the `usage` field returned by Anthropic Messages.
+// message_start carries the input tokens (and prompt-cache breakdown);
+// message_delta carries the final output_tokens. We capture both and
+// expose the totals on the Response / StreamChunk's provider.Usage.
 type anthropicUsage struct {
 	InputTokens              int `json:"input_tokens"`
 	OutputTokens             int `json:"output_tokens"`
-	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 }
 
-// anthropicMessageStart is `{type: "message_start", message: {usage: ...}}`.
-// Anthropic emits the prompt-side counts (input + cache) and a placeholder
-// output_tokens here; the final output_tokens lands on message_delta.
 type anthropicMessageStart struct {
-	Type    string `json:"type"`
 	Message struct {
 		Usage anthropicUsage `json:"usage"`
 	} `json:"message"`
 }
 
-// anthropicMessageDelta is `{type: "message_delta", usage: ...}`. The
-// usage block here carries the final output_tokens count plus any
-// cache field updates Anthropic decided to refine.
 type anthropicMessageDelta struct {
-	Type  string         `json:"type"`
 	Usage anthropicUsage `json:"usage"`
-}
-
-// mergeUsage folds incremental usage updates into running totals. The
-// caller starts with a zero anthropicUsage, then merges each event's
-// usage into it: message_start gives input + cache + initial output;
-// message_delta refines output (and occasionally caches). max() picks
-// the larger of old vs new so a smaller follow-up doesn't undo a
-// larger earlier report.
-func mergeUsage(dst *anthropicUsage, src anthropicUsage) {
-	dst.InputTokens = max(dst.InputTokens, src.InputTokens)
-	dst.OutputTokens = max(dst.OutputTokens, src.OutputTokens)
-	dst.CacheCreationInputTokens = max(dst.CacheCreationInputTokens, src.CacheCreationInputTokens)
-	dst.CacheReadInputTokens = max(dst.CacheReadInputTokens, src.CacheReadInputTokens)
-}
-
-// toUsage normalizes anthropicUsage into the provider's shape. Returns
-// nil when the accumulator is fully zero — that means no usage events
-// landed (request errored before message_start, etc.) and there's
-// nothing meaningful to report.
-func (u anthropicUsage) toUsage() *Usage {
-	if u.InputTokens == 0 && u.OutputTokens == 0 && u.CacheReadInputTokens == 0 && u.CacheCreationInputTokens == 0 {
-		return nil
-	}
-	return &Usage{
-		InputTokens:              u.InputTokens,
-		OutputTokens:             u.OutputTokens,
-		CacheReadInputTokens:     u.CacheReadInputTokens,
-		CacheCreationInputTokens: u.CacheCreationInputTokens,
-	}
 }
 
 func (p *AnthropicProvider) Chat(ctx context.Context, messages []Message, tools []Tool, model string, maxTokens int, temperature float64) (*Response, error) {
@@ -407,7 +450,7 @@ func (p *AnthropicProvider) ChatStream(ctx context.Context, messages []Message, 
 			signature string
 		}
 		blocks := make(map[int]*blockState)
-		var usage anthropicUsage
+		var usage Usage
 
 		for scanner.Scan() {
 			line := scanner.Text()
@@ -425,15 +468,15 @@ func (p *AnthropicProvider) ChatStream(ctx context.Context, messages []Message, 
 			case "message_start":
 				var ms anthropicMessageStart
 				if json.Unmarshal([]byte(data), &ms) == nil {
-					mergeUsage(&usage, ms.Message.Usage)
+					usage.InputTokens = ms.Message.Usage.InputTokens
+					usage.CacheReadTokens = ms.Message.Usage.CacheReadInputTokens
+					usage.CacheCreationTokens = ms.Message.Usage.CacheCreationInputTokens
 				}
-
 			case "message_delta":
 				var md anthropicMessageDelta
-				if json.Unmarshal([]byte(data), &md) == nil {
-					mergeUsage(&usage, md.Usage)
+				if json.Unmarshal([]byte(data), &md) == nil && md.Usage.OutputTokens > 0 {
+					usage.OutputTokens = md.Usage.OutputTokens
 				}
-
 			case "content_block_start":
 				var cbs anthropicContentBlockStart
 				if json.Unmarshal([]byte(data), &cbs) == nil {
@@ -510,8 +553,8 @@ func (p *AnthropicProvider) ChatStream(ctx context.Context, messages []Message, 
 					ToolCalls:         toolCalls,
 					Thinking:          thinkingText,
 					ThinkingSignature: thinkingSig,
+					Usage:             usage,
 					Done:              true,
-					Usage:             usage.toUsage(),
 				}:
 				case <-ctx.Done():
 				}
@@ -532,7 +575,6 @@ func (p *AnthropicProvider) parseSSE(body io.Reader) (*Response, error) {
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
 	var contentBuilder strings.Builder
-	var usage anthropicUsage
 
 	type blockState struct {
 		blockType string
@@ -543,6 +585,7 @@ func (p *AnthropicProvider) parseSSE(body io.Reader) (*Response, error) {
 		signature string
 	}
 	blocks := make(map[int]*blockState)
+	var usage Usage
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -559,24 +602,17 @@ func (p *AnthropicProvider) parseSSE(body io.Reader) (*Response, error) {
 
 		switch event.Type {
 		case "message_start":
-			// Carries the prompt-side counts (input + cache fields) and
-			// a placeholder output_tokens. Merge into our accumulator
-			// so the final usage we report is well-formed even on
-			// short responses where message_delta only refines output.
 			var ms anthropicMessageStart
 			if json.Unmarshal([]byte(data), &ms) == nil {
-				mergeUsage(&usage, ms.Message.Usage)
+				usage.InputTokens = ms.Message.Usage.InputTokens
+				usage.CacheReadTokens = ms.Message.Usage.CacheReadInputTokens
+				usage.CacheCreationTokens = ms.Message.Usage.CacheCreationInputTokens
 			}
-
 		case "message_delta":
-			// Carries the final output_tokens. May also refine cache
-			// counts. mergeUsage takes max() so an earlier larger
-			// value on any field isn't clobbered by a smaller one.
 			var md anthropicMessageDelta
-			if json.Unmarshal([]byte(data), &md) == nil {
-				mergeUsage(&usage, md.Usage)
+			if json.Unmarshal([]byte(data), &md) == nil && md.Usage.OutputTokens > 0 {
+				usage.OutputTokens = md.Usage.OutputTokens
 			}
-
 		case "content_block_start":
 			var cbs anthropicContentBlockStart
 			if json.Unmarshal([]byte(data), &cbs) == nil {
@@ -622,7 +658,7 @@ func (p *AnthropicProvider) parseSSE(body io.Reader) (*Response, error) {
 
 	result := &Response{
 		Content: contentBuilder.String(),
-		Usage:   usage.toUsage(),
+		Usage:   usage,
 	}
 	var thinkingBuilder strings.Builder
 	var thinkingSig string
