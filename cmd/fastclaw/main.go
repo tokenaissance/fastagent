@@ -102,6 +102,7 @@ func main() {
 	rootCmd.AddCommand(adminCmd())
 	rootCmd.AddCommand(apikeyCmd())
 	rootCmd.AddCommand(agentsCmd())
+	rootCmd.AddCommand(sessionCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
