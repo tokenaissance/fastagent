@@ -189,7 +189,14 @@ func (gr *GoalRuntime) maybeContinue(ctx context.Context) {
 	default:
 		return
 	}
-	gr.markActivity()
+	// NB: markActivity is deliberately NOT called here. Calling it
+	// unconditionally meant every 30s probe — even on a goal that
+	// had long since gone Complete / Paused / Cleared — refreshed
+	// lastActivity and defeated the runtimeIdleShutdown backstop,
+	// so terminal-state runtimes leaked forever. Activity is now
+	// only marked at the real-work sites below, so a runtime whose
+	// goal no longer needs continuation will idle-shut down after
+	// runtimeIdleShutdown.
 
 	g, err := gr.store.GetGoalBySession(ctx, gr.agentID, gr.sessionKey)
 	if errors.Is(err, ErrNotFound) {
@@ -230,6 +237,7 @@ func (gr *GoalRuntime) maybeContinue(ctx context.Context) {
 				"agent_id", gr.agentID, "session_key", gr.sessionKey, "error", err)
 			return
 		}
+		gr.markActivity()
 		if !PublishBudgetLimit(gr.bus, g, BudgetLimitPrompt(g)) {
 			slog.Warn("goal runtime: bus full, dropped safety-cap wrap-up",
 				"agent_id", gr.agentID, "session_key", gr.sessionKey)
@@ -238,6 +246,7 @@ func (gr *GoalRuntime) maybeContinue(ctx context.Context) {
 	}
 
 	prompt := ContinuationPrompt(g)
+	gr.markActivity()
 	if !PublishContinuation(gr.bus, g, prompt) {
 		slog.Warn("goal runtime: bus full, dropped continuation",
 			"agent_id", gr.agentID, "session_key", gr.sessionKey)

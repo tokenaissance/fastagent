@@ -226,6 +226,65 @@ func TestMaybeContinueBelowSafetyCapStillFires(t *testing.T) {
 	}
 }
 
+// TestMaybeContinueDoesNotMarkActivityOnNoOp pins the fix for the
+// runtime-leak backstop. Before this change, markActivity fired
+// unconditionally at the top of maybeContinue — so every 30s
+// probe on a terminal-state goal (Complete / Paused / Cleared)
+// kept lastActivity fresh and the runtimeIdleShutdown cap could
+// never trip. Result: a terminated goal's runtime leaked forever.
+//
+// After the fix, terminal-state probes are pure no-ops; the
+// runtime loop's idleTooLong check can actually flip true after
+// runtimeIdleShutdown of inactivity, freeing the goroutine.
+func TestMaybeContinueDoesNotMarkActivityOnNoOp(t *testing.T) {
+	for _, status := range []Status{StatusComplete, StatusPaused, StatusBudgetLimited} {
+		t.Run(string(status), func(t *testing.T) {
+			st := newFakeRoutedStore()
+			g := newActiveRoutedGoal()
+			g.Status = status
+			_ = st.CreateGoal(context.Background(), g)
+			mb := bus.New()
+			gr := NewGoalRuntime("s-1", "agent-A", "user-1", st, mb)
+
+			// Pin lastActivity into the past — far enough that
+			// idleTooLong would already be true if our backstop
+			// wasn't broken. The probe should leave it alone.
+			past := time.Now().Add(-2 * runtimeIdleShutdown)
+			gr.lastActivity = past
+
+			gr.maybeContinue(context.Background())
+
+			if !gr.lastActivity.Equal(past) {
+				t.Errorf("status=%s: lastActivity moved from %v to %v — markActivity should not fire on no-op probes",
+					status, past, gr.lastActivity)
+			}
+		})
+	}
+}
+
+// TestMaybeContinueMarksActivityOnPublish: the converse of the
+// no-op case — when the runtime actually publishes a continuation,
+// lastActivity MUST advance. Otherwise idleTooLong could trip
+// mid-loop on a healthy active goal that just happens to have a
+// stale lastActivity from creation.
+func TestMaybeContinueMarksActivityOnPublish(t *testing.T) {
+	st := newFakeRoutedStore()
+	_ = st.CreateGoal(context.Background(), newActiveRoutedGoal())
+	mb := bus.New()
+	gr := NewGoalRuntime("s-1", "agent-A", "user-1", st, mb)
+
+	past := time.Now().Add(-2 * runtimeIdleShutdown)
+	gr.lastActivity = past
+
+	gr.maybeContinue(context.Background())
+
+	if gr.lastActivity.Equal(past) {
+		t.Errorf("active goal publish should advance lastActivity, still %v", gr.lastActivity)
+	}
+	// Drain the publish so the bus channel isn't full for next tests.
+	<-mb.Inbound
+}
+
 // TestMaybeContinueLockCollapsesBursts: two near-simultaneous calls
 // must not both publish (the continuationLock try-acquire collapses
 // the second one). Otherwise PostTurn + AfterToolCall firing back
