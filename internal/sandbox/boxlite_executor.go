@@ -41,10 +41,17 @@ import (
 //   DELETE /{prefix}/boxes/{id}?force=true
 
 const (
-	defaultBoxliteURL     = "https://api.boxlite.ai/v1"
+	// BoxLite Cloud dev environment — the only public endpoint verified
+	// end-to-end (OAuth + createBox + attach). The OpenAPI servers
+	// stanza advertises `https://api.boxlite.ai/v1`, but that host sits
+	// behind Cloudflare Access and rejects ordinary client_credentials
+	// with a 403 HTML wall. When BoxLite ships a publicly reachable
+	// prod endpoint, update this default — until then, operators on
+	// prod tenants must explicitly set their URL in the admin UI.
+	defaultBoxliteURL      = "https://api.dev.boxlite.ai/api/v1"
 	defaultBoxliteClientID = "default"
-	defaultBoxlitePrefix  = "default"
-	defaultBoxliteImage   = "thinkany/fastclaw-sandbox:latest"
+	defaultBoxlitePrefix   = "default"
+	defaultBoxliteImage    = "thinkany/fastclaw-sandbox:latest"
 )
 
 // BoxliteExecutor implements Executor against a remote Boxlite REST API.
@@ -348,13 +355,30 @@ func (e *BoxliteExecutor) Hydrate(ctx context.Context) error {
 		return fmt.Errorf("close tar: %w", err)
 	}
 
+	// BoxLite Files API note: despite the OpenAPI spec advertising
+	// "Uploads a tar archive and extracts it at the specified path",
+	// the dev cloud's PUT /files does NOT extract. Empirically:
+	//   - path = a file path → writes the request body verbatim to
+	//     that file (parents are created automatically). 204.
+	//   - path = an existing directory + Content-Type x-tar →
+	//     stores the raw tar as `boxlite-upload-<rand>.tar` inside it.
+	//     Still 204 — silently wrong for our hydrate purposes.
+	// We work around by:
+	//   1. PUT the tar to a deterministic file path `/tmp/hydrate.tar`
+	//   2. exec `tar -xf /tmp/hydrate.tar -C /` to actually unpack
+	//   3. remove the staging file so /tmp stays clean
+	// One upload + one exec is still cheaper than per-file PUTs when
+	// a skill bundle has dozens of files each.
+	const stagingPath = "/tmp/fc-hydrate.tar"
 	uploadCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	req, err := http.NewRequestWithContext(uploadCtx, "PUT", e.prefixPath("/boxes/"+e.boxID+"/files")+"?path=/&overwrite=true", bytes.NewReader(bundle.buf.Bytes()))
+	uploadURL := e.prefixPath("/boxes/"+e.boxID+"/files") +
+		"?path=" + url.QueryEscape(stagingPath) + "&overwrite=true"
+	req, err := http.NewRequestWithContext(uploadCtx, "PUT", uploadURL, bytes.NewReader(bundle.buf.Bytes()))
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Content-Type", "application/x-tar")
+	req.Header.Set("Content-Type", "application/octet-stream")
 	auth, err := e.authHeader(ctx)
 	if err != nil {
 		return err
@@ -369,6 +393,17 @@ func (e *BoxliteExecutor) Hydrate(ctx context.Context) error {
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("upload tar HTTP %d: %s", resp.StatusCode, string(body))
 	}
+
+	// Unpack via exec. tar -C / + bundle paths like "skills/..." land
+	// content at /skills/... — matches what the agent's tools expect
+	// (python /skills/<name>/main.py) and what the Docker backend
+	// gives via bind mount. rm afterwards keeps /tmp tidy across
+	// recreate() cycles.
+	extractCmd := fmt.Sprintf("tar -xf %s -C / && rm -f %s", stagingPath, stagingPath)
+	if _, err := e.execOnce(ctx, extractCmd, 60*time.Second); err != nil {
+		return fmt.Errorf("extract hydrate tar: %w", err)
+	}
+
 	slog.Info("boxlite sandbox hydrated",
 		"boxID", e.boxID,
 		"skills", skillCount,
@@ -717,22 +752,34 @@ func (e *BoxliteExecutor) ReadFile(ctx context.Context, path string) (string, er
 }
 
 func (e *BoxliteExecutor) WriteFile(ctx context.Context, filePath, content string) (string, error) {
-	// `tee` over stdin would be cleaner, but our Exec wraps the command
-	// in `cd /workspace && ...` and doesn't pipe stdin. Heredoc with a
-	// random delimiter is robust against arbitrary content (the
-	// agent-supplied content can't break out as long as the random
-	// marker isn't present, which is overwhelmingly likely for any
-	// content under several KB of base64). Larger writes should go
-	// through Hydrate or a future bulk-file API.
-	marker := fmt.Sprintf("FCEOF_%d", time.Now().UnixNano())
-	cmd := fmt.Sprintf("mkdir -p %s && cat > %s <<'%s'\n%s\n%s",
-		shellQuote(filepath.Dir(filePath)),
-		shellQuote(filePath),
-		marker,
-		content,
-		marker)
-	if _, err := e.Exec(ctx, cmd, 30*time.Second); err != nil {
+	// BoxLite Files API quirk: when path points at a concrete file
+	// path the request body is written verbatim and parent dirs are
+	// auto-created (verified empirically — see Hydrate's note). We
+	// used to do a heredoc-over-exec dance, which broke on content
+	// containing the random marker and on binary content; PUT is
+	// binary-safe and skips the shell entirely.
+	uploadCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	uploadURL := e.prefixPath("/boxes/"+e.boxID+"/files") +
+		"?path=" + url.QueryEscape(filePath) + "&overwrite=true"
+	req, err := http.NewRequestWithContext(uploadCtx, "PUT", uploadURL, strings.NewReader(content))
+	if err != nil {
 		return "", err
+	}
+	req.Header.Set("Content-Type", "application/octet-stream")
+	auth, err := e.authHeader(ctx)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", auth)
+	resp, err := e.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("boxlite write: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("boxlite write HTTP %d: %s", resp.StatusCode, string(body))
 	}
 	return fmt.Sprintf("Wrote %d bytes to %s", len(content), filePath), nil
 }

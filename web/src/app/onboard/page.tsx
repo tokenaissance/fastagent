@@ -161,7 +161,7 @@ export default function OnboardPage() {
   const [sandboxDockerImage, setSandboxDockerImage] = useState("thinkany/fastclaw-sandbox:latest");
   const [sandboxE2BTemplate, setSandboxE2BTemplate] = useState("base");
   const [sandboxE2BKey, setSandboxE2BKey] = useState("");
-  const [sandboxBoxliteImage, setSandboxBoxliteImage] = useState("thinkany/fastclaw-sandbox:latest");
+  const [sandboxBoxliteImage, setSandboxBoxliteImage] = useState("");
   const [sandboxBoxliteKey, setSandboxBoxliteKey] = useState("");
   const [sandboxBoxliteURL, setSandboxBoxliteURL] = useState("");
 
@@ -878,20 +878,24 @@ function SandboxStep(props: {
                     />
                   </div>
                   <div className="space-y-1.5">
-                    <Label>Image</Label>
+                    <Label>Snapshot</Label>
                     <Input
                       value={props.boxliteImage}
                       onChange={(e) => props.setBoxliteImage(e.target.value)}
-                      placeholder="thinkany/fastclaw-sandbox:latest"
+                      placeholder="fastclaw-sandbox"
                       className="font-mono text-sm"
                     />
+                    <p className="text-xs text-muted-foreground">
+                      BoxLite snapshot name (imported via the BoxLite Dashboard),
+                      not a Docker Hub image reference.
+                    </p>
                   </div>
                   <div className="space-y-1.5 sm:col-span-2">
                     <Label>API URL (optional)</Label>
                     <Input
                       value={props.boxliteURL}
                       onChange={(e) => props.setBoxliteURL(e.target.value)}
-                      placeholder="https://api.boxlite.ai/v1"
+                      placeholder="https://api.dev.boxlite.ai/api/v1"
                       className="font-mono text-sm"
                     />
                   </div>

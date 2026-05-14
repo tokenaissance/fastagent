@@ -30,7 +30,7 @@ export default function RuntimeSettingsPage() {
   const [sandboxDockerImage, setSandboxDockerImage] = useState("");
   const [sandboxE2BTemplate, setSandboxE2BTemplate] = useState("base");
   const [sandboxE2BKey, setSandboxE2BKey] = useState("");
-  const [sandboxBoxliteImage, setSandboxBoxliteImage] = useState("thinkany/fastclaw-sandbox:latest");
+  const [sandboxBoxliteImage, setSandboxBoxliteImage] = useState("");
   const [sandboxBoxliteKey, setSandboxBoxliteKey] = useState("");
   const [sandboxBoxliteURL, setSandboxBoxliteURL] = useState("");
 
@@ -54,7 +54,7 @@ export default function RuntimeSettingsPage() {
             const looksLikeDockerImage = savedImage.includes(":") || savedImage.includes("/");
             setSandboxE2BTemplate(looksLikeDockerImage || !savedImage ? "base" : savedImage);
           } else if (backend === "boxlite") {
-            setSandboxBoxliteImage(savedImage || "thinkany/fastclaw-sandbox:latest");
+            setSandboxBoxliteImage(savedImage);
           } else {
             setSandboxDockerImage(savedImage);
           }
@@ -202,20 +202,24 @@ export default function RuntimeSettingsPage() {
                     />
                   </div>
                   <div className="space-y-2">
-                    <Label>Image</Label>
+                    <Label>Snapshot</Label>
                     <Input
                       value={sandboxBoxliteImage}
                       onChange={(e) => setSandboxBoxliteImage(e.target.value)}
-                      placeholder="thinkany/fastclaw-sandbox:latest"
+                      placeholder="fastclaw-sandbox"
                       className="font-mono text-sm"
                     />
+                    <p className="text-xs text-muted-foreground">
+                      BoxLite snapshot name (imported via the BoxLite Dashboard),
+                      not a Docker Hub image reference.
+                    </p>
                   </div>
                   <div className="space-y-2 sm:col-span-2">
                     <Label>API URL (optional)</Label>
                     <Input
                       value={sandboxBoxliteURL}
                       onChange={(e) => setSandboxBoxliteURL(e.target.value)}
-                      placeholder="https://api.boxlite.ai/v1"
+                      placeholder="https://api.dev.boxlite.ai/api/v1"
                       className="font-mono text-sm"
                     />
                   </div>
