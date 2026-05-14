@@ -19,6 +19,10 @@ type Executor interface {
 	WriteFile(ctx context.Context, path, content string) (string, error)
 	// ListDir lists a directory and returns a human-readable listing.
 	ListDir(ctx context.Context, path string) (string, error)
+	// Backend returns the short identifier of the underlying provider
+	// ("docker", "e2b", "boxlite"). Used for log lines so operators can
+	// confirm at a glance which provider handled a given exec.
+	Backend() string
 	// Close destroys the sandbox and releases resources.
 	Close() error
 }
@@ -38,6 +42,11 @@ type ExecutorPool interface {
 	Get(ctx context.Context, agentID, projectID, sessionID string) (Executor, error)
 	Release(agentID, projectID, sessionID string) error
 	CloseAll()
+	// Backend returns the short identifier of the underlying provider
+	// ("docker", "e2b", "boxlite"). Mirrors Executor.Backend so callers
+	// holding a pool handle don't have to lazily resolve an executor
+	// just to learn the provider name.
+	Backend() string
 }
 
 // WorkspaceSnapshotter is an optional capability an Executor can implement

@@ -110,6 +110,22 @@ func buildSystemSandboxPool(cfg config.SandboxCfg, ws workspace.Store) sandbox.E
 		inner = sandbox.NewE2BExecutorPool(apiKey, template, home, 30*time.Minute)
 		slog.Info("system sandbox executor pool created",
 			"backend", "e2b", "template", template)
+	case "boxlite":
+		secret := cfg.BoxliteKey
+		if secret == "" {
+			secret = os.Getenv("BOXLITE_API_KEY")
+		}
+		inner = sandbox.NewBoxliteExecutorPool(
+			cfg.BoxliteURL,
+			cfg.BoxlitePrefix,
+			cfg.BoxliteClientID,
+			secret,
+			cfg.Image,
+			home,
+			30*time.Minute,
+		)
+		slog.Info("system sandbox executor pool created",
+			"backend", "boxlite", "image", cfg.Image, "url", cfg.BoxliteURL)
 	default:
 		policy := &sandbox.Policy{NetMode: cfg.Network}
 		inner = sandbox.NewDockerExecutorPool(cfg.Image, home, policy)

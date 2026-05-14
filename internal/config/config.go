@@ -170,13 +170,22 @@ type TaskQueueCfg struct {
 
 // SandboxCfg holds sandbox configuration for an agent.
 type SandboxCfg struct {
-	Enabled    bool   `json:"enabled"`
-	Image      string `json:"image,omitempty"`
-	Policy     string `json:"policy,omitempty"`
-	Backend    string `json:"backend,omitempty"`
-	E2BKey     string `json:"e2bKey,omitempty"`
-	Network    string `json:"network,omitempty"`
-	IdleTTLSec int    `json:"idleTTLSec,omitempty"`
+	Enabled bool   `json:"enabled"`
+	Image   string `json:"image,omitempty"`
+	Policy  string `json:"policy,omitempty"`
+	Backend string `json:"backend,omitempty"`
+	E2BKey  string `json:"e2bKey,omitempty"`
+	// Boxlite (https://github.com/boxlite-ai/boxlite) is a hosted sandbox
+	// service speaking the REST spec at openapi/rest-sandbox-open-api.yaml.
+	// BoxliteURL is the full base URL (default https://api.boxlite.ai/v1);
+	// BoxliteKey is the OAuth client_secret; ClientID and Prefix default
+	// to "default" when empty so the minimum config is just (URL, Key).
+	BoxliteURL      string `json:"boxliteUrl,omitempty"`
+	BoxliteClientID string `json:"boxliteClientId,omitempty"`
+	BoxliteKey      string `json:"boxliteKey,omitempty"`
+	BoxlitePrefix   string `json:"boxlitePrefix,omitempty"`
+	Network         string `json:"network,omitempty"`
+	IdleTTLSec      int    `json:"idleTTLSec,omitempty"`
 }
 
 // GatewayAuth is now a thin shell — the authoritative auth state lives in

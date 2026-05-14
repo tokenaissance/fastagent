@@ -40,6 +40,7 @@ func (f *fakeExecutor) WriteFile(ctx context.Context, p, c string) (string, erro
 	return "", nil
 }
 func (f *fakeExecutor) ListDir(ctx context.Context, path string) (string, error) { return "", nil }
+func (f *fakeExecutor) Backend() string                                           { return "fake" }
 func (f *fakeExecutor) Close() error {
 	atomic.AddInt32(&f.closed, 1)
 	return nil
@@ -76,6 +77,8 @@ func (p *fakePool) Release(agentID, projectID, sessionID string) error {
 	}
 	return nil
 }
+
+func (p *fakePool) Backend() string { return "fake" }
 
 func (p *fakePool) CloseAll() {
 	atomic.AddInt32(&p.closedAll, 1)

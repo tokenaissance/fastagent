@@ -158,9 +158,12 @@ export default function OnboardPage() {
   // Sandbox (optional — disabled by default; user can flip and configure)
   const [sandboxEnabled, setSandboxEnabled] = useState(false);
   const [sandboxBackend, setSandboxBackend] = useState("docker");
-  const [sandboxDockerImage, setSandboxDockerImage] = useState("python:3.12-slim");
+  const [sandboxDockerImage, setSandboxDockerImage] = useState("thinkany/fastclaw-sandbox:latest");
   const [sandboxE2BTemplate, setSandboxE2BTemplate] = useState("base");
   const [sandboxE2BKey, setSandboxE2BKey] = useState("");
+  const [sandboxBoxliteImage, setSandboxBoxliteImage] = useState("thinkany/fastclaw-sandbox:latest");
+  const [sandboxBoxliteKey, setSandboxBoxliteKey] = useState("");
+  const [sandboxBoxliteURL, setSandboxBoxliteURL] = useState("");
 
   // Submit state
   const [submitting, setSubmitting] = useState(false);
@@ -229,9 +232,16 @@ export default function OnboardPage() {
           ? sandboxDockerImage
           : sandboxBackend === "e2b"
             ? sandboxE2BTemplate
-            : undefined
+            : sandboxBackend === "boxlite"
+              ? sandboxBoxliteImage
+              : undefined
         : undefined,
       sandboxE2BKey: sandboxEnabled && sandboxBackend === "e2b" ? sandboxE2BKey : undefined,
+      sandboxBoxliteKey: sandboxEnabled && sandboxBackend === "boxlite" ? sandboxBoxliteKey : undefined,
+      sandboxBoxliteUrl:
+        sandboxEnabled && sandboxBackend === "boxlite" && sandboxBoxliteURL
+          ? sandboxBoxliteURL
+          : undefined,
     });
     setSubmitting(false);
     if (!res.ok) {
@@ -249,7 +259,9 @@ export default function OnboardPage() {
       ? sandboxDockerImage.trim() !== ""
       : sandboxBackend === "e2b"
         ? sandboxE2BKey.trim() !== "" && sandboxE2BTemplate.trim() !== ""
-        : false);
+        : sandboxBackend === "boxlite"
+          ? sandboxBoxliteKey.trim() !== "" && sandboxBoxliteImage.trim() !== ""
+          : false);
   const stepValid: boolean[] = [
     true,
     username.trim() !== "" &&
@@ -325,6 +337,12 @@ export default function OnboardPage() {
             setE2BTemplate={setSandboxE2BTemplate}
             e2bKey={sandboxE2BKey}
             setE2BKey={setSandboxE2BKey}
+            boxliteImage={sandboxBoxliteImage}
+            setBoxliteImage={setSandboxBoxliteImage}
+            boxliteKey={sandboxBoxliteKey}
+            setBoxliteKey={setSandboxBoxliteKey}
+            boxliteURL={sandboxBoxliteURL}
+            setBoxliteURL={setSandboxBoxliteURL}
           />
         )}
 
@@ -767,10 +785,17 @@ function SandboxStep(props: {
   setE2BTemplate: (v: string) => void;
   e2bKey: string;
   setE2BKey: (v: string) => void;
+  boxliteImage: string;
+  setBoxliteImage: (v: string) => void;
+  boxliteKey: string;
+  setBoxliteKey: (v: string) => void;
+  boxliteURL: string;
+  setBoxliteURL: (v: string) => void;
 }) {
   const SANDBOX_BACKEND_LABELS: Record<string, string> = {
     docker: "Docker",
     e2b: "E2B (cloud)",
+    boxlite: "BoxLite (cloud)",
   };
   return (
     <Card>
@@ -814,6 +839,7 @@ function SandboxStep(props: {
                   <SelectContent>
                     <SelectItem value="docker">Docker</SelectItem>
                     <SelectItem value="e2b">E2B (cloud)</SelectItem>
+                    <SelectItem value="boxlite">BoxLite (cloud)</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -839,13 +865,44 @@ function SandboxStep(props: {
                     />
                   </div>
                 </>
+              ) : props.backend === "boxlite" ? (
+                <>
+                  <div className="space-y-1.5">
+                    <Label>BoxLite API Key</Label>
+                    <Input
+                      type="password"
+                      value={props.boxliteKey}
+                      onChange={(e) => props.setBoxliteKey(e.target.value)}
+                      placeholder="client_secret"
+                      className="font-mono text-sm"
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Image</Label>
+                    <Input
+                      value={props.boxliteImage}
+                      onChange={(e) => props.setBoxliteImage(e.target.value)}
+                      placeholder="thinkany/fastclaw-sandbox:latest"
+                      className="font-mono text-sm"
+                    />
+                  </div>
+                  <div className="space-y-1.5 sm:col-span-2">
+                    <Label>API URL (optional)</Label>
+                    <Input
+                      value={props.boxliteURL}
+                      onChange={(e) => props.setBoxliteURL(e.target.value)}
+                      placeholder="https://api.boxlite.ai/v1"
+                      className="font-mono text-sm"
+                    />
+                  </div>
+                </>
               ) : (
                 <div className="space-y-1.5">
                   <Label>Docker Image</Label>
                   <Input
                     value={props.dockerImage}
                     onChange={(e) => props.setDockerImage(e.target.value)}
-                    placeholder="python:3.12-slim"
+                    placeholder="thinkany/fastclaw-sandbox:latest"
                     className="font-mono text-sm"
                   />
                 </div>

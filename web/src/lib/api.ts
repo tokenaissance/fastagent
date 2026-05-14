@@ -194,7 +194,16 @@ export interface ConfigResponse {
   };
   channels: Record<string, { enabled: boolean; botToken?: string }>;
   storage: { type: string; dsn?: string };
-  sandbox?: { enabled: boolean; backend?: string; image?: string; e2bKey?: string };
+  sandbox?: {
+    enabled: boolean;
+    backend?: string;
+    image?: string;
+    e2bKey?: string;
+    boxliteUrl?: string;
+    boxliteClientId?: string;
+    boxliteKey?: string;
+    boxlitePrefix?: string;
+  };
   hooks: { enabled: boolean; token?: string; path?: string; port?: number };
   cronJobs?: Array<Record<string, unknown>>;
   skills?: {
@@ -342,6 +351,10 @@ export interface OnboardRequest {
   sandboxBackend?: string;
   sandboxImage?: string;
   sandboxE2BKey?: string;
+  sandboxBoxliteUrl?: string;
+  sandboxBoxliteClientId?: string;
+  sandboxBoxliteKey?: string;
+  sandboxBoxlitePrefix?: string;
 }
 
 export async function onboard(req: OnboardRequest): Promise<{ ok: boolean; error?: string }> {
