@@ -255,11 +255,20 @@ function buildChatMessages(history: ChatHistoryMessage[]): ChatMessage[] {
           c.result = "(stopped)";
         }
       }
-      // Show as tool-group
+      // If this assistant turn produced text alongside its tool calls
+      // (common with "final answer + closing tool" patterns like text +
+      // update_goal), surface that text as its own agent bubble BEFORE
+      // the tool-group instead of folding it into the tool-group's
+      // content. Folded, the body reads as preamble to a collapsed tool
+      // block; split, the model's actual answer stands as a first-class
+      // reply.
+      if (h.content) {
+        msgs.push({ id: `h-pre-${i}`, role: "agent", content: h.content, timestamp: 0, metadata: h.metadata });
+      }
       msgs.push({
         id: `h-tool-${i}`,
         role: "tool-group",
-        content: h.content || "",
+        content: "",
         timestamp: 0,
         toolCalls: calls,
       });
@@ -1370,27 +1379,22 @@ export function ChatScreen() {
             });
             const groupId = curGroupId;
             const calls = [...curCalls];
-            const content = curContent;
             setMessages((prev) => {
-              // If last message is the thinking content for this round, replace with tool-group
-              const last = prev[prev.length - 1];
-              if (content && last?.role === "agent" && last.content === content) {
-                return [
-                  ...prev.slice(0, -1),
-                  { id: groupId, role: "tool-group" as const, content, timestamp: Date.now(), toolCalls: calls },
-                ];
-              }
-              // Update existing tool-group for this round
+              // Update existing tool-group for this round (additional
+              // tool_call within the same assistant turn).
               const idx = prev.findIndex((m) => m.id === groupId);
               if (idx >= 0) {
                 const updated = [...prev];
                 updated[idx] = { ...updated[idx], toolCalls: calls };
                 return updated;
               }
-              // New tool-group
+              // Leave any streamed agent bubble in place — don't fold
+              // its text into the tool-group. Mirrors the split applied
+              // in buildChatMessages on history reload, so live and
+              // reloaded views stay consistent.
               return [
                 ...prev,
-                { id: groupId, role: "tool-group" as const, content, timestamp: Date.now(), toolCalls: calls },
+                { id: groupId, role: "tool-group" as const, content: "", timestamp: Date.now(), toolCalls: calls },
               ];
             });
             break;
