@@ -725,15 +725,18 @@ func buildUserMessage(msg bus.InboundMessage) provider.Message {
 	if msg.Source == bus.SourceGoalContext {
 		origin = provider.OriginGoalContext
 	}
-	// IM senders get a `[SenderName]: text` prefix so future turns can
-	// tell whose message was whose from session history alone — matches
-	// what InjectGroupMessage does for group fan-out. routing.go's group
-	// mention path already pre-prefixes Text before queueing, so we skip
-	// when PeerKind=="group" to avoid double-wrapping.
+	// IM DMs are not prefixed with `[SenderName]:` — there's only one
+	// chatter per DM, the sender is already surfaced as a per-turn
+	// system block when needed (see renderSender for the group case),
+	// and putting an English-name bracket in front of every line biases
+	// the model away from the language preferences set in SOUL.md
+	// ("默认中文" loses to N copies of "[idoubicc]:" surrounding it).
+	// Web has always been bare; this brings IM DMs in line.
+	// Group fan-out still needs in-content tags so the model can tell
+	// speakers apart across turns — routing.go pre-prefixes group
+	// messages before queueing, so msg.Text already carries `[A]: …`
+	// when PeerKind=="group". We pass it through unchanged.
 	userText := msg.Text
-	if msg.SenderName != "" && msg.PeerKind != "group" {
-		userText = fmt.Sprintf("\\[%s\\]: %s", msg.SenderName, msg.Text)
-	}
 	userMsg := provider.Message{
 		Role:     "user",
 		Content:  userText,
@@ -1170,14 +1173,24 @@ func senderMetadata(msg bus.InboundMessage) map[string]any {
 }
 
 // renderSender emits a per-turn system block naming who the message
-// came from on the originating IM channel. IM bridges (discord,
-// telegram, slack, ...) put the platform-side username in SenderName
-// and the platform user id in UserID — without this block the LLM only
-// sees the message text and can't tell idoubi from anyone else who
-// might be DMing the same bot. Returns "" for web chats and any other
-// caller that doesn't populate SenderName, so we don't waste tokens.
+// came from on the originating IM channel. Used for GROUP messages so
+// the LLM can attribute each turn to the right speaker.
+//
+// Skipped for DMs: there's only one chatter per DM, their identity is
+// stable across the session and already captured in USER.md /
+// per-chatter MEMORY. Repeating it as a per-turn English system block
+// just adds language bias (SOUL.md's "默认中文" loses to N copies of
+// "The latest user turn was sent by:…" surrounding it) without telling
+// the LLM anything new. Web chats also don't get this block, so DM
+// behavior now matches web.
+//
+// Returns "" for web chats and any other caller that doesn't populate
+// SenderName, so we don't waste tokens.
 func renderSender(msg bus.InboundMessage) string {
 	if msg.SenderName == "" {
+		return ""
+	}
+	if msg.PeerKind != "group" {
 		return ""
 	}
 	var b strings.Builder
@@ -1604,6 +1617,9 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	// PhotoURL (single, used by IM bridges) or PhotoURLs (multi, used by
 	// the web chat upload path); flatten both into one content-parts
 	// slice so the provider sees `[text, image, image, …]`.
+	// buildUserMessage handles multi-image flatten + senderMetadata.
+	// `[SenderName]:` content-prefix policy lives there (group-only;
+	// DMs stay bare to avoid SOUL.md language-bias regressions).
 	userMsg := buildUserMessage(msg)
 	sess.Append(userMsg)
 
@@ -2171,7 +2187,8 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: AfterSystemPrompt, UserID: a.ownerUserID})
 
 	// Store raw user message — buildUserMessage handles multi-image
-	// flatten + IM SenderName prefixing + senderMetadata.
+	// flatten + senderMetadata. Group msgs keep their `[SenderName]:`
+	// prefix (applied in buildUserMessage); DMs stay bare.
 	userMsg := buildUserMessage(msg)
 	sess.Append(userMsg)
 
