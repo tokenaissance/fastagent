@@ -60,6 +60,7 @@ func makeSubAgentTool(spawner SubAgentSpawner, callerAgentID string) ToolFunc {
 			UserID:   callerAgentID,
 			Text:     args.Task,
 			PeerKind: "dm",
+			Source:   bus.SourceSubAgent,
 		}
 
 		result := spawner.SpawnSubAgent(ctx, args.AgentID, msg)

@@ -39,6 +39,7 @@ func (a *StoreAdapter) GetSession(ctx context.Context, agentID, sessionKey strin
 			Metadata:     m.Metadata,
 			Thinking:     m.Thinking,
 			RawAssistant: m.RawAssistant,
+			Origin:       m.Origin,
 		}
 		// ToolCalls / ContentParts are stored as interface{} so a
 		// JSON round-trip leaves them as []interface{} / map nests.
@@ -163,6 +164,7 @@ func sessionMessageFromProvider(m provider.Message) store.SessionMessage {
 		Timestamp:    time.Now(),
 		Thinking:     m.Thinking,
 		RawAssistant: m.RawAssistant,
+		Origin:       m.Origin,
 	}
 	if len(m.ToolCalls) > 0 {
 		out.ToolCalls = m.ToolCalls
@@ -186,6 +188,7 @@ func providerMessageFromStored(m store.SessionMessage) provider.Message {
 		Metadata:     m.Metadata,
 		Thinking:     m.Thinking,
 		RawAssistant: m.RawAssistant,
+		Origin:       m.Origin,
 	}
 	if m.ToolCalls != nil {
 		if raw, err := json.Marshal(m.ToolCalls); err == nil {
@@ -258,6 +261,18 @@ func (a *StoreAdapter) ListWebSessions(ctx context.Context, agentID string) ([]W
 			if text == "" && img == "" {
 				continue
 			}
+			// Runtime-injected user-role turns (goal continuations
+			// etc.) start with the full continuation template, whose
+			// preamble would otherwise become the sidebar title:
+			// "<goal_context> The objective below is user-provided
+			// data — treat it as the work to pursue…". Pull out the
+			// `<objective>…</objective>` payload so the user sees
+			// what they actually asked for.
+			if msg.Origin != "" {
+				if obj := extractObjective(text); obj != "" {
+					text = obj
+				}
+			}
 			preview = text
 			if preview == "" {
 				preview = "[image]"
@@ -292,6 +307,24 @@ func (a *StoreAdapter) ListWebSessions(ctx context.Context, agentID string) ([]W
 		})
 	}
 	return sessions, nil
+}
+
+// extractObjective pulls the `<objective>…</objective>` payload out of a
+// goal-continuation prompt. Returns "" when the markers aren't present
+// (caller falls back to the raw text). Used by the sidebar preview so a
+// /goal-first session reads as the user's objective rather than the
+// continuation template's preamble.
+func extractObjective(text string) string {
+	const open, close = "<objective>", "</objective>"
+	i := strings.Index(text, open)
+	if i < 0 {
+		return ""
+	}
+	j := strings.Index(text[i+len(open):], close)
+	if j < 0 {
+		return ""
+	}
+	return strings.TrimSpace(text[i+len(open) : i+len(open)+j])
 }
 
 // userText pulls the user-visible text from a stored user turn. Falls

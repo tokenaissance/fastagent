@@ -6,7 +6,7 @@ import { useAgentIdFromURL } from "@/hooks/use-agent-id";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { getAgent, getChatHistoryWithCursor, getChatSessions, getChatTodo, getMe, listAgentFiles, listProjects, renameChatSession, revealAgentWorkspace, sendChatStream, uploadAgentFiles, getAuthToken, getSkills, type ChatHistoryMessage, type ChatStreamEvent, type SkillInfo, type TodoItem, type ToolResultMetadata, type WorkspaceFile } from "@/lib/api";
-import { Bot, Send, Copy, Check, Pencil, Wrench, ChevronDown, ChevronRight, Download, X, File, FileText, FolderSearch, Image as ImageIcon, FileCode, Film, Music, Puzzle, SlidersHorizontal, ShieldCheck, Paperclip, Square, FolderOpen, RefreshCw, Eye, Code2, RotateCcw, ListChecks } from "lucide-react";
+import { Bot, Send, Copy, Check, Pencil, Wrench, ChevronDown, ChevronRight, Download, X, File, FileText, FolderSearch, Image as ImageIcon, FileCode, Film, Music, Puzzle, SlidersHorizontal, ShieldCheck, Paperclip, Square, FolderOpen, RefreshCw, Eye, Code2, RotateCcw, ListChecks, Terminal } from "lucide-react";
 import Link from "next/link";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -138,6 +138,29 @@ interface UserAttachment {
   // Only set on the live-send turn; reloaded history won't carry it.
   previewUrl?: string;
 }
+
+// Built-in slash commands surfaced in the composer's `/` menu alongside
+// skills. Mirror of the dispatch table in internal/agent/slash.go — keep
+// in sync when commands are added/removed/renamed there.
+type SlashCommand = { name: string; description: string };
+const BUILTIN_COMMANDS: SlashCommand[] = [
+  { name: "new", description: "Clear session history" },
+  { name: "reset", description: "Clear session history" },
+  { name: "retry", description: "Re-run last message" },
+  { name: "undo", description: "Undo last turn" },
+  { name: "compact", description: "Compress context window" },
+  { name: "status", description: "Agent status & memory info" },
+  { name: "usage", description: "Session token/turn stats" },
+  { name: "insights", description: "Activity insights (last N days)" },
+  { name: "personality", description: "List or switch personality" },
+  { name: "model", description: "Show or switch LLM model" },
+  { name: "goal", description: "Persistent multi-turn objective" },
+  { name: "help", description: "Show command help" },
+  { name: "version", description: "Show version" },
+];
+type SlashItem =
+  | ({ kind: "command" } & SlashCommand)
+  | ({ kind: "skill" } & SkillInfo);
 
 interface ChatMessage {
   id: string;
@@ -274,11 +297,20 @@ function buildChatMessages(history: ChatHistoryMessage[]): ChatMessage[] {
           c.result = "(stopped)";
         }
       }
-      // Show as tool-group
+      // If this assistant turn produced text alongside its tool calls
+      // (common with "final answer + closing tool" patterns like text +
+      // update_goal), surface that text as its own agent bubble BEFORE
+      // the tool-group instead of folding it into the tool-group's
+      // content. Folded, the body reads as preamble to a collapsed tool
+      // block; split, the model's actual answer stands as a first-class
+      // reply.
+      if (h.content) {
+        msgs.push({ id: `h-pre-${i}`, role: "agent", content: h.content, timestamp: 0, metadata: h.metadata });
+      }
       msgs.push({
         id: `h-tool-${i}`,
         role: "tool-group",
-        content: h.content || "",
+        content: "",
         timestamp: 0,
         toolCalls: calls,
       });
@@ -665,18 +697,26 @@ export function ChatScreen() {
     return { start: caret - match[2].length - 1, query: match[2] };
   };
 
-  const filteredSkills = slashOpen
-    ? skills
-        .filter((s) => {
-          const q = slashQuery.toLowerCase();
-          if (!q) return true;
-          return s.name.toLowerCase().includes(q) || (s.description || "").toLowerCase().includes(q);
-        })
-        .slice(0, 8)
+  // Merged command + skill list for the slash menu. Commands first so
+  // built-ins are easy to find; query matches both name and description.
+  // Cap at 8 to keep the popover from outgrowing the composer.
+  const filteredItems: SlashItem[] = slashOpen
+    ? (() => {
+        const q = slashQuery.toLowerCase();
+        const match = (name: string, desc: string) =>
+          !q || name.toLowerCase().includes(q) || desc.toLowerCase().includes(q);
+        const cmds: SlashItem[] = BUILTIN_COMMANDS
+          .filter((c) => match(c.name, c.description))
+          .map((c) => ({ kind: "command", ...c }));
+        const sks: SlashItem[] = skills
+          .filter((s) => match(s.name, s.description || ""))
+          .map((s) => ({ kind: "skill", ...s }));
+        return [...cmds, ...sks].slice(0, 8);
+      })()
     : [];
 
-  const selectSkill = useCallback(
-    (skill: SkillInfo) => {
+  const selectItem = useCallback(
+    (item: SlashItem) => {
       const el = textareaRef.current;
       if (!el) return;
       const caret = el.selectionStart ?? input.length;
@@ -684,7 +724,7 @@ export function ChatScreen() {
       if (!ctx) return;
       const before = input.slice(0, ctx.start);
       const after = input.slice(caret);
-      const insert = `/${skill.name} `;
+      const insert = `/${item.name} `;
       const next = before + insert + after;
       setInput(next);
       setSlashOpen(false);
@@ -1389,27 +1429,22 @@ export function ChatScreen() {
             });
             const groupId = curGroupId;
             const calls = [...curCalls];
-            const content = curContent;
             setMessages((prev) => {
-              // If last message is the thinking content for this round, replace with tool-group
-              const last = prev[prev.length - 1];
-              if (content && last?.role === "agent" && last.content === content) {
-                return [
-                  ...prev.slice(0, -1),
-                  { id: groupId, role: "tool-group" as const, content, timestamp: Date.now(), toolCalls: calls },
-                ];
-              }
-              // Update existing tool-group for this round
+              // Update existing tool-group for this round (additional
+              // tool_call within the same assistant turn).
               const idx = prev.findIndex((m) => m.id === groupId);
               if (idx >= 0) {
                 const updated = [...prev];
                 updated[idx] = { ...updated[idx], toolCalls: calls };
                 return updated;
               }
-              // New tool-group
+              // Leave any streamed agent bubble in place — don't fold
+              // its text into the tool-group. Mirrors the split applied
+              // in buildChatMessages on history reload, so live and
+              // reloaded views stay consistent.
               return [
                 ...prev,
-                { id: groupId, role: "tool-group" as const, content, timestamp: Date.now(), toolCalls: calls },
+                { id: groupId, role: "tool-group" as const, content: "", timestamp: Date.now(), toolCalls: calls },
               ];
             });
             break;
@@ -1656,20 +1691,20 @@ export function ChatScreen() {
 
     // Slash menu keyboard handling takes precedence when open: arrows move
     // the selection, Enter confirms, Escape closes without sending.
-    if (slashOpen && filteredSkills.length > 0) {
+    if (slashOpen && filteredItems.length > 0) {
       if (e.key === "ArrowDown") {
         e.preventDefault();
-        setSlashIndex((i) => (i + 1) % filteredSkills.length);
+        setSlashIndex((i) => (i + 1) % filteredItems.length);
         return;
       }
       if (e.key === "ArrowUp") {
         e.preventDefault();
-        setSlashIndex((i) => (i - 1 + filteredSkills.length) % filteredSkills.length);
+        setSlashIndex((i) => (i - 1 + filteredItems.length) % filteredItems.length);
         return;
       }
       if (e.key === "Enter" || e.key === "Tab") {
         e.preventDefault();
-        selectSkill(filteredSkills[slashIndex]);
+        selectItem(filteredItems[slashIndex]);
         return;
       }
       if (e.key === "Escape") {
@@ -2164,12 +2199,12 @@ export function ChatScreen() {
                 Sending messages here is disabled.
               </div>
             )}
-            {slashOpen && filteredSkills.length > 0 && (
+            {slashOpen && filteredItems.length > 0 && (
               <SlashMenu
-                skills={filteredSkills}
+                items={filteredItems}
                 activeIndex={slashIndex}
                 onHover={setSlashIndex}
-                onSelect={selectSkill}
+                onSelect={selectItem}
               />
             )}
             <div
@@ -3250,49 +3285,55 @@ function FilePreview({ agentId, file, onClose }: { agentId: string; file: Produc
 }
 
 function SlashMenu({
-  skills,
+  items,
   activeIndex,
   onHover,
   onSelect,
 }: {
-  skills: SkillInfo[];
+  items: SlashItem[];
   activeIndex: number;
   onHover: (i: number) => void;
-  onSelect: (s: SkillInfo) => void;
+  onSelect: (s: SlashItem) => void;
 }) {
   return (
     <div className="absolute bottom-full left-0 right-0 mb-2 rounded-xl border border-border bg-popover shadow-lg overflow-hidden z-20">
       <div className="max-h-[320px] overflow-y-auto py-1">
-        {skills.map((s, i) => (
-          <button
-            key={s.name}
-            // onMouseDown fires before the textarea's onBlur so the click
-            // isn't swallowed by the blur-driven menu close.
-            onMouseDown={(e) => {
-              e.preventDefault();
-              onSelect(s);
-            }}
-            onMouseEnter={() => onHover(i)}
-            className={`w-full flex items-start gap-3 px-3 py-2 text-left transition-colors ${
-              i === activeIndex ? "bg-muted/60" : "hover:bg-muted/40"
-            }`}
-          >
-            <Puzzle className="h-4 w-4 mt-0.5 shrink-0 text-muted-foreground" />
-            <div className="flex-1 min-w-0">
-              <div className="flex items-center gap-2">
-                <p className="text-sm font-medium truncate">{s.name}</p>
-                <span className="text-[10px] uppercase tracking-wider text-muted-foreground/70">
-                  {s.type || "skill"}
-                </span>
+        {items.map((it, i) => {
+          const isCmd = it.kind === "command";
+          const Icon = isCmd ? Terminal : Puzzle;
+          const badge = isCmd ? "command" : (it.type || "skill");
+          const label = isCmd ? `/${it.name}` : it.name;
+          return (
+            <button
+              key={`${it.kind}-${it.name}`}
+              // onMouseDown fires before the textarea's onBlur so the click
+              // isn't swallowed by the blur-driven menu close.
+              onMouseDown={(e) => {
+                e.preventDefault();
+                onSelect(it);
+              }}
+              onMouseEnter={() => onHover(i)}
+              className={`w-full flex items-start gap-3 px-3 py-2 text-left transition-colors ${
+                i === activeIndex ? "bg-muted/60" : "hover:bg-muted/40"
+              }`}
+            >
+              <Icon className="h-4 w-4 mt-0.5 shrink-0 text-muted-foreground" />
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2">
+                  <p className="text-sm font-medium truncate">{label}</p>
+                  <span className="text-[10px] uppercase tracking-wider text-muted-foreground/70">
+                    {badge}
+                  </span>
+                </div>
+                {it.description && (
+                  <p className="text-xs text-muted-foreground line-clamp-1">
+                    {it.description}
+                  </p>
+                )}
               </div>
-              {s.description && (
-                <p className="text-xs text-muted-foreground line-clamp-1">
-                  {s.description}
-                </p>
-              )}
-            </div>
-          </button>
-        ))}
+            </button>
+          );
+        })}
       </div>
       <Link
         href="/skills/"

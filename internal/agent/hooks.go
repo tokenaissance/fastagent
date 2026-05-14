@@ -35,8 +35,27 @@ type HookContext struct {
 	TurnCount     int       // incremented each agent turn (for PostTurn)
 	ToolCallCount int       // total tool calls in this turn (for PostTurn)
 	Workspace     string    // agent workspace path (for PostTurn)
-	ChatID        string    // chat/session identifier (for mem0 user isolation)
 	UserID        string    // owning user ID for multi-user namespace isolation
+	ChatID        string    // used by the plugin hook adapter
+	// Source mirrors bus.InboundMessage.Source so PostTurn hooks can
+	// distinguish a real user turn from a cron / heartbeat / sub-agent
+	// / goal-context turn. Empty means user. Hooks that should only
+	// fire on user-originated turns (notably the goal trigger) gate
+	// on this.
+	Source string
+
+	// GoalSessionKey is the persistent session_key for the in-flight
+	// turn. The goal-accounting hook reads it to look up the active
+	// goal (if any) for this session. Empty when the turn happened
+	// outside a chat context.
+	GoalSessionKey string
+
+	// IsPlanMode reports whether this turn ran in plan-mode (model
+	// emits a plan, doesn't act). Goal trigger hooks gate on this so
+	// a plan-only turn doesn't auto-fire a continuation behind the
+	// user's back — plan mode exists precisely to let the user review
+	// before more work happens.
+	IsPlanMode bool
 }
 
 // HookFunc is a function that runs at a hook point.

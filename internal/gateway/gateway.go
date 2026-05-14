@@ -169,9 +169,20 @@ type Gateway struct {
 	sandboxPool sandbox.ExecutorPool
 	usage       usage.Meter
 	envCfg      *config.EnvConfig
-	mu          sync.RWMutex
-	dedup       sync.Map
+	// chatEvents, when set, lets bus-fired web turns (cron / goal
+	// continuation / heartbeat / sub-agent) stream through the same
+	// SSE hub a user-typed POST /api/chat turn uses. Nil-safe: unset
+	// keeps the legacy bus.Outbound → WebChannel async-bubble path.
+	chatEvents *agent.EventHub
+	mu         sync.RWMutex
+	dedup      sync.Map
 }
+
+// SetChatEvents wires the agent event hub the setup server lazy-inits.
+// Must be called before Run() so the very first bus-fired web turn
+// streams through the hub rather than landing as one delayed async
+// bubble. Safe to call once.
+func (g *Gateway) SetChatEvents(h *agent.EventHub) { g.chatEvents = h }
 
 // WebChannel returns the in-process fan-out for web SSE subscribers.
 // Used by the setup server to register chat-stream subscribers so cron-
@@ -371,6 +382,19 @@ func New(env *config.EnvConfig) (*Gateway, error) {
 		// path stability, files overwritten in place, etc.).
 		turnStart := time.Now()
 
+		// Attach a stream pipeline for web-channel bus-fired turns so
+		// events reach the same SSE hub the user-typed path uses. No-op
+		// when the hub isn't wired (e.g. CLI/test harness) or the
+		// session can't be resolved — the OutboundMessage push below
+		// still delivers the final reply.
+		webStreamed := false
+		if g.chatEvents != nil && task.Message.Channel == "web" {
+			if sess := ag.Sessions().Get(task.Message.Channel, task.Message.AccountID, task.Message.ChatID, task.Message.ProjectID); sess != nil {
+				ctx = agent.ContextWithStream(ctx, nil, g.store, g.chatEvents, task.OwnerUserID, task.AgentID, sess.SessionKey())
+				webStreamed = true
+			}
+		}
+
 		reply := ag.HandleMessage(ctx, task.Message)
 		close(typingDone)
 		// Extract `![alt](workspace/relative/path)` markdown image refs
@@ -387,12 +411,23 @@ func New(env *config.EnvConfig) (*Gateway, error) {
 		// by filename so we don't double-send anything
 		// splitMediaFromReply already resolved.
 		items = appendRecentWorkspaceImages(ctx, g.workspace, task.AgentID, task.Message.ProjectID, task.Message.ChatID, turnStart, items)
+		// Web-streamed turns already delivered the reply via the hub.
+		// Skip the outbound push entirely when there's no media; with
+		// media, push with empty text so attachments still flow but
+		// the chat panel doesn't double-render the text.
+		if webStreamed && len(items) == 0 {
+			return reply, nil
+		}
+		outText := text
+		if webStreamed {
+			outText = ""
+		}
 		out := bus.OutboundMessage{
 			Channel:      task.Message.Channel,
 			AccountID:    task.AccountID,
 			AgentID:      task.AgentID,
 			ChatID:       task.Message.ChatID,
-			Text:         text,
+			Text:         outText,
 			ReplyToMsgID: task.Message.MessageID,
 			ParseMode:    "Markdown",
 			MediaItems:   items,

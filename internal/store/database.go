@@ -9,10 +9,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
-	_ "github.com/lib/pq"          // PostgreSQL driver
-	_ "modernc.org/sqlite"         // SQLite driver (pure Go)
+	_ "github.com/lib/pq"  // PostgreSQL driver
+	_ "modernc.org/sqlite" // SQLite driver (pure Go)
 )
 
 // DBStore implements Store using a SQL database (PostgreSQL or SQLite).
@@ -134,8 +135,57 @@ func (d *DBStore) Migrate(ctx context.Context) error {
 	if err := d.migrateSessionsAddProjectID(ctx); err != nil {
 		return fmt.Errorf("migrate sessions.project_id: %w", err)
 	}
+	if err := d.migrateSessionMessagesAddOrigin(ctx); err != nil {
+		return fmt.Errorf("migrate session_messages.origin: %w", err)
+	}
+	if err := d.migrateAgentGoalsAddRouting(ctx); err != nil {
+		return fmt.Errorf("migrate agent_goals routing: %w", err)
+	}
 	if err := d.migrateTokenUsageAddProvider(ctx); err != nil {
 		return fmt.Errorf("migrate token_usage_daily.provider: %w", err)
+	}
+	return nil
+}
+
+// migrateAgentGoalsAddRouting retrofits channel/account_id/chat_id/
+// project_id onto legacy agent_goals tables. All four default to ''
+// — pre-existing rows had no continuation infrastructure attached
+// anyway, so the empty value just means "no routing recorded; can't
+// auto-continue this goal" and TryFireContinuation bails safely.
+// Idempotent.
+func (d *DBStore) migrateAgentGoalsAddRouting(ctx context.Context) error {
+	for _, col := range []string{"channel", "account_id", "chat_id", "project_id"} {
+		has, err := d.tableHasColumn(ctx, "agent_goals", col)
+		if err != nil {
+			return err
+		}
+		if has {
+			continue
+		}
+		if _, err := d.db.ExecContext(ctx,
+			fmt.Sprintf(`ALTER TABLE agent_goals ADD COLUMN %s TEXT NOT NULL DEFAULT ''`, col)); err != nil {
+			return fmt.Errorf("add column %s: %w", col, err)
+		}
+	}
+	return nil
+}
+
+// migrateSessionMessagesAddOrigin retrofits the origin column onto
+// legacy session_messages tables. Empty default = pre-existing user /
+// assistant messages keep working unchanged. Non-empty marks runtime-
+// injected rows (currently only "goal_context") so the WebChatHistory
+// reader can skip them. Idempotent.
+func (d *DBStore) migrateSessionMessagesAddOrigin(ctx context.Context) error {
+	has, err := d.tableHasColumn(ctx, "session_messages", "origin")
+	if err != nil {
+		return err
+	}
+	if has {
+		return nil
+	}
+	if _, err := d.db.ExecContext(ctx,
+		`ALTER TABLE session_messages ADD COLUMN origin TEXT NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("add column: %w", err)
 	}
 	return nil
 }
@@ -499,7 +549,7 @@ func (d *DBStore) migrateCronJobsAddUserID(ctx context.Context) error {
 // `<channel>_<chatID>` convention (web_<sid>, wechat_<openid>, …), so the
 // backfill splits on the first underscore. account_id has no historical
 // source — pre-feature installs only ran one bot per channel anyway, so
-// leaving it '' is correct for those rows. New sessions written after
+// leaving it ” is correct for those rows. New sessions written after
 // this migration always populate the full triple explicitly.
 func (d *DBStore) migrateSessionsAddChannelTriple(ctx context.Context) error {
 	has, err := d.tableHasColumn(ctx, "sessions", "channel")
@@ -694,14 +744,14 @@ func (d *DBStore) migrateUsersAppUserCols(ctx context.Context) error {
 	return nil
 }
 
-// migrateAgentFilesDropTemplate clears the legacy user_id='' template
+// migrateAgentFilesDropTemplate clears the legacy user_id=” template
 // rows from agent_files. Each row is reparented to the agent's owner
 // when no per-user row already exists for that (agent_id, filename) —
 // preserves existing content as the owner's personal copy. After this
 // pass the table holds (agent_id, real_user_id, filename) tuples only;
 // any "shared SOUL.md across all users" use case should live in a local
 // FS file at <agent_home>/<name>, which the runtime falls back to.
-// Idempotent: re-runs find no user_id='' rows and exit clean.
+// Idempotent: re-runs find no user_id=” rows and exit clean.
 func (d *DBStore) migrateAgentFilesDropTemplate(ctx context.Context) error {
 	rows, err := d.db.QueryContext(ctx,
 		`SELECT agent_files.agent_id, agent_files.filename, agent_files.content, agents.user_id
@@ -1170,6 +1220,11 @@ func (d *DBStore) migrationSQL() []string {
 			metadata TEXT NOT NULL DEFAULT '',
 			thinking TEXT NOT NULL DEFAULT '',
 			raw_assistant TEXT NOT NULL DEFAULT '',
+			-- origin marks runtime-injected rows (currently only
+			-- "goal_context"). Empty = real user / assistant exchange.
+			-- WebChatHistory + FTS skip non-empty origin to keep
+			-- synthetic prompts out of user-visible / searchable views.
+			origin TEXT NOT NULL DEFAULT '',
 			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			PRIMARY KEY (user_id, agent_id, session_key, seq)
 		)`,
@@ -1297,6 +1352,31 @@ func (d *DBStore) migrationSQL() []string {
 			PRIMARY KEY (user_id, agent_id, project_id)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_projects_listing ON projects (user_id, agent_id, updated_at DESC)`,
+		// agent_goals backs the /goal feature: one persistent objective
+		// per (agent, session). The UNIQUE (agent_id, session_key)
+		// constraint is the source of truth for "this session already
+		// has a goal" — CreateGoal translates the conflict into
+		// ErrGoalAlreadyExists.
+		`CREATE TABLE IF NOT EXISTS agent_goals (
+			id TEXT PRIMARY KEY,
+			agent_id TEXT NOT NULL,
+			session_key TEXT NOT NULL,
+			owner_user_id TEXT NOT NULL,
+			-- Routing tuple, stamped at create time so a continuation
+			-- can publish onto the same bus address the original turn
+			-- arrived on. Mirrors cron_jobs' channel/chat_id columns.
+			channel TEXT NOT NULL DEFAULT '',
+			account_id TEXT NOT NULL DEFAULT '',
+			chat_id TEXT NOT NULL DEFAULT '',
+			project_id TEXT NOT NULL DEFAULT '',
+			objective TEXT NOT NULL,
+			status TEXT NOT NULL DEFAULT 'active',
+			token_budget BIGINT,
+			tokens_used BIGINT NOT NULL DEFAULT 0,
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_goals_session ON agent_goals (agent_id, session_key)`,
 		// token_usage_daily is the per-(day, user, agent, session,
 		// provider, model) counter behind the admin Usage dashboard.
 		// Every successful LLM Chat / ChatStream lands one row via
@@ -1963,24 +2043,24 @@ func (d *DBStore) AppendSessionMessage(ctx context.Context, userID, agentID, ses
 	if d.dialect == "postgres" {
 		_, err := d.db.ExecContext(ctx,
 			`INSERT INTO session_messages
-				(user_id, agent_id, session_key, seq, role, content, content_parts, tool_calls, tool_call_id, name, metadata, thinking, raw_assistant, created_at)
-			SELECT $1, $2, $3, COALESCE(MAX(seq), -1) + 1, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
+				(user_id, agent_id, session_key, seq, role, content, content_parts, tool_calls, tool_call_id, name, metadata, thinking, raw_assistant, origin, created_at)
+			SELECT $1, $2, $3, COALESCE(MAX(seq), -1) + 1, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
 				FROM session_messages
 				WHERE user_id = $1 AND agent_id = $2 AND session_key = $3`,
 			userID, agentID, sessionKey,
 			msg.Role, msg.Content, string(contentParts), string(toolCalls),
-			msg.ToolCallID, msg.Name, string(metadata), msg.Thinking, rawAssistant, ts)
+			msg.ToolCallID, msg.Name, string(metadata), msg.Thinking, rawAssistant, msg.Origin, ts)
 		return err
 	}
 	_, err := d.db.ExecContext(ctx,
 		`INSERT INTO session_messages
-			(user_id, agent_id, session_key, seq, role, content, content_parts, tool_calls, tool_call_id, name, metadata, thinking, raw_assistant, created_at)
-		SELECT ?, ?, ?, COALESCE(MAX(seq), -1) + 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+			(user_id, agent_id, session_key, seq, role, content, content_parts, tool_calls, tool_call_id, name, metadata, thinking, raw_assistant, origin, created_at)
+		SELECT ?, ?, ?, COALESCE(MAX(seq), -1) + 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 			FROM session_messages
 			WHERE user_id = ? AND agent_id = ? AND session_key = ?`,
 		userID, agentID, sessionKey,
 		msg.Role, msg.Content, string(contentParts), string(toolCalls),
-		msg.ToolCallID, msg.Name, string(metadata), msg.Thinking, rawAssistant, ts,
+		msg.ToolCallID, msg.Name, string(metadata), msg.Thinking, rawAssistant, msg.Origin, ts,
 		userID, agentID, sessionKey)
 	return err
 }
@@ -2090,7 +2170,7 @@ func (d *DBStore) LatestSessionEventSeq(ctx context.Context, userID, agentID, se
 // to sessions.messages should check len() and decide.
 func (d *DBStore) ListSessionMessages(ctx context.Context, userID, agentID, sessionKey string) ([]SessionMessage, error) {
 	rows, err := d.db.QueryContext(ctx,
-		fmt.Sprintf(`SELECT role, content, content_parts, tool_calls, tool_call_id, name, metadata, thinking, raw_assistant, created_at
+		fmt.Sprintf(`SELECT role, content, content_parts, tool_calls, tool_call_id, name, metadata, thinking, raw_assistant, origin, created_at
 			FROM session_messages
 			WHERE user_id = %s AND agent_id = %s AND session_key = %s
 			ORDER BY seq ASC`, d.ph(1), d.ph(2), d.ph(3)),
@@ -2103,7 +2183,7 @@ func (d *DBStore) ListSessionMessages(ctx context.Context, userID, agentID, sess
 	for rows.Next() {
 		var m SessionMessage
 		var contentParts, toolCalls, metadata, rawAssistant string
-		if err := rows.Scan(&m.Role, &m.Content, &contentParts, &toolCalls, &m.ToolCallID, &m.Name, &metadata, &m.Thinking, &rawAssistant, &m.Timestamp); err != nil {
+		if err := rows.Scan(&m.Role, &m.Content, &contentParts, &toolCalls, &m.ToolCallID, &m.Name, &metadata, &m.Thinking, &rawAssistant, &m.Origin, &m.Timestamp); err != nil {
 			return nil, err
 		}
 		if contentParts != "" && contentParts != "null" {
@@ -2786,6 +2866,125 @@ func scanCronJobs(rows *sql.Rows) ([]CronJobRecord, error) {
 		jobs = append(jobs, j)
 	}
 	return jobs, rows.Err()
+}
+
+// --- Agent goals ---
+//
+// All goal columns ride together on every CRUD path — mutations happen
+// via "read, mutate domain object, write back" rather than partial
+// updates. Keeps the per-turn accounting logic in Go rather than
+// scattered across UPDATE … SET fragments.
+//
+// Legacy columns (last_accounted_token_usage / time_used_seconds /
+// last_accounted_at / safety_max_iterations / iterations) still exist
+// on old SQLite databases — they're not in the current CREATE TABLE
+// and the SQL below neither reads nor writes them.
+const goalSelectCols = `id, agent_id, session_key, owner_user_id, channel, account_id, chat_id, project_id, objective, status, token_budget, tokens_used, created_at, updated_at`
+
+func (d *DBStore) CreateGoal(ctx context.Context, g *GoalRecord) error {
+	if g.AgentID == "" || g.SessionKey == "" {
+		return errors.New("store: goal.agent_id and session_key are required")
+	}
+	if g.OwnerUserID == "" {
+		return errors.New("store: goal.owner_user_id is required")
+	}
+	now := time.Now().UTC()
+	if g.CreatedAt.IsZero() {
+		g.CreatedAt = now
+	}
+	if g.UpdatedAt.IsZero() {
+		g.UpdatedAt = now
+	}
+	if g.Status == "" {
+		g.Status = "active"
+	}
+	_, err := d.db.ExecContext(ctx,
+		fmt.Sprintf(`INSERT INTO agent_goals (id, agent_id, session_key, owner_user_id, channel, account_id, chat_id, project_id, objective, status, token_budget, tokens_used, created_at, updated_at)
+			VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)`,
+			d.ph(1), d.ph(2), d.ph(3), d.ph(4), d.ph(5), d.ph(6), d.ph(7), d.ph(8), d.ph(9), d.ph(10), d.ph(11), d.ph(12), d.ph(13), d.ph(14)),
+		g.ID, g.AgentID, g.SessionKey, g.OwnerUserID,
+		g.Channel, g.AccountID, g.ChatID, g.ProjectID,
+		g.Objective, g.Status,
+		g.TokenBudget, g.TokensUsed, g.CreatedAt, g.UpdatedAt)
+	if err != nil {
+		if isUniqueViolation(err) {
+			return ErrGoalAlreadyExists
+		}
+		return err
+	}
+	return nil
+}
+
+func (d *DBStore) GetGoalBySession(ctx context.Context, agentID, sessionKey string) (*GoalRecord, error) {
+	row := d.db.QueryRowContext(ctx,
+		fmt.Sprintf(`SELECT `+goalSelectCols+` FROM agent_goals WHERE agent_id = %s AND session_key = %s`,
+			d.ph(1), d.ph(2)),
+		agentID, sessionKey)
+	return scanGoal(row)
+}
+
+func (d *DBStore) UpdateGoal(ctx context.Context, g *GoalRecord) error {
+	if g.ID == "" {
+		return errors.New("store: goal.id is required for UpdateGoal")
+	}
+	g.UpdatedAt = time.Now().UTC()
+	res, err := d.db.ExecContext(ctx,
+		fmt.Sprintf(`UPDATE agent_goals
+			SET status = %s, token_budget = %s, tokens_used = %s, updated_at = %s
+			WHERE id = %s`,
+			d.ph(1), d.ph(2), d.ph(3), d.ph(4), d.ph(5)),
+		g.Status, g.TokenBudget, g.TokensUsed, g.UpdatedAt, g.ID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (d *DBStore) DeleteGoal(ctx context.Context, goalID string) error {
+	_, err := d.db.ExecContext(ctx,
+		fmt.Sprintf(`DELETE FROM agent_goals WHERE id = %s`, d.ph(1)), goalID)
+	return err
+}
+
+// scanGoal reads one row (from QueryRow) into a GoalRecord. Returns
+// ErrNotFound (via scanErr) when the query matched nothing.
+func scanGoal(row *sql.Row) (*GoalRecord, error) {
+	var g GoalRecord
+	var tokenBudget sql.NullInt64
+	if err := row.Scan(&g.ID, &g.AgentID, &g.SessionKey, &g.OwnerUserID,
+		&g.Channel, &g.AccountID, &g.ChatID, &g.ProjectID,
+		&g.Objective, &g.Status,
+		&tokenBudget, &g.TokensUsed, &g.CreatedAt, &g.UpdatedAt); err != nil {
+		return nil, scanErr(err)
+	}
+	if tokenBudget.Valid {
+		g.TokenBudget = &tokenBudget.Int64
+	}
+	return &g, nil
+}
+
+// isUniqueViolation reports whether err is a UNIQUE-constraint
+// violation in either Postgres (SQLSTATE 23505) or SQLite (substring
+// "UNIQUE constraint failed"). Both drivers expose enough detail in
+// the error text to identify this without importing driver packages.
+func isUniqueViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	// Postgres lib/pq surfaces "pq: duplicate key value violates unique constraint"
+	if strings.Contains(msg, "duplicate key value") {
+		return true
+	}
+	// modernc.org/sqlite reports "UNIQUE constraint failed: <table>.<col>"
+	if strings.Contains(msg, "UNIQUE constraint failed") {
+		return true
+	}
+	return false
 }
 
 var _ Store = (*DBStore)(nil)

@@ -92,6 +92,34 @@ func CompactMessages(messages []provider.Message, workspace string, prov provide
 	}, nil
 }
 
+// safeCompactionCutoff advances cutoff forward past any leading tool
+// messages so the recent tail never starts with a "tool" role. If we
+// shipped a list of the form [summary_user, tool, ...] to the
+// provider, OpenAI-compatible APIs would reject with:
+//
+//	"Messages with role 'tool' must be a response to a preceding
+//	 message with 'tool_calls'"
+//
+// — the previous assistant.tool_calls that "tool" was answering got
+// swallowed into the summary on its own side of cutoff. Anthropic
+// won't 400 on this but the contract is the same: a tool reply
+// without its parent call is semantic garbage.
+//
+// We only need to step past leading tool messages. If the tail begins
+// with assistant(tool_calls), that's fine — its tool replies (if any)
+// come AFTER it in the tail.
+//
+// Pure function; no allocation; safe with cutoff at any value.
+func safeCompactionCutoff(messages []provider.Message, cutoff int) int {
+	if cutoff < 0 {
+		cutoff = 0
+	}
+	for cutoff < len(messages) && messages[cutoff].Role == "tool" {
+		cutoff++
+	}
+	return cutoff
+}
+
 // pruneOldToolResults strips tool result content from messages older than PruneTurnAge.
 func pruneOldToolResults(messages []provider.Message) []provider.Message {
 	if len(messages) <= PruneTurnAge {
@@ -122,12 +150,23 @@ func compressOlderMessages(messages []provider.Message, prov provider.Provider, 
 		return messages, nil
 	}
 
-	cutoff := len(messages) - PruneTurnAge
+	cutoff := safeCompactionCutoff(messages, len(messages)-PruneTurnAge)
 	olderMessages := messages[:cutoff]
 
-	// Build a text representation of older messages for summarization
+	// Build a text representation of older messages for summarization.
+	// Skip runtime-injected messages (currently only goal_context
+	// continuations): their content is synthetic audit scaffolding,
+	// not conversation worth summarizing — and the latest one is
+	// already preserved verbatim in the recent tail below, so the
+	// model never loses the current audit context. This is the
+	// pinned-head protection design §5.3 (b) calls for: old
+	// goal_context messages are dropped entirely from the
+	// compaction output; the live one rides through unchanged.
 	var text string
 	for _, m := range olderMessages {
+		if m.Origin != provider.OriginUser {
+			continue
+		}
 		text += fmt.Sprintf("[%s] %s\n", m.Role, m.Content)
 	}
 

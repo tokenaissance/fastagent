@@ -195,8 +195,8 @@ func toAnthropicMessages(msgs []Message) (string, []anthropicMessage) {
 					blocks = append(blocks, map[string]interface{}{
 						"type": "image",
 						"source": map[string]string{
-							"type":       "url",
-							"url":        part.ImageURL.URL,
+							"type": "url",
+							"url":  part.ImageURL.URL,
 						},
 					})
 				}
@@ -352,10 +352,10 @@ type anthropicContentBlockStart struct {
 }
 
 type anthropicContentBlockEntry struct {
-	Type  string `json:"type"` // "text" or "tool_use"
-	ID    string `json:"id,omitempty"`
-	Name  string `json:"name,omitempty"`
-	Text  string `json:"text,omitempty"`
+	Type  string          `json:"type"` // "text" or "tool_use"
+	ID    string          `json:"id,omitempty"`
+	Name  string          `json:"name,omitempty"`
+	Text  string          `json:"text,omitempty"`
 	Input json.RawMessage `json:"input,omitempty"`
 }
 
@@ -375,8 +375,8 @@ type anthropicDeltaContent struct {
 
 // anthropicUsage mirrors the `usage` field returned by Anthropic Messages.
 // message_start carries the input tokens (and prompt-cache breakdown);
-// message_delta carries the final output_tokens. We capture both and emit
-// the total on the Response/StreamChunk.
+// message_delta carries the final output_tokens. We capture both and
+// expose the totals on the Response / StreamChunk's provider.Usage.
 type anthropicUsage struct {
 	InputTokens              int `json:"input_tokens"`
 	OutputTokens             int `json:"output_tokens"`

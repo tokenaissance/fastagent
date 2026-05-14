@@ -82,6 +82,7 @@ func (hb *Heartbeat) tick(ctx context.Context) {
 			UserID:   "system",
 			Text:     heartbeatMsg,
 			PeerKind: "dm",
+			Source:   bus.SourceHeartbeat,
 		}
 	}
 

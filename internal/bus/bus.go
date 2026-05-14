@@ -1,18 +1,38 @@
 package bus
 
+// Source identifies what produced an InboundMessage. The default
+// (empty string) means an end-user typed it through a chat surface
+// (IM, web, OpenAI-compat API, webhook, plugin) — that's the most
+// common case and the existing call sites don't have to be touched.
+//
+// Non-user sources are the cases the agent runtime needs to
+// distinguish: cron self-fires, heartbeat ticks, sub-agent spawns,
+// and runtime-injected goal continuations. The /goal feature in
+// particular uses this to decide whether a turn just finished
+// because of a real user message (and should trigger a continuation
+// probe) or because of one of these synthetic ones (which should not,
+// or we'd loop).
+const (
+	SourceUser        = "" // default — keep "" so existing producers stay correct without edits
+	SourceCron        = "cron"
+	SourceHeartbeat   = "heartbeat"
+	SourceSubAgent    = "subagent"
+	SourceGoalContext = "goal_context"
+)
+
 // InboundMessage represents a message received from a channel.
 type InboundMessage struct {
-	Channel      string   // channel type, e.g. "telegram"
-	AccountID    string   // account within the channel (e.g. which bot)
-	ChatID       string   // unique chat identifier within the channel
+	Channel   string // channel type, e.g. "telegram"
+	AccountID string // account within the channel (e.g. which bot)
+	ChatID    string // unique chat identifier within the channel
 	// ProjectID, when set, names the per-(user, agent) project the chat
 	// belongs to. Empty = loose chat (legacy behavior). Stamped on
 	// inbound messages by the chat handlers after they've resolved the
 	// session row, so the agent runtime can route workspace IO to
 	// projects/<id>/ instead of sessions/<chat>/.
-	ProjectID    string
-	UserID       string   // user identifier
-	OwnerUserID  string   // fastclaw user that owns the agent (for multi-user routing)
+	ProjectID   string
+	UserID      string // user identifier
+	OwnerUserID string // fastclaw user that owns the agent (for multi-user routing)
 	// AgentID is an *explicit* agent target. Non-empty when the source
 	// of the message already knows which agent should handle it (cron
 	// jobs, web chat, sub-agent spawns) — bypasses binding lookup +
@@ -44,6 +64,12 @@ type InboundMessage struct {
 	// next turn ships its own params (or none). nil / empty when the
 	// inbound source doesn't supply params (IM channels, web chat).
 	Params map[string]any
+	// Source distinguishes user-originated messages from runtime-
+	// originated ones (cron, heartbeat, sub-agent, goal continuations).
+	// Empty means "user". See the Source* constants. Read this on the
+	// agent-loop side to decide whether the turn should fire downstream
+	// reactions that are only valid for genuine user input.
+	Source string
 }
 
 // OutboundButton represents a button in an inline keyboard.

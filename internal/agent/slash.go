@@ -11,9 +11,16 @@ import (
 )
 
 // slashResult holds the result of a slash command.
+//
+// continuationQueued flags slashes that pushed a follow-up message onto
+// bus.Inbound (currently /goal foo and /goal resume). HandleMessage uses
+// it to emit a `turn_pending` event instead of `done`, which keeps the
+// caller's SSE stream open until the continuation's own `done` arrives —
+// so the typing indicator stays visible during the model-thinking gap.
 type slashResult struct {
-	handled bool
-	reply   string
+	handled            bool
+	reply              string
+	continuationQueued bool
 }
 
 // handleSlashCommand checks if the message is a slash command and handles it.
@@ -54,6 +61,14 @@ func (a *Agent) handleSlashCommand(msg bus.InboundMessage) slashResult {
 		}
 
 	case "/new", "/reset":
+		// Clear any goal attached to the OLD session_key — design
+		// §6 chose "fresh session = clean state" over "goal follows
+		// chat". Runs before the web short-circuit too, so frontend-
+		// driven /new also reaps the goal row.
+		if a.goalStore != nil {
+			oldKey := a.resolveSessionKey(msg)
+			a.clearGoalForSession(oldKey)
+		}
 		if msg.Channel == "web" {
 			// For web channel, don't delete the session file — frontend handles new session creation
 			return slashResult{handled: true, reply: "__NEW_SESSION__"}
@@ -99,6 +114,9 @@ func (a *Agent) handleSlashCommand(msg bus.InboundMessage) slashResult {
 			return slashResult{handled: true, reply: fmt.Sprintf("Current model: `%s`\n\nUsage: /model <model-name>\nExample: /model gpt-4o-mini", a.model)}
 		}
 		return a.slashModel(msg, args[0])
+
+	case "/goal":
+		return a.slashGoal(msg, args)
 
 	case "/help":
 		return slashResult{handled: true, reply: a.slashHelp()}
@@ -453,6 +471,13 @@ Personality & Model
   /personality        — List available personalities
   /personality <name> — Switch personality (SOUL-<name>.md)
   /model <name>       — Switch LLM model
+
+Goal (persistent multi-turn objective)
+  /goal <objective> — Create a goal; agent self-continues until done
+  /goal             — Show current goal status
+  /goal pause       — Pause continuation
+  /goal resume      — Resume a paused goal
+  /goal clear       — Delete the goal
 
 Info
   /help           — Show this help

@@ -199,6 +199,7 @@ type ContextBuilder struct {
 	thinking       string // off, low, medium, high, adaptive
 	sandboxEnabled bool
 	sandboxBackend string
+	goalActive     bool // when true, omit autoPlanPrompt — see SetGoalActive
 	store   MemoryStore
 	userID  string
 	agentID string
@@ -233,6 +234,29 @@ func (cb *ContextBuilder) SetWorkspace(p string) { cb.workspace = p }
 // store at turn start end up visible to the model without rebuilding the
 // whole context builder.
 func (cb *ContextBuilder) SetSkillsSummary(s string) { cb.skillsSummary = s }
+
+// SetGoalActive flags the current turn as belonging to an active goal
+// session. When true, BuildSystemPrompt omits autoPlanPrompt:
+//
+//   - Plan's contract ("emit a numbered plan, no tool calls, end with
+//     'Reply `go` to execute'") demands a human checkpoint; goal's
+//     contract ("iterate autonomously until done") forbids one. With
+//     both injected, the model emits a plan-only turn that the goal
+//     continuation hook then auto-resumes — a "pseudo-plan" turn that
+//     wastes a round and misleads the UI (the "Reply `go`" approve
+//     buttons render even though no one will wait for the user's `go`).
+//
+//   - Removing the prompt is preferred over adding a counter-instruction.
+//     A negative "don't write a plan-first turn" risks the model
+//     over-generalizing to "don't structure your thinking at all";
+//     simply not teaching the plan-first shape leaves general reflective
+//     capability intact (audit checklist in goal continuation + todo.md
+//     in taskDelegationPrompt already cover structured progress).
+//
+// Caller (loop.go) sets this per turn from sessionHasActiveGoal — the
+// ContextBuilder is shared across turns on an Agent, so the flag must be
+// set explicitly on every turn or stale state leaks.
+func (cb *ContextBuilder) SetGoalActive(active bool) { cb.goalActive = active }
 
 // BuildSystemPrompt assembles the system prompt from identity, bootstrap files, memory, and skills.
 // Reads everything under the agent owner's bucket — equivalent to the
@@ -464,7 +488,16 @@ Then in your final reply, write: ![](/workspace/output.png)`
 	// (which can carry agent-specific persona overrides). Order matters:
 	// auto-plan covers the "do I plan or act?" branch first, delegation
 	// then teaches the planning model what tool to write into the steps.
-	parts = append(parts, autoPlanPrompt)
+	//
+	// autoPlanPrompt is suppressed when this turn belongs to an active
+	// goal session. See SetGoalActive for the rationale. taskDelegationPrompt
+	// stays in — its "Plan first when delegating" subsection is conditioned
+	// on plan mode actually being on, so in a goal session it naturally
+	// becomes a no-op, and the surrounding delegate_task / todo.md guidance
+	// is still useful.
+	if !cb.goalActive {
+		parts = append(parts, autoPlanPrompt)
+	}
 	parts = append(parts, taskDelegationPrompt)
 
 	// 3. Bootstrap files. USER.md is the only per-chatter entry — it

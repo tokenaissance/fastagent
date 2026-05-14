@@ -151,6 +151,12 @@ func (s *Server) chatEventHub() *agent.EventHub {
 	return s.chatEvents
 }
 
+// ChatEventHub exposes the hub so the gateway can attach a stream
+// pipeline onto bus-fired web turns (cron / goal continuation /
+// heartbeat / sub-agent), giving them the same SSE streaming a
+// user-typed turn gets. Wraps chatEventHub's lazy-init.
+func (s *Server) ChatEventHub() *agent.EventHub { return s.chatEventHub() }
+
 // authMiddleware wraps the auth.Resolver's Middleware. Required for every
 // authenticated route.
 func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {

@@ -14,6 +14,7 @@ import (
 
 	"github.com/codeany-ai/open-agent-sdk-go/costtracker"
 
+	"github.com/fastclaw-ai/fastclaw/internal/agent/goal"
 	"github.com/fastclaw-ai/fastclaw/internal/agent/tools"
 	"github.com/fastclaw-ai/fastclaw/internal/bus"
 	"github.com/fastclaw-ai/fastclaw/internal/config"
@@ -30,41 +31,41 @@ import (
 
 // Agent is the ReAct agent loop.
 type Agent struct {
-	name              string
-	provider          provider.Provider
-	registry          *tools.Registry
-	sessions          *session.Manager
-	memory            *Memory
-	ctxBuilder        *ContextBuilder
-	mcpMgr            *mcp.Manager
-	hooks             *HookRegistry
+	name                 string
+	provider             provider.Provider
+	registry             *tools.Registry
+	sessions             *session.Manager
+	memory               *Memory
+	ctxBuilder           *ContextBuilder
+	mcpMgr               *mcp.Manager
+	hooks                *HookRegistry
 	model                string
 	maxTokens            int
 	temperature          float64
 	maxToolIterations    int
 	maxParallelToolCalls int // 0 = unlimited
 	thinking             string
-	homePath          string // agent's home: SOUL.md, sessions, memory, skills
-	workspacePath     string // working dir where agent creates user files
-	homeDir           string // FastClaw root, ~/.fastclaw
-	ownerUserID       string // the user that owns this agent (for hook namespacing)
+	homePath        string // agent's home: SOUL.md, sessions, memory, skills
+	workspacePath   string // working dir where agent creates user files
+	homeDir         string // FastClaw root, ~/.fastclaw
+	ownerUserID     string // the user that owns this agent (for hook namespacing)
 	// admins is the per-channel allowlist of chatters who can run write-
 	// mode slash commands (/new /undo /retry /compact /model /personality).
 	// Keyed by channel name (e.g. "discord" → ["123...", "456..."]). Empty
 	// or absent → no gate, anyone can run the command (legacy default).
-	admins            map[string][]string
-	skillsCfg         config.SkillsConfig
-	globalSkillsCfg   config.SkillsCfg
-	messageBus        *bus.MessageBus
-	subAgentSpawner   tools.SubAgentSpawner
-	ftsStore          *store.FTSStore
-	piiScrubEnabled   bool
-	memoryCfg         config.MemoryCfg
+	admins          map[string][]string
+	skillsCfg       config.SkillsConfig
+	globalSkillsCfg config.SkillsCfg
+	messageBus      *bus.MessageBus
+	subAgentSpawner tools.SubAgentSpawner
+	ftsStore        *store.FTSStore
+	piiScrubEnabled bool
+	memoryCfg       config.MemoryCfg
 	// memoryStore is the optional Store-backed source of identity files
 	// (SOUL.md, IDENTITY.md, ...). Kept on the Agent so ReloadWorkspaceFiles
 	// can rewire a fresh ContextBuilder to keep reading from the Store
 	// instead of silently falling back to pod-local filesystem.
-	memoryStore       MemoryStore
+	memoryStore MemoryStore
 	// workspaceStore is optional; when set, SkillsLoader hydrates per-agent
 	// and global skill dirs from the object store on every turn so skills
 	// uploaded post-boot or on a sibling replica become visible here.
@@ -84,6 +85,13 @@ type Agent struct {
 	// so concurrent sessions of the same agent get isolated containers
 	// + isolated /workspace mounts.
 	sandboxPool sandbox.ExecutorPool
+
+	// goalStore is the /goal feature's per-Agent state. Wired by
+	// WireGoals; nil on agents whose Manager didn't provide a data
+	// store (legacy single-user installs). When nil, the goal tools
+	// and hook are simply not registered, so a missing store silently
+	// degrades to "feature off" rather than crashing.
+	goalStore goal.Store
 }
 
 // SetSandboxPool wires the per-(agent,session) executor pool. Called by
@@ -254,28 +262,28 @@ func NewAgentWithSkillsCfg(rc config.ResolvedAgent, prov provider.Provider, mb *
 	eng := newSDKEngine(rc.ID)
 
 	ag := &Agent{
-		name:              rc.ID,
-		provider:          prov,
-		registry:          registry,
-		sessions:          session.NewManager(rc.Home + "/sessions"),
-		memory:            memory,
-		ctxBuilder:        newContextBuilderWithSandbox(rc.Home, workspace, memory, skillsSummary, rc.Thinking, rc.Sandbox.Enabled, rc.Sandbox.Backend),
-		hooks:             hooks,
+		name:                 rc.ID,
+		provider:             prov,
+		registry:             registry,
+		sessions:             session.NewManager(rc.Home + "/sessions"),
+		memory:               memory,
+		ctxBuilder:           newContextBuilderWithSandbox(rc.Home, workspace, memory, skillsSummary, rc.Thinking, rc.Sandbox.Enabled, rc.Sandbox.Backend),
+		hooks:                hooks,
 		model:                rc.Model,
 		maxTokens:            rc.MaxTokens,
 		temperature:          rc.Temperature,
 		maxToolIterations:    rc.MaxToolIterations,
 		maxParallelToolCalls: rc.MaxParallelToolCalls,
 		thinking:             rc.Thinking,
-		homePath:          rc.Home,
-		workspacePath:     workspace,
-		homeDir:           homeDir,
-		admins:            rc.Admins,
-		skillsCfg:         rc.Skills,
-		globalSkillsCfg:   globalSkillsCfg,
-		messageBus:        mb,
-		engine:            eng,
-		costTracker:       eng.costTracker,
+		homePath:        rc.Home,
+		workspacePath:   workspace,
+		homeDir:         homeDir,
+		admins:          rc.Admins,
+		skillsCfg:       rc.Skills,
+		globalSkillsCfg: globalSkillsCfg,
+		messageBus:      mb,
+		engine:          eng,
+		costTracker:     eng.costTracker,
 	}
 
 	// delegate_task lets the parent agent fan a bounded subtask out to a
@@ -488,6 +496,12 @@ func (a *Agent) SetOwnerUserID(uid string) {
 	a.ownerUserID = uid
 }
 
+// OwnerUserID returns the agent's owning user ID — the user that
+// created / owns this agent. Exposed so callers that mint records
+// on the user's behalf (e.g. /goal slash) can stamp ownership
+// without reaching into agent internals.
+func (a *Agent) OwnerUserID() string { return a.ownerUserID }
+
 // SetMeter wires the admin token meter onto this agent. Called by the
 // gateway at boot / hot-reload so every Chat call lands a RecordTokens
 // invocation. Nil is fine — meterTokens() is a no-op when unset.
@@ -609,6 +623,147 @@ func (a *Agent) HookRegistry() *HookRegistry {
 	return a.hooks
 }
 
+// WireGoals turns the /goal feature on for this Agent. Side effects:
+//
+//   - Stash the store on the agent.
+//   - Register the AfterModelCall token-accounting hook (folds
+//     Response.Usage into the active goal, flips budget_limited on
+//     exhaust).
+//   - Register the model-callable update_goal tool.
+//   - Register a PostTurn hook that, when allowed, fires the next
+//     continuation synchronously.
+//
+// Must be called after SetOwnerUserID so the registered tool and
+// hook carry the right owner. Called by manager.buildAgent when a
+// data store is available; nil store turns the feature off cleanly.
+func (a *Agent) WireGoals(st goal.Store) {
+	if st == nil {
+		return
+	}
+	a.goalStore = st
+
+	if hook := NewTokenAccountingHook(st, a.messageBus, a.name); hook != nil {
+		a.hooks.Register(AfterModelCall, hook)
+	}
+	tools.RegisterGoalTools(a.registry, st, a.name)
+
+	// Trigger continuation only at turn boundaries (PostTurn), not
+	// mid-turn from AfterToolCall. AfterToolCall publishing
+	// optimistically while a turn is still running opens a window
+	// where the next continuation lands in bus.Inbound before a
+	// concurrent /goal pause can; PostTurn closes that window.
+	//
+	// PostTurn fires for every source — we accept user (a real reply
+	// or a /goal resume) and goal_context (chain the loop). Other
+	// sources (cron, heartbeat, sub-agent) must NOT auto-continue or
+	// we'd loop. The budget_limit wrap-up arrives as goal_context too,
+	// but TryFireContinuation re-reads the goal status and bails on
+	// non-Active goals, so a wrap-up turn doesn't cause a chain.
+	a.hooks.Register(PostTurn, a.goalTriggerHook(allowedContinuationSources))
+}
+
+// allowedContinuationSources is the whitelist of bus sources that
+// may auto-fire the next continuation from a PostTurn hook. User
+// turns start / resume the loop; goal_context turns chain it.
+var allowedContinuationSources = map[string]bool{
+	bus.SourceUser:        true,
+	bus.SourceGoalContext: true,
+}
+
+// goalTriggerHook builds a HookFunc that fires the next continuation
+// for the in-flight session, when all gates pass.
+func (a *Agent) goalTriggerHook(allowed map[string]bool) HookFunc {
+	return func(ctx context.Context, hc *HookContext) {
+		if !allowed[hc.Source] {
+			return
+		}
+		if hc.IsPlanMode {
+			return
+		}
+		if hc.GoalSessionKey == "" {
+			return
+		}
+		if a.goalStore == nil {
+			return
+		}
+		goal.TryFireContinuation(ctx, a.goalStore, a.messageBus, a.name, hc.GoalSessionKey)
+	}
+}
+
+// sessionHasActiveGoal reports whether the session this inbound is
+// for has a goal in Active state. Used as a hard precedence rule
+// over auto-plan-mode: an active goal is an autonomous loop; plan-mode
+// is a "wait for human approval" gate. The two cannot coexist on the
+// same turn without breaking the goal's autonomy guarantee.
+//
+// Best-effort: a store error or missing session returns false. One
+// indexed read per inbound turn — cheap enough to skip caching.
+func (a *Agent) sessionHasActiveGoal(ctx context.Context, msg bus.InboundMessage) bool {
+	if a.goalStore == nil || a.sessions == nil {
+		return false
+	}
+	sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID, msg.ProjectID)
+	if sess == nil {
+		return false
+	}
+	g, err := a.goalStore.GetGoalBySession(ctx, a.name, sess.SessionKey())
+	if err != nil || g == nil {
+		return false
+	}
+	return g.Status == goal.StatusActive
+}
+
+// buildUserMessage flattens an inbound message into the user-role
+// provider.Message that lands in session history. Tags Origin so
+// goal-context continuations get recognized by the compaction /
+// WebChatHistory / FTS filters (which check Origin != OriginUser),
+// and merges PhotoURL (legacy IM single) + PhotoURLs (web multi)
+// into one ContentParts slice. Image-only sends skip a leading
+// empty text part — some upstreams reject content-less wire messages.
+func buildUserMessage(msg bus.InboundMessage) provider.Message {
+	origin := provider.OriginUser
+	if msg.Source == bus.SourceGoalContext {
+		origin = provider.OriginGoalContext
+	}
+	// IM senders get a `[SenderName]: text` prefix so future turns can
+	// tell whose message was whose from session history alone — matches
+	// what InjectGroupMessage does for group fan-out. routing.go's group
+	// mention path already pre-prefixes Text before queueing, so we skip
+	// when PeerKind=="group" to avoid double-wrapping.
+	userText := msg.Text
+	if msg.SenderName != "" && msg.PeerKind != "group" {
+		userText = fmt.Sprintf("\\[%s\\]: %s", msg.SenderName, msg.Text)
+	}
+	userMsg := provider.Message{
+		Role:     "user",
+		Content:  userText,
+		Origin:   origin,
+		Metadata: senderMetadata(msg),
+	}
+	imageURLs := msg.PhotoURLs
+	if msg.PhotoURL != "" {
+		imageURLs = append([]string{msg.PhotoURL}, imageURLs...)
+	}
+	if len(imageURLs) == 0 {
+		return userMsg
+	}
+	userMsg.Content = ""
+	// Skip an empty leading text part — image-only sends used to produce
+	// `[{text: ""}, {image_url}, …]` which some upstreams reject as a
+	// content-less wire message.
+	var parts []provider.ContentPart
+	if userText != "" {
+		parts = append(parts, provider.ContentPart{Type: "text", Text: userText})
+	}
+	for _, u := range imageURLs {
+		parts = append(parts, provider.ContentPart{
+			Type: "image_url", ImageURL: &provider.ImageURL{URL: u, Detail: "auto"},
+		})
+	}
+	userMsg.ContentParts = parts
+	return userMsg
+}
+
 // RegisterWebSearchChain exposes the web_search tool to this agent using a
 // provider chain (primary + fallbacks). Pass nil to skip — the tool won't
 // appear in the agent's tool list, so the model can't try to call it.
@@ -660,6 +815,14 @@ func (a *Agent) WebChatHistory(sessionId string) []map[string]any {
 	msgs := sess.ArchivedMessages()
 	var history []map[string]any
 	for _, m := range msgs {
+		// Hide runtime-injected messages (currently only goal_context
+		// continuations). They live in the session for the LLM's
+		// benefit; surfacing them to the user would expose audit
+		// scaffolding the user never typed. Matches Codex's slash-only
+		// /goal UX — the audit prompt is internal-only.
+		if m.Origin != provider.OriginUser {
+			continue
+		}
 		switch m.Role {
 		case "user":
 			// Multimodal user turns store text inside ContentParts and
@@ -1071,7 +1234,7 @@ func isPlanMode(params map[string]any) bool {
 //     · explicit count >= 10 ("50 leads" / "找 50 个" / "list 20")
 //     · multi-line bullet list (4+ "- " / "* " lines)
 //     · keywords typical of structured-deliverable prompts
-//       (ICP / 表格 / table / list of / draft N / 报告 / report)
+//     (ICP / 表格 / table / list of / draft N / 报告 / report)
 //
 // Two-signal threshold keeps the false-positive rate low: a long but
 // open-ended discussion ("explain how X works in detail") trips at
@@ -1235,24 +1398,7 @@ func (a *Agent) handlePlanMode(ctx context.Context, msg bus.InboundMessage) stri
 	// Mirror the regular path's user-message construction so multimodal
 	// + IM-bridge payloads (PhotoURL / PhotoURLs) land in session
 	// history the same way they would on a non-plan turn.
-	userMsg := provider.Message{Role: "user", Content: msg.Text}
-	imageURLs := msg.PhotoURLs
-	if msg.PhotoURL != "" {
-		imageURLs = append([]string{msg.PhotoURL}, imageURLs...)
-	}
-	if len(imageURLs) > 0 {
-		userMsg.Content = ""
-		var parts []provider.ContentPart
-		if msg.Text != "" {
-			parts = append(parts, provider.ContentPart{Type: "text", Text: msg.Text})
-		}
-		for _, u := range imageURLs {
-			parts = append(parts, provider.ContentPart{
-				Type: "image_url", ImageURL: &provider.ImageURL{URL: u, Detail: "auto"},
-			})
-		}
-		userMsg.ContentParts = parts
-	}
+	userMsg := buildUserMessage(msg)
 	sess.Append(userMsg)
 
 	if a.provider == nil {
@@ -1262,6 +1408,11 @@ func (a *Agent) handlePlanMode(ctx context.Context, msg bus.InboundMessage) stri
 		return noProviderMsg
 	}
 
+	// handlePlanMode is only reached when sessionHasActiveGoal is false
+	// (see HandleMessage gate at the planMode check), but the
+	// ContextBuilder is shared across turns so we set the flag
+	// explicitly to avoid stale state from a prior goal-active turn.
+	a.ctxBuilder.SetGoalActive(false)
 	systemPrompt := a.ctxBuilder.BuildSystemPromptAs(chatterUID, a.memory.WithUserID(chatterUID))
 	// Tool catalog injection: plan mode passes tools=nil to the LLM so
 	// it can't accidentally call anything, but that also hides the
@@ -1311,10 +1462,26 @@ func (a *Agent) handlePlanMode(ctx context.Context, msg bus.InboundMessage) stri
 
 // HandleMessage processes an inbound message through the ReAct loop.
 func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) string {
-	// Check for slash commands first
+	// Check for slash commands first. Empty reply means "handled but
+	// intentionally silent" — /goal foo and /goal resume both fall
+	// through to a streaming continuation that IS the response, so
+	// emitting a separate content event would just clutter the chat
+	// with a redundant confirmation bubble.
+	//
+	// Slashes that queued a continuation emit `turn_pending` instead
+	// of `done`; the POST SSE handler treats that as "stay open, the
+	// real reply is coming on the next bus-fired turn." Without it,
+	// the stream closes immediately and the typing indicator vanishes
+	// while the model is still warming up.
 	if result := a.handleSlashCommand(msg); result.handled {
-		emitEvent(ctx, ChatEvent{Type: "content", Data: map[string]any{"content": result.reply}})
-		emitEvent(ctx, ChatEvent{Type: "done"})
+		if result.reply != "" {
+			emitEvent(ctx, ChatEvent{Type: "content", Data: map[string]any{"content": result.reply}})
+		}
+		if result.continuationQueued {
+			emitEvent(ctx, ChatEvent{Type: "turn_pending"})
+		} else {
+			emitEvent(ctx, ChatEvent{Type: "done"})
+		}
 		return result.reply
 	}
 
@@ -1325,7 +1492,28 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	// models — they kept diving straight into web_fetch. The heuristic
 	// only fires on the first turn of a session so a user mid-execution
 	// asking a long follow-up doesn't get re-planned.
-	if !isPlanMode(msg.Params) && msg.Text != "" {
+	//
+	// Two opt-outs that take precedence over the heuristic:
+	//
+	//   1. Runtime-originated turns (cron / heartbeat / sub-agent /
+	//      goal_context). The /goal continuation template has a
+	//      1./2./3./4. audit checklist + the word "deliverables" —
+	//      exactly what the heuristic was designed to catch on real
+	//      users. And the `/goal foo` slash that precedes the first
+	//      continuation doesn't `sess.Append`, so sessionAlreadyEngaged
+	//      is still false when the continuation lands. Without this
+	//      gate, every first continuation gets force-routed into
+	//      plan-mode.
+	//
+	//   2. Session has an active goal. plan-mode and goal are
+	//      semantically opposed — plan says "wait for me to approve",
+	//      goal says "iterate autonomously until done". If a goal is
+	//      running, even a user's regular turn shouldn't be forced
+	//      into plan-mode behind their back: that would interrupt the
+	//      autonomous loop. Goal takes precedence, by design.
+	autoPlanEligible := (msg.Source == "" || msg.Source == bus.SourceUser) &&
+		!a.sessionHasActiveGoal(ctx, msg)
+	if autoPlanEligible && !isPlanMode(msg.Params) && msg.Text != "" {
 		sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID, msg.ProjectID)
 		if !sessionAlreadyEngaged(sess) && looksLikeComplexFirstTurn(msg.Text) {
 			slog.Info("auto-routing to plan mode",
@@ -1346,8 +1534,21 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	// wrong direction — the failure mode we saw on long research
 	// prompts where deepseek-flash spent 95 messages exploring and
 	// never produced a deliverable.
+	// Plan-mode is silently dropped when this session has an active
+	// goal. Goal is supposed to be autonomous — pausing for human
+	// approval mid-loop contradicts the contract. Strip the flag so
+	// downstream hooks see this turn as a normal one (IsPlanMode=false
+	// → goalTriggerHook re-fires PostTurn → continuation chain stays
+	// alive instead of waiting on the 30 s probe). To regain plan-mode
+	// behaviour during goal-driven work, /goal pause first.
 	if isPlanMode(msg.Params) {
-		return a.handlePlanMode(ctx, msg)
+		if a.sessionHasActiveGoal(ctx, msg) {
+			slog.Info("ignoring plan-mode flag — session has an active goal",
+				"agent", a.name, "chat_id", msg.ChatID)
+			delete(msg.Params, "planMode")
+		} else {
+			return a.handlePlanMode(ctx, msg)
+		}
 	}
 
 	chatterUID := a.chatterUserID(msg)
@@ -1363,6 +1564,11 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	// wired) the executor used by exec/read_file/list_dir is tied to a
 	// session-private container.
 	a.bindSession(ctx, msg.Channel, msg.ChatID, msg.ProjectID)
+	// Plumb the persistent session_key for goal-scoped tools.
+	// SetSessionID above uses msg.ChatID (the channel-level chat
+	// identifier); goal tools need the durable session.Session.SessionKey
+	// to address rows in agent_goals.
+	a.registry.SetGoalSessionKey(sess.SessionKey())
 
 	// Safety net for client-aborted turns: if the loop exits with a
 	// tool_use that never got its matching tool_result appended (the
@@ -1384,6 +1590,10 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	// Hook: BeforeSystemPrompt
 	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: BeforeSystemPrompt, UserID: a.ownerUserID})
 
+	// Suppress autoPlanPrompt when a goal owns this session — plan's
+	// "wait for `go`" semantics fight goal's autonomous-loop contract.
+	// See ContextBuilder.SetGoalActive.
+	a.ctxBuilder.SetGoalActive(a.sessionHasActiveGoal(ctx, msg))
 	chatterMem := a.memory.WithUserID(chatterUID)
 	systemPrompt := a.ctxBuilder.BuildSystemPromptAs(chatterUID, chatterMem)
 
@@ -1394,37 +1604,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	// PhotoURL (single, used by IM bridges) or PhotoURLs (multi, used by
 	// the web chat upload path); flatten both into one content-parts
 	// slice so the provider sees `[text, image, image, …]`.
-	//
-	// IM senders get a `[SenderName]: text` prefix so future turns can
-	// tell whose message was whose from session history alone — matches
-	// what InjectGroupMessage does for group fan-out. routing.go's group
-	// mention path already pre-prefixes Text before queueing, so we skip
-	// when PeerKind=="group" to avoid double-wrapping.
-	userText := msg.Text
-	if msg.SenderName != "" && msg.PeerKind != "group" {
-		userText = fmt.Sprintf("\\[%s\\]: %s", msg.SenderName, msg.Text)
-	}
-	userMsg := provider.Message{Role: "user", Content: userText, Metadata: senderMetadata(msg)}
-	imageURLs := msg.PhotoURLs
-	if msg.PhotoURL != "" {
-		imageURLs = append([]string{msg.PhotoURL}, imageURLs...)
-	}
-	if len(imageURLs) > 0 {
-		userMsg.Content = ""
-		// Skip an empty leading text part — image-only sends used to
-		// produce `[{text: ""}, {image_url}, …]` which some upstreams
-		// reject as a content-less wire message.
-		var parts []provider.ContentPart
-		if userText != "" {
-			parts = append(parts, provider.ContentPart{Type: "text", Text: userText})
-		}
-		for _, u := range imageURLs {
-			parts = append(parts, provider.ContentPart{
-				Type: "image_url", ImageURL: &provider.ImageURL{URL: u, Detail: "auto"},
-			})
-		}
-		userMsg.ContentParts = parts
-	}
+	userMsg := buildUserMessage(msg)
 	sess.Append(userMsg)
 
 	// Context compaction: check if session messages are too large
@@ -1518,7 +1698,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		resp, err := a.streamChatToResponse(ctx, llmMessages, callTools)
 
 		// Hook: AfterModelCall
-		hcAfter := &HookContext{AgentName: a.name, Point: AfterModelCall, Messages: messages, Response: resp, Error: err, StartTime: hcBefore.StartTime, ChatID: msg.ChatID, UserID: a.ownerUserID}
+		hcAfter := &HookContext{AgentName: a.name, Point: AfterModelCall, Messages: messages, Response: resp, Error: err, StartTime: hcBefore.StartTime, ChatID: msg.ChatID, UserID: a.ownerUserID, GoalSessionKey: a.registry.GoalSessionKey()}
 		a.hooks.Run(ctx, hcAfter)
 
 		if err != nil {
@@ -1533,7 +1713,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 			sess.Append(provider.Message{Role: "assistant", Content: resp.Content, Thinking: resp.Thinking, Timestamp: time.Now().UnixMilli(), RawAssistant: resp.RawAssistant})
 			emitEvent(ctx, ChatEvent{Type: "content", Data: map[string]any{"content": resp.Content}})
 			emitEvent(ctx, ChatEvent{Type: "done"})
-			a.runPostTurn(ctx, messages, totalToolCalls, chatterMem)
+			a.runPostTurn(ctx, msg, messages, totalToolCalls, chatterMem)
 			return resp.Content
 		}
 
@@ -1683,12 +1863,15 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 
 			// Hook: AfterToolCall
 			a.hooks.Run(ctx, &HookContext{
-				AgentName:  a.name,
-				Point:      AfterToolCall,
-				ToolName:   r.toolName,
-				ToolResult: resultContent,
-				Error:      r.err,
-				UserID:     a.ownerUserID,
+				AgentName:      a.name,
+				Point:          AfterToolCall,
+				ToolName:       r.toolName,
+				ToolResult:     resultContent,
+				Error:          r.err,
+				UserID:         a.ownerUserID,
+				GoalSessionKey: a.registry.GoalSessionKey(),
+				IsPlanMode:     isPlanMode(msg.Params),
+				Source:         msg.Source,
 			})
 
 			if r.err != nil {
@@ -1790,7 +1973,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		"metadata": capMeta,
 	}})
 	emitEvent(ctx, ChatEvent{Type: "done"})
-	a.runPostTurn(ctx, messages, totalToolCalls, chatterMem)
+	a.runPostTurn(ctx, msg, messages, totalToolCalls, chatterMem)
 	return finalContent
 }
 
@@ -1879,20 +2062,34 @@ func padOrphanToolResults(sess *session.Session) {
 	}
 }
 
-// runPostTurn fires PostTurn hooks and handles auto-persist and skills learning.
+// msg is the InboundMessage that drove this turn — its (channel, account,
+// chat, project) plus Source ride along on the HookContext so PostTurn
+// hooks can route to session-scoped state and tell user-driven turns
+// apart from runtime-originated ones (cron, heartbeat, sub-agent, goal
+// continuation).
+//
 // chatterMem is the chatter-scoped Memory built at the top of the turn —
 // auto-persist writes the extracted facts back through it so a visitor
 // on a public agent accrues their *own* MEMORY.md / USER.md, not the
 // owner's. nil falls back to the agent-scoped Memory (legacy behavior).
-func (a *Agent) runPostTurn(ctx context.Context, messages []provider.Message, toolCallCount int, chatterMem *Memory) {
+//
+// FIXME: HandleMessageStream (the SSE path) does not call runPostTurn,
+// so PostTurn hooks never fire on web chat. Tracked separately — see
+// docs/design/goal.md §9.
+func (a *Agent) runPostTurn(ctx context.Context, msg bus.InboundMessage, messages []provider.Message, toolCallCount int, chatterMem *Memory) {
 	if chatterMem == nil {
 		chatterMem = a.memory
 	}
 	a.turnCount++
 
-	// Index user/assistant messages in FTS
+	// Index user/assistant messages in FTS. Skip runtime-injected
+	// messages (e.g. goal_context continuations) — they're synthetic
+	// audit prompts, not searchable conversation content.
 	if a.ftsStore != nil {
 		for _, m := range messages {
+			if m.Origin != provider.OriginUser {
+				continue
+			}
 			if m.Role == "user" || m.Role == "assistant" {
 				_ = a.ftsStore.Index(a.name, "", m.Role, m.Content, time.Now())
 			}
@@ -1901,13 +2098,17 @@ func (a *Agent) runPostTurn(ctx context.Context, messages []provider.Message, to
 
 	// Fire PostTurn hooks
 	a.hooks.Run(ctx, &HookContext{
-		AgentName:     a.name,
-		Point:         PostTurn,
-		Messages:      messages,
-		TurnCount:     a.turnCount,
-		ToolCallCount: toolCallCount,
-		Workspace:     a.homePath,
-		UserID:        a.ownerUserID,
+		AgentName:      a.name,
+		Point:          PostTurn,
+		Messages:       messages,
+		TurnCount:      a.turnCount,
+		ToolCallCount:  toolCallCount,
+		Workspace:      a.homePath,
+		UserID:         a.ownerUserID,
+		ChatID:         msg.ChatID,
+		Source:         msg.Source,
+		GoalSessionKey: a.registry.GoalSessionKey(),
+		IsPlanMode:     isPlanMode(msg.Params),
 	})
 
 	// Auto-persist memory every N turns
@@ -1933,7 +2134,9 @@ func (a *Agent) runPostTurn(ctx context.Context, messages []provider.Message, to
 // a StreamReader for the final response. Tool call iterations use non-streaming Chat;
 // the final text response uses ChatStream for true SSE streaming.
 func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage) *provider.StreamReader {
-	// Reuse setup logic from HandleMessage
+	// Reuse setup logic from HandleMessage. Empty reply is "handled
+	// but silent" — see the HandleMessage twin. Still emit a Done
+	// chunk so callers waiting on the stream don't hang.
 	if result := a.handleSlashCommand(msg); result.handled {
 		ch := make(chan provider.StreamChunk, 2)
 		go func() {
@@ -1948,6 +2151,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 	a.refreshSkillsFromStore(chatterUID)
 	sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID, msg.ProjectID)
 	a.bindSession(ctx, msg.Channel, msg.ChatID, msg.ProjectID)
+	a.registry.SetGoalSessionKey(sess.SessionKey())
 
 	// Same orphan-tool_use safety net as HandleMessage. The streaming path
 	// previously lacked this, so loop detection (which appends an assistant
@@ -1960,38 +2164,15 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 	defer padOrphanToolResults(sess)
 
 	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: BeforeSystemPrompt, UserID: a.ownerUserID})
+	// See HandleMessage twin for rationale on SetGoalActive.
+	a.ctxBuilder.SetGoalActive(a.sessionHasActiveGoal(ctx, msg))
 	chatterMem := a.memory.WithUserID(chatterUID)
 	systemPrompt := a.ctxBuilder.BuildSystemPromptAs(chatterUID, chatterMem)
 	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: AfterSystemPrompt, UserID: a.ownerUserID})
 
-	// Store raw user message — same multi-image flatten + IM sender
-	// prefixing as HandleMessage. See that copy for the rationale on
-	// why group PeerKind is skipped here.
-	userText := msg.Text
-	if msg.SenderName != "" && msg.PeerKind != "group" {
-		userText = fmt.Sprintf("\\[%s\\]: %s", msg.SenderName, msg.Text)
-	}
-	userMsg := provider.Message{Role: "user", Content: userText, Metadata: senderMetadata(msg)}
-	imageURLs := msg.PhotoURLs
-	if msg.PhotoURL != "" {
-		imageURLs = append([]string{msg.PhotoURL}, imageURLs...)
-	}
-	if len(imageURLs) > 0 {
-		userMsg.Content = ""
-		// Skip an empty leading text part — image-only sends used to
-		// produce `[{text: ""}, {image_url}, …]` which some upstreams
-		// reject as a content-less wire message.
-		var parts []provider.ContentPart
-		if userText != "" {
-			parts = append(parts, provider.ContentPart{Type: "text", Text: userText})
-		}
-		for _, u := range imageURLs {
-			parts = append(parts, provider.ContentPart{
-				Type: "image_url", ImageURL: &provider.ImageURL{URL: u, Detail: "auto"},
-			})
-		}
-		userMsg.ContentParts = parts
-	}
+	// Store raw user message — buildUserMessage handles multi-image
+	// flatten + IM SenderName prefixing + senderMetadata.
+	userMsg := buildUserMessage(msg)
 	sess.Append(userMsg)
 
 	sessionMsgs := sess.GetMessages()
@@ -2031,7 +2212,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 		dumpLLMRequest(a.name, a.model, messages, toolDefs)
 		resp, err := a.provider.Chat(ctx, messages, toolDefs, a.model, a.maxTokens, a.temperature)
 
-		hcAfter := &HookContext{AgentName: a.name, Point: AfterModelCall, Messages: messages, Response: resp, Error: err, StartTime: hcBefore.StartTime, ChatID: msg.ChatID, UserID: a.ownerUserID}
+		hcAfter := &HookContext{AgentName: a.name, Point: AfterModelCall, Messages: messages, Response: resp, Error: err, StartTime: hcBefore.StartTime, ChatID: msg.ChatID, UserID: a.ownerUserID, GoalSessionKey: a.registry.GoalSessionKey()}
 		a.hooks.Run(ctx, hcAfter)
 
 		if err != nil {
@@ -2163,7 +2344,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 		for idx, r := range results {
 			tc := resp.ToolCalls[idx]
 			resultContent, meta := extractToolMeta(r.result)
-			a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: AfterToolCall, ToolName: r.toolName, ToolResult: resultContent, Error: r.err, UserID: a.ownerUserID})
+			a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: AfterToolCall, ToolName: r.toolName, ToolResult: resultContent, Error: r.err, UserID: a.ownerUserID, GoalSessionKey: a.registry.GoalSessionKey(), IsPlanMode: isPlanMode(msg.Params), Source: msg.Source})
 
 			if r.err != nil {
 				slog.Warn("tool execution error", "agent", a.name, "name", r.toolName, "error", r.err)
