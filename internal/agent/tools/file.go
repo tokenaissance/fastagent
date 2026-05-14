@@ -510,7 +510,7 @@ func makeReadFile(r *Registry) ToolFunc {
 		// reading from a workspace dir where identity files don't live.
 		if r.systemFileStore != nil && r.agentID != "" && basenameIsSystemFile(args.Path) {
 			name := filepath.Base(filepath.Clean(args.Path))
-			if data, err := r.systemFileStore.GetWorkspaceFile(ctx, r.agentID, r.systemFileUserID(name), name); err == nil {
+			if data, err := r.readSystemFileForUser(ctx, r.systemFileUserID(name), name); err == nil {
 				return string(data), nil
 			}
 			// Store miss: try the agent's systemRoot on disk directly,
@@ -686,7 +686,7 @@ func makeEditFile(r *Registry) ToolFunc {
 		if r.systemFileStore != nil && r.agentID != "" && isSingleSegmentSystemFile(args.Path) {
 			name := filepath.Clean(args.Path)
 			uid := r.systemFileUserID(name)
-			data, err := r.systemFileStore.GetWorkspaceFile(ctx, r.agentID, uid, name)
+			data, err := r.readSystemFileForUser(ctx, uid, name)
 			if err != nil {
 				return "", fmt.Errorf("system file get: %w", err)
 			}
@@ -868,7 +868,7 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 		// /data/.fastclaw/workspaces/<id>/IDENTITY.md still hits the DB.
 		if r.systemFileStore != nil && r.agentID != "" && basenameIsSystemFile(args.Path) {
 			name := filepath.Base(filepath.Clean(args.Path))
-			if data, err := r.systemFileStore.GetWorkspaceFile(ctx, r.agentID, r.systemFileUserID(name), name); err == nil {
+			if data, err := r.readSystemFileForUser(ctx, r.systemFileUserID(name), name); err == nil {
 				return string(data), nil
 			}
 			return "", nil // miss → treat as unset (fresh agent)
@@ -1114,7 +1114,7 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 		case RouteSystemStore:
 			name := filepath.Clean(args.Path)
 			uid := r.systemFileUserID(name)
-			data, err := r.systemFileStore.GetWorkspaceFile(ctx, r.agentID, uid, name)
+			data, err := r.readSystemFileForUser(ctx, uid, name)
 			if err != nil {
 				return "", fmt.Errorf("system file get: %w", err)
 			}

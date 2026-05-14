@@ -259,7 +259,27 @@ func (cb *ContextBuilder) SetSkillsSummary(s string) { cb.skillsSummary = s }
 func (cb *ContextBuilder) SetGoalActive(active bool) { cb.goalActive = active }
 
 // BuildSystemPrompt assembles the system prompt from identity, bootstrap files, memory, and skills.
+// Reads everything under the agent owner's bucket — equivalent to the
+// owner chatting with their own agent. For public-link callers that
+// need per-chatter USER.md + memory isolation, use BuildSystemPromptAs.
 func (cb *ContextBuilder) BuildSystemPrompt() string {
+	return cb.BuildSystemPromptAs(cb.userID, cb.memory)
+}
+
+// BuildSystemPromptAs is BuildSystemPrompt with explicit chatter identity.
+// chatterUID + chatterMem govern reads of the per-user files (USER.md and
+// long-term Memory) so a visitor on a public agent sees their own profile
+// and memory rather than the owner's. Everything else — SOUL, IDENTITY,
+// AGENTS, BOOTSTRAP, HEARTBEAT, TOOLS — still loads from the agent
+// owner's bucket because those define what the agent IS, not who is
+// talking to it. Pass cb.userID / cb.memory to mimic legacy behavior.
+func (cb *ContextBuilder) BuildSystemPromptAs(chatterUID string, chatterMem *Memory) string {
+	if chatterUID == "" {
+		chatterUID = cb.userID
+	}
+	if chatterMem == nil {
+		chatterMem = cb.memory
+	}
 	var parts []string
 
 	// 1. Runtime environment info. Deliberately NOT an identity claim —
@@ -323,6 +343,26 @@ func (cb *ContextBuilder) BuildSystemPrompt() string {
 Your identity (name, role, personality) is defined by IDENTITY.md and SOUL.md
 below — if those are empty, you do NOT yet have a name and must follow the
 bootstrap instructions in BOOTSTRAP.md before answering the user.
+
+Who is talking to you RIGHT NOW is described by USER.md below (and only
+USER.md). If USER.md is empty, you do NOT know who the current chatter
+is — greet them neutrally or ask. Do NOT assume their name from a "User"
+field in IDENTITY.md, from MEMORY.md entries, or from any past system
+context: an agent shared via public link is talked to by many different
+chatters, and IDENTITY.md's User field (if any) belongs to whoever
+configured the agent, not necessarily the person on the other side of
+this conversation.
+
+File-purpose schema — respect this when writing identity files:
+- IDENTITY.md = what the AGENT is (Name, Role, specialization). Never
+  put a "User" / "Owner" / chatter-profile field here — that's per-
+  conversation data, not part of the agent's identity.
+- SOUL.md = how the agent behaves (personality, tone, principles,
+  language preferences). Same rule: no chatter-specific data.
+- USER.md = who the CURRENT chatter is (their name, preferences,
+  ongoing context). When a chatter tells you their name or profile,
+  write_file / edit_file IT HERE, not into IDENTITY.md.
+- MEMORY.md = long-term facts worth remembering across turns.
 
 %s
 
@@ -460,9 +500,18 @@ Then in your final reply, write: ![](/workspace/output.png)`
 	}
 	parts = append(parts, taskDelegationPrompt)
 
-	// 3. Bootstrap files
+	// 3. Bootstrap files. USER.md is the only per-chatter entry — it
+	// captures whose profile the agent should adopt for this conversation
+	// (preferences, role, work style). Pulling it from the chatter's
+	// bucket keeps a public-link visitor from inheriting the owner's
+	// notes. Everything else (SOUL/IDENTITY/AGENTS/BOOTSTRAP/HEARTBEAT/
+	// TOOLS) is part of the agent's identity and stays owner-scoped.
 	for _, name := range bootstrapFiles {
-		content := cb.loadFile(name)
+		uid := cb.userID
+		if name == "USER.md" {
+			uid = chatterUID
+		}
+		content := cb.loadFileForUser(name, uid)
 		if content != "" {
 			parts = append(parts, fmt.Sprintf("# %s\n%s", name, content))
 		}
@@ -473,8 +522,8 @@ Then in your final reply, write: ![](/workspace/output.png)`
 		parts = append(parts, fmt.Sprintf("# Skills\n%s", cb.skillsSummary))
 	}
 
-	// 4. Long-term memory
-	mem := cb.memory.LoadMemory()
+	// 4. Long-term memory — keyed by chatter, same rationale as USER.md.
+	mem := chatterMem.LoadMemory()
 	if mem != "" {
 		parts = append(parts, fmt.Sprintf("# Long-term Memory\n%s", mem))
 	}
@@ -649,15 +698,35 @@ Structure your reasoning before acting. Think before you respond.`, depth)
 }
 
 func (cb *ContextBuilder) loadFile(name string) string {
-	// Per-agent only — store row first, FS as legacy fallback for
-	// installs that predate the store-primary refactor.
+	return cb.loadFileForUser(name, cb.userID)
+}
+
+// loadFileForUser reads a workspace file under an explicit userID.
+// Store rows are keyed by (agentID, userID). USER.md is per-chatter
+// and goes through the Exact path so a brand-new visitor doesn't
+// inherit the owner's profile via the SQL owner-fallback overlay;
+// every other identity file (SOUL/IDENTITY/AGENTS/BOOTSTRAP/HEARTBEAT/
+// TOOLS) uses the overlay so chatters inherit the owner's setup. The
+// on-disk home/ fallback only fires for the agent owner because that's
+// the only bucket the legacy FS layout knows about.
+func (cb *ContextBuilder) loadFileForUser(name, userID string) string {
 	if cb.store != nil {
-		data, err := cb.store.GetWorkspaceFile(cb.ctx(), cb.agentID, cb.userID, name)
+		ctx := context.Background()
+		if userID != "" {
+			ctx = config.WithUserID(ctx, userID)
+		}
+		var data []byte
+		var err error
+		if name == "USER.md" {
+			data, err = cb.store.GetWorkspaceFileExact(ctx, cb.agentID, userID, name)
+		} else {
+			data, err = cb.store.GetWorkspaceFile(ctx, cb.agentID, userID, name)
+		}
 		if err == nil && len(data) > 0 {
 			return strings.TrimSpace(string(data))
 		}
 	}
-	if cb.home != "" {
+	if userID == cb.userID && cb.home != "" {
 		if data, err := os.ReadFile(filepath.Join(cb.home, name)); err == nil && len(data) > 0 {
 			return strings.TrimSpace(string(data))
 		}

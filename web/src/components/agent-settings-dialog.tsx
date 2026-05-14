@@ -58,6 +58,8 @@ const AGENT_TABS: Array<{ id: AgentSettingsTab; label: string; icon: TabIcon }> 
 const USER_TABS: Array<{ id: AgentSettingsTab; label: string; icon: TabIcon }> = [
   { id: "account", label: "Account", icon: UserCog },
   { id: "general", label: "General", icon: Palette },
+  // About surfaces the gateway version + upgrade hint — only useful
+  // to operators (super_admin), filtered out below for regular users.
   { id: "about", label: "About", icon: InfoIcon },
 ];
 
@@ -79,6 +81,7 @@ export function AgentSettingsDialog({
   defaultTab,
   role = "owner",
   userOnly = false,
+  isAdmin = false,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -88,12 +91,16 @@ export function AgentSettingsDialog({
   // sidebar's Settings button, which has no agent context — it should
   // only expose Account + General.
   userOnly?: boolean;
+  // isAdmin gates super_admin-only tabs (currently just About — the
+  // gateway version + upgrade hint is operator info, not end-user info).
+  isAdmin?: boolean;
 }) {
   const agentTabs = userOnly
     ? []
     : role === "viewer"
       ? AGENT_TABS.filter((t) => t.id === "channels")
       : AGENT_TABS;
+  const userTabs = isAdmin ? USER_TABS : USER_TABS.filter((t) => t.id !== "about");
   // Pick the landing tab: userOnly opens on General (User section);
   // viewers land on Channels (their only Agent tab); owners on Profile.
   const initialTab: AgentSettingsTab =
@@ -133,7 +140,7 @@ export function AgentSettingsDialog({
           <SectionLabel className={agentTabs.length > 0 ? "mt-3" : undefined}>
             User
           </SectionLabel>
-          {USER_TABS.map((t) => (
+          {userTabs.map((t) => (
             <TabButton
               key={t.id}
               tab={t}

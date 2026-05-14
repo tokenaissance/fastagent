@@ -455,6 +455,7 @@ func registerSandboxedExec(r *Registry, ex sandbox.Executor) {
 			}
 		}
 		slog.Info("sandboxed exec",
+			"backend", ex.Backend(),
 			"envProviderSet", envProvider != nil,
 			"skillDirsCount", len(skillDirs),
 			"injected", injected,

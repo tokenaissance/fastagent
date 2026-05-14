@@ -401,6 +401,16 @@ func (l *lazyExecutor) ListDir(ctx context.Context, path string) (string, error)
 // handle. Real teardown happens via LifecyclePool.Release / CloseAll.
 func (l *lazyExecutor) Close() error { return nil }
 
+// Backend reports the provider name by delegating to the inner pool, which
+// knows it as a type-level constant. No need to materialize a real
+// executor — the answer is static for the pool's lifetime.
+func (l *lazyExecutor) Backend() string { return l.pool.inner.Backend() }
+
+// Backend on LifecyclePool delegates to the wrapped inner pool. Mirrors
+// the per-executor Backend so callers can ask "which provider is this?"
+// at any layer of the wrapper stack.
+func (p *LifecyclePool) Backend() string { return p.inner.Backend() }
+
 // Ensure interfaces are satisfied.
 var (
 	_ Executor     = (*lazyExecutor)(nil)

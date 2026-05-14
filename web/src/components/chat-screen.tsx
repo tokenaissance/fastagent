@@ -174,6 +174,17 @@ interface ChatMessage {
   // either the live content event's `metadata` payload or the
   // ChatHistoryMessage.metadata on a refresh.
   metadata?: ToolResultMetadata;
+  // IM-bridge sender identity, surfaced from session_messages metadata
+  // (set by the agent loop for Discord/Telegram/... routed turns).
+  // Present means: render an avatar + nickname header instead of an
+  // anonymous "you" bubble — the message came from a third party
+  // talking to the bot, not from the agent owner themselves.
+  sender?: {
+    name: string;
+    avatarUrl?: string;
+    id?: string;
+    channel?: string;
+  };
 }
 
 // Tailwind class string applied to every chat-bubble markdown wrapper
@@ -247,7 +258,15 @@ function buildChatMessages(history: ChatHistoryMessage[]): ChatMessage[] {
               previewUrl: url,
             }))
           : undefined;
-      msgs.push({ id: `h-${i}`, role: "user", content: h.content || "", timestamp: 0, attachments });
+      const sender = h.senderName
+        ? {
+            name: h.senderName,
+            avatarUrl: h.senderAvatarUrl,
+            id: h.senderId,
+            channel: h.senderChannel,
+          }
+        : undefined;
+      msgs.push({ id: `h-${i}`, role: "user", content: h.content || "", timestamp: 0, attachments, sender });
       i++;
     } else if (h.role === "assistant" && h.toolCalls && h.toolCalls.length > 0) {
       // Group: assistant tool_calls + following tool results + final assistant content
@@ -1788,7 +1807,15 @@ export function ChatScreen() {
       <div
         className={
           "flex flex-1 min-w-0 flex-col" +
-          (isEmpty ? " justify-center" : "")
+          // pb-12 (3rem) matches the header height we already subtracted
+          // from the parent's h-[calc(100vh-3rem)]. Without it `justify-
+          // center` centers content inside the post-header area, which
+          // sits visually ~24px below the true viewport mid-line — the
+          // user notices the hero + composer pair drifting low. Adding
+          // an equal bottom padding biases the centered group upward by
+          // half the header height so the optical centre lines up with
+          // the geometric centre of the screen.
+          (isEmpty ? " justify-center pb-12" : "")
         }
       >
       {/* Messages */}
@@ -1911,6 +1938,23 @@ export function ChatScreen() {
                       msg.role === "user" ? "order-1" : ""
                     }`}
                   >
+                    {msg.role === "user" && msg.sender && (
+                      <div className="mb-1 flex items-center justify-end gap-2 text-xs text-muted-foreground">
+                        <span className="font-medium text-foreground/80">{msg.sender.name}</span>
+                        {msg.sender.avatarUrl ? (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img
+                            src={msg.sender.avatarUrl}
+                            alt={msg.sender.name}
+                            className="h-5 w-5 rounded-full object-cover ring-1 ring-border"
+                          />
+                        ) : (
+                          <span className="flex h-5 w-5 items-center justify-center rounded-full bg-primary/20 text-[10px] font-semibold uppercase text-foreground">
+                            {msg.sender.name.slice(0, 1)}
+                          </span>
+                        )}
+                      </div>
+                    )}
                     <div
                       className={`rounded-2xl px-4 py-2.5 break-words ${
                         msg.role === "user"
@@ -2304,7 +2348,7 @@ export function ChatScreen() {
                   </div>
                 </>
               ) : (
-                <div className="flex items-end gap-2">
+                <div className="flex items-center gap-2">
                   <label
                     className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors ${
                       !selectedAgent || sending || isReadOnlyView
@@ -2340,8 +2384,8 @@ export function ChatScreen() {
                     }
                     disabled={!selectedAgent || sending || isReadOnlyView}
                     rows={1}
-                    className="flex-1 resize-none bg-transparent text-[15px] placeholder:text-muted-foreground/50 outline-none disabled:opacity-50"
-                    style={{ maxHeight: 200, minHeight: 24 }}
+                    className="flex-1 resize-none bg-transparent text-[15px] leading-8 placeholder:text-muted-foreground/50 outline-none disabled:opacity-50"
+                    style={{ maxHeight: 200, minHeight: 32 }}
                   />
                   {sending ? (
                     <Button

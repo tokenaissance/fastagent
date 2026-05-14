@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { Bot, Check, Loader2, Save } from "lucide-react";
+import { Bot, Check, Copy, Loader2, Save } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -35,6 +35,7 @@ export default function AgentProfilePanel() {
   const [avatar, setAvatar] = React.useState<File | null>(null);
   const [avatarPreview, setAvatarPreview] = React.useState<string | null>(null);
   const [avatarBust, setAvatarBust] = React.useState<number>(0);
+  const [linkCopied, setLinkCopied] = React.useState(false);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
 
   const refresh = React.useCallback(() => {
@@ -244,7 +245,7 @@ export default function AgentProfilePanel() {
         </div>
       </div>
 
-      <div className="rounded-lg border border-border bg-card p-5">
+      <div className="space-y-3 rounded-lg border border-border bg-card p-5">
         <div className="flex items-start justify-between gap-4">
           <div className="space-y-1">
             <Label htmlFor="agent-profile-public" className="text-sm font-medium">
@@ -259,10 +260,54 @@ export default function AgentProfilePanel() {
           <Switch
             id="agent-profile-public"
             checked={isPublic}
-            onCheckedChange={(v) => setIsPublic(!!v)}
+            onCheckedChange={(v) => {
+              setIsPublic(!!v);
+              setLinkCopied(false);
+            }}
             disabled={!isOwner}
           />
         </div>
+        {isPublic && agent && (
+          <div className="flex gap-2">
+            <Input
+              readOnly
+              value={
+                typeof window !== "undefined"
+                  ? `${window.location.origin}/agents/${agent.id}/chat/`
+                  : `/agents/${agent.id}/chat/`
+              }
+              onFocus={(e) => e.currentTarget.select()}
+              className="font-mono text-xs"
+            />
+            <Button
+              type="button"
+              variant="outline"
+              onClick={async () => {
+                if (!agent) return;
+                const url = `${window.location.origin}/agents/${agent.id}/chat/`;
+                try {
+                  await navigator.clipboard.writeText(url);
+                  setLinkCopied(true);
+                  setTimeout(() => setLinkCopied(false), 2000);
+                } catch {
+                  // clipboard blocked — user can still select the input
+                }
+              }}
+            >
+              {linkCopied ? (
+                <>
+                  <Check className="h-4 w-4 mr-1.5" />
+                  Copied
+                </>
+              ) : (
+                <>
+                  <Copy className="h-4 w-4 mr-1.5" />
+                  Copy
+                </>
+              )}
+            </Button>
+          </div>
+        )}
       </div>
     </div>
   );

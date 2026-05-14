@@ -195,10 +195,14 @@ type onboardRequest struct {
 
 	AgentName string `json:"agentName,omitempty"`
 
-	SandboxEnabled bool   `json:"sandboxEnabled,omitempty"`
-	SandboxBackend string `json:"sandboxBackend,omitempty"`
-	SandboxImage   string `json:"sandboxImage,omitempty"`
-	SandboxE2BKey  string `json:"sandboxE2BKey,omitempty"`
+	SandboxEnabled         bool   `json:"sandboxEnabled,omitempty"`
+	SandboxBackend         string `json:"sandboxBackend,omitempty"`
+	SandboxImage           string `json:"sandboxImage,omitempty"`
+	SandboxE2BKey          string `json:"sandboxE2BKey,omitempty"`
+	SandboxBoxliteURL      string `json:"sandboxBoxliteUrl,omitempty"`
+	SandboxBoxliteClientID string `json:"sandboxBoxliteClientId,omitempty"`
+	SandboxBoxliteKey      string `json:"sandboxBoxliteKey,omitempty"`
+	SandboxBoxlitePrefix   string `json:"sandboxBoxlitePrefix,omitempty"`
 }
 
 // handleOnboard creates the first super_admin + first system provider +
@@ -295,6 +299,18 @@ func (s *Server) handleOnboard(w http.ResponseWriter, r *http.Request) {
 		}
 		if req.SandboxE2BKey != "" {
 			sandbox["e2bKey"] = req.SandboxE2BKey
+		}
+		if req.SandboxBoxliteURL != "" {
+			sandbox["boxliteUrl"] = req.SandboxBoxliteURL
+		}
+		if req.SandboxBoxliteClientID != "" {
+			sandbox["boxliteClientId"] = req.SandboxBoxliteClientID
+		}
+		if req.SandboxBoxliteKey != "" {
+			sandbox["boxliteKey"] = req.SandboxBoxliteKey
+		}
+		if req.SandboxBoxlitePrefix != "" {
+			sandbox["boxlitePrefix"] = req.SandboxBoxlitePrefix
 		}
 		if err := scope.SaveSettingByScope(r.Context(), s.dataStore, scope.System, "", "sandbox", sandbox); err != nil {
 			jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})

@@ -175,6 +175,10 @@ func (d *DockerExecutor) SnapshotWorkspace(ctx context.Context) (map[string][]by
 	return out, nil
 }
 
+// Backend returns "docker" — used by the per-exec log line so operators
+// can confirm which provider handled a given tool call.
+func (d *DockerExecutor) Backend() string { return "docker" }
+
 // Ensure DockerExecutor satisfies the optional snapshot contract. A compile
 // error here would flag any accidental interface drift.
 var _ WorkspaceSnapshotter = (*DockerExecutor)(nil)
@@ -215,6 +219,10 @@ func poolKey(agentID, projectID, sessionID string) string {
 		return agentID
 	}
 }
+
+// Backend on the pool mirrors DockerExecutor.Backend so the LifecyclePool
+// can surface the provider identity without resolving a lazy executor.
+func (p *DockerExecutorPool) Backend() string { return "docker" }
 
 // NewDockerExecutorPool creates a pool of Docker-backed executors.
 func NewDockerExecutorPool(image, workspaceRoot string, policy *Policy) *DockerExecutorPool {

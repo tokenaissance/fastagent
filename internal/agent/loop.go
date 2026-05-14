@@ -45,17 +45,22 @@ type Agent struct {
 	maxToolIterations    int
 	maxParallelToolCalls int // 0 = unlimited
 	thinking             string
-	homePath             string // agent's home: SOUL.md, sessions, memory, skills
-	workspacePath        string // working dir where agent creates user files
-	homeDir              string // FastClaw root, ~/.fastclaw
-	ownerUserID          string // the user that owns this agent (for hook namespacing)
-	skillsCfg            config.SkillsConfig
-	globalSkillsCfg      config.SkillsCfg
-	messageBus           *bus.MessageBus
-	subAgentSpawner      tools.SubAgentSpawner
-	ftsStore             *store.FTSStore
-	piiScrubEnabled      bool
-	memoryCfg            config.MemoryCfg
+	homePath        string // agent's home: SOUL.md, sessions, memory, skills
+	workspacePath   string // working dir where agent creates user files
+	homeDir         string // FastClaw root, ~/.fastclaw
+	ownerUserID     string // the user that owns this agent (for hook namespacing)
+	// admins is the per-channel allowlist of chatters who can run write-
+	// mode slash commands (/new /undo /retry /compact /model /personality).
+	// Keyed by channel name (e.g. "discord" → ["123...", "456..."]). Empty
+	// or absent → no gate, anyone can run the command (legacy default).
+	admins          map[string][]string
+	skillsCfg       config.SkillsConfig
+	globalSkillsCfg config.SkillsCfg
+	messageBus      *bus.MessageBus
+	subAgentSpawner tools.SubAgentSpawner
+	ftsStore        *store.FTSStore
+	piiScrubEnabled bool
+	memoryCfg       config.MemoryCfg
 	// memoryStore is the optional Store-backed source of identity files
 	// (SOUL.md, IDENTITY.md, ...). Kept on the Agent so ReloadWorkspaceFiles
 	// can rewire a fresh ContextBuilder to keep reading from the Store
@@ -270,14 +275,15 @@ func NewAgentWithSkillsCfg(rc config.ResolvedAgent, prov provider.Provider, mb *
 		maxToolIterations:    rc.MaxToolIterations,
 		maxParallelToolCalls: rc.MaxParallelToolCalls,
 		thinking:             rc.Thinking,
-		homePath:             rc.Home,
-		workspacePath:        workspace,
-		homeDir:              homeDir,
-		skillsCfg:            rc.Skills,
-		globalSkillsCfg:      globalSkillsCfg,
-		messageBus:           mb,
-		engine:               eng,
-		costTracker:          eng.costTracker,
+		homePath:        rc.Home,
+		workspacePath:   workspace,
+		homeDir:         homeDir,
+		admins:          rc.Admins,
+		skillsCfg:       rc.Skills,
+		globalSkillsCfg: globalSkillsCfg,
+		messageBus:      mb,
+		engine:          eng,
+		costTracker:     eng.costTracker,
 	}
 
 	// delegate_task lets the parent agent fan a bounded subtask out to a
@@ -452,14 +458,24 @@ func (a *Agent) SetGroupContext(gc *GroupContext) {
 // InjectGroupMessage appends a message from another bot into the session history
 // without triggering an LLM call. This gives the agent awareness of what other
 // bots said in the group chat.
+//
+// The `\[name\]:` prefix escapes the brackets so the web UI's CommonMark
+// renderer doesn't read short single-token messages (e.g. `[idoubi]: hello`)
+// as a link reference definition and silently swallow them. The LLM still
+// reads it as a bracketed sender label — the backslash escapes are well-
+// understood markdown source.
 func (a *Agent) InjectGroupMessage(ctx context.Context, msg bus.InboundMessage) {
 	sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID, msg.ProjectID)
 	label := msg.SenderName
 	if label == "" {
 		label = "Bot"
 	}
-	content := fmt.Sprintf("[%s]: %s", label, msg.Text)
-	sess.Append(provider.Message{Role: "user", Content: content})
+	content := fmt.Sprintf("\\[%s\\]: %s", label, msg.Text)
+	sess.Append(provider.Message{
+		Role:     "user",
+		Content:  content,
+		Metadata: senderMetadata(msg),
+	})
 }
 
 // SetSubAgentSpawner sets the sub-agent spawner for the spawn_subagent tool.
@@ -709,10 +725,20 @@ func buildUserMessage(msg bus.InboundMessage) provider.Message {
 	if msg.Source == bus.SourceGoalContext {
 		origin = provider.OriginGoalContext
 	}
+	// IM senders get a `[SenderName]: text` prefix so future turns can
+	// tell whose message was whose from session history alone — matches
+	// what InjectGroupMessage does for group fan-out. routing.go's group
+	// mention path already pre-prefixes Text before queueing, so we skip
+	// when PeerKind=="group" to avoid double-wrapping.
+	userText := msg.Text
+	if msg.SenderName != "" && msg.PeerKind != "group" {
+		userText = fmt.Sprintf("\\[%s\\]: %s", msg.SenderName, msg.Text)
+	}
 	userMsg := provider.Message{
-		Role:    "user",
-		Content: msg.Text,
-		Origin:  origin,
+		Role:     "user",
+		Content:  userText,
+		Origin:   origin,
+		Metadata: senderMetadata(msg),
 	}
 	imageURLs := msg.PhotoURLs
 	if msg.PhotoURL != "" {
@@ -722,9 +748,12 @@ func buildUserMessage(msg bus.InboundMessage) provider.Message {
 		return userMsg
 	}
 	userMsg.Content = ""
+	// Skip an empty leading text part — image-only sends used to produce
+	// `[{text: ""}, {image_url}, …]` which some upstreams reject as a
+	// content-less wire message.
 	var parts []provider.ContentPart
-	if msg.Text != "" {
-		parts = append(parts, provider.ContentPart{Type: "text", Text: msg.Text})
+	if userText != "" {
+		parts = append(parts, provider.ContentPart{Type: "text", Text: userText})
 	}
 	for _, u := range imageURLs {
 		parts = append(parts, provider.ContentPart{
@@ -810,12 +839,35 @@ func (a *Agent) WebChatHistory(sessionId string) []map[string]any {
 					imageURLs = append(imageURLs, p.ImageURL.URL)
 				}
 			}
+			// IM-routed turns store an "\[idoubi\]: hello" prefix on
+			// Content so the LLM can attribute the line in group chats
+			// when the system prompt rolls off. The web panel renders
+			// the nickname separately from `senderName` metadata, so
+			// strip the prefix from `text` here to keep the bubble body
+			// clean. Cover both the escaped (post-fix) and unescaped
+			// (legacy session rows) shapes.
+			senderName, _ := m.Metadata["senderName"].(string)
+			if senderName != "" {
+				text = stripSenderPrefix(text, senderName)
+			}
 			if text == "" && len(imageURLs) == 0 {
 				continue
 			}
 			entry := map[string]any{"role": "user", "content": text}
 			if len(imageURLs) > 0 {
 				entry["imageUrls"] = imageURLs
+			}
+			if senderName != "" {
+				entry["senderName"] = senderName
+				if v, ok := m.Metadata["senderAvatarUrl"].(string); ok && v != "" {
+					entry["senderAvatarUrl"] = v
+				}
+				if v, ok := m.Metadata["senderId"].(string); ok && v != "" {
+					entry["senderId"] = v
+				}
+				if v, ok := m.Metadata["senderChannel"].(string); ok && v != "" {
+					entry["senderChannel"] = v
+				}
 			}
 			history = append(history, entry)
 		case "assistant":
@@ -1067,6 +1119,80 @@ func renderClientParams(params map[string]any) string {
 		"```json\n" + string(blob) + "\n```"
 }
 
+// stripSenderPrefix removes the leading "\[name\]: " (or unescaped
+// "[name]: ") attribution wrapper that the agent loop injects on
+// IM-routed user turns. Used by the web history rendering so the
+// nickname can be surfaced via dedicated metadata and the bubble body
+// no longer double-shows "[idoubi]: hello" alongside an avatar header.
+// Returns the original string when no prefix matches.
+func stripSenderPrefix(text, senderName string) string {
+	if senderName == "" {
+		return text
+	}
+	for _, p := range []string{
+		"\\[" + senderName + "\\]: ",
+		"[" + senderName + "]: ",
+	} {
+		if strings.HasPrefix(text, p) {
+			return text[len(p):]
+		}
+	}
+	return text
+}
+
+// senderMetadata extracts UI-only sender identity off an inbound IM
+// message (Discord/Telegram/Slack/...) and returns a metadata map ready
+// to attach to the persisted user-role Message. The web chat panel
+// reads these fields back via WebChatHistory to render an avatar +
+// nickname header on each bubble. Returns nil for web chats and any
+// other caller that doesn't populate SenderName so we don't bloat
+// session_messages rows with empty maps.
+//
+// The map is deliberately not Marshal()-strict — provider serializers
+// ignore Message.Metadata, so anything we put here stays out of the
+// LLM payload. The nickname is still funneled to the LLM via the
+// `\[nickname\]: ` prefix on Message.Content (set by callers).
+func senderMetadata(msg bus.InboundMessage) map[string]any {
+	if msg.SenderName == "" {
+		return nil
+	}
+	md := map[string]any{
+		"senderName":    msg.SenderName,
+		"senderChannel": msg.Channel,
+	}
+	if msg.UserID != "" {
+		md["senderId"] = msg.UserID
+	}
+	if msg.SenderAvatarURL != "" {
+		md["senderAvatarUrl"] = msg.SenderAvatarURL
+	}
+	return md
+}
+
+// renderSender emits a per-turn system block naming who the message
+// came from on the originating IM channel. IM bridges (discord,
+// telegram, slack, ...) put the platform-side username in SenderName
+// and the platform user id in UserID — without this block the LLM only
+// sees the message text and can't tell idoubi from anyone else who
+// might be DMing the same bot. Returns "" for web chats and any other
+// caller that doesn't populate SenderName, so we don't waste tokens.
+func renderSender(msg bus.InboundMessage) string {
+	if msg.SenderName == "" {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("## Current Sender\n\nThe latest user turn was sent by:\n")
+	fmt.Fprintf(&b, "- channel: %s\n", msg.Channel)
+	fmt.Fprintf(&b, "- username: %s\n", msg.SenderName)
+	if msg.UserID != "" {
+		fmt.Fprintf(&b, "- user_id: %s\n", msg.UserID)
+	}
+	if msg.PeerKind != "" {
+		fmt.Fprintf(&b, "- peer_kind: %s\n", msg.PeerKind)
+	}
+	return b.String()
+}
+
 // isPlanMode reports whether the inbound message asked for plan-only
 // output (no tool calls, just a numbered plan the user reviews before
 // authorizing real work). Truthy values: bool true, string "true"/"1",
@@ -1287,7 +1413,7 @@ func (a *Agent) handlePlanMode(ctx context.Context, msg bus.InboundMessage) stri
 	// ContextBuilder is shared across turns so we set the flag
 	// explicitly to avoid stale state from a prior goal-active turn.
 	a.ctxBuilder.SetGoalActive(false)
-	systemPrompt := a.ctxBuilder.BuildSystemPrompt()
+	systemPrompt := a.ctxBuilder.BuildSystemPromptAs(chatterUID, a.memory.WithUserID(chatterUID))
 	// Tool catalog injection: plan mode passes tools=nil to the LLM so
 	// it can't accidentally call anything, but that also hides the
 	// registry from the planning model. Without this, plans were written
@@ -1468,7 +1594,8 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	// "wait for `go`" semantics fight goal's autonomous-loop contract.
 	// See ContextBuilder.SetGoalActive.
 	a.ctxBuilder.SetGoalActive(a.sessionHasActiveGoal(ctx, msg))
-	systemPrompt := a.ctxBuilder.BuildSystemPrompt()
+	chatterMem := a.memory.WithUserID(chatterUID)
+	systemPrompt := a.ctxBuilder.BuildSystemPromptAs(chatterUID, chatterMem)
 
 	// Hook: AfterSystemPrompt
 	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: AfterSystemPrompt, UserID: a.ownerUserID})
@@ -1493,8 +1620,11 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		slog.Info("context compacted", "agent", a.name, "log_file", compactResult.LogFile)
 	}
 
-	messages := make([]provider.Message, 0, len(sessionMsgs)+2)
+	messages := make([]provider.Message, 0, len(sessionMsgs)+3)
 	messages = append(messages, provider.Message{Role: "system", Content: systemPrompt})
+	if senderMsg := renderSender(msg); senderMsg != "" {
+		messages = append(messages, provider.Message{Role: "system", Content: senderMsg})
+	}
 	if paramsMsg := renderClientParams(msg.Params); paramsMsg != "" {
 		messages = append(messages, provider.Message{Role: "system", Content: paramsMsg})
 	}
@@ -1583,7 +1713,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 			sess.Append(provider.Message{Role: "assistant", Content: resp.Content, Thinking: resp.Thinking, Timestamp: time.Now().UnixMilli(), RawAssistant: resp.RawAssistant})
 			emitEvent(ctx, ChatEvent{Type: "content", Data: map[string]any{"content": resp.Content}})
 			emitEvent(ctx, ChatEvent{Type: "done"})
-			a.runPostTurn(ctx, msg, messages, totalToolCalls)
+			a.runPostTurn(ctx, msg, messages, totalToolCalls, chatterMem)
 			return resp.Content
 		}
 
@@ -1843,7 +1973,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		"metadata": capMeta,
 	}})
 	emitEvent(ctx, ChatEvent{Type: "done"})
-	a.runPostTurn(ctx, msg, messages, totalToolCalls)
+	a.runPostTurn(ctx, msg, messages, totalToolCalls, chatterMem)
 	return finalContent
 }
 
@@ -1932,17 +2062,24 @@ func padOrphanToolResults(sess *session.Session) {
 	}
 }
 
-// runPostTurn fires PostTurn hooks and handles auto-persist and skills learning.
 // msg is the InboundMessage that drove this turn — its (channel, account,
 // chat, project) plus Source ride along on the HookContext so PostTurn
 // hooks can route to session-scoped state and tell user-driven turns
 // apart from runtime-originated ones (cron, heartbeat, sub-agent, goal
 // continuation).
 //
+// chatterMem is the chatter-scoped Memory built at the top of the turn —
+// auto-persist writes the extracted facts back through it so a visitor
+// on a public agent accrues their *own* MEMORY.md / USER.md, not the
+// owner's. nil falls back to the agent-scoped Memory (legacy behavior).
+//
 // FIXME: HandleMessageStream (the SSE path) does not call runPostTurn,
 // so PostTurn hooks never fire on web chat. Tracked separately — see
 // docs/design/goal.md §9.
-func (a *Agent) runPostTurn(ctx context.Context, msg bus.InboundMessage, messages []provider.Message, toolCallCount int) {
+func (a *Agent) runPostTurn(ctx context.Context, msg bus.InboundMessage, messages []provider.Message, toolCallCount int, chatterMem *Memory) {
+	if chatterMem == nil {
+		chatterMem = a.memory
+	}
 	a.turnCount++
 
 	// Index user/assistant messages in FTS. Skip runtime-injected
@@ -1980,7 +2117,7 @@ func (a *Agent) runPostTurn(ctx context.Context, msg bus.InboundMessage, message
 		if model == "" {
 			model = a.model
 		}
-		go AutoPersistMemory(ctx, a.memory, a.provider, model, messages)
+		go AutoPersistMemory(ctx, chatterMem, a.provider, model, messages)
 	}
 
 	// Skills learner
@@ -2027,12 +2164,14 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 	defer padOrphanToolResults(sess)
 
 	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: BeforeSystemPrompt, UserID: a.ownerUserID})
-	// See HandleMessage twin for rationale.
+	// See HandleMessage twin for rationale on SetGoalActive.
 	a.ctxBuilder.SetGoalActive(a.sessionHasActiveGoal(ctx, msg))
-	systemPrompt := a.ctxBuilder.BuildSystemPrompt()
+	chatterMem := a.memory.WithUserID(chatterUID)
+	systemPrompt := a.ctxBuilder.BuildSystemPromptAs(chatterUID, chatterMem)
 	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: AfterSystemPrompt, UserID: a.ownerUserID})
 
-	// Store raw user message — same multi-image flatten as HandleMessage.
+	// Store raw user message — buildUserMessage handles multi-image
+	// flatten + IM SenderName prefixing + senderMetadata.
 	userMsg := buildUserMessage(msg)
 	sess.Append(userMsg)
 
@@ -2046,8 +2185,11 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 		sessionMsgs = compactResult.Messages
 	}
 
-	messages := make([]provider.Message, 0, len(sessionMsgs)+2)
+	messages := make([]provider.Message, 0, len(sessionMsgs)+3)
 	messages = append(messages, provider.Message{Role: "system", Content: systemPrompt})
+	if senderMsg := renderSender(msg); senderMsg != "" {
+		messages = append(messages, provider.Message{Role: "system", Content: senderMsg})
+	}
 	if paramsMsg := renderClientParams(msg.Params); paramsMsg != "" {
 		messages = append(messages, provider.Message{Role: "system", Content: paramsMsg})
 	}
@@ -2447,9 +2589,15 @@ func (a *Agent) ReloadWorkspaceFiles() {
 	a.ctxBuilder.SetWorkspace(a.workspacePath)
 	// Preserve Store-backed identity reads across reload; without this,
 	// Postgres-mode pods silently fall back to pod-local filesystem.
+	// userID must also be re-pinned — the DB store requires a non-empty
+	// user_id to scope the SOL/IDENTITY/AGENTS reads, and without it
+	// the ContextBuilder's loadFile pass would fail on every shared
+	// identity file after a reload (manifest as an "agent without a
+	// name/soul" greeting).
 	if a.memoryStore != nil {
 		a.ctxBuilder.store = a.memoryStore
 		a.ctxBuilder.agentID = a.name
+		a.ctxBuilder.userID = a.ownerUserID
 	}
 }
 

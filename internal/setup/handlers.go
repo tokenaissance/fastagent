@@ -1435,15 +1435,27 @@ func (s *Server) handleChatSessions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRenameSession(w http.ResponseWriter, r *http.Request) {
+	// Body-or-query for agentId — the frontend sends it in the JSON body
+	// (see renameChatSession in web/src/lib/api.ts), matching the
+	// handleMoveSessionProject convention. The earlier query-only path
+	// always saw "" and bailed at resolveAgent with a silent 404, so
+	// "Edit chat title" looked like a no-op even though the dialog
+	// submitted cleanly.
 	agentID := r.URL.Query().Get("agentId")
+	var req struct {
+		AgentID string `json:"agentId"`
+		Title   string `json:"title"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	if agentID == "" {
+		agentID = req.AgentID
+	}
 	ag := s.resolveAgent(r, agentID)
 	if ag == nil {
 		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "agent not found"})
-		return
-	}
-	var req struct{ Title string `json:"title"` }
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
 	if err := ag.RenameWebChatSession(r.PathValue("key"), req.Title); err != nil {

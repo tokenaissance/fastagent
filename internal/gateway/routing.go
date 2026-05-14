@@ -139,9 +139,9 @@ func (g *Gateway) routeGroup(ctx context.Context, msg bus.InboundMessage) {
 			ag.InjectGroupMessage(ctx, msg)
 		}
 		if len(msg.Mentions) > 0 {
-			if target := g.agentByMention(space, msg.Mentions, boundAgents); target != nil {
+			if target := g.agentByMention(space, msg, boundAgents); target != nil {
 				triggerMsg := msg
-				triggerMsg.Text = fmt.Sprintf("[%s]: %s", msg.SenderName, msg.Text)
+				triggerMsg.Text = fmt.Sprintf("\\[%s\\]: %s", msg.SenderName, msg.Text)
 				triggerMsg.IsBotMessage = false
 				g.taskQueue.Submit(target.Name(), chatKey(triggerMsg.Channel, triggerMsg.AccountID, triggerMsg.ChatID), triggerMsg, g.accountIDForAgent(space, target.Name(), triggerMsg.Channel))
 			}
@@ -149,12 +149,15 @@ func (g *Gateway) routeGroup(ctx context.Context, msg bus.InboundMessage) {
 		return
 	}
 	if len(msg.Mentions) > 0 {
-		if target := g.agentByMention(space, msg.Mentions, boundAgents); target != nil {
+		if target := g.agentByMention(space, msg, boundAgents); target != nil {
 			for _, ag := range boundAgents {
 				if ag.Name() != target.Name() {
 					ag.InjectGroupMessage(ctx, msg)
 				}
 			}
+			slog.Info("routing group mention",
+				"user", msg.OwnerUserID, "channel", msg.Channel,
+				"chat_id", msg.ChatID, "agent", target.Name())
 			g.taskQueue.Submit(target.Name(), chatKey(msg.Channel, msg.AccountID, msg.ChatID), msg, g.accountIDForAgent(space, target.Name(), msg.Channel))
 			return
 		}
@@ -281,16 +284,62 @@ func (g *Gateway) agentsBoundToMessage(ctx context.Context, space *UserSpace, ms
 	return out
 }
 
-func (g *Gateway) agentByMention(space *UserSpace, mentions []string, candidates []*agent.Agent) *agent.Agent {
-	usernames := buildBotUsernames(space.Config.Bindings, g.chanMgr)
-	for _, mention := range mentions {
+// agentByMention picks the candidate agent that should handle a group
+// message based on whether the bot that *received* this inbound was
+// @-mentioned. Mentions in a group chat only ever address bots present
+// in that chat, and exactly one of our adapters is "us" for any given
+// inbound — `msg.Channel` + `msg.AccountID` already names that bot, so
+// we resolve its username via the channel manager and compare directly.
+//
+// Previous implementation built a flat agentID→username map from every
+// binding the user owned. That silently broke for agents wired up to
+// more than one channel (e.g. Telegram + Discord on the same agent):
+// the second binding overwrote the first, so mentioning the bot on the
+// "loser" channel never matched. See git history if you're tempted to
+// reintroduce a per-agent cache.
+func (g *Gateway) agentByMention(space *UserSpace, msg bus.InboundMessage, candidates []*agent.Agent) *agent.Agent {
+	if g.chanMgr == nil {
+		return nil
+	}
+	botUsername := g.chanMgr.BotUsername(msg.Channel, msg.AccountID)
+	slog.Info("agentByMention probe",
+		"channel", msg.Channel,
+		"account", msg.AccountID,
+		"bot_username", botUsername,
+		"mentions", msg.Mentions,
+		"candidates", agentNames(candidates))
+	if botUsername == "" {
+		return nil
+	}
+	var addressed bool
+	for _, m := range msg.Mentions {
+		if m == botUsername {
+			addressed = true
+			break
+		}
+	}
+	if !addressed {
+		return nil
+	}
+	for _, b := range space.Config.Bindings {
+		if b.Match.Channel != msg.Channel || b.Match.AccountID != msg.AccountID {
+			continue
+		}
 		for _, ag := range candidates {
-			if u, ok := usernames[ag.Name()]; ok && u == mention {
+			if ag.Name() == b.AgentID {
 				return ag
 			}
 		}
 	}
 	return nil
+}
+
+func agentNames(ags []*agent.Agent) []string {
+	out := make([]string, 0, len(ags))
+	for _, a := range ags {
+		out = append(out, a.Name())
+	}
+	return out
 }
 
 // groupBehaviorFor returns the team's groupBehavior + defaultAgent for the

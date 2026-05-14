@@ -136,8 +136,17 @@ func (e *E2BExecutor) recreate(ctx context.Context) error {
 	}
 	e.sandboxID = newEx.sandboxID
 	e.accessToken = newEx.accessToken
+	// Hydrate is mandatory for the same reason it is in Get() — it's
+	// the only step that makes /workspace writable to the exec user.
+	// If we just warn-log a failure here, the recreated sandbox is
+	// silently broken: agent calls succeed but every /workspace write
+	// fails with Permission denied, and the bytes get stranded in
+	// /tmp where they evaporate at the next eviction.
 	if err := e.Hydrate(ctx); err != nil {
-		slog.Warn("e2b hydrate after recreate failed", "sandboxID", e.sandboxID, "error", err)
+		return fmt.Errorf("hydrate after recreate (sandboxID=%s): %w", e.sandboxID, err)
+	}
+	if err := verifyWorkspaceWritable(ctx, e); err != nil {
+		return fmt.Errorf("recreated sandbox unusable (sandboxID=%s): %w", e.sandboxID, err)
 	}
 	return nil
 }
@@ -162,20 +171,19 @@ func (e *E2BExecutor) SetHydrationSources(skillDirs []string, ws workspace.Store
 //     written via write_file in past sessions survive sandbox restarts,
 //     same contract as the existing per-file hydrateWorkspace)
 //
-// Implementation: pack everything into one tar.gz, base64-inline it into
-// a single `exec` invocation, and let `tar -xz -C /` create paths in
-// place. We deliberately bypass the envd /files API here even though the
-// docs document multipart/form-data uploads — past attempts to hydrate
-// via that endpoint produced 200 OK responses while files silently
-// landed off-path, and the user-facing failure mode (skill scripts
-// "No such file or directory" at exec time) was painful to debug. The
-// exec channel is the same one the agent already uses, so if Hydrate
-// works the rest of the tooling does too.
-//
-// Size note: shell ARG_MAX on Linux is typically >=128KB. A typical
-// skill bundle is a few KB and a fresh agent's workspace is empty, so
-// a single round-trip works for the common case. If a workspace ever
-// grows past ~80KB-of-base64 we should switch to a stdin-piped exec.
+// Implementation: pack everything into one tar.gz, upload it via envd's
+// /files multipart endpoint (same path writeFileOnce uses — known good),
+// then run a tiny `bash -c` to extract+chown. Earlier versions inlined
+// the base64'd tar inside the `bash -c` arg; that worked for trivially
+// small bundles but empirically truncated the Connect-protocol response
+// once the encoded payload climbed past ~80KB-of-base64 (8 bundled
+// skills was already 103KB and tripped it). Truncation surfaced as an
+// envd End-frame with `exited=false` and no exit-status — the old code
+// treated that as success because exitCode was still 0, so Hydrate
+// looked like it ran while the chown step had actually been cut off
+// mid-flight. The fix moves the bulk transfer off the exec channel
+// entirely so the script stays small and constant-sized regardless of
+// bundle size.
 func (e *E2BExecutor) Hydrate(ctx context.Context) error {
 	bundle := newTarBundle()
 
@@ -262,20 +270,28 @@ func (e *E2BExecutor) Hydrate(ctx context.Context) error {
 	//   e2b's published Dockerfile; custom templates that strip sudo
 	//   either need to keep it or pre-create /skills + /workspace
 	//   chowned to user.
-	// - tmp file instead of pipe: `sudo cmd | sudo cmd` can prompt
-	//   on the second sudo even with NOPASSWD; one sudo at a time
-	//   stays well-behaved.
+	// - The bundle (when any files exist) is now uploaded via the
+	//   /files endpoint BEFORE this exec runs — see uploadBytes above
+	//   and the size-related comment on Hydrate itself. The script
+	//   below only ever references /tmp/fc-hydrate.tar.gz as a path,
+	//   so the bash -c arg stays small regardless of how large the
+	//   bundle gets.
 	// - chown after extract: tar-as-root lands files root-owned, so
 	//   re-chown after extract; agent's subsequent writes run as user.
+	if bundle.fileCount > 0 {
+		// Upload as `user`-owned to /tmp; tar still runs under sudo so
+		// it can land /skills/* and /workspace/* at the filesystem root.
+		if err := e.uploadBytes(ctx, "/tmp/fc-hydrate.tar.gz", bundle.gz.Bytes()); err != nil {
+			return fmt.Errorf("hydrate upload tar: %w", err)
+		}
+	}
 	cmdParts := []string{
 		"set -e",
 		"sudo mkdir -p /skills /workspace",
 		"sudo chown user:user /skills /workspace",
 	}
 	if bundle.fileCount > 0 {
-		encoded := base64.StdEncoding.EncodeToString(bundle.gz.Bytes())
 		cmdParts = append(cmdParts,
-			"echo '"+encoded+"' | base64 -d > /tmp/fc-hydrate.tar.gz",
 			"sudo tar -xzf /tmp/fc-hydrate.tar.gz -C /",
 			"sudo chown -R user:user /skills /workspace",
 			"rm -f /tmp/fc-hydrate.tar.gz",
@@ -547,7 +563,23 @@ func (e *E2BExecutor) execOnce(ctx context.Context, command string, timeout time
 	}
 	output = strings.TrimSpace(output)
 
-	slog.Info("e2b exec completed", "sandboxID", e.sandboxID, "exitCode", exitCode, "exited", exited, "outputLen", len(output))
+	slog.Info("e2b exec completed", "sandboxID", e.sandboxID, "exitCode", exitCode, "exited", exited, "outputLen", len(output), "frames", len(frames), "bodyBytes", len(body))
+
+	// Reject a stream that didn't deliver a proper "End/exited=true" trailer.
+	// Why this matters: when the request payload pushes envd past some
+	// internal buffer (empirically >~80KB-of-base64 in a single bash -c arg
+	// triggers it), the response comes back with frames but no final exit
+	// status. exitCode stays at its zero default and we'd otherwise return
+	// nil error — which is exactly the silent-failure mode that left Hydrate
+	// looking successful while the chown step hadn't actually run, then
+	// verifyWorkspaceWritable reported "/workspace probe: Permission denied"
+	// with no clue why the chown didn't take.
+	if !exited {
+		if output == "" {
+			output = "(no output — response stream truncated before exit-status trailer)"
+		}
+		return output, fmt.Errorf("e2b exec did not exit cleanly (frames=%d, bodyBytes=%d): %s", len(frames), len(body), output)
+	}
 
 	if exitCode != 0 {
 		if output == "" {
@@ -604,32 +636,46 @@ func (e *E2BExecutor) WriteFile(ctx context.Context, path, content string) (stri
 }
 
 func (e *E2BExecutor) writeFileOnce(ctx context.Context, filePath, content string) (string, error) {
+	if err := e.uploadBytes(ctx, filePath, []byte(content)); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("Wrote %d bytes to %s", len(content), filePath), nil
+}
+
+// uploadBytes POSTs `data` to envd's /files multipart endpoint at
+// `sandboxPath`, owned by the `user` account exec runs as. Pulled out of
+// writeFileOnce so Hydrate can ship its tar bundle through the same
+// large-payload-safe path instead of inlining a base64 blob inside a
+// `bash -c` arg (the latter empirically truncates the Connect response
+// stream at ~80KB and leaves the sandbox half-hydrated; see the comment
+// on the Hydrate caller).
+func (e *E2BExecutor) uploadBytes(ctx context.Context, sandboxPath string, data []byte) error {
 	// E2B envd's POST /files expects multipart/form-data with a `file`
 	// field, NOT a raw octet-stream body. The earlier raw-body version
 	// returned 200 OK but silently dropped the upload, leaving the file
 	// non-existent inside the sandbox — caught when uploaded skills
 	// failed with "No such file or directory" at exec time.
 	reqURL := fmt.Sprintf("%s/files?path=%s&username=user",
-		e.envdURL(), url.QueryEscape(filePath))
+		e.envdURL(), url.QueryEscape(sandboxPath))
 
 	// envd: the destination path comes from the `path` query param;
 	// the multipart `filename` is just metadata, so basename is fine.
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)
-	fw, err := mw.CreateFormFile("file", path.Base(filePath))
+	fw, err := mw.CreateFormFile("file", path.Base(sandboxPath))
 	if err != nil {
-		return "", err
+		return err
 	}
-	if _, err := fw.Write([]byte(content)); err != nil {
-		return "", err
+	if _, err := fw.Write(data); err != nil {
+		return err
 	}
 	if err := mw.Close(); err != nil {
-		return "", err
+		return err
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", reqURL, &buf)
 	if err != nil {
-		return "", err
+		return err
 	}
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 	if e.accessToken != "" {
@@ -638,15 +684,15 @@ func (e *E2BExecutor) writeFileOnce(ctx context.Context, filePath, content strin
 
 	resp, err := e.client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("e2b write: %w", err)
+		return fmt.Errorf("e2b upload: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("e2b write HTTP %d: %s", resp.StatusCode, string(body))
+		return fmt.Errorf("e2b upload HTTP %d: %s", resp.StatusCode, string(body))
 	}
-	return fmt.Sprintf("Wrote %d bytes to %s", len(content), filePath), nil
+	return nil
 }
 
 func (e *E2BExecutor) ListDir(ctx context.Context, path string) (string, error) {
@@ -734,6 +780,29 @@ func (e *E2BExecutor) SnapshotWorkspace(ctx context.Context) (map[string][]byte,
 	return out2, nil
 }
 
+// verifyWorkspaceWritable runs a one-shot probe against /workspace as
+// the same `user` account agent exec runs under. It catches the
+// silent-failure mode where Hydrate appeared to succeed but the
+// underlying chown didn't actually take — empirically observed when
+// the e2b template ships /workspace owned by root and the chown step
+// is skipped or sudoless. The probe writes a single byte and removes
+// it; the touch+rm round-trip is the same operation pattern the agent
+// uses on its first /workspace write, so anything that would fail
+// there fails here too.
+func verifyWorkspaceWritable(ctx context.Context, ex *E2BExecutor) error {
+	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	const probeCmd = `touch /workspace/.fc-health && rm -f /workspace/.fc-health && echo ok`
+	out, err := ex.execOnce(probeCtx, probeCmd, 10*time.Second)
+	if err != nil {
+		return fmt.Errorf("/workspace probe: %w (out=%s)", err, strings.TrimSpace(out))
+	}
+	if !strings.Contains(out, "ok") {
+		return fmt.Errorf("/workspace not writable as exec user (out=%s)", strings.TrimSpace(out))
+	}
+	return nil
+}
+
 func (e *E2BExecutor) Close() error {
 	req, _ := http.NewRequest("DELETE",
 		fmt.Sprintf("%s/sandboxes/%s", e2bBaseURL, e.sandboxID), nil)
@@ -746,6 +815,14 @@ func (e *E2BExecutor) Close() error {
 	slog.Info("e2b sandbox closed", "sandboxID", e.sandboxID)
 	return nil
 }
+
+// Backend returns "e2b" — used by the per-exec log line so operators can
+// confirm at a glance which provider handled a given tool call.
+func (e *E2BExecutor) Backend() string { return "e2b" }
+
+// Backend on the pool mirrors E2BExecutor.Backend so the LifecyclePool can
+// surface the provider identity without resolving a lazy executor.
+func (p *E2BExecutorPool) Backend() string { return "e2b" }
 
 // E2BExecutorPool manages per-user E2B sandboxes.
 type E2BExecutorPool struct {
@@ -795,7 +872,20 @@ func (p *E2BExecutorPool) Get(ctx context.Context, agentID, projectID, sessionID
 	}
 	ex.SetHydrationSources(skillDirsForAgent(p.home, agentID), p.workspace, agentID, projectID, sessionID)
 	if err := ex.Hydrate(ctx); err != nil {
-		slog.Warn("e2b hydrate failed", "agent", agentID, "project", projectID, "session", sessionID, "error", err)
+		// Hydrate is what chowns /workspace to the non-root `user`
+		// account exec runs as; without it every agent write to
+		// /workspace gets Permission denied silently — see the
+		// reproducer in e2b_probe_diag_test.go. Used to be a WARN
+		// here; the sandbox would still get cached and every
+		// subsequent turn would surface as "agent wrote files but
+		// they vanished". Tear it down so the caller retries or
+		// fails loudly.
+		_ = ex.Close()
+		return nil, fmt.Errorf("e2b hydrate: %w", err)
+	}
+	if err := verifyWorkspaceWritable(ctx, ex); err != nil {
+		_ = ex.Close()
+		return nil, fmt.Errorf("e2b sandbox unusable: %w", err)
 	}
 	p.executors[key] = ex
 	return ex, nil

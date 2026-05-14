@@ -38,6 +38,21 @@ func (a *Agent) handleSlashCommand(msg bus.InboundMessage) slashResult {
 	}
 	args := parts[1:]
 
+	// Owner-only gate for write commands. Read-only inspections (/status,
+	// /usage, /insights, /help, /version, /start, /whoami) stay open so
+	// any group member can self-serve info. Mutators that change the
+	// agent's runtime state (model, personality) or the session history
+	// (new/reset/undo/retry/compact) are restricted to the agent owner
+	// + per-channel admin allowlist — without this gate, anyone in a
+	// Discord guild could `/model haiku` and silently downgrade a shared
+	// agent for everyone else.
+	if writeSlashCommands[cmd] && !a.isAdminChatter(msg) {
+		return slashResult{
+			handled: true,
+			reply:   fmt.Sprintf("🔒 `%s` 只有 agent owner / admin 能用。让 owner 把你的 platform 用户 ID 加进 agent.json 的 `admins.%s` 里(用 `/whoami` 查自己的 ID)。", cmd, msg.Channel),
+		}
+	}
+
 	switch cmd {
 	case "/start":
 		return slashResult{
@@ -109,9 +124,64 @@ func (a *Agent) handleSlashCommand(msg bus.InboundMessage) slashResult {
 	case "/version":
 		return slashResult{handled: true, reply: fmt.Sprintf("⚡ FastClaw\nAgent: %s\nModel: %s", a.name, a.model)}
 
+	case "/whoami":
+		return slashResult{
+			handled: true,
+			reply: fmt.Sprintf("Channel: `%s`\nYour user ID: `%s`\nSender name: `%s`\n\n(Add this ID to `admins.%s` in the agent config to grant write-slash access.)",
+				msg.Channel, msg.UserID, msg.SenderName, msg.Channel),
+		}
+
 	default:
 		return slashResult{}
 	}
+}
+
+// writeSlashCommands are the slash commands that mutate the agent's runtime
+// state or session history and therefore need the owner/admin gate. Anything
+// not in this set is treated as read-only and runs unrestricted.
+var writeSlashCommands = map[string]bool{
+	"/new":         true,
+	"/reset":       true,
+	"/undo":        true,
+	"/retry":       true,
+	"/compact":     true,
+	"/model":       true,
+	"/personality": true,
+}
+
+// isAdminChatter decides whether the chatter is allowed to run a write-mode
+// slash command on this channel.
+//
+// Web / api: the chatter's UserID is the FastClaw user UUID — owner is
+// identified by direct equality with the agent's ownerUserID. No
+// per-platform allowlist needed.
+//
+// IM channels (discord, telegram, slack, ...): UserID is the platform's
+// own user ID (Discord snowflake, Telegram numeric ID, ...), which has
+// no inherent link to the agent's FastClaw owner. The owner registers
+// platform IDs in agent.json's `admins[channel]` to grant access — and,
+// to keep single-user dev installs from being locked out of their own
+// agent, an empty/absent allowlist for the channel falls through to
+// "anyone can run it" (the legacy behavior). Operators who care about
+// group-chat protection populate the list to lock it down.
+func (a *Agent) isAdminChatter(msg bus.InboundMessage) bool {
+	// Web / api carry FastClaw UUIDs directly; owner check is sufficient.
+	if msg.Channel == "web" || msg.Channel == "api" {
+		return msg.UserID != "" && msg.UserID == a.ownerUserID
+	}
+	list, ok := a.admins[msg.Channel]
+	if !ok || len(list) == 0 {
+		// No allowlist configured for this channel → preserve legacy
+		// unrestricted behavior. Operators opt in to group-chat
+		// protection by populating admins[channel].
+		return true
+	}
+	for _, id := range list {
+		if id == msg.UserID {
+			return true
+		}
+	}
+	return false
 }
 
 // slashRetry re-runs the last user message, discarding the last assistant response.
@@ -411,7 +481,12 @@ Goal (persistent multi-turn objective)
 
 Info
   /help           — Show this help
-  /version        — Show version`
+  /version        — Show version
+  /whoami         — Show your platform user ID
+
+🔒 Write commands (/new /reset /undo /retry /compact /model /personality)
+   in IM channels are restricted to the agent owner + admins listed in
+   agent.json's "admins" field. Use /whoami to find your ID.`
 }
 
 func truncateSlash(s string, n int) string {

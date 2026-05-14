@@ -194,7 +194,16 @@ export interface ConfigResponse {
   };
   channels: Record<string, { enabled: boolean; botToken?: string }>;
   storage: { type: string; dsn?: string };
-  sandbox?: { enabled: boolean; backend?: string; image?: string; e2bKey?: string };
+  sandbox?: {
+    enabled: boolean;
+    backend?: string;
+    image?: string;
+    e2bKey?: string;
+    boxliteUrl?: string;
+    boxliteClientId?: string;
+    boxliteKey?: string;
+    boxlitePrefix?: string;
+  };
   hooks: { enabled: boolean; token?: string; path?: string; port?: number };
   cronJobs?: Array<Record<string, unknown>>;
   skills?: {
@@ -342,6 +351,10 @@ export interface OnboardRequest {
   sandboxBackend?: string;
   sandboxImage?: string;
   sandboxE2BKey?: string;
+  sandboxBoxliteUrl?: string;
+  sandboxBoxliteClientId?: string;
+  sandboxBoxliteKey?: string;
+  sandboxBoxlitePrefix?: string;
 }
 
 export async function onboard(req: OnboardRequest): Promise<{ ok: boolean; error?: string }> {
@@ -693,6 +706,15 @@ export interface ChatHistoryMessage {
   // attachments. The chat UI renders these as inline thumbnails on
   // bubbles loaded from history.
   imageUrls?: string[];
+  // Populated for user turns that arrived via an IM bridge (Discord,
+  // Telegram, ...). The chat panel renders an avatar + nickname header
+  // on each such bubble so the agent owner can see who they're looking
+  // at. None of these reach the LLM — they live on Message.Metadata
+  // and are stripped from the persisted Content too.
+  senderName?: string;
+  senderAvatarUrl?: string;
+  senderId?: string;
+  senderChannel?: string;
 }
 
 export interface TodoItem {

@@ -30,6 +30,9 @@ export default function RuntimeSettingsPage() {
   const [sandboxDockerImage, setSandboxDockerImage] = useState("");
   const [sandboxE2BTemplate, setSandboxE2BTemplate] = useState("base");
   const [sandboxE2BKey, setSandboxE2BKey] = useState("");
+  const [sandboxBoxliteImage, setSandboxBoxliteImage] = useState("thinkany/fastclaw-sandbox:latest");
+  const [sandboxBoxliteKey, setSandboxBoxliteKey] = useState("");
+  const [sandboxBoxliteURL, setSandboxBoxliteURL] = useState("");
 
   useEffect(() => {
     // Belt-and-suspenders gate: the layout already hides the nav item,
@@ -50,10 +53,14 @@ export default function RuntimeSettingsPage() {
           if (backend === "e2b") {
             const looksLikeDockerImage = savedImage.includes(":") || savedImage.includes("/");
             setSandboxE2BTemplate(looksLikeDockerImage || !savedImage ? "base" : savedImage);
+          } else if (backend === "boxlite") {
+            setSandboxBoxliteImage(savedImage || "thinkany/fastclaw-sandbox:latest");
           } else {
             setSandboxDockerImage(savedImage);
           }
           setSandboxE2BKey(cfg.sandbox?.e2bKey || "");
+          setSandboxBoxliteKey(cfg.sandbox?.boxliteKey || "");
+          setSandboxBoxliteURL(cfg.sandbox?.boxliteUrl || "");
         })
         .catch(() => {})
         .finally(() => setLoading(false));
@@ -63,13 +70,19 @@ export default function RuntimeSettingsPage() {
   const handleSave = async () => {
     setSaving(true);
     const image =
-      sandboxBackend === "e2b" ? sandboxE2BTemplate : sandboxDockerImage;
+      sandboxBackend === "e2b"
+        ? sandboxE2BTemplate
+        : sandboxBackend === "boxlite"
+          ? sandboxBoxliteImage
+          : sandboxDockerImage;
     await updateConfig({
       sandbox: {
         enabled: sandboxEnabled,
         backend: sandboxBackend,
         image: image || undefined,
         e2bKey: sandboxE2BKey || undefined,
+        boxliteKey: sandboxBoxliteKey || undefined,
+        boxliteUrl: sandboxBoxliteURL || undefined,
       },
     });
     setSaving(false);
@@ -141,7 +154,7 @@ export default function RuntimeSettingsPage() {
                   <SelectTrigger>
                     <SelectValue>
                       {(v: unknown) =>
-                        ({ docker: "Docker", e2b: "E2B (cloud)" } as Record<string, string>)[
+                        ({ docker: "Docker", e2b: "E2B (cloud)", boxlite: "BoxLite (cloud)" } as Record<string, string>)[
                           v as string
                         ] ?? (v as string) ?? ""
                       }
@@ -150,6 +163,7 @@ export default function RuntimeSettingsPage() {
                   <SelectContent>
                     <SelectItem value="docker">Docker</SelectItem>
                     <SelectItem value="e2b">E2B (cloud)</SelectItem>
+                    <SelectItem value="boxlite">BoxLite (cloud)</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -175,13 +189,44 @@ export default function RuntimeSettingsPage() {
                     />
                   </div>
                 </>
+              ) : sandboxBackend === "boxlite" ? (
+                <>
+                  <div className="space-y-2">
+                    <Label>BoxLite API Key</Label>
+                    <Input
+                      type="password"
+                      value={sandboxBoxliteKey}
+                      onChange={(e) => setSandboxBoxliteKey(e.target.value)}
+                      placeholder="client_secret"
+                      className="font-mono text-sm"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Image</Label>
+                    <Input
+                      value={sandboxBoxliteImage}
+                      onChange={(e) => setSandboxBoxliteImage(e.target.value)}
+                      placeholder="thinkany/fastclaw-sandbox:latest"
+                      className="font-mono text-sm"
+                    />
+                  </div>
+                  <div className="space-y-2 sm:col-span-2">
+                    <Label>API URL (optional)</Label>
+                    <Input
+                      value={sandboxBoxliteURL}
+                      onChange={(e) => setSandboxBoxliteURL(e.target.value)}
+                      placeholder="https://api.boxlite.ai/v1"
+                      className="font-mono text-sm"
+                    />
+                  </div>
+                </>
               ) : (
                 <div className="space-y-2">
                   <Label>Docker Image</Label>
                   <Input
                     value={sandboxDockerImage}
                     onChange={(e) => setSandboxDockerImage(e.target.value)}
-                    placeholder="python:3.12-slim"
+                    placeholder="thinkany/fastclaw-sandbox:latest"
                     className="font-mono text-sm"
                   />
                 </div>
