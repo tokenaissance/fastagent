@@ -9,7 +9,6 @@ goal status to budget_limited. Do not start fresh substantive work.
 Final accounting:
 - Tokens used: {{.TokensUsed}}
 - Token budget: {{.TokenBudget}}
-- Time spent: {{.TimeUsedSeconds}}s
 
 In this final turn:
 - Summarize what is verifiably done.

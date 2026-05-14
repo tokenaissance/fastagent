@@ -23,8 +23,7 @@ func TestBuildUserMessageOriginPropagates(t *testing.T) {
 		{"cron tick", bus.SourceCron, provider.OriginUser},
 		{"heartbeat", bus.SourceHeartbeat, provider.OriginUser},
 		{"subagent", bus.SourceSubAgent, provider.OriginUser},
-		{"goal continuation", bus.SourceGoalContinuation, provider.OriginGoalContext},
-		{"goal budget-limit wrap-up", bus.SourceGoalBudgetLimit, provider.OriginGoalContext},
+		{"goal context", bus.SourceGoalContext, provider.OriginGoalContext},
 		{"unknown future source", "unknown", provider.OriginUser},
 	}
 	for _, tc := range cases {
@@ -115,11 +114,11 @@ func TestBuildUserMessageMergesPhotoURLAndPhotoURLs(t *testing.T) {
 	}
 }
 
-// Goal continuation with body: Origin AND audit prompt text both
+// Goal-context turn with body: Origin AND audit prompt text both
 // have to survive — the load-bearing combination.
-func TestBuildUserMessageGoalContinuationWithText(t *testing.T) {
+func TestBuildUserMessageGoalContextWithText(t *testing.T) {
 	got := buildUserMessage(bus.InboundMessage{
-		Source: bus.SourceGoalContinuation,
+		Source: bus.SourceGoalContext,
 		Text:   "<goal_context>...audit prompt...</goal_context>",
 	})
 	if got.Origin != provider.OriginGoalContext {

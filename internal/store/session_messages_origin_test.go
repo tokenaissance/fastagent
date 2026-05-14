@@ -19,8 +19,8 @@ func TestSessionMessageOriginRoundTrip(t *testing.T) {
 	uid, agent, key := "user-1", "agent-A", "s-origin-test"
 
 	// One real user turn, one runtime-injected goal_context, one
-	// assistant reply — that's the canonical interleaving once
-	// GoalRuntime starts running.
+	// assistant reply — the canonical interleaving once /goal is
+	// running.
 	msgs := []SessionMessage{
 		{Role: "user", Content: "translate the README"},
 		{Role: "user", Content: "[runtime audit prompt]", Origin: "goal_context"},

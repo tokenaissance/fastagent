@@ -12,9 +12,8 @@ import (
 var templatesFS embed.FS
 
 var (
-	continuationTmpl     = mustParse("continuation.md")
-	budgetLimitTmpl      = mustParse("budget_limit.md")
-	objectiveUpdatedTmpl = mustParse("objective_updated.md")
+	continuationTmpl = mustParse("continuation.md")
+	budgetLimitTmpl  = mustParse("budget_limit.md")
 )
 
 func mustParse(name string) *template.Template {
@@ -36,21 +35,19 @@ type promptVars struct {
 	TokensUsed      int64
 	TokenBudget     string // rendered as a string so we can show "none" / "unbounded"
 	RemainingTokens string
-	TimeUsedSeconds int64
 }
 
 func newPromptVars(g *Goal) promptVars {
 	v := promptVars{
-		Objective:       EscapeXMLText(g.Objective),
-		TokensUsed:      g.TokensUsed,
-		TimeUsedSeconds: g.TimeUsedSeconds,
+		Objective:  EscapeXMLText(g.Objective),
+		TokensUsed: g.TokensUsed,
 	}
 	if g.TokenBudget == nil {
 		v.TokenBudget = "none"
 		v.RemainingTokens = "unbounded"
 	} else {
 		v.TokenBudget = fmt.Sprintf("%d", *g.TokenBudget)
-		remaining, _ := g.RemainingTokens()
+		remaining, _ := RemainingTokens(g)
 		v.RemainingTokens = fmt.Sprintf("%d", remaining)
 	}
 	return v
@@ -66,12 +63,6 @@ func ContinuationPrompt(g *Goal) string {
 // turn that flips a goal to BudgetLimited.
 func BudgetLimitPrompt(g *Goal) string {
 	return render(budgetLimitTmpl, newPromptVars(g))
-}
-
-// ObjectiveUpdatedPrompt renders the prompt injected when the user
-// edits the objective mid-run.
-func ObjectiveUpdatedPrompt(g *Goal) string {
-	return render(objectiveUpdatedTmpl, newPromptVars(g))
 }
 
 func render(t *template.Template, v promptVars) string {

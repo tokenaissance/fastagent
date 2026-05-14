@@ -2,8 +2,6 @@ package agent
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -54,10 +52,9 @@ func (a *Agent) slashGoal(msg bus.InboundMessage, args []string) slashResult {
 }
 
 // resolveSessionKey returns the persistent session_key for the
-// in-flight turn. Defensive: if `Manager.Get` returns nil (an
-// already-stopped manager, an out-of-context call), the slash
-// handlers downgrade to a clean "feature not available here"
-// message rather than dereferencing nil.
+// in-flight turn, or "" if no session matches the inbound's
+// (channel, account, chat, project) tuple. Slash handlers downgrade
+// to a clean error message on "".
 func (a *Agent) resolveSessionKey(msg bus.InboundMessage) string {
 	sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID, msg.ProjectID)
 	if sess == nil {
@@ -93,7 +90,7 @@ func (a *Agent) slashGoalCreate(msg bus.InboundMessage, objective string) slashR
 	}
 
 	g := &goal.Goal{
-		ID:          newGoalID(),
+		ID:          goal.NewID(),
 		AgentID:     a.name,
 		SessionKey:  key,
 		OwnerUserID: a.ownerUserID,
@@ -111,42 +108,36 @@ func (a *Agent) slashGoalCreate(msg bus.InboundMessage, objective string) slashR
 		return slashResult{handled: true, reply: fmt.Sprintf("Error creating goal: %v", err)}
 	}
 
-	// Kick the runtime so the first continuation fires immediately
-	// off the user's own /goal turn. Silent success — the
-	// continuation streaming back IS the conversational reply, same
-	// as if the user had typed the objective directly. Goal is
-	// transparent at the chat surface; no scaffolding text.
-	if a.goalManager != nil {
-		if gr := a.goalManager.Ensure(key, a.name, a.ownerUserID); gr != nil {
-			gr.Trigger()
-		}
-	}
+	// Fire the first continuation immediately off the user's own /goal
+	// turn. Silent success — the continuation streaming back IS the
+	// conversational reply, same as if the user had typed the
+	// objective directly. Goal is transparent at the chat surface; no
+	// scaffolding text.
+	goal.TryFireContinuation(context.Background(), a.goalStore, a.messageBus, a.name, key)
 	return slashResult{handled: true, reply: ""}
 }
 
 func (a *Agent) slashGoalPause(msg bus.InboundMessage) slashResult {
-	// Silent transition. Mistakes (Not active / no goal) still
-	// surface — see transitionGoal.
-	return a.transitionGoal(msg, goal.StatusActive, goal.StatusPaused, "", "Not active.")
+	// Silent transition. Wrong-state / no-goal cases still surface.
+	return a.transitionGoal(msg, goal.StatusActive, goal.StatusPaused, "Not active.")
 }
 
 func (a *Agent) slashGoalResume(msg bus.InboundMessage) slashResult {
-	res := a.transitionGoal(msg, goal.StatusPaused, goal.StatusActive, "", "Not paused.")
+	res := a.transitionGoal(msg, goal.StatusPaused, goal.StatusActive, "Not paused.")
 	// Empty reply == success path; non-empty == wrongStateMsg or
-	// error. Trigger only on success.
-	if res.handled && res.reply == "" && a.goalManager != nil {
+	// error. Fire the next continuation only on success.
+	if res.handled && res.reply == "" {
 		key := a.resolveSessionKey(msg)
-		if gr := a.goalManager.Ensure(key, a.name, a.ownerUserID); gr != nil {
-			gr.Trigger()
-		}
+		goal.TryFireContinuation(context.Background(), a.goalStore, a.messageBus, a.name, key)
 	}
 	return res
 }
 
 // transitionGoal centralizes the "load goal → check it's in the
 // expected source state → flip → persist" pattern for pause/resume.
-// Returns a slashResult tailored to the outcome.
-func (a *Agent) transitionGoal(msg bus.InboundMessage, from, to goal.Status, okMsg, wrongStateMsg string) slashResult {
+// On success the reply is silent (""); on wrong state, returns
+// wrongStateMsg; on store errors, returns a formatted error.
+func (a *Agent) transitionGoal(msg bus.InboundMessage, from, to goal.Status, wrongStateMsg string) slashResult {
 	key := a.resolveSessionKey(msg)
 	g, err := a.goalStore.GetGoalBySession(context.Background(), a.name, key)
 	if errors.Is(err, goal.ErrNotFound) || g == nil {
@@ -162,7 +153,7 @@ func (a *Agent) transitionGoal(msg bus.InboundMessage, from, to goal.Status, okM
 	if err := a.goalStore.UpdateGoal(context.Background(), g); err != nil {
 		return slashResult{handled: true, reply: fmt.Sprintf("Error updating goal: %v", err)}
 	}
-	return slashResult{handled: true, reply: okMsg}
+	return slashResult{handled: true, reply: ""}
 }
 
 func (a *Agent) slashGoalClear(msg bus.InboundMessage) slashResult {
@@ -177,20 +168,14 @@ func (a *Agent) slashGoalClear(msg bus.InboundMessage) slashResult {
 	if err := a.goalStore.DeleteGoal(context.Background(), g.ID); err != nil {
 		return slashResult{handled: true, reply: fmt.Sprintf("Error clearing goal: %v", err)}
 	}
-	// Stop the runtime so a future /goal in the same session starts
-	// with a fresh goroutine.
-	if a.goalManager != nil {
-		a.goalManager.StopSession(key)
-	}
 	return slashResult{handled: true, reply: ""}
 }
 
 // clearGoalForSession removes any goal attached to the named
-// session_key + stops the matching runtime. Called by /new and
-// /reset so an old session's goal doesn't leak into a brand-new
-// conversation thread on the same chat. Best-effort: store errors
-// are logged at the caller, not surfaced — /new shouldn't fail
-// because of a stray goal row.
+// session_key. Called by /new and /reset so an old session's goal
+// doesn't leak into a brand-new conversation thread on the same
+// chat. Best-effort: store errors are not surfaced — /new shouldn't
+// fail because of a stray goal row.
 func (a *Agent) clearGoalForSession(sessionKey string) {
 	if a.goalStore == nil || sessionKey == "" {
 		return
@@ -200,20 +185,5 @@ func (a *Agent) clearGoalForSession(sessionKey string) {
 		return
 	}
 	_ = a.goalStore.DeleteGoal(context.Background(), g.ID)
-	if a.goalManager != nil {
-		a.goalManager.StopSession(sessionKey)
-	}
 }
 
-// newGoalID mints a fresh opaque id for a Goal row. Mirrors the
-// helper in internal/agent/tools/goal.go — kept duplicated rather
-// than exported to avoid pulling that package into the slash path.
-// Slash creation is rare; the small duplication is the right
-// tradeoff against an importable surface.
-func newGoalID() string {
-	var buf [16]byte
-	if _, err := rand.Read(buf[:]); err != nil {
-		panic(fmt.Sprintf("slash_goal: crypto/rand failed: %v", err))
-	}
-	return "g-" + hex.EncodeToString(buf[:])
-}

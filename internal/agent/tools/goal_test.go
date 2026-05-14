@@ -3,7 +3,6 @@ package tools
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -13,7 +12,7 @@ import (
 
 // memGoalStore is the in-memory goal.Store implementation the tool
 // tests use. Keyed by (agentID, sessionKey) to mirror the production
-// UNIQUE index and exercise the same conflict path.
+// UNIQUE index.
 type memGoalStore struct {
 	mu   sync.Mutex
 	rows map[string]*goal.Goal // key = agentID + "|" + sessionKey
@@ -46,9 +45,6 @@ func (m *memGoalStore) GetGoalBySession(_ context.Context, agentID, sessionKey s
 	clone := *g
 	return &clone, nil
 }
-func (m *memGoalStore) GetGoalByID(context.Context, string) (*goal.Goal, error) {
-	return nil, goal.ErrNotFound
-}
 func (m *memGoalStore) UpdateGoal(_ context.Context, g *goal.Goal) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -60,26 +56,22 @@ func (m *memGoalStore) UpdateGoal(_ context.Context, g *goal.Goal) error {
 	m.rows[k] = &clone
 	return nil
 }
-func (m *memGoalStore) UpdateObjective(context.Context, string, string) error { return nil }
-func (m *memGoalStore) DeleteGoal(context.Context, string) error              { return nil }
-func (m *memGoalStore) ListGoalsByOwner(context.Context, string, int) ([]*goal.Goal, error) {
-	return nil, nil
-}
+func (m *memGoalStore) DeleteGoal(context.Context, string) error { return nil }
 
 // fixture builds a Registry pre-bound to a session and a memGoalStore,
-// with the three goal tools registered. The (agentID, ownerUserID,
-// sessionKey) values are the ones every test exercises against.
+// with update_goal registered. (agentID, ownerUserID, sessionKey) match
+// what every test exercises.
 func fixture(t *testing.T) (*Registry, *memGoalStore) {
 	t.Helper()
 	r := NewRegistry("", "")
 	r.SetGoalSessionKey("s-fixture-1")
 	st := newMemGoalStore()
-	RegisterGoalTools(r, st, "agent-A", "user-1")
+	RegisterGoalTools(r, st, "agent-A")
 	return r, st
 }
 
 // callTool runs the named tool with the given args JSON and returns
-// (result, err). Centralizes the registry-lookup boilerplate.
+// (result, err).
 func callTool(t *testing.T, r *Registry, name, argsJSON string) (string, error) {
 	t.Helper()
 	fn := r.GetFunc(name)
@@ -89,113 +81,27 @@ func callTool(t *testing.T, r *Registry, name, argsJSON string) (string, error) 
 	return fn(context.Background(), json.RawMessage(argsJSON))
 }
 
-// TestGetGoalReturnsNoGoalEnvelope: get_goal must NOT fail when no
-// goal is set. Returning {"status": "no_goal"} lets the model probe
-// safely without a tool error that could derail the turn.
-func TestGetGoalReturnsNoGoalEnvelope(t *testing.T) {
-	r, _ := fixture(t)
-	out, err := callTool(t, r, "get_goal", `{}`)
-	if err != nil {
-		t.Fatalf("get_goal: %v", err)
-	}
-	if !strings.Contains(out, `"no_goal"`) {
-		t.Errorf("expected no_goal envelope, got %s", out)
-	}
-}
-
-// TestCreateGoalHappyPath: a fresh session can create a goal; status
-// defaults to active; the session_key + agent_id come from registry
-// state (the model can't forge them via args).
-func TestCreateGoalHappyPath(t *testing.T) {
-	r, st := fixture(t)
-	out, err := callTool(t, r, "create_goal",
-		`{"objective":"translate README","token_budget":200000}`)
-	if err != nil {
-		t.Fatalf("create_goal: %v", err)
-	}
-	if !strings.Contains(out, `"active"`) {
-		t.Errorf("expected status active in response, got %s", out)
-	}
-	g, _ := st.GetGoalBySession(context.Background(), "agent-A", "s-fixture-1")
-	if g == nil {
-		t.Fatal("goal not persisted")
-	}
-	if g.OwnerUserID != "user-1" {
-		t.Errorf("OwnerUserID = %q, want user-1 (must come from registry, not args)", g.OwnerUserID)
-	}
-	if g.TokenBudget == nil || *g.TokenBudget != 200000 {
-		t.Errorf("TokenBudget round-trip mismatch: %v", g.TokenBudget)
+// seedGoal directly inserts an Active goal into the store, bypassing
+// any model-facing tool surface (which no longer ships create_goal).
+func seedGoal(t *testing.T, st *memGoalStore) {
+	t.Helper()
+	if err := st.CreateGoal(context.Background(), &goal.Goal{
+		ID:          "g-test",
+		AgentID:     "agent-A",
+		SessionKey:  "s-fixture-1",
+		OwnerUserID: "user-1",
+		Objective:   "do it",
+		Status:      goal.StatusActive,
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
 	}
 }
 
-// TestCreateGoalRejectsDuplicate: the UNIQUE constraint failure
-// must surface as a model-recoverable error, not a 500 — the model
-// should be able to recover by asking the user to /goal clear first.
-func TestCreateGoalRejectsDuplicate(t *testing.T) {
-	r, _ := fixture(t)
-	if _, err := callTool(t, r, "create_goal", `{"objective":"first"}`); err != nil {
-		t.Fatalf("first create: %v", err)
-	}
-	_, err := callTool(t, r, "create_goal", `{"objective":"second"}`)
-	if err == nil {
-		t.Fatal("second create should have failed (a goal already exists)")
-	}
-	if !strings.Contains(err.Error(), "already exists") {
-		t.Errorf("error should mention duplicate; got %v", err)
-	}
-}
-
-// TestCreateGoalNoSessionContext: the model can't create a goal
-// outside a chat turn — guards against an agent (e.g. boot-time hook
-// or webhook handler) accidentally minting goals where no session
-// has been bound.
-func TestCreateGoalNoSessionContext(t *testing.T) {
-	r := NewRegistry("", "")
-	// Deliberately skip SetGoalSessionKey.
-	st := newMemGoalStore()
-	RegisterGoalTools(r, st, "agent-A", "user-1")
-	_, err := callTool(t, r, "create_goal", `{"objective":"x"}`)
-	if err == nil || !strings.Contains(err.Error(), "no active session") {
-		t.Fatalf("expected no-session error, got %v", err)
-	}
-}
-
-// TestCreateGoalEmptyObjectiveRejected: empty / whitespace-only
-// objectives are rejected up front rather than landing as a blank
-// row in the store.
-func TestCreateGoalEmptyObjectiveRejected(t *testing.T) {
-	r, _ := fixture(t)
-	if _, err := callTool(t, r, "create_goal", `{"objective":""}`); err == nil {
-		t.Error("empty objective should be rejected")
-	}
-	if _, err := callTool(t, r, "create_goal", `{"objective":"   "}`); err == nil {
-		t.Error("whitespace objective should be rejected")
-	}
-}
-
-// TestCreateGoalRejectsNonPositiveBudget: a budget of 0 or negative
-// would either run forever or never start; reject it at the door.
-func TestCreateGoalRejectsNonPositiveBudget(t *testing.T) {
-	r, _ := fixture(t)
-	if _, err := callTool(t, r, "create_goal", `{"objective":"x","token_budget":0}`); err == nil {
-		t.Error("zero budget should be rejected")
-	}
-	if _, err := callTool(t, r, "create_goal", `{"objective":"x","token_budget":-5}`); err == nil {
-		t.Error("negative budget should be rejected")
-	}
-}
-
-// TestUpdateGoalCompleteFlipsStatus: the happy-path completion flips
-// status from active → complete and returns the final token tally.
-// Mirrors what the model would do after audit succeeds.
+// TestUpdateGoalCompleteFlipsStatus: happy path flips active → complete
+// and returns the final token tally.
 func TestUpdateGoalCompleteFlipsStatus(t *testing.T) {
 	r, st := fixture(t)
-	if _, err := callTool(t, r, "create_goal", `{"objective":"do it"}`); err != nil {
-		t.Fatalf("seed create: %v", err)
-	}
-	// Simulate some token accounting happened (step 2b will do this
-	// for real via AfterModelCall; here we hand-set so the response
-	// can be asserted).
+	seedGoal(t, st)
 	g, _ := st.GetGoalBySession(context.Background(), "agent-A", "s-fixture-1")
 	g.TokensUsed = 12345
 	_ = st.UpdateGoal(context.Background(), g)
@@ -213,14 +119,11 @@ func TestUpdateGoalCompleteFlipsStatus(t *testing.T) {
 	}
 }
 
-// TestUpdateGoalRejectsBadStatus is the load-bearing test of the
-// "model can only mark complete" contract. Anything else, especially
-// pause / budget_limited / unmet, must error out.
+// TestUpdateGoalRejectsBadStatus pins the "model can only mark complete"
+// contract. Anything else must error out.
 func TestUpdateGoalRejectsBadStatus(t *testing.T) {
-	r, _ := fixture(t)
-	if _, err := callTool(t, r, "create_goal", `{"objective":"x"}`); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
+	r, st := fixture(t)
+	seedGoal(t, st)
 	for _, bad := range []string{`"pause"`, `"paused"`, `"budget_limited"`, `"unmet"`, `"active"`, `""`} {
 		args := `{"status":` + bad + `}`
 		if _, err := callTool(t, r, "update_goal", args); err == nil {
@@ -230,8 +133,7 @@ func TestUpdateGoalRejectsBadStatus(t *testing.T) {
 }
 
 // TestUpdateGoalNoActiveGoal: calling update_goal without a goal in
-// place is a user error the model should surface — not a panic and
-// not a silent success.
+// place is a user error the model should surface.
 func TestUpdateGoalNoActiveGoal(t *testing.T) {
 	r, _ := fixture(t)
 	_, err := callTool(t, r, "update_goal", `{"status":"complete"}`)
@@ -241,13 +143,10 @@ func TestUpdateGoalNoActiveGoal(t *testing.T) {
 }
 
 // TestUpdateGoalOnlyTransitionsFromActive: a goal that's already
-// complete / paused / budget_limited can't be re-completed by the
-// model. Runtime / user are the only writers of those states.
+// complete / paused / budget_limited can't be re-completed by the model.
 func TestUpdateGoalOnlyTransitionsFromActive(t *testing.T) {
 	r, st := fixture(t)
-	if _, err := callTool(t, r, "create_goal", `{"objective":"x"}`); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
+	seedGoal(t, st)
 	for _, blocked := range []goal.Status{goal.StatusPaused, goal.StatusBudgetLimited, goal.StatusComplete} {
 		g, _ := st.GetGoalBySession(context.Background(), "agent-A", "s-fixture-1")
 		g.Status = blocked
@@ -260,26 +159,52 @@ func TestUpdateGoalOnlyTransitionsFromActive(t *testing.T) {
 	}
 }
 
-// TestGoalToolsRegistered confirms the 3 expected names show up on
-// the registry (and the function is non-nil). Cheap guard against
-// renaming one and forgetting to update the registration call.
-func TestGoalToolsRegistered(t *testing.T) {
+// TestUpdateGoalRegistered: trivial guard that the only tool we ship
+// stays registered under its expected name.
+func TestUpdateGoalRegistered(t *testing.T) {
 	r, _ := fixture(t)
-	for _, name := range []string{"get_goal", "create_goal", "update_goal"} {
-		if r.GetFunc(name) == nil {
-			t.Errorf("tool %q not registered", name)
-		}
+	if r.GetFunc("update_goal") == nil {
+		t.Error("update_goal not registered")
 	}
 }
 
-// TestUpdateGoalErrorIsErrorType: sanity that errors come back as
-// proper Go errors (not encoded into the result string). Code that
-// gates on err != nil — most of the tool execution path — relies on
-// this.
-func TestUpdateGoalErrorIsErrorType(t *testing.T) {
-	r, _ := fixture(t)
+// TestUpdateGoalNoSessionContext: when the tool fires outside a chat
+// turn (registry never got SetGoalSessionKey), it must surface a
+// recoverable error instead of dereferencing a nil session. This is
+// the boot-time / out-of-context path.
+func TestUpdateGoalNoSessionContext(t *testing.T) {
+	r := NewRegistry("", "")
+	// Deliberately skip SetGoalSessionKey.
+	st := newMemGoalStore()
+	RegisterGoalTools(r, st, "agent-A")
+
 	_, err := callTool(t, r, "update_goal", `{"status":"complete"}`)
-	if !errors.Is(err, err) || err == nil {
-		t.Fatal("expected non-nil error")
+	if err == nil || !strings.Contains(err.Error(), "no active session") {
+		t.Fatalf("expected no-session error, got %v", err)
+	}
+}
+
+// TestUpdateGoalMalformedArgs: invalid JSON or wrong-typed status
+// must come back as a Go error, not a panic and not a silent success.
+// Non-OpenAI providers can ship through non-conforming model output;
+// this is the defensive parse boundary.
+func TestUpdateGoalMalformedArgs(t *testing.T) {
+	r, st := fixture(t)
+	seedGoal(t, st)
+
+	for _, bad := range []string{
+		`{`,                       // truncated JSON
+		`{"status": 123}`,         // wrong type
+		`{}`,                      // missing status
+		`{"status":["complete"]}`, // array, not string
+	} {
+		if _, err := callTool(t, r, "update_goal", bad); err == nil {
+			t.Errorf("update_goal accepted malformed args %q", bad)
+		}
+	}
+	// Goal must not have been mutated by any of the failed calls.
+	g, _ := st.GetGoalBySession(context.Background(), "agent-A", "s-fixture-1")
+	if g.Status != goal.StatusActive {
+		t.Errorf("status mutated to %q despite all calls failing", g.Status)
 	}
 }

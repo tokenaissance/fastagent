@@ -202,15 +202,11 @@ type Store interface {
 	// pair is taken; callers must DeleteGoal first to start a new one.
 	CreateGoal(ctx context.Context, g *GoalRecord) error
 	GetGoalBySession(ctx context.Context, agentID, sessionKey string) (*GoalRecord, error)
-	GetGoalByID(ctx context.Context, goalID string) (*GoalRecord, error)
 	// UpdateGoal writes mutable fields back. Caller-immutable fields
 	// (ID, AgentID, SessionKey, OwnerUserID, Objective, CreatedAt) are
-	// ignored — Objective edits go through UpdateGoalObjective so the
-	// runtime can fire the objective_updated continuation.
+	// ignored.
 	UpdateGoal(ctx context.Context, g *GoalRecord) error
-	UpdateGoalObjective(ctx context.Context, goalID, objective string) error
 	DeleteGoal(ctx context.Context, goalID string) error
-	ListGoalsByOwner(ctx context.Context, ownerUserID string, limit int) ([]GoalRecord, error)
 
 	Close() error
 }
@@ -502,18 +498,6 @@ type GoalRecord struct {
 	// BIGINT column.
 	TokenBudget *int64 `json:"tokenBudget,omitempty"`
 	TokensUsed  int64  `json:"tokensUsed"`
-
-	// LastAccountedTokenUsage is the cumulative SDK Usage at the moment
-	// we last folded a delta into TokensUsed. Stored as JSONB so we
-	// don't have to bump the schema every time the SDK grows a new
-	// usage field.
-	LastAccountedTokenUsage []byte `json:"lastAccountedTokenUsage,omitempty"`
-
-	TimeUsedSeconds int64     `json:"timeUsedSeconds"`
-	LastAccountedAt time.Time `json:"lastAccountedAt"`
-
-	SafetyMaxIterations int `json:"safetyMaxIterations"`
-	Iterations          int `json:"iterations"`
 
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`

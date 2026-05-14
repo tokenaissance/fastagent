@@ -14,21 +14,17 @@ func TestGoalSQLiteRoundTrip(t *testing.T) {
 	budget := int64(200_000)
 
 	g := &GoalRecord{
-		ID:                      "goal-1",
-		AgentID:                 "agent-A",
-		SessionKey:              "s-12345-abcdef",
-		OwnerUserID:             "user-1",
-		Objective:               "translate README to English",
-		Status:                  "active",
-		TokenBudget:             &budget,
-		LastAccountedTokenUsage: []byte(`{"InputTokens":0,"OutputTokens":0}`),
+		ID:          "goal-1",
+		AgentID:     "agent-A",
+		SessionKey:  "s-12345-abcdef",
+		OwnerUserID: "user-1",
+		Objective:   "translate README to English",
+		Status:      "active",
+		TokenBudget: &budget,
 	}
 
 	if err := db.CreateGoal(ctx, g); err != nil {
 		t.Fatalf("create: %v", err)
-	}
-	if g.SafetyMaxIterations != 100 {
-		t.Errorf("CreateGoal should default SafetyMaxIterations to 100, got %d", g.SafetyMaxIterations)
 	}
 
 	// UNIQUE (agent_id, session_key) must reject a second goal on the
@@ -52,42 +48,24 @@ func TestGoalSQLiteRoundTrip(t *testing.T) {
 	}
 
 	// Update via UpdateGoal — exercises the "tokens accumulated, status
-	// flipped" path that GoalRuntime will use every continuation.
+	// flipped" path that the continuation hook uses every turn.
 	got.TokensUsed = 50_000
 	got.Status = "budget_limited"
-	got.Iterations = 5
 	if err := db.UpdateGoal(ctx, got); err != nil {
 		t.Fatalf("update: %v", err)
 	}
-	again, _ := db.GetGoalByID(ctx, got.ID)
-	if again.TokensUsed != 50_000 || again.Status != "budget_limited" || again.Iterations != 5 {
-		t.Errorf("update didn't round-trip: %+v", again)
-	}
-
-	// UpdateGoalObjective is the path /goal <new-text> uses; the runtime
-	// follows it with an ObjectiveUpdatedPrompt injection.
-	if err := db.UpdateGoalObjective(ctx, got.ID, "translate to Japanese instead"); err != nil {
-		t.Fatalf("update objective: %v", err)
-	}
-	again, _ = db.GetGoalByID(ctx, got.ID)
-	if again.Objective != "translate to Japanese instead" {
-		t.Errorf("objective rewrite didn't stick: %q", again.Objective)
-	}
-
-	// ListGoalsByOwner powers a future "all my goals" panel; even with
-	// one goal it should return that one.
-	list, err := db.ListGoalsByOwner(ctx, "user-1", 10)
+	again, err := db.GetGoalBySession(ctx, "agent-A", "s-12345-abcdef")
 	if err != nil {
-		t.Fatalf("list: %v", err)
+		t.Fatalf("re-get: %v", err)
 	}
-	if len(list) != 1 {
-		t.Fatalf("expected 1 goal in list, got %d", len(list))
+	if again.TokensUsed != 50_000 || again.Status != "budget_limited" {
+		t.Errorf("update didn't round-trip: %+v", again)
 	}
 
 	if err := db.DeleteGoal(ctx, got.ID); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
-	if _, err := db.GetGoalByID(ctx, got.ID); !errors.Is(err, ErrNotFound) {
+	if _, err := db.GetGoalBySession(ctx, "agent-A", "s-12345-abcdef"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected ErrNotFound after delete, got %v", err)
 	}
 }

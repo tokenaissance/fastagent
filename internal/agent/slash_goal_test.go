@@ -13,9 +13,9 @@ import (
 )
 
 // newSlashTestAgent builds an Agent wired enough to exercise the
-// slash_goal.go handlers: store + manager + a real session.Manager
-// (file-backed in a temp dir) so resolveSessionKey returns a stable
-// key without dragging in the rest of NewAgent's machinery.
+// slash_goal.go handlers: store + a real session.Manager (file-backed
+// in a temp dir) so resolveSessionKey returns a stable key without
+// dragging in the rest of NewAgent's machinery.
 func newSlashTestAgent(t *testing.T) *Agent {
 	t.Helper()
 	a := &Agent{
@@ -27,11 +27,6 @@ func newSlashTestAgent(t *testing.T) *Agent {
 		sessions:    session.NewManager(t.TempDir()),
 	}
 	a.WireGoals(&memGoalStore{})
-	t.Cleanup(func() {
-		if a.goalManager != nil {
-			a.goalManager.Shutdown()
-		}
-	})
 	return a
 }
 
@@ -95,10 +90,6 @@ func TestSlashGoalCreateHappyPath(t *testing.T) {
 	if g.Status != goal.StatusActive {
 		t.Errorf("status = %q, want active", g.Status)
 	}
-	// The slash handler should have spun a runtime and triggered it.
-	if a.goalManager.Get(key) == nil {
-		t.Error("expected GoalRuntime to be running after create")
-	}
 }
 
 // TestSlashGoalCreatePublishesContinuation pins the end-to-end:
@@ -113,8 +104,8 @@ func TestSlashGoalCreatePublishesContinuation(t *testing.T) {
 
 	select {
 	case got := <-a.messageBus.Inbound:
-		if got.Source != bus.SourceGoalContinuation {
-			t.Errorf("Source = %q, want %q", got.Source, bus.SourceGoalContinuation)
+		if got.Source != bus.SourceGoalContext {
+			t.Errorf("Source = %q, want %q", got.Source, bus.SourceGoalContext)
 		}
 		if got.Channel != "web" || got.ChatID != "chat-1" {
 			t.Errorf("routing not stamped on continuation msg: channel=%q chat=%q",
@@ -131,7 +122,7 @@ func TestSlashGoalCreatePublishesContinuation(t *testing.T) {
 			t.Errorf("Text doesn't look like an audit prompt:\n%s", got.Text)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("no continuation published to bus.Inbound within 2s — runtime.Trigger() / maybeContinue path is broken")
+		t.Fatal("no continuation published to bus.Inbound within 2s — TryFireContinuation path is broken")
 	}
 }
 
@@ -194,6 +185,58 @@ func TestSlashGoalPauseRejectsWrongState(t *testing.T) {
 	}
 }
 
+// TestSlashGoalResumeRejectsWrongState mirrors the pause test on the
+// other side: /goal resume on an already-active goal must reject and
+// NOT publish a continuation (a successful resume would).
+func TestSlashGoalResumeRejectsWrongState(t *testing.T) {
+	a := newSlashTestAgent(t)
+	a.slashGoal(webMsg(), strongArgs())
+	drainInbound(a.messageBus) // discard the create-time continuation
+
+	res := a.slashGoal(webMsg(), []string{"resume"})
+	if !strings.Contains(res.reply, "Not paused") {
+		t.Errorf("expected wrong-state hint; got %s", res.reply)
+	}
+	select {
+	case msg := <-a.messageBus.Inbound:
+		t.Errorf("resume on active should not publish; got %+v", msg)
+	default:
+	}
+}
+
+// TestSlashGoalResumeOnNoGoal: /goal resume on a session with no
+// goal must reply "No goal set" and stay silent on the bus.
+func TestSlashGoalResumeOnNoGoal(t *testing.T) {
+	a := newSlashTestAgent(t)
+	res := a.slashGoal(webMsg(), []string{"resume"})
+	if !strings.Contains(res.reply, "No goal set") {
+		t.Errorf("expected no-goal reply; got %s", res.reply)
+	}
+}
+
+// TestSlashGoalResumePublishesContinuation: the symmetric of the
+// create-time publish — after pause+resume, the next continuation
+// must hit the bus so the loop actually picks back up.
+func TestSlashGoalResumePublishesContinuation(t *testing.T) {
+	a := newSlashTestAgent(t)
+	a.slashGoal(webMsg(), strongArgs())
+	a.slashGoal(webMsg(), []string{"pause"})
+	drainInbound(a.messageBus)
+
+	res := a.slashGoal(webMsg(), []string{"resume"})
+	if res.reply != "" {
+		t.Fatalf("resume reply = %q, want silent", res.reply)
+	}
+	select {
+	case got := <-a.messageBus.Inbound:
+		if got.Source != bus.SourceGoalContext {
+			t.Errorf("Source = %q, want goal_context", got.Source)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("resume must publish a continuation onto the bus")
+	}
+}
+
 func TestSlashGoalClearRemovesRow(t *testing.T) {
 	a := newSlashTestAgent(t)
 	a.slashGoal(webMsg(), strongArgs())
@@ -206,10 +249,6 @@ func TestSlashGoalClearRemovesRow(t *testing.T) {
 	}
 	if g, _ := a.goalStore.GetGoalBySession(context.Background(), a.name, key); g != nil {
 		t.Error("goal still present after clear")
-	}
-	// Runtime should be stopped so a future /goal mints a fresh one.
-	if a.goalManager.Get(key) != nil {
-		t.Error("runtime still alive after clear; should have been stopped")
 	}
 }
 
@@ -242,17 +281,13 @@ func TestSlashGoalDisabledWithoutStore(t *testing.T) {
 }
 
 // TestPlanModeGatesTrigger: when the turn ran in plan-mode, the
-// trigger hook must NOT spin a continuation. Otherwise plan-mode's
-// whole "let the user review before more work" promise breaks.
+// trigger hook must NOT publish a continuation. Otherwise plan-mode's
+// "let the user review before more work" promise breaks.
 func TestPlanModeGatesTrigger(t *testing.T) {
 	a := newSlashTestAgent(t)
-	// Seed an active goal so the slow-path Ensure check would
-	// otherwise succeed.
 	a.slashGoal(webMsg(), strongArgs())
 	key := a.resolveSessionKey(webMsg())
-
-	// Drain the runtime spawned by slashGoalCreate so we start clean.
-	a.goalManager.StopSession(key)
+	drainInbound(a.messageBus)
 
 	hook := a.goalTriggerHook(allowedContinuationSources)
 	hook(context.Background(), &HookContext{
@@ -260,49 +295,39 @@ func TestPlanModeGatesTrigger(t *testing.T) {
 		GoalSessionKey: key,
 		IsPlanMode:     true,
 	})
-	if a.goalManager.Get(key) != nil {
-		t.Error("plan-mode turn spun up a runtime; trigger gate didn't fire")
+	select {
+	case msg := <-a.messageBus.Inbound:
+		t.Errorf("plan-mode turn published a continuation: %+v", msg)
+	default:
 	}
 }
 
-// TestTriggerLazyEnsureSkipsSessionsWithoutGoal pins the goroutine-
-// leak fix: a turn on a session with no goal must NOT create a
-// runtime. Without the fix, every chat session that ever ran a turn
-// would get its own idle goroutine for up to 30 min.
-func TestTriggerLazyEnsureSkipsSessionsWithoutGoal(t *testing.T) {
+// TestTriggerSkipsSessionsWithoutGoal: a turn on a session with no
+// goal must NOT publish anything onto the bus.
+func TestTriggerSkipsSessionsWithoutGoal(t *testing.T) {
 	a := newSlashTestAgent(t)
 	hook := a.goalTriggerHook(allowedContinuationSources)
 	hook(context.Background(), &HookContext{
 		Source:         bus.SourceUser,
 		GoalSessionKey: "s-no-goal-here",
 	})
-	if a.goalManager.ActiveCount() != 0 {
-		t.Errorf("triggers on session without a goal should not spin runtimes; ActiveCount=%d",
-			a.goalManager.ActiveCount())
+	select {
+	case msg := <-a.messageBus.Inbound:
+		t.Errorf("triggers on session without a goal should not publish; got %+v", msg)
+	default:
 	}
 }
 
-// TestSlashGoalCreateLandsActiveAndTriggers: /goal foo creates the
-// goal Active (no weak-objective gate) and immediately wakes the
-// runtime so the first continuation publishes off the user's own
-// slash turn. Matches Codex's slash-only UX — "type /goal and it
-// just starts".
-func TestSlashGoalCreateLandsActiveAndTriggers(t *testing.T) {
-	a := newSlashTestAgent(t)
-	// Deliberately short + no verify keyword — would have been
-	// auto-paused under the old heuristic. New contract: starts.
-	res := a.slashGoal(webMsg(), []string{"fix", "the", "slow", "dashboard"})
-
-	if strings.Contains(res.reply, "paused") {
-		t.Errorf("create should not auto-pause any objective; got %s", res.reply)
-	}
-	key := a.resolveSessionKey(webMsg())
-	g, _ := a.goalStore.GetGoalBySession(context.Background(), a.name, key)
-	if g == nil || g.Status != goal.StatusActive {
-		t.Fatalf("status = %v, want active", g)
-	}
-	if a.goalManager.Get(key) == nil {
-		t.Error("create should spin a runtime so the first continuation fires immediately")
+// drainInbound clears any pending messages the slash-create path put
+// on the bus, so a later assertion only sees the explicit publish under
+// test.
+func drainInbound(mb *bus.MessageBus) {
+	for {
+		select {
+		case <-mb.Inbound:
+		default:
+			return
+		}
 	}
 }
 
@@ -319,8 +344,5 @@ func TestNewSessionClearsGoal(t *testing.T) {
 	a.clearGoalForSession(oldKey)
 	if g, _ := a.goalStore.GetGoalBySession(context.Background(), a.name, oldKey); g != nil {
 		t.Errorf("/new should have cleared goal for session %q", oldKey)
-	}
-	if a.goalManager.Get(oldKey) != nil {
-		t.Error("runtime for old session should be stopped on /new")
 	}
 }

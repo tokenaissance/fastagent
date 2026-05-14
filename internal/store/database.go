@@ -151,8 +151,8 @@ func (d *DBStore) Migrate(ctx context.Context) error {
 // project_id onto legacy agent_goals tables. All four default to ''
 // — pre-existing rows had no continuation infrastructure attached
 // anyway, so the empty value just means "no routing recorded; can't
-// auto-continue this goal" and the GoalRuntime publish path bails
-// safely. Idempotent.
+// auto-continue this goal" and TryFireContinuation bails safely.
+// Idempotent.
 func (d *DBStore) migrateAgentGoalsAddRouting(ctx context.Context) error {
 	for _, col := range []string{"channel", "account_id", "chat_id", "project_id"} {
 		has, err := d.tableHasColumn(ctx, "agent_goals", col)
@@ -1357,11 +1357,6 @@ func (d *DBStore) migrationSQL() []string {
 		// constraint is the source of truth for "this session already
 		// has a goal" — CreateGoal translates the conflict into
 		// ErrGoalAlreadyExists.
-		//
-		// last_accounted_token_usage is JSONB-style: stored as TEXT for
-		// SQLite compatibility, decoded into agent.TokenUsage by the
-		// callers. Keeping it opaque means the goal_token_delta math
-		// can grow new usage fields without a schema bump.
 		`CREATE TABLE IF NOT EXISTS agent_goals (
 			id TEXT PRIMARY KEY,
 			agent_id TEXT NOT NULL,
@@ -1378,16 +1373,10 @@ func (d *DBStore) migrationSQL() []string {
 			status TEXT NOT NULL DEFAULT 'active',
 			token_budget BIGINT,
 			tokens_used BIGINT NOT NULL DEFAULT 0,
-			last_accounted_token_usage TEXT NOT NULL DEFAULT '',
-			time_used_seconds BIGINT NOT NULL DEFAULT 0,
-			last_accounted_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			safety_max_iterations INTEGER NOT NULL DEFAULT 100,
-			iterations INTEGER NOT NULL DEFAULT 0,
 			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_goals_session ON agent_goals (agent_id, session_key)`,
-		`CREATE INDEX IF NOT EXISTS idx_agent_goals_owner ON agent_goals (owner_user_id, status, updated_at DESC)`,
 		// token_usage_daily is the per-(day, user, agent, session,
 		// provider, model) counter behind the admin Usage dashboard.
 		// Every successful LLM Chat / ChatStream lands one row via
@@ -2881,12 +2870,16 @@ func scanCronJobs(rows *sql.Rows) ([]CronJobRecord, error) {
 
 // --- Agent goals ---
 //
-// All goal columns ride together on every CRUD path — there's no
-// partial-update API beyond UpdateGoalObjective. Mutations are
-// expected to happen via "read, mutate domain object, write back",
-// not via a bag of field updates. Keeps GoalRuntime's accounting
-// logic in Go rather than scattered across UPDATE … SET fragments.
-const goalSelectCols = `id, agent_id, session_key, owner_user_id, channel, account_id, chat_id, project_id, objective, status, token_budget, tokens_used, last_accounted_token_usage, time_used_seconds, last_accounted_at, safety_max_iterations, iterations, created_at, updated_at`
+// All goal columns ride together on every CRUD path — mutations happen
+// via "read, mutate domain object, write back" rather than partial
+// updates. Keeps the per-turn accounting logic in Go rather than
+// scattered across UPDATE … SET fragments.
+//
+// Legacy columns (last_accounted_token_usage / time_used_seconds /
+// last_accounted_at / safety_max_iterations / iterations) still exist
+// on old SQLite databases — they're not in the current CREATE TABLE
+// and the SQL below neither reads nor writes them.
+const goalSelectCols = `id, agent_id, session_key, owner_user_id, channel, account_id, chat_id, project_id, objective, status, token_budget, tokens_used, created_at, updated_at`
 
 func (d *DBStore) CreateGoal(ctx context.Context, g *GoalRecord) error {
 	if g.AgentID == "" || g.SessionKey == "" {
@@ -2902,25 +2895,17 @@ func (d *DBStore) CreateGoal(ctx context.Context, g *GoalRecord) error {
 	if g.UpdatedAt.IsZero() {
 		g.UpdatedAt = now
 	}
-	if g.LastAccountedAt.IsZero() {
-		g.LastAccountedAt = now
-	}
 	if g.Status == "" {
 		g.Status = "active"
 	}
-	if g.SafetyMaxIterations == 0 {
-		g.SafetyMaxIterations = 100
-	}
-	usage := string(g.LastAccountedTokenUsage)
 	_, err := d.db.ExecContext(ctx,
-		fmt.Sprintf(`INSERT INTO agent_goals (id, agent_id, session_key, owner_user_id, channel, account_id, chat_id, project_id, objective, status, token_budget, tokens_used, last_accounted_token_usage, time_used_seconds, last_accounted_at, safety_max_iterations, iterations, created_at, updated_at)
-			VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)`,
-			d.ph(1), d.ph(2), d.ph(3), d.ph(4), d.ph(5), d.ph(6), d.ph(7), d.ph(8), d.ph(9), d.ph(10), d.ph(11), d.ph(12), d.ph(13), d.ph(14), d.ph(15), d.ph(16), d.ph(17), d.ph(18), d.ph(19)),
+		fmt.Sprintf(`INSERT INTO agent_goals (id, agent_id, session_key, owner_user_id, channel, account_id, chat_id, project_id, objective, status, token_budget, tokens_used, created_at, updated_at)
+			VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)`,
+			d.ph(1), d.ph(2), d.ph(3), d.ph(4), d.ph(5), d.ph(6), d.ph(7), d.ph(8), d.ph(9), d.ph(10), d.ph(11), d.ph(12), d.ph(13), d.ph(14)),
 		g.ID, g.AgentID, g.SessionKey, g.OwnerUserID,
 		g.Channel, g.AccountID, g.ChatID, g.ProjectID,
 		g.Objective, g.Status,
-		g.TokenBudget, g.TokensUsed, usage, g.TimeUsedSeconds, g.LastAccountedAt,
-		g.SafetyMaxIterations, g.Iterations, g.CreatedAt, g.UpdatedAt)
+		g.TokenBudget, g.TokensUsed, g.CreatedAt, g.UpdatedAt)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return ErrGoalAlreadyExists
@@ -2938,44 +2923,17 @@ func (d *DBStore) GetGoalBySession(ctx context.Context, agentID, sessionKey stri
 	return scanGoal(row)
 }
 
-func (d *DBStore) GetGoalByID(ctx context.Context, goalID string) (*GoalRecord, error) {
-	row := d.db.QueryRowContext(ctx,
-		fmt.Sprintf(`SELECT `+goalSelectCols+` FROM agent_goals WHERE id = %s`, d.ph(1)),
-		goalID)
-	return scanGoal(row)
-}
-
 func (d *DBStore) UpdateGoal(ctx context.Context, g *GoalRecord) error {
 	if g.ID == "" {
 		return errors.New("store: goal.id is required for UpdateGoal")
 	}
 	g.UpdatedAt = time.Now().UTC()
-	usage := string(g.LastAccountedTokenUsage)
 	res, err := d.db.ExecContext(ctx,
 		fmt.Sprintf(`UPDATE agent_goals
-			SET status = %s, token_budget = %s, tokens_used = %s, last_accounted_token_usage = %s,
-				time_used_seconds = %s, last_accounted_at = %s, iterations = %s,
-				safety_max_iterations = %s, updated_at = %s
+			SET status = %s, token_budget = %s, tokens_used = %s, updated_at = %s
 			WHERE id = %s`,
-			d.ph(1), d.ph(2), d.ph(3), d.ph(4), d.ph(5), d.ph(6), d.ph(7), d.ph(8), d.ph(9), d.ph(10)),
-		g.Status, g.TokenBudget, g.TokensUsed, usage,
-		g.TimeUsedSeconds, g.LastAccountedAt, g.Iterations,
-		g.SafetyMaxIterations, g.UpdatedAt, g.ID)
-	if err != nil {
-		return err
-	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return ErrNotFound
-	}
-	return nil
-}
-
-func (d *DBStore) UpdateGoalObjective(ctx context.Context, goalID, objective string) error {
-	res, err := d.db.ExecContext(ctx,
-		fmt.Sprintf(`UPDATE agent_goals SET objective = %s, updated_at = %s WHERE id = %s`,
-			d.ph(1), d.ph(2), d.ph(3)),
-		objective, time.Now().UTC(), goalID)
+			d.ph(1), d.ph(2), d.ph(3), d.ph(4), d.ph(5)),
+		g.Status, g.TokenBudget, g.TokensUsed, g.UpdatedAt, g.ID)
 	if err != nil {
 		return err
 	}
@@ -2992,29 +2950,6 @@ func (d *DBStore) DeleteGoal(ctx context.Context, goalID string) error {
 	return err
 }
 
-func (d *DBStore) ListGoalsByOwner(ctx context.Context, ownerUserID string, limit int) ([]GoalRecord, error) {
-	if limit <= 0 {
-		limit = 50
-	}
-	rows, err := d.db.QueryContext(ctx,
-		fmt.Sprintf(`SELECT `+goalSelectCols+` FROM agent_goals WHERE owner_user_id = %s ORDER BY updated_at DESC LIMIT %s`,
-			d.ph(1), d.ph(2)),
-		ownerUserID, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []GoalRecord
-	for rows.Next() {
-		g, err := scanGoalFromRows(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, *g)
-	}
-	return out, rows.Err()
-}
-
 // scanGoal reads one row (from QueryRow) into a GoalRecord. Returns
 // ErrNotFound (via scanErr) when the query matched nothing.
 func scanGoal(row *sql.Row) (*GoalRecord, error) {
@@ -3023,25 +2958,8 @@ func scanGoal(row *sql.Row) (*GoalRecord, error) {
 	if err := row.Scan(&g.ID, &g.AgentID, &g.SessionKey, &g.OwnerUserID,
 		&g.Channel, &g.AccountID, &g.ChatID, &g.ProjectID,
 		&g.Objective, &g.Status,
-		&tokenBudget, &g.TokensUsed, &g.LastAccountedTokenUsage, &g.TimeUsedSeconds,
-		&g.LastAccountedAt, &g.SafetyMaxIterations, &g.Iterations, &g.CreatedAt, &g.UpdatedAt); err != nil {
+		&tokenBudget, &g.TokensUsed, &g.CreatedAt, &g.UpdatedAt); err != nil {
 		return nil, scanErr(err)
-	}
-	if tokenBudget.Valid {
-		g.TokenBudget = &tokenBudget.Int64
-	}
-	return &g, nil
-}
-
-func scanGoalFromRows(rows *sql.Rows) (*GoalRecord, error) {
-	var g GoalRecord
-	var tokenBudget sql.NullInt64
-	if err := rows.Scan(&g.ID, &g.AgentID, &g.SessionKey, &g.OwnerUserID,
-		&g.Channel, &g.AccountID, &g.ChatID, &g.ProjectID,
-		&g.Objective, &g.Status,
-		&tokenBudget, &g.TokensUsed, &g.LastAccountedTokenUsage, &g.TimeUsedSeconds,
-		&g.LastAccountedAt, &g.SafetyMaxIterations, &g.Iterations, &g.CreatedAt, &g.UpdatedAt); err != nil {
-		return nil, err
 	}
 	if tokenBudget.Valid {
 		g.TokenBudget = &tokenBudget.Int64

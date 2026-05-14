@@ -9,9 +9,7 @@ import (
 )
 
 // newAgentForWireTest builds the minimal Agent skeleton the wiring
-// tests need. We don't go through NewAgentWithSkillsCfg because that
-// drags in the full config + workspace machinery; the wiring path
-// only needs registry / hooks / messageBus / agentID / ownerUserID.
+// tests need — registry / hooks / messageBus / agentID / ownerUserID.
 func newAgentForWireTest(t *testing.T) *Agent {
 	t.Helper()
 	return &Agent{
@@ -29,127 +27,44 @@ func newAgentForWireTest(t *testing.T) *Agent {
 func TestWireGoalsNilStoreIsNoOp(t *testing.T) {
 	a := newAgentForWireTest(t)
 	a.WireGoals(nil)
-	if a.GoalStore() != nil {
-		t.Error("GoalStore should remain nil after WireGoals(nil)")
+	if a.goalStore != nil {
+		t.Error("goalStore should remain nil after WireGoals(nil)")
 	}
-	if a.GoalManager() != nil {
-		t.Error("GoalManager should remain nil after WireGoals(nil)")
-	}
-	if a.registry.GetFunc("get_goal") != nil {
-		t.Error("get_goal should not be registered when store is nil")
+	if a.registry.GetFunc("update_goal") != nil {
+		t.Error("update_goal should not be registered when store is nil")
 	}
 }
 
-// TestWireGoalsRegistersToolsAndHook is the happy-path smoke test:
-// after WireGoals returns, the 3 goal tools must be on the registry
-// and the AfterModelCall hook must be present.
-func TestWireGoalsRegistersToolsAndHook(t *testing.T) {
+// TestWireGoalsRegistersToolAndHook is the happy-path smoke test:
+// after WireGoals returns, update_goal is registered and the
+// AfterModelCall hook is present.
+func TestWireGoalsRegistersToolAndHook(t *testing.T) {
 	a := newAgentForWireTest(t)
 	st := &memGoalStore{}
 	a.WireGoals(st)
-	t.Cleanup(func() {
-		if a.goalManager != nil {
-			a.goalManager.Shutdown()
-		}
-	})
 
-	if a.GoalStore() != st {
-		t.Errorf("GoalStore() returned %v, want %v", a.GoalStore(), st)
+	if a.goalStore != st {
+		t.Errorf("goalStore = %v, want %v", a.goalStore, st)
 	}
-	if a.GoalManager() == nil {
-		t.Fatal("GoalManager() returned nil after WireGoals")
+	if a.registry.GetFunc("update_goal") == nil {
+		t.Error("update_goal not registered")
 	}
-	for _, name := range []string{"get_goal", "create_goal", "update_goal"} {
-		if a.registry.GetFunc(name) == nil {
-			t.Errorf("tool %q not registered", name)
-		}
-	}
-	// One AfterModelCall registration came from WireGoals; LoggingHook
-	// was already there, so we expect ≥ 1 — match >= rather than ==
-	// to stay robust against the hook constructor adding extras later.
 	if len(a.hooks.hooks[AfterModelCall]) < 1 {
 		t.Errorf("AfterModelCall hook count = %d, want ≥1", len(a.hooks.hooks[AfterModelCall]))
 	}
-}
-
-// TestWireGoalsIsIdempotent: WireGoals replaces an existing manager
-// rather than leaking goroutines. Hot-reload paths or
-// re-provisioning flows can call it twice safely.
-func TestWireGoalsIsIdempotent(t *testing.T) {
-	a := newAgentForWireTest(t)
-	a.WireGoals(&memGoalStore{})
-	first := a.GoalManager()
-	a.WireGoals(&memGoalStore{})
-	second := a.GoalManager()
-	t.Cleanup(second.Shutdown)
-
-	if first == second {
-		t.Error("second WireGoals should produce a fresh GoalManager (the old one was shutdown)")
-	}
-	// First manager's runtimes must be reaped — verify via ActiveCount.
-	// Add then remove a session to confirm the OLD manager won't
-	// accept new work (it should be inactive after Shutdown).
-	if gr := first.Ensure("s-1", "agent-test", "user-1"); gr != nil {
-		t.Error("first manager should refuse Ensure after Shutdown (Start was reset)")
+	if len(a.hooks.hooks[PostTurn]) < 1 {
+		t.Errorf("PostTurn hook count = %d, want ≥1", len(a.hooks.hooks[PostTurn]))
 	}
 }
 
-// TestWireGoalsToolUsesOwnerAndAgentID confirms the registered tools
-// pick up the agent's owner + name correctly, not whatever default
-// the registry was constructed with. Without this, a multi-user
-// install could mint goals against the wrong user_id.
-func TestWireGoalsToolUsesOwnerAndAgentID(t *testing.T) {
-	a := newAgentForWireTest(t)
-	a.name = "agent-Z"
-	a.ownerUserID = "user-Z"
-	st := &memGoalStore{}
-	a.WireGoals(st)
-	t.Cleanup(a.goalManager.Shutdown)
-
-	a.registry.SetGoalSessionKey("s-Z")
-	if _, err := a.registry.GetFunc("create_goal")(t.Context(),
-		[]byte(`{"objective":"x"}`)); err != nil {
-		t.Fatalf("create_goal: %v", err)
-	}
-	g, _ := st.GetGoalBySession(t.Context(), "agent-Z", "s-Z")
-	if g == nil {
-		t.Fatal("goal not created under expected (agent-Z, s-Z)")
-	}
-	if g.OwnerUserID != "user-Z" {
-		t.Errorf("OwnerUserID = %q, want user-Z", g.OwnerUserID)
-	}
-}
-
-// TestGoalManagerLifecycleAfterWire: the manager returned by
-// GoalManager() is in the Started state — Ensure must return a real
-// runtime, not nil. Without this, a freshly wired agent would
-// silently skip every Trigger call from the agent loop.
-func TestGoalManagerLifecycleAfterWire(t *testing.T) {
-	a := newAgentForWireTest(t)
-	a.WireGoals(&memGoalStore{})
-	t.Cleanup(a.goalManager.Shutdown)
-
-	gr := a.GoalManager().Ensure("s-1", a.name, a.ownerUserID)
-	if gr == nil {
-		t.Fatal("Ensure returned nil — GoalManager wasn't Started by WireGoals")
-	}
-}
-
-// staticGoalStore is a minimal goal.Store stub for the tests above
-// that don't need the full per-session map (the tests already in
-// goal_hook_test.go share the same name `memGoalStore` in this
-// package — re-use that one). The compile-time check below catches
-// drift if the goal.Store interface grows.
+// Compile-time check that the in-package mem store satisfies goal.Store.
 var _ goal.Store = (*memGoalStore)(nil)
 
-// TestGoalTriggerHookGatesOnUserSource: the PostTurn trigger must
-// fire only on genuine user turns. Otherwise a cron tick / sub-agent
-// spawn / runtime-injected goal_continuation would each trigger
-// another continuation and we'd loop forever.
-func TestGoalTriggerHookGatesOnUserSource(t *testing.T) {
+// TestGoalTriggerHookGatesOnSource: the PostTurn trigger must fire
+// only on allowed sources (user + goal_context). Cron / heartbeat /
+// sub-agent turns must NOT chain a continuation or we'd loop.
+func TestGoalTriggerHookGatesOnSource(t *testing.T) {
 	a := newAgentForWireTest(t)
-	// Pre-seed an active goal so the lazy-Ensure gate (no goal → no
-	// runtime) doesn't swallow the user-source assertion below.
 	st := &memGoalStore{}
 	_ = st.CreateGoal(t.Context(), &goal.Goal{
 		ID:         "g-fixture",
@@ -160,41 +75,41 @@ func TestGoalTriggerHookGatesOnUserSource(t *testing.T) {
 		Status:     goal.StatusActive,
 	})
 	a.WireGoals(st)
-	t.Cleanup(a.goalManager.Shutdown)
 
 	hook := a.goalTriggerHook(allowedContinuationSources)
-	// Non-allowed sources must short-circuit at the Source gate,
-	// BEFORE the store read — so even with a seeded goal they
-	// shouldn't spin a runtime. Cron / heartbeat / sub-agent /
-	// goal_budget_limit are excluded; goal_continuation IS allowed
-	// (it's how the loop chains itself).
+	// Non-allowed sources must short-circuit at the Source gate.
 	for _, src := range []string{
-		bus.SourceCron, bus.SourceHeartbeat, bus.SourceSubAgent, bus.SourceGoalBudgetLimit,
+		bus.SourceCron, bus.SourceHeartbeat, bus.SourceSubAgent,
 	} {
 		hook(t.Context(), &HookContext{
 			Source:         src,
-			GoalSessionKey: "s-user", // same key the goal is on
+			GoalSessionKey: "s-user",
 		})
 	}
-	if got := a.goalManager.ActiveCount(); got != 0 {
-		t.Errorf("non-allowed-source hooks created %d runtimes, want 0", got)
+	select {
+	case msg := <-a.messageBus.Inbound:
+		t.Errorf("non-allowed source produced an inbound: %+v", msg)
+	default:
 	}
 
-	// And the converse: a genuine user turn DOES spin a runtime when
-	// a goal exists.
+	// A genuine user turn fires a continuation onto the bus.
 	hook(t.Context(), &HookContext{
 		Source:         bus.SourceUser,
 		GoalSessionKey: "s-user",
 	})
-	if got := a.goalManager.ActiveCount(); got != 1 {
-		t.Errorf("user-source hook created %d runtimes, want 1", got)
+	select {
+	case msg := <-a.messageBus.Inbound:
+		if msg.Source != bus.SourceGoalContext {
+			t.Errorf("Source = %q, want goal_context", msg.Source)
+		}
+	default:
+		t.Error("user-source PostTurn should have published a continuation")
 	}
 }
 
-// TestGoalTriggerHookAllowsContinuationChain: goal_continuation
-// must be in the allowed set — otherwise the loop wouldn't chain
-// itself past the first continuation (each continuation's PostTurn
-// would refuse to publish the next).
+// TestGoalTriggerHookAllowsContinuationChain: goal_context must be in
+// the allowed set — otherwise the loop wouldn't chain itself past the
+// first continuation.
 func TestGoalTriggerHookAllowsContinuationChain(t *testing.T) {
 	a := newAgentForWireTest(t)
 	st := &memGoalStore{}
@@ -207,15 +122,19 @@ func TestGoalTriggerHookAllowsContinuationChain(t *testing.T) {
 		Status:     goal.StatusActive,
 	})
 	a.WireGoals(st)
-	t.Cleanup(a.goalManager.Shutdown)
 
 	hook := a.goalTriggerHook(allowedContinuationSources)
 	hook(t.Context(), &HookContext{
-		Source:         bus.SourceGoalContinuation,
+		Source:         bus.SourceGoalContext,
 		GoalSessionKey: "s-1",
 	})
-	if got := a.goalManager.ActiveCount(); got != 1 {
-		t.Errorf("goal_continuation should trigger to chain the loop; got %d runtimes", got)
+	select {
+	case msg := <-a.messageBus.Inbound:
+		if msg.Source != bus.SourceGoalContext {
+			t.Errorf("Source = %q, want goal_context", msg.Source)
+		}
+	default:
+		t.Error("goal_context source should have chained the loop")
 	}
 }
 
@@ -224,11 +143,41 @@ func TestGoalTriggerHookAllowsContinuationChain(t *testing.T) {
 func TestGoalTriggerHookNoOpWithoutSessionKey(t *testing.T) {
 	a := newAgentForWireTest(t)
 	a.WireGoals(&memGoalStore{})
-	t.Cleanup(a.goalManager.Shutdown)
 
 	hook := a.goalTriggerHook(allowedContinuationSources)
 	hook(t.Context(), &HookContext{Source: bus.SourceUser, GoalSessionKey: ""})
-	if got := a.goalManager.ActiveCount(); got != 0 {
-		t.Errorf("empty session key should not create a runtime; got %d", got)
+	select {
+	case msg := <-a.messageBus.Inbound:
+		t.Errorf("empty session key should not publish; got %+v", msg)
+	default:
+	}
+}
+
+// TestGoalTriggerHookNoOpInPlanMode: plan-mode pauses for human
+// review; auto-firing the next continuation behind the user would
+// defeat the point.
+func TestGoalTriggerHookNoOpInPlanMode(t *testing.T) {
+	a := newAgentForWireTest(t)
+	st := &memGoalStore{}
+	_ = st.CreateGoal(t.Context(), &goal.Goal{
+		ID:         "g-fixture",
+		AgentID:    a.name,
+		SessionKey: "s-plan",
+		Channel:    "web",
+		ChatID:     "c",
+		Status:     goal.StatusActive,
+	})
+	a.WireGoals(st)
+
+	hook := a.goalTriggerHook(allowedContinuationSources)
+	hook(t.Context(), &HookContext{
+		Source:         bus.SourceUser,
+		GoalSessionKey: "s-plan",
+		IsPlanMode:     true,
+	})
+	select {
+	case msg := <-a.messageBus.Inbound:
+		t.Errorf("plan-mode turn should not auto-continue; got %+v", msg)
+	default:
 	}
 }

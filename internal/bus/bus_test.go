@@ -23,12 +23,11 @@ func TestSourceUserIsEmpty(t *testing.T) {
 // gets classified as user (or vice versa).
 func TestSourceConstantsDistinct(t *testing.T) {
 	all := map[string]string{
-		"SourceUser":             SourceUser,
-		"SourceCron":             SourceCron,
-		"SourceHeartbeat":        SourceHeartbeat,
-		"SourceSubAgent":         SourceSubAgent,
-		"SourceGoalContinuation": SourceGoalContinuation,
-		"SourceGoalBudgetLimit":  SourceGoalBudgetLimit,
+		"SourceUser":        SourceUser,
+		"SourceCron":        SourceCron,
+		"SourceHeartbeat":   SourceHeartbeat,
+		"SourceSubAgent":    SourceSubAgent,
+		"SourceGoalContext": SourceGoalContext,
 	}
 	seen := make(map[string]string, len(all))
 	for name, val := range all {

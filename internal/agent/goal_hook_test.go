@@ -44,9 +44,6 @@ func (m *memGoalStore) GetGoalBySession(_ context.Context, agentID, sessionKey s
 	clone := *m.row
 	return &clone, nil
 }
-func (m *memGoalStore) GetGoalByID(context.Context, string) (*goal.Goal, error) {
-	return nil, goal.ErrNotFound
-}
 func (m *memGoalStore) UpdateGoal(_ context.Context, g *goal.Goal) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -57,7 +54,6 @@ func (m *memGoalStore) UpdateGoal(_ context.Context, g *goal.Goal) error {
 	m.row = &clone
 	return nil
 }
-func (m *memGoalStore) UpdateObjective(context.Context, string, string) error { return nil }
 func (m *memGoalStore) DeleteGoal(_ context.Context, goalID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -66,10 +62,6 @@ func (m *memGoalStore) DeleteGoal(_ context.Context, goalID string) error {
 	}
 	return nil
 }
-func (m *memGoalStore) ListGoalsByOwner(context.Context, string, int) ([]*goal.Goal, error) {
-	return nil, nil
-}
-
 // seedActiveGoal places a fresh active goal in the store. Returns
 // the agentID + sessionKey the hook context should reference.
 func seedActiveGoal(t *testing.T, st *memGoalStore, budget int64) (agentID, sessionKey string) {
@@ -177,8 +169,8 @@ func TestTokenAccountingHookPublishesBudgetLimit(t *testing.T) {
 
 	select {
 	case msg := <-mb.Inbound:
-		if msg.Source != bus.SourceGoalBudgetLimit {
-			t.Errorf("Source = %q, want goal_budget_limit", msg.Source)
+		if msg.Source != bus.SourceGoalContext {
+			t.Errorf("Source = %q, want goal_context", msg.Source)
 		}
 		if !strings.Contains(msg.Text, "budget_limited") {
 			t.Errorf("budget_limit prompt missing status word:\n%s", msg.Text)
@@ -234,8 +226,9 @@ func TestTokenAccountingHookSkipsWhenNoUsage(t *testing.T) {
 	agentID, sessionKey := seedActiveGoal(t, st, 1000)
 	hook := NewTokenAccountingHook(st, nil, agentID)
 
-	// Response.Usage is nil — provider didn't report (Ollama etc.).
-	// We deliberately don't error; we just skip folding.
+	// Response.Usage is the zero value — provider didn't report
+	// (e.g. local Ollama). Don't error; just skip folding so a
+	// budget-bound goal doesn't get billed against air.
 	hook(context.Background(), &HookContext{
 		Point:          AfterModelCall,
 		Response:       &provider.Response{},
@@ -243,7 +236,7 @@ func TestTokenAccountingHookSkipsWhenNoUsage(t *testing.T) {
 	})
 	g, _ := st.GetGoalBySession(context.Background(), agentID, sessionKey)
 	if g.TokensUsed != 0 {
-		t.Errorf("TokensUsed mutated to %d on nil-Usage hook", g.TokensUsed)
+		t.Errorf("TokensUsed mutated to %d on zero-Usage hook", g.TokensUsed)
 	}
 }
 
@@ -309,21 +302,20 @@ func TestTokenAccountingHookNilStoreReturnsNil(t *testing.T) {
 
 func TestTokenAccountingHookSkipsZeroDelta(t *testing.T) {
 	// An all-cached prompt with no output produces 0 delta — the
-	// hook should skip the persist, not write an unchanged row. We
-	// verify the skip by setting saveErr: if the hook tries to
-	// persist, the error would be logged but the row stays.
-	st := &memGoalStore{saveErr: errors.New("should not be called")}
+	// hook must skip the persist round-trip rather than rewrite an
+	// unchanged row. We poke the saveErr fuse: if the hook reaches
+	// UpdateGoal, the test fails on the row check.
+	st := &memGoalStore{}
 	agentID, sessionKey := seedActiveGoal(t, st, 1000)
-	st.saveErr = errors.New("save should not be reached") // re-set after seed
+	st.saveErr = errors.New("UpdateGoal should not be called for zero-delta")
 
 	hook := NewTokenAccountingHook(st, nil, agentID)
+	// CacheReadTokens > 0 keeps the "is Usage entirely zero" gate
+	// from short-circuiting; InputTokens=0 + OutputTokens=0 makes
+	// the actual goal-token delta zero.
 	hook(context.Background(), makeAfterModelCall(sessionKey, provider.Usage{
-		InputTokens: 100, CacheReadTokens: 100,
+		CacheReadTokens: 100,
 	}))
-	// If the hook had called UpdateGoal, our memGoalStore would have
-	// returned saveErr and logged a warn — but the goal would have
-	// been mutated in-place first. The cheap assertion: the row's
-	// TokensUsed must still be 0 (FoldUsage skipped, store skipped).
 	g, _ := st.GetGoalBySession(context.Background(), agentID, sessionKey)
 	if g.TokensUsed != 0 {
 		t.Errorf("TokensUsed = %d, want 0 on zero-delta call", g.TokensUsed)

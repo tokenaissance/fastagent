@@ -36,29 +36,18 @@ type HookContext struct {
 	ToolCallCount int       // total tool calls in this turn (for PostTurn)
 	Workspace     string    // agent workspace path (for PostTurn)
 	UserID        string    // owning user ID for multi-user namespace isolation
-	// --- Session identity (populated at PostTurn) ---
-	//
-	// PostTurn hooks need to know which conversation this turn belongs
-	// to so they can address session-scoped state (e.g. /goal's
-	// GoalRuntime triggers fire per (agent, sessionKey)). The full
-	// (channel, accountID, chatID, projectID) quadruple uniquely names
-	// a fastclaw session — see session.Manager.Get for the resolution
-	// rules.
-	Channel   string
-	AccountID string
-	ChatID    string // existing field; the quadruple's anchor
-	ProjectID string
+	ChatID        string    // used by the plugin hook adapter
 	// Source mirrors bus.InboundMessage.Source so PostTurn hooks can
 	// distinguish a real user turn from a cron / heartbeat / sub-agent
-	// / goal-continuation turn. Empty means user. Hooks that should
-	// only fire on user-originated turns (notably the goal trigger)
-	// gate on this.
+	// / goal-context turn. Empty means user. Hooks that should only
+	// fire on user-originated turns (notably the goal trigger) gate
+	// on this.
 	Source string
 
 	// GoalSessionKey is the persistent session_key for the in-flight
-	// turn, populated alongside ChatID. The goal-accounting hook reads
-	// it to look up the active goal (if any) for this session. Empty
-	// when the turn happened outside a chat context.
+	// turn. The goal-accounting hook reads it to look up the active
+	// goal (if any) for this session. Empty when the turn happened
+	// outside a chat context.
 	GoalSessionKey string
 
 	// IsPlanMode reports whether this turn ran in plan-mode (model

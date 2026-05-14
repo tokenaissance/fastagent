@@ -43,11 +43,11 @@ type Message struct {
 
 	// Origin distinguishes runtime-injected messages from real user /
 	// assistant exchanges. Empty (OriginUser) is the default. Currently
-	// only OriginGoalContext is set, by the GoalRuntime continuation
-	// path. User-visible history (WebChatHistory) and the FTS index
-	// filter on this so synthetic prompts don't pollute either view.
-	// The field rides as part of the JSONB sessions.messages working
-	// set and as a column on the structured session_messages archive.
+	// only OriginGoalContext is set, by the /goal continuation path.
+	// User-visible history (WebChatHistory) and the FTS index filter
+	// on this so synthetic prompts don't pollute either view. Rides
+	// as part of the JSONB sessions.messages working set and as a
+	// column on the structured session_messages archive.
 	Origin string `json:"origin,omitempty"`
 }
 

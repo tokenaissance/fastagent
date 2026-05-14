@@ -81,13 +81,12 @@ type Agent struct {
 	// + isolated /workspace mounts.
 	sandboxPool sandbox.ExecutorPool
 
-	// goalStore + goalManager are the /goal feature's per-Agent state.
-	// Wired by WireGoals; nil on agents whose Manager didn't provide a
-	// data store (legacy single-user installs). When nil, the goal
-	// tools / hook are simply not registered, so a missing store
-	// silently degrades to "feature off" rather than crashing.
-	goalStore   goal.Store
-	goalManager *goal.GoalManager
+	// goalStore is the /goal feature's per-Agent state. Wired by
+	// WireGoals; nil on agents whose Manager didn't provide a data
+	// store (legacy single-user installs). When nil, the goal tools
+	// and hook are simply not registered, so a missing store silently
+	// degrades to "feature off" rather than crashing.
+	goalStore goal.Store
 }
 
 // SetSandboxPool wires the per-(agent,session) executor pool. Called by
@@ -610,90 +609,53 @@ func (a *Agent) HookRegistry() *HookRegistry {
 
 // WireGoals turns the /goal feature on for this Agent. Side effects:
 //
-//   - Stash the store + a freshly started GoalManager on the agent.
+//   - Stash the store on the agent.
 //   - Register the AfterModelCall token-accounting hook (folds
 //     Response.Usage into the active goal, flips budget_limited on
 //     exhaust).
-//   - Register the three model-callable tools (get_goal, create_goal,
-//     update_goal).
+//   - Register the model-callable update_goal tool.
+//   - Register a PostTurn hook that, when allowed, fires the next
+//     continuation synchronously.
 //
-// Must be called after SetOwnerUserID so the registered tools and
+// Must be called after SetOwnerUserID so the registered tool and
 // hook carry the right owner. Called by manager.buildAgent when a
-// data store is available. When the data store is absent (legacy
-// single-user installs) the feature is simply off and goal-related
-// reads return ErrNotFound — no crashing, no half-state.
-//
-// Idempotent: a second call replaces the previous wiring (cancels
-// the old GoalManager and registers fresh tools). In practice only
-// called once per Agent lifetime.
+// data store is available; nil store turns the feature off cleanly.
 func (a *Agent) WireGoals(st goal.Store) {
 	if st == nil {
 		return
 	}
-	if a.goalManager != nil {
-		a.goalManager.Shutdown()
-	}
 	a.goalStore = st
-	a.goalManager = goal.NewGoalManager(st, a.messageBus)
-	// Tying GoalManager's lifetime to a background context is fine
-	// for now — fastclaw doesn't have a per-agent teardown path, and
-	// GoalRuntime self-terminates after runtimeIdleShutdown so no
-	// goroutine accumulates indefinitely on agents that never touch
-	// the goal feature.
-	a.goalManager.Start(context.Background())
 
 	if hook := NewTokenAccountingHook(st, a.messageBus, a.name); hook != nil {
 		a.hooks.Register(AfterModelCall, hook)
 	}
-	tools.RegisterGoalTools(a.registry, st, a.name, a.ownerUserID)
+	tools.RegisterGoalTools(a.registry, st, a.name)
 
 	// Trigger continuation only at turn boundaries (PostTurn), not
-	// mid-turn from AfterToolCall. Two reasons:
+	// mid-turn from AfterToolCall. AfterToolCall publishing
+	// optimistically while a turn is still running opens a window
+	// where the next continuation lands in bus.Inbound before a
+	// concurrent /goal pause can; PostTurn closes that window.
 	//
-	// 1. Race correctness. AfterToolCall publishing optimistically
-	//    while a turn is still running opens a window where the
-	//    runtime publishes continuation N+1 to bus.Inbound BEFORE the
-	//    user's /goal pause can land. Both end up in the chat queue;
-	//    the worker pulls N+1 first; HandleMessage's continuation-
-	//    status gate reads DB status = Active (pause hasn't been
-	//    dequeued yet) and lets N+1 through. User sees one extra
-	//    reply after pause. Moving the publish to PostTurn closes
-	//    this window: pause has the entire duration of turn N to
-	//    enter bus.Inbound; it always lands before N+1 in the chat
-	//    queue, so the gate catches it.
-	//
-	// 2. Negligible cost. Continuation just fires one tool-call cycle
-	//    later (after the turn ends instead of during it). Codex's
-	//    own design is "fire continuation when idle", which is what
-	//    PostTurn approximates.
-	//
-	// PostTurn fires for every source — we accept user (genuine
-	// resume) and goal_continuation (chain the loop). Other sources
-	// (cron, heartbeat, sub-agent, goal_budget_limit) must NOT
-	// auto-continue or we'd loop or fire after the budget wrap-up.
+	// PostTurn fires for every source — we accept user (a real reply
+	// or a /goal resume) and goal_context (chain the loop). Other
+	// sources (cron, heartbeat, sub-agent) must NOT auto-continue or
+	// we'd loop. The budget_limit wrap-up arrives as goal_context too,
+	// but TryFireContinuation re-reads the goal status and bails on
+	// non-Active goals, so a wrap-up turn doesn't cause a chain.
 	a.hooks.Register(PostTurn, a.goalTriggerHook(allowedContinuationSources))
 }
 
 // allowedContinuationSources is the whitelist of bus sources that
 // may auto-fire the next continuation from a PostTurn hook. User
-// turns start / resume the loop; goal_continuation turns chain it.
-// Everyone else (cron, heartbeat, sub-agent, goal_budget_limit) is
-// excluded — see WireGoals for the rationale.
+// turns start / resume the loop; goal_context turns chain it.
 var allowedContinuationSources = map[string]bool{
-	bus.SourceUser:             true,
-	bus.SourceGoalContinuation: true,
+	bus.SourceUser:        true,
+	bus.SourceGoalContext: true,
 }
 
-// goalTriggerHook builds a HookFunc that wakes the GoalRuntime for
-// the in-flight session. Gating rules:
-//
-//   - Source: only sources in allowed pass — see
-//     allowedContinuationSources for the rationale.
-//   - Plan mode: a plan-only turn is the user reviewing a plan —
-//     auto-continuing behind them defeats the point.
-//   - Lazy Ensure: don't spin a runtime per session that has no goal.
-//     If a runtime already exists, just Trigger; otherwise do a
-//     cheap store read first and skip when no row.
+// goalTriggerHook builds a HookFunc that fires the next continuation
+// for the in-flight session, when all gates pass.
 func (a *Agent) goalTriggerHook(allowed map[string]bool) HookFunc {
 	return func(ctx context.Context, hc *HookContext) {
 		if !allowed[hc.Source] {
@@ -705,77 +667,20 @@ func (a *Agent) goalTriggerHook(allowed map[string]bool) HookFunc {
 		if hc.GoalSessionKey == "" {
 			return
 		}
-		gm := a.goalManager
-		if gm == nil {
-			return
-		}
-		// Fast path: a runtime already exists for this session. Just
-		// poke it — no store read needed.
-		if gr := gm.Get(hc.GoalSessionKey); gr != nil {
-			gr.Trigger()
-			return
-		}
-		// Slow path: no runtime yet. Check the store before spinning
-		// one up — sessions that never set a goal would otherwise get
-		// an idle goroutine per turn that hangs around for 30 min.
 		if a.goalStore == nil {
 			return
 		}
-		g, err := a.goalStore.GetGoalBySession(ctx, a.name, hc.GoalSessionKey)
-		if err != nil || g == nil || g.Status != goal.StatusActive {
-			return
-		}
-		gr := gm.Ensure(hc.GoalSessionKey, a.name, a.ownerUserID)
-		if gr != nil {
-			gr.Trigger()
-		}
+		goal.TryFireContinuation(ctx, a.goalStore, a.messageBus, a.name, hc.GoalSessionKey)
 	}
 }
 
-// GoalManager exposes the running GoalManager (or nil when /goal is
-// not wired). Slash handlers and REST endpoints use this to mint /
-// stop per-session runtimes when goals are created or cleared.
-func (a *Agent) GoalManager() *goal.GoalManager {
-	return a.goalManager
-}
-
-// GoalStore exposes the goal.Store wired into this agent (or nil
-// when /goal is not wired). Slash + REST handlers read/write
-// goals through this rather than reaching into the underlying
-// store.Store directly.
-func (a *Agent) GoalStore() goal.Store {
-	return a.goalStore
-}
-
-// shouldProcessGoalContinuation gates a SourceGoalContinuation
-// inbound on the current goal status. Returns true (process the
-// message) when:
-//   - the message isn't a goal_continuation at all (everyone else
-//     passes through unchanged)
-//   - goal feature isn't wired (legacy installs without a store)
-//   - the goal exists and is Active
-//
-// Returns false (drop) when the goal was paused/cleared between
-// the GoalRuntime publishing this continuation and the gateway
-// dispatching it back to HandleMessage. The race is real because
-// AfterToolCall on a continuation turn fires a Trigger that
-// publishes the next continuation BEFORE the current turn finishes;
-// a /goal pause queued during the current turn ends up after the
-// just-published continuation in bus.Inbound and would otherwise
-// see one extra agent reply before silence.
-//
-// SourceGoalBudgetLimit is exempt — that's the wrap-up turn the
-// token-accounting hook explicitly published when status flipped
-// to BudgetLimited; gating it on status==Active would drop the
-// wrap-up. Honoring it post-flip is correct.
 // sessionHasActiveGoal reports whether the session this inbound is
 // for has a goal in Active state. Used as a hard precedence rule
 // over auto-plan-mode: an active goal is an autonomous loop; plan-mode
 // is a "wait for human approval" gate. The two cannot coexist on the
 // same turn without breaking the goal's autonomy guarantee.
 //
-// Best-effort: a store error or missing session returns false (the
-// caller treats absence as "no active goal"). The check is one
+// Best-effort: a store error or missing session returns false. One
 // indexed read per inbound turn — cheap enough to skip caching.
 func (a *Agent) sessionHasActiveGoal(ctx context.Context, msg bus.InboundMessage) bool {
 	if a.goalStore == nil || a.sessions == nil {
@@ -792,42 +697,16 @@ func (a *Agent) sessionHasActiveGoal(ctx context.Context, msg bus.InboundMessage
 	return g.Status == goal.StatusActive
 }
 
-func (a *Agent) shouldProcessGoalContinuation(ctx context.Context, msg bus.InboundMessage) bool {
-	if msg.Source != bus.SourceGoalContinuation {
-		return true
-	}
-	if a.goalStore == nil || a.sessions == nil {
-		// Continuation arrived on an agent that doesn't have /goal
-		// wired (test rig, legacy install). Don't second-guess —
-		// fall through and let the normal path handle it.
-		return true
-	}
-	sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID, msg.ProjectID)
-	if sess == nil {
-		return true
-	}
-	g, err := a.goalStore.GetGoalBySession(ctx, a.name, sess.SessionKey())
-	if err != nil || g == nil {
-		// Goal cleared between publish and delivery — drop. This is
-		// also the "no goal exists" case for a stray inbound, which
-		// is appropriate to drop because the continuation prompt is
-		// meaningless without a goal.
-		return false
-	}
-	return g.Status == goal.StatusActive
-}
-
 // buildUserMessage flattens an inbound message into the user-role
 // provider.Message that lands in session history. Tags Origin so
-// goal-runtime continuations get recognized by the compaction /
+// goal-context continuations get recognized by the compaction /
 // WebChatHistory / FTS filters (which check Origin != OriginUser),
 // and merges PhotoURL (legacy IM single) + PhotoURLs (web multi)
 // into one ContentParts slice. Image-only sends skip a leading
 // empty text part — some upstreams reject content-less wire messages.
 func buildUserMessage(msg bus.InboundMessage) provider.Message {
 	origin := provider.OriginUser
-	switch msg.Source {
-	case bus.SourceGoalContinuation, bus.SourceGoalBudgetLimit:
+	if msg.Source == bus.SourceGoalContext {
 		origin = provider.OriginGoalContext
 	}
 	userMsg := provider.Message{
@@ -1452,20 +1331,6 @@ func (a *Agent) handlePlanMode(ctx context.Context, msg bus.InboundMessage) stri
 
 // HandleMessage processes an inbound message through the ReAct loop.
 func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) string {
-	// Drop stale goal continuations whose goal was paused or cleared
-	// between publish and delivery. Without this, a user's /goal
-	// pause that lands after a continuation has been queued would
-	// still see one more agent reply before silence. The gate is
-	// only applied to SourceGoalContinuation — SourceGoalBudgetLimit
-	// is the wrap-up turn we deliberately published *because* the
-	// goal flipped to BudgetLimited, so it must always pass.
-	if !a.shouldProcessGoalContinuation(ctx, msg) {
-		slog.Debug("dropping stale goal continuation",
-			"agent", a.name, "channel", msg.Channel, "chat", msg.ChatID)
-		emitEvent(ctx, ChatEvent{Type: "done"})
-		return ""
-	}
-
 	// Check for slash commands first. Empty reply means "handled but
 	// intentionally silent" — /goal foo and /goal resume both fall
 	// through to a streaming continuation that IS the response, so
@@ -1490,24 +1355,21 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	// Two opt-outs that take precedence over the heuristic:
 	//
 	//   1. Runtime-originated turns (cron / heartbeat / sub-agent /
-	//      goal_continuation / goal_budget_limit). The /goal
-	//      continuation template has a 1./2./3./4. audit checklist +
-	//      the word "deliverables" — exactly what the heuristic was
-	//      designed to catch on real users. And the `/goal foo` slash
-	//      that precedes the first continuation doesn't `sess.Append`,
-	//      so sessionAlreadyEngaged is still false when the
-	//      continuation lands. Without this gate, every first
-	//      continuation gets force-routed into plan-mode.
+	//      goal_context). The /goal continuation template has a
+	//      1./2./3./4. audit checklist + the word "deliverables" —
+	//      exactly what the heuristic was designed to catch on real
+	//      users. And the `/goal foo` slash that precedes the first
+	//      continuation doesn't `sess.Append`, so sessionAlreadyEngaged
+	//      is still false when the continuation lands. Without this
+	//      gate, every first continuation gets force-routed into
+	//      plan-mode.
 	//
 	//   2. Session has an active goal. plan-mode and goal are
 	//      semantically opposed — plan says "wait for me to approve",
 	//      goal says "iterate autonomously until done". If a goal is
 	//      running, even a user's regular turn shouldn't be forced
 	//      into plan-mode behind their back: that would interrupt the
-	//      autonomous loop, and (because handlePlanMode skips
-	//      runPostTurn) the goal-trigger hook wouldn't refire either —
-	//      30 s probe would be the only recovery. Goal takes
-	//      precedence, by design.
+	//      autonomous loop. Goal takes precedence, by design.
 	autoPlanEligible := (msg.Source == "" || msg.Source == bus.SourceUser) &&
 		!a.sessionHasActiveGoal(ctx, msg)
 	if autoPlanEligible && !isPlanMode(msg.Params) && msg.Text != "" {
@@ -1566,12 +1428,6 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	// identifier); goal tools need the durable session.Session.SessionKey
 	// to address rows in agent_goals.
 	a.registry.SetGoalSessionKey(sess.SessionKey())
-	// AccountID is set separately from SetMessageContext (channel,
-	// chatID) so goal continuations can publish back on the exact
-	// (channel, accountID, chatID) triple the inbound arrived on —
-	// required for multi-bot channels (e.g. several Telegram bots
-	// sharing one chat thread by id).
-	a.registry.SetMessageAccountID(msg.AccountID)
 
 	// Safety net for client-aborted turns: if the loop exits with a
 	// tool_use that never got its matching tool_result appended (the
@@ -2093,10 +1949,7 @@ func (a *Agent) runPostTurn(ctx context.Context, msg bus.InboundMessage, message
 		ToolCallCount:  toolCallCount,
 		Workspace:      a.homePath,
 		UserID:         a.ownerUserID,
-		Channel:        msg.Channel,
-		AccountID:      msg.AccountID,
 		ChatID:         msg.ChatID,
-		ProjectID:      msg.ProjectID,
 		Source:         msg.Source,
 		GoalSessionKey: a.registry.GoalSessionKey(),
 		IsPlanMode:     isPlanMode(msg.Params),
@@ -2125,14 +1978,6 @@ func (a *Agent) runPostTurn(ctx context.Context, msg bus.InboundMessage, message
 // a StreamReader for the final response. Tool call iterations use non-streaming Chat;
 // the final text response uses ChatStream for true SSE streaming.
 func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage) *provider.StreamReader {
-	// Mirror HandleMessage's stale-continuation gate. See its doc
-	// for the race the gate prevents.
-	if !a.shouldProcessGoalContinuation(ctx, msg) {
-		slog.Debug("dropping stale goal continuation (stream)",
-			"agent", a.name, "channel", msg.Channel, "chat", msg.ChatID)
-		return a.stringStream("")
-	}
-
 	// Reuse setup logic from HandleMessage. Empty reply is "handled
 	// but silent" — see the HandleMessage twin. Still emit a Done
 	// chunk so callers waiting on the stream don't hang.
@@ -2151,7 +1996,6 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 	sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID, msg.ProjectID)
 	a.bindSession(ctx, msg.Channel, msg.ChatID, msg.ProjectID)
 	a.registry.SetGoalSessionKey(sess.SessionKey())
-	a.registry.SetMessageAccountID(msg.AccountID)
 
 	// Same orphan-tool_use safety net as HandleMessage. The streaming path
 	// previously lacked this, so loop detection (which appends an assistant
