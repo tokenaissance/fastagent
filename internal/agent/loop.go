@@ -48,6 +48,11 @@ type Agent struct {
 	workspacePath     string // working dir where agent creates user files
 	homeDir           string // FastClaw root, ~/.fastclaw
 	ownerUserID       string // the user that owns this agent (for hook namespacing)
+	// admins is the per-channel allowlist of chatters who can run write-
+	// mode slash commands (/new /undo /retry /compact /model /personality).
+	// Keyed by channel name (e.g. "discord" → ["123...", "456..."]). Empty
+	// or absent → no gate, anyone can run the command (legacy default).
+	admins            map[string][]string
 	skillsCfg         config.SkillsConfig
 	globalSkillsCfg   config.SkillsCfg
 	messageBus        *bus.MessageBus
@@ -265,6 +270,7 @@ func NewAgentWithSkillsCfg(rc config.ResolvedAgent, prov provider.Provider, mb *
 		homePath:          rc.Home,
 		workspacePath:     workspace,
 		homeDir:           homeDir,
+		admins:            rc.Admins,
 		skillsCfg:         rc.Skills,
 		globalSkillsCfg:   globalSkillsCfg,
 		messageBus:        mb,

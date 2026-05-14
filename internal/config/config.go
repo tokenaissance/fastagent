@@ -457,6 +457,16 @@ type AgentFileConfig struct {
 	ToolProviders     map[string]ToolProviderCfg `json:"toolProviders,omitempty"`
 	Tools             map[string]ToolCategoryCfg `json:"tools,omitempty"`
 	Providers         map[string]ProviderConfig  `json:"providers,omitempty"`
+	// Admins gates write-mode slash commands (/new /reset /undo /retry /compact
+	// /model /personality) in IM channels. Keyed by channel name ("discord",
+	// "telegram", "slack", ...), each value is the platform-side user IDs
+	// allowed to run those commands on that channel. Empty/absent list = no
+	// gate (anyone can run the command — backward-compatible default).
+	//
+	// On web/api the gate falls through to msg.UserID == agent owner UUID
+	// regardless of this field, since those channels carry the FastClaw
+	// identity directly and don't need a per-platform allowlist.
+	Admins map[string][]string `json:"admins,omitempty"`
 }
 
 type SkillsConfig struct {
@@ -505,6 +515,9 @@ type ResolvedAgent struct {
 	ToolProviders     map[string]ToolProviderCfg
 	Tools             map[string]ToolCategoryCfg
 	Providers         map[string]ProviderConfig
+	// Admins is the per-channel admin allowlist for write-mode slash
+	// commands. See AgentFileConfig.Admins for semantics + default.
+	Admins map[string][]string
 }
 
 type TeamEntry struct {
@@ -673,6 +686,14 @@ func (cfg *Config) MergedAgentConfig(entry AgentEntry) ResolvedAgent {
 			resolved.MaxParallelToolCalls = fileCfg.MaxParallelToolCalls
 		}
 		resolved.Skills = fileCfg.Skills
+		if len(fileCfg.Admins) > 0 {
+			resolved.Admins = make(map[string][]string, len(fileCfg.Admins))
+			for ch, ids := range fileCfg.Admins {
+				cp := make([]string, len(ids))
+				copy(cp, ids)
+				resolved.Admins[ch] = cp
+			}
+		}
 		for k, v := range fileCfg.MCPServers {
 			if resolved.MCPServers == nil {
 				resolved.MCPServers = make(map[string]MCPServerConfig)

@@ -3,6 +3,7 @@ package channels
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"log/slog"
 	"regexp"
 	"strings"
@@ -43,6 +44,7 @@ func NewDiscord(botToken string, accountID string, mb *bus.MessageBus) (*Discord
 	}
 
 	dg.AddHandler(d.onMessageCreate)
+	dg.AddHandler(d.onInteractionCreate)
 
 	return d, nil
 }
@@ -78,8 +80,184 @@ func (d *Discord) Start(ctx context.Context) error {
 		"account", d.accountID,
 	)
 
+	d.registerCommands()
+
 	<-ctx.Done()
 	return nil
+}
+
+// registerCommands publishes the bot's slash-command set to Discord so the
+// native `/` autocomplete picker surfaces them (mirrors telegram.go's
+// registerCommands). Without this, users have to type `/new` as plain text
+// — Discord won't suggest it.
+//
+// Registered as GLOBAL commands (empty guild ID) so they're available in
+// DMs as well as every guild the bot is in. Global commands can take a
+// few minutes to propagate across Discord's cache on first publish; after
+// that, edits via BulkOverwrite are usually instant.
+//
+// The interaction handler (onInteractionCreate) synthesizes an
+// InboundMessage with text `/<cmd> <args>` so the existing slash handler
+// in agent/slash.go runs unchanged — no duplicate slash logic on this side.
+func (d *Discord) registerCommands() {
+	appID := d.session.State.User.ID
+	if appID == "" {
+		slog.Warn("discord skipping command registration: empty app id")
+		return
+	}
+	cmds := []*discordgo.ApplicationCommand{
+		{Name: "start", Description: "Start the bot"},
+		{Name: "new", Description: "Start a new conversation"},
+		{Name: "retry", Description: "Re-run the last message"},
+		{Name: "undo", Description: "Undo the last turn"},
+		{Name: "compact", Description: "Compress context window"},
+		{Name: "status", Description: "Show agent status"},
+		{Name: "usage", Description: "Session turn & token stats"},
+		{
+			Name:        "insights",
+			Description: "Activity insights (last 7 days)",
+			Options: []*discordgo.ApplicationCommandOption{
+				{
+					Type:        discordgo.ApplicationCommandOptionInteger,
+					Name:        "days",
+					Description: "Number of days (default 7)",
+					Required:    false,
+				},
+			},
+		},
+		{
+			Name:        "personality",
+			Description: "List or switch personality",
+			Options: []*discordgo.ApplicationCommandOption{
+				{
+					Type:        discordgo.ApplicationCommandOptionString,
+					Name:        "name",
+					Description: "Personality name (omit to list)",
+					Required:    false,
+				},
+			},
+		},
+		{
+			Name:        "model",
+			Description: "Switch LLM model",
+			Options: []*discordgo.ApplicationCommandOption{
+				{
+					Type:        discordgo.ApplicationCommandOptionString,
+					Name:        "name",
+					Description: "Model name (e.g. claude-opus-4-7)",
+					Required:    true,
+				},
+			},
+		},
+		{Name: "help", Description: "Show available commands"},
+		{Name: "version", Description: "Show version"},
+		{Name: "whoami", Description: "Show your platform user ID (for admin allowlist)"},
+	}
+	if _, err := d.session.ApplicationCommandBulkOverwrite(appID, "", cmds); err != nil {
+		slog.Warn("discord command registration failed", "account", d.accountID, "error", err)
+		return
+	}
+	slog.Info("discord commands registered", "account", d.accountID, "count", len(cmds))
+}
+
+// onInteractionCreate handles native slash-command clicks from Discord's
+// autocomplete picker. Discord delivers these as Interactions, not as
+// MessageCreate events — without this handler, clicking `/new` shows
+// "The application did not respond" in the UI and the slash never reaches
+// the agent's handleSlashCommand.
+//
+// Flow: ACK the interaction ephemerally (only the clicker sees it) within
+// the 3-second window, then push a synthetic InboundMessage with text
+// `/<cmd> <args>` so the standard slash path runs and posts the reply as
+// a normal channel message. The ephemeral ACK is brief and self-explains
+// what the bot is doing; the real reply lands in the channel as usual.
+//
+// For group (guild) interactions we inject the bot's username into
+// Mentions so routing.go's agentByMention resolves THIS bot as the
+// target — clicking the bot's own command is intent-equivalent to
+// @-mentioning it.
+func (d *Discord) onInteractionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	if i.Type != discordgo.InteractionApplicationCommand {
+		return
+	}
+	data := i.ApplicationCommandData()
+
+	// Build the text representation `/<cmd> <arg1> <arg2>` so the slash
+	// handler parses it via the same strings.Fields path as a typed
+	// command. Option order follows the registered schema (single arg per
+	// command today), so this is just space-joining option values.
+	var b strings.Builder
+	b.WriteString("/")
+	b.WriteString(data.Name)
+	for _, opt := range data.Options {
+		b.WriteString(" ")
+		fmt.Fprintf(&b, "%v", opt.Value)
+	}
+	text := b.String()
+
+	// Determine peer kind + sender identity. In guilds, the user info is
+	// nested under Member; in DMs, it's at the top level.
+	peerKind := "dm"
+	if i.GuildID != "" {
+		peerKind = "group"
+	}
+	var u *discordgo.User
+	if i.Member != nil && i.Member.User != nil {
+		u = i.Member.User
+	} else if i.User != nil {
+		u = i.User
+	}
+	if u == nil {
+		slog.Warn("discord interaction missing user", "name", data.Name)
+		return
+	}
+	senderName := u.GlobalName
+	if senderName == "" {
+		senderName = u.Username
+	}
+
+	// Group routing requires the bot to be in msg.Mentions for
+	// agentByMention to pick THIS bot. Clicking the bot's own slash
+	// command is intent-equivalent — inject the username so the
+	// gateway routes the synthetic message to us instead of dropping
+	// it as an unaddressed group message.
+	var mentions []string
+	if peerKind == "group" {
+		mentions = []string{d.botUsername}
+	}
+
+	// ACK the interaction ephemerally so Discord clears the
+	// "thinking..." spinner immediately. The real reply lands in the
+	// channel as a normal bot message via the outbound path.
+	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Content: fmt.Sprintf("⚡ Running `%s`…", text),
+			Flags:   discordgo.MessageFlagsEphemeral,
+		},
+	}); err != nil {
+		slog.Warn("discord interaction ack failed", "cmd", data.Name, "error", err)
+	}
+
+	slog.Info("discord slash command received",
+		"cmd", data.Name,
+		"channel_id", i.ChannelID,
+		"guild_id", i.GuildID,
+		"peer_kind", peerKind,
+		"from", u.Username,
+	)
+
+	d.bus.Inbound <- bus.InboundMessage{
+		Channel:    "discord",
+		AccountID:  d.accountID,
+		ChatID:     i.ChannelID,
+		UserID:     u.ID,
+		MessageID:  i.ID,
+		Text:       text,
+		PeerKind:   peerKind,
+		SenderName: senderName,
+		Mentions:   mentions,
+	}
 }
 
 // Send sends a message to a Discord channel.

@@ -231,6 +231,7 @@ func (t *Telegram) registerCommands() {
 		{Command: "model", Description: "Switch LLM model"},
 		{Command: "help", Description: "Show available commands"},
 		{Command: "version", Description: "Show version"},
+		{Command: "whoami", Description: "Show your platform user ID"},
 	}
 	cfg := tgbotapi.NewSetMyCommands(commands...)
 	if _, err := t.bot.Request(cfg); err != nil {
