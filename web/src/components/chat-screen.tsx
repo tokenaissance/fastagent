@@ -1772,7 +1772,15 @@ export function ChatScreen() {
       <div
         className={
           "flex flex-1 min-w-0 flex-col" +
-          (isEmpty ? " justify-center" : "")
+          // pb-12 (3rem) matches the header height we already subtracted
+          // from the parent's h-[calc(100vh-3rem)]. Without it `justify-
+          // center` centers content inside the post-header area, which
+          // sits visually ~24px below the true viewport mid-line — the
+          // user notices the hero + composer pair drifting low. Adding
+          // an equal bottom padding biases the centered group upward by
+          // half the header height so the optical centre lines up with
+          // the geometric centre of the screen.
+          (isEmpty ? " justify-center pb-12" : "")
         }
       >
       {/* Messages */}
@@ -2305,7 +2313,7 @@ export function ChatScreen() {
                   </div>
                 </>
               ) : (
-                <div className="flex items-end gap-2">
+                <div className="flex items-center gap-2">
                   <label
                     className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors ${
                       !selectedAgent || sending || isReadOnlyView
@@ -2341,8 +2349,8 @@ export function ChatScreen() {
                     }
                     disabled={!selectedAgent || sending || isReadOnlyView}
                     rows={1}
-                    className="flex-1 resize-none bg-transparent text-[15px] placeholder:text-muted-foreground/50 outline-none disabled:opacity-50"
-                    style={{ maxHeight: 200, minHeight: 24 }}
+                    className="flex-1 resize-none bg-transparent text-[15px] leading-8 placeholder:text-muted-foreground/50 outline-none disabled:opacity-50"
+                    style={{ maxHeight: 200, minHeight: 32 }}
                   />
                   {sending ? (
                     <Button

@@ -18,8 +18,19 @@ COPY . .
 COPY --from=web-builder /src/web/out internal/setup/web
 ARG VERSION=dev
 ARG COMMIT=unknown
+ARG DATE=unknown
+# Stamp BOTH symbol sets — `main.*` for the legacy `fastclaw version` CLI
+# consumer and `internal/buildinfo.*` for the agent runtime + the About
+# page in the web UI. Mirrors the Makefile / scripts/release.sh ldflags
+# so a docker-built image identifies itself the same way the released
+# binary does; without the buildinfo line the About page silently shows
+# "dev" on every published image (the symptom that triggered this fix).
 RUN CGO_ENABLED=0 go build \
-    -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${COMMIT}" \
+    -ldflags "-s -w \
+      -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.date=${DATE} \
+      -X github.com/fastclaw-ai/fastclaw/internal/buildinfo.Version=${VERSION} \
+      -X github.com/fastclaw-ai/fastclaw/internal/buildinfo.Commit=${COMMIT} \
+      -X github.com/fastclaw-ai/fastclaw/internal/buildinfo.Date=${DATE}" \
     -o /fastclaw ./cmd/fastclaw
 
 # --- Stage 3: Runtime ---
