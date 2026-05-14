@@ -265,6 +265,17 @@ func (d *Discord) onMessageCreate(s *discordgo.Session, m *discordgo.MessageCrea
 		}
 	}
 
+	// Prefer the display name (GlobalName) over the unique handle so
+	// the chat panel renders "idoubi" (what Discord shows everywhere)
+	// rather than the post-username-overhaul lowercase handle
+	// "idoubicc". Falls back to Username when GlobalName is unset
+	// (legacy bots, freshly-migrated accounts, etc.).
+	senderName := m.Author.GlobalName
+	if senderName == "" {
+		senderName = m.Author.Username
+	}
+	avatarURL := m.Author.AvatarURL("256")
+
 	slog.Info("discord message received",
 		"from", m.Author.Username,
 		"channel_id", m.ChannelID,
@@ -274,15 +285,16 @@ func (d *Discord) onMessageCreate(s *discordgo.Session, m *discordgo.MessageCrea
 	)
 
 	d.bus.Inbound <- bus.InboundMessage{
-		Channel:      "discord",
-		AccountID:    d.accountID,
-		ChatID:       m.ChannelID,
-		UserID:       m.Author.ID,
-		MessageID:    m.ID,
-		Text:         text,
-		PeerKind:     peerKind,
-		SenderName:   m.Author.Username,
-		Mentions:     mentions,
-		IsBotMessage: isBot,
+		Channel:         "discord",
+		AccountID:       d.accountID,
+		ChatID:          m.ChannelID,
+		UserID:          m.Author.ID,
+		MessageID:       m.ID,
+		Text:            text,
+		PeerKind:        peerKind,
+		SenderName:      senderName,
+		SenderAvatarURL: avatarURL,
+		Mentions:        mentions,
+		IsBotMessage:    isBot,
 	}
 }

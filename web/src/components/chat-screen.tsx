@@ -151,6 +151,17 @@ interface ChatMessage {
   // either the live content event's `metadata` payload or the
   // ChatHistoryMessage.metadata on a refresh.
   metadata?: ToolResultMetadata;
+  // IM-bridge sender identity, surfaced from session_messages metadata
+  // (set by the agent loop for Discord/Telegram/... routed turns).
+  // Present means: render an avatar + nickname header instead of an
+  // anonymous "you" bubble — the message came from a third party
+  // talking to the bot, not from the agent owner themselves.
+  sender?: {
+    name: string;
+    avatarUrl?: string;
+    id?: string;
+    channel?: string;
+  };
 }
 
 // Tailwind class string applied to every chat-bubble markdown wrapper
@@ -224,7 +235,15 @@ function buildChatMessages(history: ChatHistoryMessage[]): ChatMessage[] {
               previewUrl: url,
             }))
           : undefined;
-      msgs.push({ id: `h-${i}`, role: "user", content: h.content || "", timestamp: 0, attachments });
+      const sender = h.senderName
+        ? {
+            name: h.senderName,
+            avatarUrl: h.senderAvatarUrl,
+            id: h.senderId,
+            channel: h.senderChannel,
+          }
+        : undefined;
+      msgs.push({ id: `h-${i}`, role: "user", content: h.content || "", timestamp: 0, attachments, sender });
       i++;
     } else if (h.role === "assistant" && h.toolCalls && h.toolCalls.length > 0) {
       // Group: assistant tool_calls + following tool results + final assistant content
@@ -1876,6 +1895,23 @@ export function ChatScreen() {
                       msg.role === "user" ? "order-1" : ""
                     }`}
                   >
+                    {msg.role === "user" && msg.sender && (
+                      <div className="mb-1 flex items-center justify-end gap-2 text-xs text-muted-foreground">
+                        <span className="font-medium text-foreground/80">{msg.sender.name}</span>
+                        {msg.sender.avatarUrl ? (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img
+                            src={msg.sender.avatarUrl}
+                            alt={msg.sender.name}
+                            className="h-5 w-5 rounded-full object-cover ring-1 ring-border"
+                          />
+                        ) : (
+                          <span className="flex h-5 w-5 items-center justify-center rounded-full bg-primary/20 text-[10px] font-semibold uppercase text-foreground">
+                            {msg.sender.name.slice(0, 1)}
+                          </span>
+                        )}
+                      </div>
+                    )}
                     <div
                       className={`rounded-2xl px-4 py-2.5 break-words ${
                         msg.role === "user"

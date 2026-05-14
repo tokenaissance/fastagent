@@ -21,8 +21,11 @@ func NewMemoryStoreAdapter(st store.Store) *MemoryStoreAdapter {
 
 const memoryFilename = "MEMORY.md"
 
+// GetMemory uses the *Exact* (no owner-fallback) variant deliberately.
+// MEMORY.md is per-chatter — a public-link visitor must not inherit the
+// agent owner's accumulated memories of past conversations.
 func (a *MemoryStoreAdapter) GetMemory(ctx context.Context, agentID, userID string) (string, error) {
-	data, err := a.st.GetAgentFile(ctx, agentID, userID, memoryFilename)
+	data, err := a.st.GetAgentFileExact(ctx, agentID, userID, memoryFilename)
 	if err != nil {
 		return "", err
 	}
@@ -33,8 +36,19 @@ func (a *MemoryStoreAdapter) SaveMemory(ctx context.Context, agentID, userID, co
 	return a.st.SaveAgentFile(ctx, agentID, userID, memoryFilename, []byte(content))
 }
 
+// GetWorkspaceFile keeps the owner-fallback overlay because the
+// ContextBuilder uses this method for shared identity files
+// (SOUL/IDENTITY/AGENTS/BOOTSTRAP/HEARTBEAT/TOOLS). Chatters inheriting
+// the owner's identity is the desired behavior there.
 func (a *MemoryStoreAdapter) GetWorkspaceFile(ctx context.Context, agentID, userID, filename string) ([]byte, error) {
 	return a.st.GetAgentFile(ctx, agentID, userID, filename)
+}
+
+// GetWorkspaceFileExact bypasses the owner-fallback overlay. Used for
+// per-chatter files (USER.md) so a fresh visitor sees an empty profile
+// instead of the owner's.
+func (a *MemoryStoreAdapter) GetWorkspaceFileExact(ctx context.Context, agentID, userID, filename string) ([]byte, error) {
+	return a.st.GetAgentFileExact(ctx, agentID, userID, filename)
 }
 
 func (a *MemoryStoreAdapter) SaveWorkspaceFile(ctx context.Context, agentID, userID, filename string, data []byte) error {

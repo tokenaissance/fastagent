@@ -347,6 +347,7 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
             ? "viewer"
             : "owner"
         }
+        isAdmin={isAdmin}
       />
     </Sidebar>
   );

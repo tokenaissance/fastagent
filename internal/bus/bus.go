@@ -23,6 +23,14 @@ type InboundMessage struct {
 	Text         string   // message text
 	PeerKind     string   // "group" or "dm"
 	SenderName   string   // display name of the sender
+	// SenderAvatarURL is the platform-side avatar URL for the message
+	// sender, when the channel can provide one (Discord serves
+	// `cdn.discordapp.com/avatars/<user_id>/<hash>.png`; Telegram/Slack
+	// need a separate API hit so the bridges leave this empty for now).
+	// Stored on the session_message row as UI-only metadata — the LLM
+	// never sees it — so the web chat panel can render an avatar +
+	// nickname header on each IM-routed user bubble.
+	SenderAvatarURL string
 	Mentions     []string // @usernames mentioned in the message
 	IsBotMessage bool     // true if the message was sent by a bot
 	PhotoURL     string   // URL of attached photo (if any) — single-image legacy field

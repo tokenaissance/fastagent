@@ -19,10 +19,21 @@ import (
 // userID is the chatter — chat-time MEMORY.md / USER.md updates land in
 // that user's per-user override row so they don't pollute the shared
 // template that the agent owner edits via the Customize page.
+//
+// GetWorkspaceFile vs GetWorkspaceFileExact:
+//   - GetWorkspaceFile picks the caller's row first, falls back to the
+//     agent owner's row when the caller has none. Used for shared
+//     identity files (SOUL/IDENTITY/AGENTS/...): a chatter inherits
+//     whatever the owner configured.
+//   - GetWorkspaceFileExact returns ONLY the caller's row, or
+//     ErrNotFound. Used for per-chatter files (USER.md, MEMORY.md):
+//     a brand-new visitor must see an empty profile/memory, never
+//     leak the owner's.
 type MemoryStore interface {
 	GetMemory(ctx context.Context, agentID, userID string) (string, error)
 	SaveMemory(ctx context.Context, agentID, userID, content string) error
 	GetWorkspaceFile(ctx context.Context, agentID, userID, filename string) ([]byte, error)
+	GetWorkspaceFileExact(ctx context.Context, agentID, userID, filename string) ([]byte, error)
 	SaveWorkspaceFile(ctx context.Context, agentID, userID, filename string, data []byte) error
 }
 
@@ -46,6 +57,20 @@ func NewMemoryWithStoreForUser(workspace string, st MemoryStore, userID, agentID
 	return &Memory{workspace: workspace, store: st, userID: userID, agentID: agentID}
 }
 
+// WithUserID returns a shallow copy bound to a different userID.
+// Lets a per-turn caller rebind MEMORY.md / USER.md reads + writes to
+// the chatter (rather than the agent owner) without mutating the
+// shared agent-scoped Memory other concurrent turns may be reading.
+// Returns nil when m is nil so callers don't have to nil-guard.
+func (m *Memory) WithUserID(uid string) *Memory {
+	if m == nil {
+		return nil
+	}
+	out := *m
+	out.userID = uid
+	return &out
+}
+
 // ctx returns a context tagged with this Memory's user so SQL queries in
 // the store layer scope correctly. The store falls back to DefaultUserID
 // when no user is on the context, but going through here is explicit and
@@ -67,13 +92,18 @@ func (m *Memory) historyPath() string {
 	return filepath.Join(m.workspace, "HISTORY.md")
 }
 
-// LoadMemory reads the long-term memory.
+// LoadMemory reads the long-term memory for this Memory's user. When a
+// store is configured we never fall back to the on-disk workspace
+// MEMORY.md — that file is the agent owner's copy and would leak to
+// any non-owner chatter whose row simply doesn't exist yet. FS read
+// only fires on legacy single-user installs without a store.
 func (m *Memory) LoadMemory() string {
 	if m.store != nil {
 		content, err := m.store.GetMemory(m.ctx(), m.agentID, m.userID)
 		if err == nil {
 			return content
 		}
+		return ""
 	}
 	data, err := os.ReadFile(m.memoryPath())
 	if err != nil {
@@ -218,13 +248,19 @@ func (m *Memory) SaveUserFile(content string) error {
 	return os.WriteFile(filepath.Join(m.workspace, "USER.md"), []byte(content), 0o644)
 }
 
-// LoadUserFile reads the USER.md file.
+// LoadUserFile reads the USER.md file for this Memory's user. Same
+// rationale as LoadMemory: USER.md is per-chatter (the visitor's
+// profile, not the agent owner's), so we read it via the Exact path
+// that bypasses the SQL owner-fallback overlay, and skip the on-disk
+// fallback when a store is configured to avoid leaking the owner's
+// workspace copy to a chatter without their own row.
 func (m *Memory) LoadUserFile() string {
 	if m.store != nil {
-		data, err := m.store.GetWorkspaceFile(m.ctx(), m.agentID, m.userID, "USER.md")
+		data, err := m.store.GetWorkspaceFileExact(m.ctx(), m.agentID, m.userID, "USER.md")
 		if err == nil {
 			return string(data)
 		}
+		return ""
 	}
 	data, err := os.ReadFile(filepath.Join(m.workspace, "USER.md"))
 	if err != nil {

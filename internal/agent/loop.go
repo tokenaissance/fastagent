@@ -444,14 +444,24 @@ func (a *Agent) SetGroupContext(gc *GroupContext) {
 // InjectGroupMessage appends a message from another bot into the session history
 // without triggering an LLM call. This gives the agent awareness of what other
 // bots said in the group chat.
+//
+// The `\[name\]:` prefix escapes the brackets so the web UI's CommonMark
+// renderer doesn't read short single-token messages (e.g. `[idoubi]: hello`)
+// as a link reference definition and silently swallow them. The LLM still
+// reads it as a bracketed sender label — the backslash escapes are well-
+// understood markdown source.
 func (a *Agent) InjectGroupMessage(ctx context.Context, msg bus.InboundMessage) {
 	sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID, msg.ProjectID)
 	label := msg.SenderName
 	if label == "" {
 		label = "Bot"
 	}
-	content := fmt.Sprintf("[%s]: %s", label, msg.Text)
-	sess.Append(provider.Message{Role: "user", Content: content})
+	content := fmt.Sprintf("\\[%s\\]: %s", label, msg.Text)
+	sess.Append(provider.Message{
+		Role:     "user",
+		Content:  content,
+		Metadata: senderMetadata(msg),
+	})
 }
 
 // SetSubAgentSpawner sets the sub-agent spawner for the spawn_subagent tool.
@@ -660,12 +670,35 @@ func (a *Agent) WebChatHistory(sessionId string) []map[string]any {
 					imageURLs = append(imageURLs, p.ImageURL.URL)
 				}
 			}
+			// IM-routed turns store an "\[idoubi\]: hello" prefix on
+			// Content so the LLM can attribute the line in group chats
+			// when the system prompt rolls off. The web panel renders
+			// the nickname separately from `senderName` metadata, so
+			// strip the prefix from `text` here to keep the bubble body
+			// clean. Cover both the escaped (post-fix) and unescaped
+			// (legacy session rows) shapes.
+			senderName, _ := m.Metadata["senderName"].(string)
+			if senderName != "" {
+				text = stripSenderPrefix(text, senderName)
+			}
 			if text == "" && len(imageURLs) == 0 {
 				continue
 			}
 			entry := map[string]any{"role": "user", "content": text}
 			if len(imageURLs) > 0 {
 				entry["imageUrls"] = imageURLs
+			}
+			if senderName != "" {
+				entry["senderName"] = senderName
+				if v, ok := m.Metadata["senderAvatarUrl"].(string); ok && v != "" {
+					entry["senderAvatarUrl"] = v
+				}
+				if v, ok := m.Metadata["senderId"].(string); ok && v != "" {
+					entry["senderId"] = v
+				}
+				if v, ok := m.Metadata["senderChannel"].(string); ok && v != "" {
+					entry["senderChannel"] = v
+				}
 			}
 			history = append(history, entry)
 		case "assistant":
@@ -915,6 +948,56 @@ func renderClientParams(params map[string]any) string {
 		"The user's client app submitted these parameters alongside " +
 		"the message. Forward them to whichever tool / skill you call.\n\n" +
 		"```json\n" + string(blob) + "\n```"
+}
+
+// stripSenderPrefix removes the leading "\[name\]: " (or unescaped
+// "[name]: ") attribution wrapper that the agent loop injects on
+// IM-routed user turns. Used by the web history rendering so the
+// nickname can be surfaced via dedicated metadata and the bubble body
+// no longer double-shows "[idoubi]: hello" alongside an avatar header.
+// Returns the original string when no prefix matches.
+func stripSenderPrefix(text, senderName string) string {
+	if senderName == "" {
+		return text
+	}
+	for _, p := range []string{
+		"\\[" + senderName + "\\]: ",
+		"[" + senderName + "]: ",
+	} {
+		if strings.HasPrefix(text, p) {
+			return text[len(p):]
+		}
+	}
+	return text
+}
+
+// senderMetadata extracts UI-only sender identity off an inbound IM
+// message (Discord/Telegram/Slack/...) and returns a metadata map ready
+// to attach to the persisted user-role Message. The web chat panel
+// reads these fields back via WebChatHistory to render an avatar +
+// nickname header on each bubble. Returns nil for web chats and any
+// other caller that doesn't populate SenderName so we don't bloat
+// session_messages rows with empty maps.
+//
+// The map is deliberately not Marshal()-strict — provider serializers
+// ignore Message.Metadata, so anything we put here stays out of the
+// LLM payload. The nickname is still funneled to the LLM via the
+// `\[nickname\]: ` prefix on Message.Content (set by callers).
+func senderMetadata(msg bus.InboundMessage) map[string]any {
+	if msg.SenderName == "" {
+		return nil
+	}
+	md := map[string]any{
+		"senderName":    msg.SenderName,
+		"senderChannel": msg.Channel,
+	}
+	if msg.UserID != "" {
+		md["senderId"] = msg.UserID
+	}
+	if msg.SenderAvatarURL != "" {
+		md["senderAvatarUrl"] = msg.SenderAvatarURL
+	}
+	return md
 }
 
 // renderSender emits a per-turn system block naming who the message
@@ -1173,7 +1256,7 @@ func (a *Agent) handlePlanMode(ctx context.Context, msg bus.InboundMessage) stri
 		return noProviderMsg
 	}
 
-	systemPrompt := a.ctxBuilder.BuildSystemPrompt()
+	systemPrompt := a.ctxBuilder.BuildSystemPromptAs(chatterUID, a.memory.WithUserID(chatterUID))
 	// Tool catalog injection: plan mode passes tools=nil to the LLM so
 	// it can't accidentally call anything, but that also hides the
 	// registry from the planning model. Without this, plans were written
@@ -1295,7 +1378,8 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	// Hook: BeforeSystemPrompt
 	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: BeforeSystemPrompt, UserID: a.ownerUserID})
 
-	systemPrompt := a.ctxBuilder.BuildSystemPrompt()
+	chatterMem := a.memory.WithUserID(chatterUID)
+	systemPrompt := a.ctxBuilder.BuildSystemPromptAs(chatterUID, chatterMem)
 
 	// Hook: AfterSystemPrompt
 	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: AfterSystemPrompt, UserID: a.ownerUserID})
@@ -1312,9 +1396,9 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	// when PeerKind=="group" to avoid double-wrapping.
 	userText := msg.Text
 	if msg.SenderName != "" && msg.PeerKind != "group" {
-		userText = fmt.Sprintf("[%s]: %s", msg.SenderName, msg.Text)
+		userText = fmt.Sprintf("\\[%s\\]: %s", msg.SenderName, msg.Text)
 	}
-	userMsg := provider.Message{Role: "user", Content: userText}
+	userMsg := provider.Message{Role: "user", Content: userText, Metadata: senderMetadata(msg)}
 	imageURLs := msg.PhotoURLs
 	if msg.PhotoURL != "" {
 		imageURLs = append([]string{msg.PhotoURL}, imageURLs...)
@@ -1443,7 +1527,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 			sess.Append(provider.Message{Role: "assistant", Content: resp.Content, Thinking: resp.Thinking, Timestamp: time.Now().UnixMilli(), RawAssistant: resp.RawAssistant})
 			emitEvent(ctx, ChatEvent{Type: "content", Data: map[string]any{"content": resp.Content}})
 			emitEvent(ctx, ChatEvent{Type: "done"})
-			a.runPostTurn(ctx, messages, totalToolCalls)
+			a.runPostTurn(ctx, messages, totalToolCalls, chatterMem)
 			return resp.Content
 		}
 
@@ -1700,7 +1784,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		"metadata": capMeta,
 	}})
 	emitEvent(ctx, ChatEvent{Type: "done"})
-	a.runPostTurn(ctx, messages, totalToolCalls)
+	a.runPostTurn(ctx, messages, totalToolCalls, chatterMem)
 	return finalContent
 }
 
@@ -1790,7 +1874,14 @@ func padOrphanToolResults(sess *session.Session) {
 }
 
 // runPostTurn fires PostTurn hooks and handles auto-persist and skills learning.
-func (a *Agent) runPostTurn(ctx context.Context, messages []provider.Message, toolCallCount int) {
+// chatterMem is the chatter-scoped Memory built at the top of the turn —
+// auto-persist writes the extracted facts back through it so a visitor
+// on a public agent accrues their *own* MEMORY.md / USER.md, not the
+// owner's. nil falls back to the agent-scoped Memory (legacy behavior).
+func (a *Agent) runPostTurn(ctx context.Context, messages []provider.Message, toolCallCount int, chatterMem *Memory) {
+	if chatterMem == nil {
+		chatterMem = a.memory
+	}
 	a.turnCount++
 
 	// Index user/assistant messages in FTS
@@ -1819,7 +1910,7 @@ func (a *Agent) runPostTurn(ctx context.Context, messages []provider.Message, to
 		if model == "" {
 			model = a.model
 		}
-		go AutoPersistMemory(ctx, a.memory, a.provider, model, messages)
+		go AutoPersistMemory(ctx, chatterMem, a.provider, model, messages)
 	}
 
 	// Skills learner
@@ -1863,7 +1954,8 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 	defer padOrphanToolResults(sess)
 
 	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: BeforeSystemPrompt, UserID: a.ownerUserID})
-	systemPrompt := a.ctxBuilder.BuildSystemPrompt()
+	chatterMem := a.memory.WithUserID(chatterUID)
+	systemPrompt := a.ctxBuilder.BuildSystemPromptAs(chatterUID, chatterMem)
 	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: AfterSystemPrompt, UserID: a.ownerUserID})
 
 	// Store raw user message — same multi-image flatten + IM sender
@@ -1871,9 +1963,9 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 	// why group PeerKind is skipped here.
 	userText := msg.Text
 	if msg.SenderName != "" && msg.PeerKind != "group" {
-		userText = fmt.Sprintf("[%s]: %s", msg.SenderName, msg.Text)
+		userText = fmt.Sprintf("\\[%s\\]: %s", msg.SenderName, msg.Text)
 	}
-	userMsg := provider.Message{Role: "user", Content: userText}
+	userMsg := provider.Message{Role: "user", Content: userText, Metadata: senderMetadata(msg)}
 	imageURLs := msg.PhotoURLs
 	if msg.PhotoURL != "" {
 		imageURLs = append([]string{msg.PhotoURL}, imageURLs...)
@@ -2310,9 +2402,15 @@ func (a *Agent) ReloadWorkspaceFiles() {
 	a.ctxBuilder.SetWorkspace(a.workspacePath)
 	// Preserve Store-backed identity reads across reload; without this,
 	// Postgres-mode pods silently fall back to pod-local filesystem.
+	// userID must also be re-pinned — the DB store requires a non-empty
+	// user_id to scope the SOL/IDENTITY/AGENTS reads, and without it
+	// the ContextBuilder's loadFile pass would fail on every shared
+	// identity file after a reload (manifest as an "agent without a
+	// name/soul" greeting).
 	if a.memoryStore != nil {
 		a.ctxBuilder.store = a.memoryStore
 		a.ctxBuilder.agentID = a.name
+		a.ctxBuilder.userID = a.ownerUserID
 	}
 }
 

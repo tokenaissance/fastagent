@@ -246,19 +246,3 @@ func purgeWeChatAccount(st store.Store, rowID, deadAccount string) error {
 	rec.Data = data
 	return st.SaveConfig(ctx, rec)
 }
-
-// buildBotUsernames creates agentID -> botUsername mapping by looking at
-// bindings and resolving the bot username from the channel manager.
-func buildBotUsernames(bindings []config.Binding, chanMgr *channels.Manager) map[string]string {
-	m := make(map[string]string)
-	for _, b := range bindings {
-		if b.Match.Channel == "" {
-			continue
-		}
-		username := chanMgr.BotUsername(b.Match.Channel, b.Match.AccountID)
-		if username != "" {
-			m[b.AgentID] = username
-		}
-	}
-	return m
-}

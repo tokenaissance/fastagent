@@ -164,8 +164,16 @@ type turnFailKey struct {
 // store.Store) intentionally so existing adapters can be reused. userID
 // is the chatter — chat-time writes land in that user's per-user
 // override row so they don't clobber the shared template.
+//
+// GetWorkspaceFile uses the SQL owner-fallback overlay (caller's row,
+// then the agent owner's). That's correct for shared identity files
+// (SOUL/IDENTITY/AGENTS/...) where a chatter inherits the owner's
+// configuration. GetWorkspaceFileExact returns ONLY the caller's row
+// — used for per-chatter files (USER.md, MEMORY.md) so a brand-new
+// visitor doesn't read the owner's accumulated memory.
 type SystemFileStore interface {
 	GetWorkspaceFile(ctx context.Context, agentID, userID, filename string) ([]byte, error)
+	GetWorkspaceFileExact(ctx context.Context, agentID, userID, filename string) ([]byte, error)
 	SaveWorkspaceFile(ctx context.Context, agentID, userID, filename string, data []byte) error
 }
 
@@ -230,6 +238,28 @@ func (r *Registry) systemFileUserID(filename string) string {
 		return r.agentOwnerUserID
 	}
 	return r.userID
+}
+
+// isPerUserSystemFile reports whether a system filename should be read
+// with the strict (no owner-fallback) variant. USER.md and MEMORY.md
+// are the chatter's private profile + memory — picking up the owner's
+// row when the chatter has none would leak their accumulated context
+// to a public-link visitor.
+func isPerUserSystemFile(filename string) bool {
+	base := filepath.Base(filepath.Clean(filename))
+	return base == "USER.md" || base == "MEMORY.md"
+}
+
+// readSystemFileForUser dispatches to GetWorkspaceFileExact for the
+// per-chatter files and GetWorkspaceFile (overlay) for shared identity
+// files. Callers should use this instead of hitting the store
+// interface directly so the per-file privacy convention stays in one
+// place.
+func (r *Registry) readSystemFileForUser(ctx context.Context, userID, name string) ([]byte, error) {
+	if isPerUserSystemFile(name) {
+		return r.systemFileStore.GetWorkspaceFileExact(ctx, r.agentID, userID, name)
+	}
+	return r.systemFileStore.GetWorkspaceFile(ctx, r.agentID, userID, name)
 }
 
 // SetSandboxRequired flips the exec tool's host-shell fallback off. Call

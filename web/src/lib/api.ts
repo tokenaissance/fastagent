@@ -693,6 +693,15 @@ export interface ChatHistoryMessage {
   // attachments. The chat UI renders these as inline thumbnails on
   // bubbles loaded from history.
   imageUrls?: string[];
+  // Populated for user turns that arrived via an IM bridge (Discord,
+  // Telegram, ...). The chat panel renders an avatar + nickname header
+  // on each such bubble so the agent owner can see who they're looking
+  // at. None of these reach the LLM — they live on Message.Metadata
+  // and are stripped from the persisted Content too.
+  senderName?: string;
+  senderAvatarUrl?: string;
+  senderId?: string;
+  senderChannel?: string;
 }
 
 export interface TodoItem {

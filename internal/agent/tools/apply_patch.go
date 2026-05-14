@@ -504,7 +504,7 @@ func (r *Registry) readForPatch(ctx context.Context, path string) (string, error
 	}
 	if r.systemFileStore != nil && r.agentID != "" && basenameIsSystemFile(path) {
 		name := filepath.Base(filepath.Clean(path))
-		if data, err := r.systemFileStore.GetWorkspaceFile(ctx, r.agentID, r.systemFileUserID(name), name); err == nil {
+		if data, err := r.readSystemFileForUser(ctx, r.systemFileUserID(name), name); err == nil {
 			return string(data), nil
 		}
 		if r.systemRoot != "" {
@@ -592,7 +592,7 @@ func (r *Registry) deleteForPatch(ctx context.Context, path string) error {
 func (r *Registry) readForPatchSandbox(ctx context.Context, ex sandbox.Executor, path string) (string, error) {
 	if r.systemFileStore != nil && r.agentID != "" && basenameIsSystemFile(path) {
 		name := filepath.Base(filepath.Clean(path))
-		if data, err := r.systemFileStore.GetWorkspaceFile(ctx, r.agentID, r.systemFileUserID(name), name); err == nil {
+		if data, err := r.readSystemFileForUser(ctx, r.systemFileUserID(name), name); err == nil {
 			return string(data), nil
 		}
 		return "", nil
