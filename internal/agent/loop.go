@@ -1282,6 +1282,11 @@ func (a *Agent) handlePlanMode(ctx context.Context, msg bus.InboundMessage) stri
 		return noProviderMsg
 	}
 
+	// handlePlanMode is only reached when sessionHasActiveGoal is false
+	// (see HandleMessage gate at the planMode check), but the
+	// ContextBuilder is shared across turns so we set the flag
+	// explicitly to avoid stale state from a prior goal-active turn.
+	a.ctxBuilder.SetGoalActive(false)
 	systemPrompt := a.ctxBuilder.BuildSystemPrompt()
 	// Tool catalog injection: plan mode passes tools=nil to the LLM so
 	// it can't accidentally call anything, but that also hides the
@@ -1459,6 +1464,10 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	// Hook: BeforeSystemPrompt
 	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: BeforeSystemPrompt, UserID: a.ownerUserID})
 
+	// Suppress autoPlanPrompt when a goal owns this session — plan's
+	// "wait for `go`" semantics fight goal's autonomous-loop contract.
+	// See ContextBuilder.SetGoalActive.
+	a.ctxBuilder.SetGoalActive(a.sessionHasActiveGoal(ctx, msg))
 	systemPrompt := a.ctxBuilder.BuildSystemPrompt()
 
 	// Hook: AfterSystemPrompt
@@ -2018,6 +2027,8 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 	defer padOrphanToolResults(sess)
 
 	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: BeforeSystemPrompt, UserID: a.ownerUserID})
+	// See HandleMessage twin for rationale.
+	a.ctxBuilder.SetGoalActive(a.sessionHasActiveGoal(ctx, msg))
 	systemPrompt := a.ctxBuilder.BuildSystemPrompt()
 	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: AfterSystemPrompt, UserID: a.ownerUserID})
 
