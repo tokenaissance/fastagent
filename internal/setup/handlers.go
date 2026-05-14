@@ -969,12 +969,16 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	// reply lands in session_events. The 15-minute cap is the only thing
 	// that can kill it.
 	agentCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), agentTurnTimeout)
+	// cancel lives on the handler, not the agent goroutine: when a slash
+	// queues a continuation we keep the SSE open past HandleMessage's
+	// return, and inner-scope cancel would tear down agentCtx before the
+	// continuation's events can reach this handler's safety-net check.
+	defer cancel()
 	agentCtx = agent.ContextWithStream(agentCtx, nil, s.dataStore, hub, uid, agentID, req.SessionID)
 
 	agentDone := make(chan struct{})
 	go func() {
 		defer close(agentDone)
-		defer cancel()
 		// events param stays nil — emitEvent now fans out via the
 		// streamCtx attached above (persist + hub). The legacy channel
 		// path is no longer needed for this handler.
@@ -988,6 +992,15 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	defer keepalive.Stop()
 
 	clientGone := r.Context().Done()
+	// turnPending flips on when the slash handler reports it queued a
+	// continuation via bus.Inbound (`turn_pending` event). The POST
+	// goroutine's HandleMessage has already returned, but the real
+	// reply is still 10–15s away on a different goroutine — we keep
+	// the SSE open so the browser's typing indicator stays visible
+	// and the continuation's content_delta/content events stream into
+	// the same connection. Cleared when the continuation's own `done`
+	// arrives, at which point the loop returns normally.
+	turnPending := false
 	for {
 		select {
 		case <-clientGone:
@@ -997,6 +1010,44 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 			// /api/chat/subscribe?since=N.
 			return
 		case <-agentDone:
+			// Race: HandleMessage publishes `turn_pending` to the hub
+			// AND `defer close(agentDone)` fires from the same goroutine.
+			// Go's select picks at random when both are ready, so
+			// agentDone can win even when a turn_pending event is
+			// sitting in the sub buffer. Drain pending events first to
+			// make the decision deterministic.
+		drain:
+			for {
+				select {
+				case env, ok := <-sub:
+					if !ok {
+						return
+					}
+					if env.Event.Type == "turn_pending" {
+						turnPending = true
+						continue
+					}
+					if env.Event.Type == "done" {
+						return
+					}
+					forwardEvent(w, flusher, env)
+				default:
+					break drain
+				}
+			}
+			if turnPending {
+				// HandleMessage returned silent after queueing a
+				// continuation. Don't close; wait for the continuation's
+				// `done` event over the hub instead. agentCtx.Done()
+				// (15-min timeout) is the upper bound if it never lands.
+				agentDone = nil
+				continue
+			}
+			return
+		case <-agentCtx.Done():
+			// Safety net for the turnPending path above: bail out at
+			// the agent context's hard timeout even if no `done` event
+			// ever arrives.
 			return
 		case <-keepalive.C:
 			fmt.Fprintf(w, ": ping\n\n")
@@ -1005,30 +1056,37 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
-			// Include seq inline in the JSON payload (in addition to
-			// the SSE `id:` line) so the fetch-based parser used by
-			// the frontend's POST sendChatStream can dedup events
-			// it ALSO sees on its parallel /api/chat/subscribe SSE
-			// connection. Without this dedup, every chunk renders
-			// twice during an active turn.
-			payload := map[string]any{
-				"seq":  env.Seq,
-				"type": env.Event.Type,
+			if env.Event.Type == "turn_pending" {
+				turnPending = true
+				continue
 			}
-			if env.Event.Data != nil {
-				payload["data"] = env.Event.Data
-			}
-			data, _ := json.Marshal(payload)
-			if env.Seq >= 0 {
-				fmt.Fprintf(w, "id: %d\n", env.Seq)
-			}
-			fmt.Fprintf(w, "data: %s\n\n", data)
-			flusher.Flush()
+			forwardEvent(w, flusher, env)
 			if env.Event.Type == "done" {
 				return
 			}
 		}
 	}
+}
+
+// forwardEvent writes one EventEnvelope to the SSE response. Includes
+// seq inline in the JSON payload (in addition to the SSE `id:` line)
+// so the fetch-based parser used by the frontend's POST sendChatStream
+// can dedup against the parallel /api/chat/subscribe SSE connection.
+// Without this dedup, every chunk renders twice during an active turn.
+func forwardEvent(w http.ResponseWriter, flusher http.Flusher, env agent.EventEnvelope) {
+	payload := map[string]any{
+		"seq":  env.Seq,
+		"type": env.Event.Type,
+	}
+	if env.Event.Data != nil {
+		payload["data"] = env.Event.Data
+	}
+	data, _ := json.Marshal(payload)
+	if env.Seq >= 0 {
+		fmt.Fprintf(w, "id: %d\n", env.Seq)
+	}
+	fmt.Fprintf(w, "data: %s\n\n", data)
+	flusher.Flush()
 }
 
 // handleChatSubscribe holds an SSE connection open for one (agent,

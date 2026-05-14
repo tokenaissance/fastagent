@@ -1336,11 +1336,21 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	// through to a streaming continuation that IS the response, so
 	// emitting a separate content event would just clutter the chat
 	// with a redundant confirmation bubble.
+	//
+	// Slashes that queued a continuation emit `turn_pending` instead
+	// of `done`; the POST SSE handler treats that as "stay open, the
+	// real reply is coming on the next bus-fired turn." Without it,
+	// the stream closes immediately and the typing indicator vanishes
+	// while the model is still warming up.
 	if result := a.handleSlashCommand(msg); result.handled {
 		if result.reply != "" {
 			emitEvent(ctx, ChatEvent{Type: "content", Data: map[string]any{"content": result.reply}})
 		}
-		emitEvent(ctx, ChatEvent{Type: "done"})
+		if result.continuationQueued {
+			emitEvent(ctx, ChatEvent{Type: "turn_pending"})
+		} else {
+			emitEvent(ctx, ChatEvent{Type: "done"})
+		}
 		return result.reply
 	}
 

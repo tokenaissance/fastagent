@@ -114,7 +114,7 @@ func (a *Agent) slashGoalCreate(msg bus.InboundMessage, objective string) slashR
 	// objective directly. Goal is transparent at the chat surface; no
 	// scaffolding text.
 	goal.TryFireContinuation(context.Background(), a.goalStore, a.messageBus, a.name, key)
-	return slashResult{handled: true, reply: ""}
+	return slashResult{handled: true, reply: "", continuationQueued: true}
 }
 
 func (a *Agent) slashGoalPause(msg bus.InboundMessage) slashResult {
@@ -129,6 +129,7 @@ func (a *Agent) slashGoalResume(msg bus.InboundMessage) slashResult {
 	if res.handled && res.reply == "" {
 		key := a.resolveSessionKey(msg)
 		goal.TryFireContinuation(context.Background(), a.goalStore, a.messageBus, a.name, key)
+		res.continuationQueued = true
 	}
 	return res
 }

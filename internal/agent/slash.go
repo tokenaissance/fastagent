@@ -11,9 +11,16 @@ import (
 )
 
 // slashResult holds the result of a slash command.
+//
+// continuationQueued flags slashes that pushed a follow-up message onto
+// bus.Inbound (currently /goal foo and /goal resume). HandleMessage uses
+// it to emit a `turn_pending` event instead of `done`, which keeps the
+// caller's SSE stream open until the continuation's own `done` arrives —
+// so the typing indicator stays visible during the model-thinking gap.
 type slashResult struct {
-	handled bool
-	reply   string
+	handled            bool
+	reply              string
+	continuationQueued bool
 }
 
 // handleSlashCommand checks if the message is a slash command and handles it.
