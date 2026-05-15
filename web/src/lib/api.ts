@@ -935,6 +935,32 @@ export async function sendChat(agentId: string, sessionId: string, message: stri
   return res.json();
 }
 
+// steerChat buffers a message into an in-flight turn for the session.
+// Resolves true when the server folded it into a running turn (200),
+// false when no turn is active (409) — caller should then fall back to
+// a normal sendChatStream. Throws only on unexpected/transport errors.
+export async function steerChat(
+  agentId: string,
+  sessionId: string,
+  message: string,
+  projectId?: string,
+): Promise<boolean> {
+  const res = await apiFetch("/api/chat/steer", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      agentId,
+      sessionId,
+      projectId: projectId || undefined,
+      message,
+    }),
+  });
+  if (res.status === 409) return false;
+  if (!res.ok) throw new Error(`steer failed: ${res.status}`);
+  const data = await res.json().catch(() => ({}));
+  return data?.buffered === true;
+}
+
 export interface ToolResultMetadata {
   sandbox?: boolean;
   // Stamped on the forced-final-delivery assistant message that the
@@ -955,6 +981,7 @@ export interface ChatStreamEvent {
     | "content_delta"
     | "tool_call"
     | "tool_result"
+    | "steer"
     | "error"
     | "done"
     | "subagent_progress";

@@ -38,6 +38,16 @@ type Session struct {
 	// rows it's read back via Manager.Get and late-bound here so the
 	// next save preserves it.
 	projectID string
+
+	// Steering: turnDepth counts in-flight HandleMessage turns for this
+	// session (a counter, not a bool, so re-entrant/overlapping turns
+	// don't strand the active flag). steerBuf holds user messages that
+	// arrived mid-turn; the running ReAct loop drains them between tool
+	// iterations. Both are guarded by mu. getByKey never touches these,
+	// so a Manager.Get reload (which overwrites Messages) can't clobber a
+	// pending steer.
+	turnDepth int
+	steerBuf  []provider.Message
 }
 
 // SessionKey returns the opaque session_key this Session is bound to.
@@ -441,6 +451,61 @@ func (s *Session) GetMessages() []provider.Message {
 	msgs := make([]provider.Message, len(s.Messages))
 	copy(msgs, s.Messages)
 	return msgs
+}
+
+// BeginTurn marks a HandleMessage turn as in-flight for this session.
+// Paired with EndTurn. Steering messages are only accepted while at
+// least one turn is active.
+func (s *Session) BeginTurn() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.turnDepth++
+}
+
+// EndTurn marks a turn as finished. When the last in-flight turn ends it
+// returns any steer messages still buffered (the end-of-turn race: a
+// message pushed after the loop's final drain). Callers redispatch the
+// leftovers as a fresh turn.
+func (s *Session) EndTurn() []provider.Message {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.turnDepth > 0 {
+		s.turnDepth--
+	}
+	if s.turnDepth > 0 || len(s.steerBuf) == 0 {
+		return nil
+	}
+	leftover := s.steerBuf
+	s.steerBuf = nil
+	return leftover
+}
+
+// PushSteerIfActive buffers a steering message iff a turn is currently
+// in-flight. Returns false when no turn is active, so the caller can
+// fall back to dispatching the message as a normal new turn. The return
+// value is the single source of truth — there is deliberately no
+// separate "is running" probe to race against.
+func (s *Session) PushSteerIfActive(msg provider.Message) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.turnDepth == 0 {
+		return false
+	}
+	s.steerBuf = append(s.steerBuf, msg)
+	return true
+}
+
+// DrainSteer atomically returns and clears the buffered steer messages.
+// The running loop calls this between tool iterations.
+func (s *Session) DrainSteer() []provider.Message {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.steerBuf) == 0 {
+		return nil
+	}
+	drained := s.steerBuf
+	s.steerBuf = nil
+	return drained
 }
 
 // UnconsolidatedCount returns the number of messages since last consolidation.

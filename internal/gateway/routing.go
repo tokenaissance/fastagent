@@ -103,6 +103,30 @@ func (g *Gateway) resolveChannelOwner(ctx context.Context, msg bus.InboundMessag
 	return ""
 }
 
+// trySteer diverts msg into target's currently in-flight turn instead of
+// queuing a separate one. `text` is the body the Submit path would have
+// delivered. Returns true when the message was folded into a running
+// turn — the caller must then NOT also Submit. False means no turn is
+// active; fall back to taskQueue.Submit.
+func (g *Gateway) trySteer(target *agent.Agent, msg bus.InboundMessage, text string) bool {
+	if target == nil || !target.SteerInbound(msg, text) {
+		return false
+	}
+	slog.Info("message steered into in-flight turn",
+		"agent", target.Name(), "channel", msg.Channel, "chat_id", msg.ChatID)
+	return true
+}
+
+// groupSteerText mirrors the `\[name\]: body` sender labeling
+// buildUserMessage applies to queued group turns, so a steered message
+// gives the model the same speaker context a normal group turn would.
+func groupSteerText(msg bus.InboundMessage) string {
+	if msg.SenderName == "" {
+		return msg.Text
+	}
+	return fmt.Sprintf("\\[%s\\]: %s", msg.SenderName, msg.Text)
+}
+
 func (g *Gateway) routeDM(ctx context.Context, msg bus.InboundMessage) {
 	space, err := g.users.getOrLoad(ctx, msg.OwnerUserID)
 	if err != nil {
@@ -119,6 +143,9 @@ func (g *Gateway) routeDM(ctx context.Context, msg bus.InboundMessage) {
 	slog.Info("routing DM",
 		"user", msg.OwnerUserID, "channel", msg.Channel,
 		"chat_id", msg.ChatID, "agent", ag.Name())
+	if g.trySteer(ag, msg, msg.Text) {
+		return
+	}
 	g.taskQueue.Submit(ag.Name(), chatKey(msg.Channel, msg.AccountID, msg.ChatID), msg, msg.AccountID)
 }
 
@@ -143,7 +170,9 @@ func (g *Gateway) routeGroup(ctx context.Context, msg bus.InboundMessage) {
 				triggerMsg := msg
 				triggerMsg.Text = fmt.Sprintf("\\[%s\\]: %s", msg.SenderName, msg.Text)
 				triggerMsg.IsBotMessage = false
-				g.taskQueue.Submit(target.Name(), chatKey(triggerMsg.Channel, triggerMsg.AccountID, triggerMsg.ChatID), triggerMsg, g.accountIDForAgent(space, target.Name(), triggerMsg.Channel))
+				if !g.trySteer(target, triggerMsg, triggerMsg.Text) {
+					g.taskQueue.Submit(target.Name(), chatKey(triggerMsg.Channel, triggerMsg.AccountID, triggerMsg.ChatID), triggerMsg, g.accountIDForAgent(space, target.Name(), triggerMsg.Channel))
+				}
 			}
 		}
 		return
@@ -158,7 +187,9 @@ func (g *Gateway) routeGroup(ctx context.Context, msg bus.InboundMessage) {
 			slog.Info("routing group mention",
 				"user", msg.OwnerUserID, "channel", msg.Channel,
 				"chat_id", msg.ChatID, "agent", target.Name())
-			g.taskQueue.Submit(target.Name(), chatKey(msg.Channel, msg.AccountID, msg.ChatID), msg, g.accountIDForAgent(space, target.Name(), msg.Channel))
+			if !g.trySteer(target, msg, groupSteerText(msg)) {
+				g.taskQueue.Submit(target.Name(), chatKey(msg.Channel, msg.AccountID, msg.ChatID), msg, g.accountIDForAgent(space, target.Name(), msg.Channel))
+			}
 			return
 		}
 	}
@@ -174,7 +205,9 @@ func (g *Gateway) routeGroup(ctx context.Context, msg bus.InboundMessage) {
 				ag.InjectGroupMessage(ctx, msg)
 			}
 		}
-		g.taskQueue.Submit(target.Name(), chatKey(msg.Channel, msg.AccountID, msg.ChatID), msg, g.accountIDForAgent(space, target.Name(), msg.Channel))
+		if !g.trySteer(target, msg, groupSteerText(msg)) {
+			g.taskQueue.Submit(target.Name(), chatKey(msg.Channel, msg.AccountID, msg.ChatID), msg, g.accountIDForAgent(space, target.Name(), msg.Channel))
+		}
 	default:
 		for _, ag := range boundAgents {
 			ag.InjectGroupMessage(ctx, msg)

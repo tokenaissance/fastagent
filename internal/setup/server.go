@@ -28,6 +28,10 @@ type AgentHandle interface {
 	Name() string
 	HandleWebChat(ctx context.Context, sessionId, projectIdHint, userID, text string, imageURLs []string, params map[string]any) string
 	HandleWebChatStream(ctx context.Context, sessionId, projectIdHint, userID, text string, imageURLs []string, params map[string]any, events chan<- agent.ChatEvent) string
+	// SteerWeb buffers a message into an in-flight turn for the session;
+	// returns false when no turn is running (caller falls back to a
+	// normal send).
+	SteerWeb(sessionId, projectIDHint, text string) bool
 	WebChatHistory(sessionId string) []map[string]any
 	WebChatSessions() []session.WebSession
 	DeleteWebChatSession(sessionId string) error
@@ -225,6 +229,7 @@ func (s *Server) Run(ctx context.Context) error {
 	// Chat
 	mux.HandleFunc("POST /api/chat", auth(s.handleChat))
 	mux.HandleFunc("POST /api/chat/stream", auth(s.handleChatStream))
+	mux.HandleFunc("POST /api/chat/steer", auth(s.handleChatSteer))
 	mux.HandleFunc("GET /api/chat/history", auth(s.handleChatHistory))
 	mux.HandleFunc("GET /api/chat/todo", auth(s.handleChatTodo))
 	mux.HandleFunc("GET /api/chat/sessions", auth(s.handleChatSessions))
