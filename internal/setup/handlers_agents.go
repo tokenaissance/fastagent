@@ -792,15 +792,21 @@ func (s *Server) handleAgentFilesZip(w http.ResponseWriter, r *http.Request) {
 	if scope.archiveSuffix != "" {
 		archiveName = fmt.Sprintf("%s-%s.zip", id, scope.archiveSuffix)
 	}
+	// Wrap entries in a folder named after the archive so extractors
+	// (macOS Archive Utility, Windows Explorer, 7zip…) place every
+	// file inside one directory instead of dumping them loose next
+	// to the zip. Without this, "5 files extracted" looks like
+	// "files went missing" because they fan out into Downloads/.
+	wrapper := strings.TrimSuffix(archiveName, ".zip") + "/"
 
 	w.Header().Set("Content-Type", "application/zip")
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, archiveName))
 
 	zw := zip.NewWriter(w)
-	defer zw.Close()
-
+	written, skipped, failed := 0, 0, 0
 	for _, o := range objects {
 		if !scope.acceptPath(o.Path) {
+			skipped++
 			continue
 		}
 		// Strip the deepest scope prefix from the archive entry name
@@ -808,30 +814,46 @@ func (s *Server) handleAgentFilesZip(w http.ResponseWriter, r *http.Request) {
 		// nested `projects/<pid>/<sid>/foo.md` paths.
 		entryName := stripScopePrefix(o.Path)
 		if entryName == "" {
+			skipped++
 			continue
 		}
 		hdr := &zip.FileHeader{
-			Name:     entryName,
+			Name:     wrapper + entryName,
 			Method:   zip.Deflate,
 			Modified: o.ModTime,
 		}
 		entry, err := zw.CreateHeader(hdr)
 		if err != nil {
+			// Continue, not return — finalizing the archive with the
+			// rest of the entries is more useful than bailing out and
+			// leaving the user with a single file. Pre-fix behavior:
+			// any transient hiccup partway through truncated the zip
+			// to whatever was already written, surfacing in prod as
+			// "only one image came out".
 			slog.Warn("zip: create entry failed", "agent", id, "path", o.Path, "err", err)
-			return
+			failed++
+			continue
 		}
 		rc, err := s.workspaceStore.Get(r.Context(), id, "", "", o.Path)
 		if err != nil {
 			slog.Warn("zip: open object failed", "agent", id, "path", o.Path, "err", err)
+			failed++
 			continue
 		}
 		_, copyErr := io.Copy(entry, rc)
 		rc.Close()
 		if copyErr != nil {
 			slog.Warn("zip: copy failed", "agent", id, "path", o.Path, "err", copyErr)
-			return
+			failed++
+			continue
 		}
+		written++
 	}
+	if err := zw.Close(); err != nil {
+		slog.Warn("zip: writer close failed", "agent", id, "err", err)
+	}
+	slog.Info("zip: archive sent", "agent", id, "archive", archiveName,
+		"objects", len(objects), "written", written, "skipped", skipped, "failed", failed)
 }
 
 // handleAgentWorkspaceReveal opens the chatter's workspace folder in
