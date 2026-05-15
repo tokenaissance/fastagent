@@ -250,6 +250,28 @@ func (s *Server) requireAgentOwner(w http.ResponseWriter, r *http.Request, agent
 // requests proxied through an integration with X-Fastclaw-End-User
 // can read artifacts for sessions they own without 403'ing on the
 // strict ownership check.
+// callerOwnsAgent returns true when the caller is the agent's owner, a
+// super_admin, or an apikey explicitly scoped to the agent. Unlike
+// requireAgentReadable this does NOT grant public-agent readers — used
+// by file-scope code that needs to distinguish "browse everything"
+// (owner) from "scope to your own session" (foreign caller on a public
+// agent). Failures are silent: caller decides how to respond.
+func (s *Server) callerOwnsAgent(r *http.Request, agentID string) bool {
+	rec, err := s.dataStore.GetAgent(r.Context(), agentID)
+	if err != nil || rec == nil {
+		return false
+	}
+	uid := s.effectiveUserID(r)
+	ident, _ := auth.FromContext(r.Context())
+	if rec.UserID == uid || ident.Role == users.RoleSuperAdmin {
+		return true
+	}
+	if ident.AuthMethod == "apikey" && ident.CanAccessAgent(agentID) {
+		return true
+	}
+	return false
+}
+
 func (s *Server) requireAgentReadable(w http.ResponseWriter, r *http.Request, agentID string) bool {
 	rec, err := s.dataStore.GetAgent(r.Context(), agentID)
 	if err != nil || rec == nil {
@@ -607,25 +629,27 @@ func (s *Server) resolveSystemFileTarget(w http.ResponseWriter, r *http.Request,
 // the directory name used under workspaces/<agent>/sessions/. The URL
 // token is the session_key (so the dashboard can address any session
 // uniformly), but workspace artifacts are namespaced by chat_id
-// instead — that's what the agent runtime passed at write time. Pre-
-// migration legacy keys looked like "web_<chat_id>" and the runtime
-// wrote files under "sessions/<chat_id>/", not "sessions/web_<chat_id>/".
+// instead — that's what the agent runtime passed at write time.
 //
-// Returns the chat_id when the session_key resolves; falls back to the
-// raw token when the lookup fails (brand-new sessions whose row hasn't
-// been created yet, or sessions saved before this migration).
+// Returns the chat_id when the session_key resolves under the caller's
+// (user_id, agent_id). Returns "" when the lookup fails — including
+// the case where the session belongs to a DIFFERENT user — so callers
+// don't accidentally widen scope into another user's files. Pre-fix
+// behavior was to fall back to the raw URL token; on a public agent
+// that let a non-owner caller pass a known chat_id of the owner and
+// read its files because the resulting scope was sessions/<their chat>/.
 func (s *Server) workspaceSessionScope(ctx context.Context, agentID, urlToken string) string {
 	tok := strings.TrimSpace(urlToken)
 	if tok == "" || s.dataStore == nil {
-		return tok
+		return ""
 	}
 	uid := config.UserIDFromContext(ctx)
 	if uid == "" {
-		return tok
+		return ""
 	}
 	_, _, chatID, err := s.dataStore.LookupSessionTriple(ctx, uid, agentID, tok)
 	if err != nil || chatID == "" {
-		return tok
+		return ""
 	}
 	return chatID
 }
@@ -721,6 +745,14 @@ func stripScopePrefix(p string) string {
 	return p
 }
 
+// rejectAllScope returns a fileScope that lets nothing through. Used
+// when the caller asked for a sessionId we can't resolve for them, so
+// a non-owner can't widen into another user's files on a public agent
+// just by guessing/leaking a chat_id.
+func rejectAllScope() fileScope {
+	return fileScope{acceptPath: func(string) bool { return false }}
+}
+
 func (s *Server) fileScopeForRequest(r *http.Request, agentID string) fileScope {
 	rawSession := r.URL.Query().Get("sessionId")
 	rawProject := r.URL.Query().Get("projectId")
@@ -737,11 +769,23 @@ func (s *Server) fileScopeForRequest(r *http.Request, agentID string) fileScope 
 		}
 	}
 	if rawSession == "" {
-		return fileScope{acceptPath: func(string) bool { return true }}
+		// Agent-wide view (no scope params at all). Owner / super_admin
+		// can legitimately browse every file; non-owners (public-agent
+		// viewers, foreign apikey callers) must specify a session they
+		// own, otherwise we'd hand them other users' files.
+		if s.callerOwnsAgent(r, agentID) {
+			return fileScope{acceptPath: func(string) bool { return true }}
+		}
+		return rejectAllScope()
 	}
 	chatID := s.workspaceSessionScope(r.Context(), agentID, rawSession)
 	if chatID == "" {
-		return fileScope{acceptPath: func(string) bool { return true }}
+		// sessionId didn't resolve to a chat THIS caller owns — either
+		// it doesn't exist or it belongs to another user. Either way,
+		// surface nothing. Pre-fix behavior was to widen back to
+		// "accept all", which on a public agent meant non-owners could
+		// list every chat's files by passing a junk sessionId.
+		return rejectAllScope()
 	}
 	if pid := s.resolveSessionProject(r.Context(), r, agentID, rawSession); pid != "" {
 		ownPrefix := "projects/" + pid + "/" + chatID + "/"
