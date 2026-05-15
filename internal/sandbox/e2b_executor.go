@@ -887,8 +887,40 @@ func (p *E2BExecutorPool) Get(ctx context.Context, agentID, projectID, sessionID
 		_ = ex.Close()
 		return nil, fmt.Errorf("e2b sandbox unusable: %w", err)
 	}
+	warmupCamoufoxDaemon(ctx, ex)
 	p.executors[key] = ex
 	return ex, nil
+}
+
+// warmupCamoufoxDaemon spawns the camoufox-cli background daemon as part
+// of sandbox provisioning so the agent's first `camoufox-cli open` call
+// attaches to a live daemon instead of racing to spawn one. Without this,
+// the CLI's auto-spawn path waits only 5 seconds for the daemon socket
+// — empirically too short in a fresh e2b sandbox (Python startup +
+// Firefox handshake routinely take longer), and concurrent execs inside
+// the same sandbox can both try to spawn, surfacing as the user-visible
+// "Daemon did not start within 5 seconds" failure.
+//
+// Best-effort: any error is logged at WARN and sandbox creation still
+// succeeds — agents that never touch the browser shouldn't fail because
+// camoufox couldn't come up, and the original (slow) cold-start path
+// remains intact as a fallback. Bounded to 120s so a wedged camoufox
+// install can't pin sandbox creation indefinitely.
+func warmupCamoufoxDaemon(ctx context.Context, ex *E2BExecutor) {
+	warmCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
+	defer cancel()
+	// `open about:blank` is the cheapest invocation that starts the
+	// daemon: no network, no GeoIP lookup, no real page load. The proxy
+	// shim in the Dockerfile still applies — if HTTPS_PROXY is set the
+	// browser launches with --proxy, matching what the agent's later
+	// calls will see, so the warmed daemon is configured identically.
+	out, err := ex.execOnce(warmCtx, "cd /workspace && camoufox-cli open about:blank", 120*time.Second)
+	if err != nil {
+		slog.Warn("e2b camoufox warmup failed (first browser call will pay cold-start)",
+			"sandboxID", ex.sandboxID, "error", err, "out", strings.TrimSpace(out))
+		return
+	}
+	slog.Info("e2b camoufox daemon warmed", "sandboxID", ex.sandboxID)
 }
 
 func (p *E2BExecutorPool) Release(agentID, projectID, sessionID string) error {
