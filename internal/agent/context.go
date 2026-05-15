@@ -24,53 +24,6 @@ var bootstrapFiles = []string{
 	"IDENTITY.md",
 }
 
-// autoPlanPrompt teaches the agent to decide on its own whether the
-// user's request warrants a plan-before-execute turn vs an immediate
-// answer/action. Replaces the explicit Plan toggle in the composer —
-// users shouldn't have to know the term "plan mode" or remember to
-// flip a switch on long prompts. The model has all the context to
-// make this call.
-const autoPlanPrompt = `# Decide whether to plan before acting
-
-Before doing any work, look at the request and pick one of two shapes:
-
-**Plan first** (emit a numbered plan, no tool calls, end with "Reply ` + "`go`" + ` to execute, or tell me what to change."):
-
-- Request decomposes into 3+ distinct phases (research → synthesis →
-  delivery; or "find N X across K categories then write Y for each").
-- Long structured deliverable expected (table with many rows, multi-
-  section report, multiple emails).
-- Mentions a number that implies repetition ("find 50 leads", "review
-  these 8 docs", "draft emails for each of the following").
-- Anything that would naturally use ` + "`delegate_task`" + ` for fan-out, or
-  that you can see hitting the iteration cap if you try to one-shot
-  it.
-
-**Skip the plan, act immediately** for:
-
-- Single-shot questions ("what is X?", "calculate Y", "fix this bug").
-- Direct commands that map to one or two tool calls ("read foo.md and
-  summarize", "search for X").
-- Conversational replies, clarifications, status checks.
-- The user already said "go" / "do it" / "yes" — they previously saw
-  a plan and are now authorizing execution. Execute now, don't re-plan.
-  (Confirmations in the user's natural language also count; recognise
-  intent, not exact words.)
-
-**When you plan**: do NOT call any tools during the plan turn — the
-plan IS your reply. Tools are still listed in your catalog but
-deliberately holding off lets the user steer. Reference tool names
-in plan steps so the user sees what you intend to invoke (e.g.
-"Step 3: Use ` + "`delegate_task`" + ` to find 10 X").
-
-**When the user replies after a plan**: their next message is either
-a confirmation or edits. Treat confirmation as authorization to
-execute every step end-to-end — don't ask permission step by step,
-and don't write another plan. Just do it. If they edited the plan,
-apply the edits and execute the revised version.
-
-`
-
 // taskDelegationPrompt teaches the agent when to reach for delegate_task.
 // Without this, even when the tool description is in the tool catalog,
 // flash-tier models keep cramming all the work into their own loop and
@@ -199,7 +152,6 @@ type ContextBuilder struct {
 	thinking       string // off, low, medium, high, adaptive
 	sandboxEnabled bool
 	sandboxBackend string
-	goalActive     bool // when true, omit autoPlanPrompt — see SetGoalActive
 	store   MemoryStore
 	userID  string
 	agentID string
@@ -234,29 +186,6 @@ func (cb *ContextBuilder) SetWorkspace(p string) { cb.workspace = p }
 // store at turn start end up visible to the model without rebuilding the
 // whole context builder.
 func (cb *ContextBuilder) SetSkillsSummary(s string) { cb.skillsSummary = s }
-
-// SetGoalActive flags the current turn as belonging to an active goal
-// session. When true, BuildSystemPrompt omits autoPlanPrompt:
-//
-//   - Plan's contract ("emit a numbered plan, no tool calls, end with
-//     'Reply `go` to execute'") demands a human checkpoint; goal's
-//     contract ("iterate autonomously until done") forbids one. With
-//     both injected, the model emits a plan-only turn that the goal
-//     continuation hook then auto-resumes — a "pseudo-plan" turn that
-//     wastes a round and misleads the UI (the "Reply `go`" approve
-//     buttons render even though no one will wait for the user's `go`).
-//
-//   - Removing the prompt is preferred over adding a counter-instruction.
-//     A negative "don't write a plan-first turn" risks the model
-//     over-generalizing to "don't structure your thinking at all";
-//     simply not teaching the plan-first shape leaves general reflective
-//     capability intact (audit checklist in goal continuation + todo.md
-//     in taskDelegationPrompt already cover structured progress).
-//
-// Caller (loop.go) sets this per turn from sessionHasActiveGoal — the
-// ContextBuilder is shared across turns on an Agent, so the flag must be
-// set explicitly on every turn or stale state leaks.
-func (cb *ContextBuilder) SetGoalActive(active bool) { cb.goalActive = active }
 
 // BuildSystemPrompt assembles the system prompt from identity, bootstrap files, memory, and skills.
 // Reads everything under the agent owner's bucket — equivalent to the
@@ -483,21 +412,8 @@ Then in your final reply, write: ![](/workspace/output.png)`
 		parts = append(parts, sandboxPrompt)
 	}
 
-	// Auto-plan + task delegation guidance — both shape how the model
-	// approaches multi-step work, so they live ahead of bootstrap files
-	// (which can carry agent-specific persona overrides). Order matters:
-	// auto-plan covers the "do I plan or act?" branch first, delegation
-	// then teaches the planning model what tool to write into the steps.
-	//
-	// autoPlanPrompt is suppressed when this turn belongs to an active
-	// goal session. See SetGoalActive for the rationale. taskDelegationPrompt
-	// stays in — its "Plan first when delegating" subsection is conditioned
-	// on plan mode actually being on, so in a goal session it naturally
-	// becomes a no-op, and the surrounding delegate_task / todo.md guidance
-	// is still useful.
-	if !cb.goalActive {
-		parts = append(parts, autoPlanPrompt)
-	}
+	// Task delegation guidance lives ahead of bootstrap files so per-
+	// agent persona overrides can still reshape downstream behavior.
 	parts = append(parts, taskDelegationPrompt)
 
 	// 3. Bootstrap files. USER.md is the only per-chatter entry — it
