@@ -5,7 +5,7 @@ import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { useAgentIdFromURL } from "@/hooks/use-agent-id";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { getAgent, getChatHistoryWithCursor, getChatSessions, getChatTodo, getMe, listAgentFiles, listProjects, renameChatSession, revealAgentWorkspace, sendChatStream, uploadAgentFiles, getAuthToken, getSkills, type ChatHistoryMessage, type ChatStreamEvent, type SkillInfo, type TodoItem, type ToolResultMetadata, type WorkspaceFile } from "@/lib/api";
+import { getAgent, getChatHistoryWithCursor, getChatSessions, getChatTodo, getMe, listAgentFiles, listProjects, renameChatSession, revealAgentWorkspace, sendChatStream, uploadAgentFiles, getSkills, type ChatHistoryMessage, type ChatStreamEvent, type SkillInfo, type TodoItem, type ToolResultMetadata, type WorkspaceFile } from "@/lib/api";
 import { Bot, Send, Copy, Check, Pencil, Wrench, ChevronDown, ChevronRight, Download, X, File, FileText, FolderSearch, Image as ImageIcon, FileCode, Film, Music, Puzzle, SlidersHorizontal, ShieldCheck, Paperclip, Square, FolderOpen, RefreshCw, Eye, Code2, RotateCcw, ListChecks, Terminal } from "lucide-react";
 import Link from "next/link";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
@@ -2844,25 +2844,32 @@ function formatBytes(n?: number): string {
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
 
+// fileUrl / zipUrl deliberately do NOT carry the bearer token in the
+// query string anymore. The web UI runs same-origin and the auth
+// middleware reads the session cookie set at login, so <img src>,
+// <a href>, and direct downloads authenticate via cookie just like
+// every other API call. Pre-fix we appended `?token=<bearer>` so
+// programmatic-bearer-only clients could render images, but that
+// token is a full API credential — putting it in URLs leaked it
+// via Referer (when a workspace HTML file linked to a 3rd-party
+// site), browser history, and reverse-proxy access logs. The
+// server still accepts `?token=` for back-compat with CLI scripts
+// that build their own URLs; the frontend just stops feeding it.
 function fileUrl(agentId: string, path: string, download: boolean): string {
-  const token = getAuthToken();
   const encoded = path.split("/").map(encodeURIComponent).join("/");
   const params = new URLSearchParams();
   if (download) params.set("download", "1");
-  if (token) params.set("token", token);
   const qs = params.toString();
   return `/api/agents/${agentId}/files/${encoded}${qs ? "?" + qs : ""}`;
 }
 
 function zipUrl(agentId: string, sessionId: string, projectId?: string): string {
-  const token = getAuthToken();
   const params = new URLSearchParams();
   // projectId wins when both are present — same precedence as the
   // backend's fileScopeForRequest, which treats projectId-without-
   // session as "whole project zip".
   if (projectId) params.set("projectId", projectId);
   else if (sessionId) params.set("sessionId", sessionId);
-  if (token) params.set("token", token);
   const qs = params.toString();
   return `/api/agents/${agentId}/files.zip${qs ? "?" + qs : ""}`;
 }
