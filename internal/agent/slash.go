@@ -118,6 +118,9 @@ func (a *Agent) handleSlashCommand(msg bus.InboundMessage) slashResult {
 	case "/goal":
 		return a.slashGoal(msg, args)
 
+	case "/plan":
+		return a.slashPlan(msg, args)
+
 	case "/help":
 		return slashResult{handled: true, reply: a.slashHelp()}
 
@@ -479,6 +482,9 @@ Goal (persistent multi-turn objective)
   /goal resume      — Resume a paused goal
   /goal clear       — Delete the goal
 
+Plan
+  /plan <task>      — Run <task> in plan mode: emit a numbered plan, no tool calls
+
 Info
   /help           — Show this help
   /version        — Show version
@@ -487,6 +493,38 @@ Info
 🔒 Write commands (/new /reset /undo /retry /compact /model /personality)
    in IM channels are restricted to the agent owner + admins listed in
    agent.json's "admins" field. Use /whoami to find your ID.`
+}
+
+// slashPlan handles `/plan <task>`: republish the rest of the message
+// onto bus.Inbound with planMode=true so the regular HandleMessage path
+// routes it into handlePlanMode. Manual replacement for the auto-plan
+// heuristic — users opt in explicitly per turn rather than the server
+// guessing from message shape.
+func (a *Agent) slashPlan(msg bus.InboundMessage, args []string) slashResult {
+	task := strings.TrimSpace(strings.Join(args, " "))
+	if task == "" {
+		return slashResult{handled: true, reply: "Usage: `/plan <task>`"}
+	}
+
+	// Clone the inbound msg so routing fields (channel, account, chat,
+	// project, user, sender, owner) carry over verbatim. Rewrite only
+	// Text and Params — the plan-mode flag is what handlePlanMode keys
+	// on (see isPlanMode in loop.go).
+	out := msg
+	out.Text = task
+	params := map[string]any{}
+	for k, v := range msg.Params {
+		params[k] = v
+	}
+	params["planMode"] = true
+	out.Params = params
+
+	select {
+	case a.messageBus.Inbound <- out:
+		return slashResult{handled: true, reply: "", continuationQueued: true}
+	default:
+		return slashResult{handled: true, reply: "Bus full, try again."}
+	}
 }
 
 func truncateSlash(s string, n int) string {
