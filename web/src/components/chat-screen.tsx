@@ -32,13 +32,14 @@ function urlTransform(url: string, key: string): string {
 // root and 404s.
 function makeUrlTransform(agentId: string, sessionId: string) {
   return (url: string, key: string): string => {
-    if (key === "src") {
-      if (url.startsWith("data:image/")) return url;
-      if (url.startsWith("/workspace/")) {
-        const rel = url.slice("/workspace/".length);
-        const scoped = sessionId ? `sessions/${sessionId}/${rel}` : rel;
-        return fileUrl(agentId, scoped, false);
-      }
+    if (key === "src" && url.startsWith("data:image/")) return url;
+    // Remap sandbox `/workspace/<name>` for both image embeds (`src`) and
+    // hyperlinks (`href`). Without href handling the model's "点击预览"
+    // link points at the app origin instead of the file API and 404s.
+    if ((key === "src" || key === "href") && url.startsWith("/workspace/")) {
+      const rel = url.slice("/workspace/".length);
+      const scoped = sessionId ? `sessions/${sessionId}/${rel}` : rel;
+      return fileUrl(agentId, scoped, false);
     }
     return defaultUrlTransform(url);
   };
@@ -100,6 +101,7 @@ function renderContentWithDataImages(
   content: string,
   surfacedSrcs?: ReadonlySet<string>,
   suppressAllInlineImages?: boolean,
+  urlTransformFn?: (url: string, key: string) => string,
 ): React.ReactNode | null {
   const parts = splitDataImages(content);
   if (!parts.some((p) => p.type === "image")) return null;
@@ -114,7 +116,7 @@ function renderContentWithDataImages(
           );
         }
         return (
-          <ReactMarkdown key={i} remarkPlugins={[remarkGfm]} components={{ a: ExternalAnchor }}>
+          <ReactMarkdown key={i} remarkPlugins={[remarkGfm]} urlTransform={urlTransformFn} components={{ a: ExternalAnchor }}>
             {p.text}
           </ReactMarkdown>
         );
@@ -564,6 +566,12 @@ export function ChatScreen() {
     };
   }, [attachmentPreviews]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesScrollRef = useRef<HTMLDivElement>(null);
+  // Auto-scroll only when the user is already pinned to the bottom.
+  // Toggled false the moment they scroll up so streaming agent output
+  // can't yank them back down mid-read, then flipped back to true once
+  // they return to the bottom (or hit the "scroll to latest" button).
+  const stickToBottomRef = useRef(true);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -1143,8 +1151,24 @@ export function ChatScreen() {
   }, [selectedAgent, sessionId]);
 
   useEffect(() => {
+    if (!stickToBottomRef.current) return;
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  // Watch the scroll container so we know whether to keep auto-scrolling
+  // as new content arrives. 64px slack absorbs streaming jitter — without
+  // it, a single token append can push the bottom past the viewport and
+  // flip us off "sticky" for one tick before the next auto-scroll fires.
+  useEffect(() => {
+    const el = messagesScrollRef.current;
+    if (!el) return;
+    const onScroll = () => {
+      const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+      stickToBottomRef.current = distance <= 64;
+    };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => el.removeEventListener("scroll", onScroll);
+  }, []);
 
   useEffect(() => {
     const el = textareaRef.current;
@@ -1253,6 +1277,10 @@ export function ChatScreen() {
     if (overrideText === undefined) {
       setInput("");
     }
+    // Sending always means "I want to see what happens next" — re-pin
+    // to bottom even if the user had scrolled up to read earlier in the
+    // conversation.
+    stickToBottomRef.current = true;
     setMessages((prev) => [
       ...prev,
       {
@@ -1820,6 +1848,7 @@ export function ChatScreen() {
       >
       {/* Messages */}
         <div
+          ref={messagesScrollRef}
           className={
             "min-h-0 px-4 " +
             (isEmpty ? "shrink-0" : "flex-1 overflow-y-auto py-4")
@@ -2014,6 +2043,7 @@ export function ChatScreen() {
                             msg.content,
                             surfacedSrcs,
                             (attachedImages.get(msg.id)?.length ?? 0) > 0,
+                            makeUrlTransform(selectedAgent, sessionId),
                           ) ?? (
                             <ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={makeUrlTransform(selectedAgent, sessionId)} components={{ a: ExternalAnchor }}>
                               {msg.content}
@@ -2567,7 +2597,7 @@ function ToolCallGroup({ msg, surfacedSrcs, agentId, sessionId, nested = false, 
       {msg.content && (
         <div className="bg-muted rounded-2xl rounded-bl-md px-4 py-2.5">
           <div className={CHAT_PROSE_CLASS}>
-            {renderContentWithDataImages(msg.content, surfacedSrcs) ?? (
+            {renderContentWithDataImages(msg.content, surfacedSrcs, false, makeUrlTransform(agentId, sessionId)) ?? (
               <ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={makeUrlTransform(agentId, sessionId)} components={{ a: ExternalAnchor }}>
                 {msg.content}
               </ReactMarkdown>
