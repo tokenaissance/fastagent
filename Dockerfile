@@ -1,7 +1,12 @@
 # --- Stage 1: Build web UI ---
 FROM node:22-alpine AS web-builder
 WORKDIR /src/web
-RUN corepack enable && corepack prepare pnpm@latest --activate
+# Pin pnpm: `latest` started pulling v11, which made
+# pnpm-workspace.yaml's onlyBuiltDependencies allow-list ineffective
+# under --frozen-lockfile (v11 wants an interactive `pnpm approve-builds`
+# step that has nowhere to run in a non-TTY Docker build), failing the
+# image build with ERR_PNPM_IGNORED_BUILDS on msw/sharp/unrs-resolver.
+RUN corepack enable && corepack prepare pnpm@10.15.0 --activate
 COPY web/package.json web/pnpm-lock.yaml web/pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile
 COPY web/ .
