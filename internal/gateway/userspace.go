@@ -809,24 +809,33 @@ func (r *userSpaceRegistry) startEvictor(ctx context.Context) {
 // bindingsFromChannelRows synthesizes the (channel, accountID) →
 // agentID routing table from channel rows themselves. It replaces the
 // old kind=setting/name=bindings indirection: every channel row whose
-// agent_id points at one of this user's agents contributes a Binding
+// agent_id points at an agent this user can route contributes a Binding
 // per Account.
 //
-// Pulls rows from two ownership corners that this user can route:
+// Pulls rows from three ownership corners this user can route:
 //   - (user_id='', agent_id=Y): the agent's "official" rows for any
-//     agent Y the user owns
-//   - (user_id=userID, agent_id=Y): per-(user, agent) overrides this
-//     user authored on someone else's (or their own) agent
+//     agent Y the user owns (legacy / pre-refactor data)
+//   - (user_id=userID, agent_id=Y) where user owns Y: this user's
+//     bindings on their own agent (the normal post-refactor pattern)
+//   - (user_id=userID, agent_id=Z) where user does NOT own Z: this
+//     user authored a channel overlay on a foreign agent (e.g. a
+//     chatter binding their WeChat bot to a public agent). Without
+//     this reverse-lookup, resolveChannelOwner correctly routes
+//     inbound DMs to the binder's UserSpace but matchAgent finds an
+//     empty Bindings list because the agent isn't in ListAgents(userID).
+//     The matchAgent path then lazy-attaches the foreign agent via
+//     ensureForeignAgent on first match.
 //
-// Per-agent overrides live one row at a time, so we list channels for
-// each agent the user can address. Granted-agent bindings stay outside
-// — they live in the agent owner's space, not every grantee's.
+// Granted-agent bindings without an explicit channel-row overlay stay
+// outside — they live in the agent owner's space, not every grantee's.
 func bindingsFromChannelRows(ctx context.Context, st store.Store, userID string, agents []store.AgentRecord) []config.Binding {
-	if st == nil || len(agents) == 0 {
+	if st == nil {
 		return nil
 	}
 	var out []config.Binding
+	covered := make(map[string]bool, len(agents))
 	for _, ar := range agents {
+		covered[ar.ID] = true
 		rows, err := st.ListConfigs(ctx, store.KindChannel, "", ar.ID)
 		if err == nil {
 			out = append(out, expandChannelBindings(rows, ar.ID)...)
@@ -835,6 +844,20 @@ func bindingsFromChannelRows(ctx context.Context, st store.Store, userID string,
 			rows, err := st.ListConfigs(ctx, store.KindChannel, userID, ar.ID)
 			if err == nil {
 				out = append(out, expandChannelBindings(rows, ar.ID)...)
+			}
+		}
+	}
+	// Reverse-lookup: any channel row this user wrote against an agent
+	// they don't own. matchAgent will lazy-attach the agent on first hit.
+	if userID != "" {
+		foreignRows, err := st.ListConfigsByUser(ctx, store.KindChannel, userID)
+		if err == nil {
+			for i := range foreignRows {
+				rec := foreignRows[i]
+				if rec.AgentID == "" || covered[rec.AgentID] {
+					continue
+				}
+				out = append(out, expandChannelBindings([]store.ConfigRecord{rec}, rec.AgentID)...)
 			}
 		}
 	}

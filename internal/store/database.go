@@ -2395,6 +2395,19 @@ func (d *DBStore) ListConfigs(ctx context.Context, kind, userID, agentID string)
 	return scanConfigs(rows)
 }
 
+func (d *DBStore) ListConfigsByUser(ctx context.Context, kind, userID string) ([]ConfigRecord, error) {
+	rows, err := d.db.QueryContext(ctx,
+		fmt.Sprintf(`SELECT `+configSelectCols+`
+			FROM configs WHERE kind = %s AND user_id = %s ORDER BY agent_id, name`,
+			d.ph(1), d.ph(2)),
+		kind, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanConfigs(rows)
+}
+
 func (d *DBStore) QueryAllConfigs(ctx context.Context, kind string) ([]ConfigRecord, error) {
 	rows, err := d.db.QueryContext(ctx,
 		fmt.Sprintf(`SELECT `+configSelectCols+`

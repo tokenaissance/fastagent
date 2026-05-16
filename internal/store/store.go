@@ -162,6 +162,13 @@ type Store interface {
 	// exactly. Pass empty for either to filter the corresponding ownership
 	// dimension. Pass both empty to get only system/global rows.
 	ListConfigs(ctx context.Context, kind, userID, agentID string) ([]ConfigRecord, error)
+	// ListConfigsByUser returns every row of a given kind owned by userID
+	// regardless of agent_id. The UserSpace assembly uses this to surface
+	// channel rows where the caller is the binder on a foreign agent —
+	// rows that ListConfigs(kind, userID, ownedAgentID) misses because
+	// the loop only visits agents the user owns. Pass userID="" to get
+	// system-scope rows (equivalent to ListConfigs(kind, "", "")).
+	ListConfigsByUser(ctx context.Context, kind, userID string) ([]ConfigRecord, error)
 	// QueryAllConfigs returns every row of a given kind regardless of
 	// ownership. Used by the gateway boot path to register every
 	// channel adapter on disk and by admin tooling that lists all
