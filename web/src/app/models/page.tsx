@@ -484,18 +484,16 @@ export default function ModelsPage() {
     await fetchConfig(isSuperAdmin, me?.id || "");
   };
 
-  // Save button at the top only persists the default-model setting. We
-  // skip the write when the field is empty so users who never touched it
-  // don't accidentally clear an existing system-scoped value.
+  // Save button at the top persists the default-model setting. An empty
+  // value is a legitimate intent ("clear the default") — the backend's
+  // `omitempty` on AgentDefaults.Model drops the key from the saved row
+  // without disturbing sibling fields, so it's safe to send through.
   const handleSaveAll = async () => {
-    if (!model.trim()) {
-      flashSaved();
-      return;
-    }
     setSaving(true);
     try {
       await updateConfig({ agents: { defaults: { model: model.trim() } } });
       flashSaved();
+      await fetchConfig(isSuperAdmin, me?.id || "");
     } finally {
       setSaving(false);
     }
