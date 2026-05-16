@@ -59,15 +59,16 @@ function extractAgentId(pathname: string): string | null {
 // Sidebar nav is rendered as a series of labeled sections so users can
 // scan it by domain instead of one flat list:
 //
-//   (no label)  Overview                         — landing dashboard
-//   Agent       Agents · Models · Skills · Tools — agent-building surfaces
-//   User        Users  · Chats  · API Keys       — admin platform tools
-//   (no label)  Settings                         — opens the user dialog
+//   (no label)  Overview                              — landing dashboard
+//   Agent       Agents · Models · Skills · Tools      — agent-building surfaces
+//   User        Users · Chats · Token Usage · API Keys — admin platform tools
+//   (no label)  Settings                              — opens the user dialog
 //
-// Skills / Tools / User-group entries are admin-only. Non-admin sees the
-// Agent group with just Agents + Models, and the User group is omitted
-// entirely. Settings is a click-only item — its onClick is attached at
-// render time so it can call into component state.
+// Skills / Tools and the Users/Chats/Token-Usage admin entries are
+// admin-only. Non-admin sees the Agent group with just Agents + Models,
+// and a slim User group with API Keys. Settings is a click-only item —
+// its onClick is attached at render time so it can call into component
+// state.
 const OVERVIEW_ITEM: NavItem = {
   title: "Overview",
   url: "/overview/",
@@ -84,6 +85,10 @@ const ADMIN_AGENT_GROUP: NavItem[] = [
   { title: "Models", url: "/models/", icon: BrainIcon },
   { title: "Skills", url: "/skills/", icon: SparklesIcon },
   { title: "Tools", url: "/tools/", icon: WrenchIcon },
+];
+
+const USER_USER_GROUP: NavItem[] = [
+  { title: "API Keys", url: "/apikeys/", icon: KeyRoundIcon },
 ];
 
 const ADMIN_USER_GROUP: NavItem[] = [
@@ -288,7 +293,10 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
               label="Agent"
               items={isAdmin ? ADMIN_AGENT_GROUP : USER_AGENT_GROUP}
             />
-            {isAdmin && <NavMain label="User" items={ADMIN_USER_GROUP} />}
+            <NavMain
+              label="User"
+              items={isAdmin ? ADMIN_USER_GROUP : USER_USER_GROUP}
+            />
           </>
         )}
         {/* Projects are per-(user, agent), so viewers on a shared agent
