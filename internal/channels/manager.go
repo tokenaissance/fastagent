@@ -12,6 +12,13 @@ import (
 type Manager struct {
 	mu       sync.Mutex
 	channels map[string]Channel // key: "channel:accountID"
+	// tgTokens tracks Telegram bot tokens already claimed by this
+	// process so we never start two pollers on the same token (they'd
+	// fight over the long-poll lock and spam 409 Conflict forever).
+	// Sticky for the process lifetime — Unregister doesn't release,
+	// because the underlying GetUpdatesChan goroutine can't be cancelled
+	// mid-poll (see Unregister).
+	tgTokens map[string]struct{}
 	bus      *bus.MessageBus
 	// Captured by Start so RegisterAndStart can hot-launch goroutines for
 	// channels added after the initial bootstrap. nil until Start runs.
@@ -22,8 +29,26 @@ type Manager struct {
 func NewManager(mb *bus.MessageBus) *Manager {
 	return &Manager{
 		channels: make(map[string]Channel),
+		tgTokens: make(map[string]struct{}),
 		bus:      mb,
 	}
+}
+
+// ClaimTelegramToken returns true if the caller is the first to claim
+// this token in this process, false if another adapter already holds
+// it. Callers should skip registration when this returns false.
+// Empty tokens are not tracked (NewTelegram will fail loudly on them).
+func (m *Manager) ClaimTelegramToken(token string) bool {
+	if token == "" {
+		return true
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, exists := m.tgTokens[token]; exists {
+		return false
+	}
+	m.tgTokens[token] = struct{}{}
+	return true
 }
 
 // Register adds a channel to the manager keyed by channel:accountID.

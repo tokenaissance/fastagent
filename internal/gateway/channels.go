@@ -62,6 +62,10 @@ func decodeChannelConfig(rec store.ConfigRecord) config.ChannelConfig {
 
 func registerTelegramChannels(chCfg config.ChannelConfig, mb *bus.MessageBus, chanMgr *channels.Manager, hot bool) error {
 	if len(chCfg.Accounts) == 0 {
+		if !chanMgr.ClaimTelegramToken(chCfg.BotToken) {
+			slog.Warn("telegram token already registered in this process, skipping duplicate")
+			return nil
+		}
 		tg, err := channels.NewTelegram(chCfg.BotToken, "", mb)
 		if err != nil {
 			return err
@@ -73,6 +77,10 @@ func registerTelegramChannels(chCfg config.ChannelConfig, mb *bus.MessageBus, ch
 		token := acct.BotToken
 		if token == "" {
 			token = chCfg.BotToken
+		}
+		if !chanMgr.ClaimTelegramToken(token) {
+			slog.Warn("telegram token already registered in this process, skipping duplicate", "account", accountID)
+			continue
 		}
 		tg, err := channels.NewTelegram(token, accountID, mb)
 		if err != nil {

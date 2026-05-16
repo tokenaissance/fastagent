@@ -62,6 +62,11 @@ func (t *Telegram) Start(ctx context.Context) error {
 	// Register bot commands so users see them in the / menu
 	t.registerCommands()
 
+	// Reclaim the bot before polling so a stray webhook or a previous
+	// holder's in-flight getUpdates doesn't lock us into the 3s retry
+	// spam loop inside tgbotapi.
+	t.claimBot()
+
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
 
@@ -213,6 +218,21 @@ func (t *Telegram) handleCallbackQuery(cq *tgbotapi.CallbackQuery) {
 		PeerKind:     peerKind,
 		SenderName:   senderName,
 		IsBotMessage: false,
+	}
+}
+
+// claimBot clears any leftover webhook and steals the long-poll lock
+// from any previous getUpdates holder, so we enter the polling loop in
+// a clean state. Telegram lets at most one client long-poll a bot at a
+// time — issuing a fresh getUpdates terminates whatever request is
+// in-flight on the other side. We use offset=-1, timeout=0 so this
+// returns immediately and we don't consume real updates.
+func (t *Telegram) claimBot() {
+	if _, err := t.bot.Request(tgbotapi.DeleteWebhookConfig{DropPendingUpdates: false}); err != nil {
+		slog.Warn("telegram delete webhook on startup", "account", t.accountID, "error", err)
+	}
+	if _, err := t.bot.GetUpdates(tgbotapi.UpdateConfig{Offset: -1, Timeout: 0, Limit: 1}); err != nil {
+		slog.Warn("telegram claim long-poll lock", "account", t.accountID, "error", err)
 	}
 }
 
