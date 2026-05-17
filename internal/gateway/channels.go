@@ -4,12 +4,30 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"time"
 
 	"github.com/fastclaw-ai/fastclaw/internal/bus"
 	"github.com/fastclaw-ai/fastclaw/internal/channels"
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 	"github.com/fastclaw-ai/fastclaw/internal/store"
 )
+
+// storeLeaser adapts store.Store to channels.Leaser. The method names
+// differ (Acquire/Renew/Release on the channels side, ...ChannelLease
+// on the store side) so the store can grow other lease kinds without
+// renaming. Lives here rather than in the store package to keep the
+// store interface IM-agnostic.
+type storeLeaser struct{ st store.Store }
+
+func (s storeLeaser) Acquire(ctx context.Context, channel, accountID, holderID string, ttl time.Duration) (bool, error) {
+	return s.st.AcquireChannelLease(ctx, channel, accountID, holderID, ttl)
+}
+func (s storeLeaser) Renew(ctx context.Context, channel, accountID, holderID string, ttl time.Duration) (bool, error) {
+	return s.st.RenewChannelLease(ctx, channel, accountID, holderID, ttl)
+}
+func (s storeLeaser) Release(ctx context.Context, channel, accountID, holderID string) error {
+	return s.st.ReleaseChannelLease(ctx, channel, accountID, holderID)
+}
 
 // registerChannelInstance starts a channel adapter for one kind="channel"
 // row in configs. The row's credential_key is what processInbound
@@ -51,6 +69,21 @@ func register(chanMgr *channels.Manager, ch channels.Channel, hot bool) {
 	chanMgr.Register(ch)
 }
 
+// registerSingleton is the polling-channel variant: every replica
+// running this binary will share the (channel, accountID) lease and
+// only the leaseholder's Start runs. Use for Telegram long-poll,
+// WeChat iLink long-poll, Discord/Slack WS, and Feishu long-conn —
+// anything where a second concurrent client would deliver duplicate
+// inbound. Webhook-only adapters (LINE, Feishu webhook mode) and
+// in-process fanout (Web) stay on plain register.
+func registerSingleton(chanMgr *channels.Manager, ch channels.Channel, hot bool) {
+	if hot {
+		chanMgr.RegisterSingletonAndStart(ch)
+		return
+	}
+	chanMgr.RegisterSingleton(ch)
+}
+
 func decodeChannelConfig(rec store.ConfigRecord) config.ChannelConfig {
 	cc := config.ChannelConfig{Enabled: rec.Enabled}
 	if blob, err := json.Marshal(rec.Data); err == nil && len(blob) > 0 {
@@ -70,7 +103,7 @@ func registerTelegramChannels(chCfg config.ChannelConfig, mb *bus.MessageBus, ch
 		if err != nil {
 			return err
 		}
-		register(chanMgr, tg, hot)
+		registerSingleton(chanMgr, tg, hot)
 		return nil
 	}
 	for accountID, acct := range chCfg.Accounts {
@@ -86,7 +119,7 @@ func registerTelegramChannels(chCfg config.ChannelConfig, mb *bus.MessageBus, ch
 		if err != nil {
 			return err
 		}
-		register(chanMgr, tg, hot)
+		registerSingleton(chanMgr, tg, hot)
 	}
 	return nil
 }
@@ -97,7 +130,7 @@ func registerDiscordChannels(chCfg config.ChannelConfig, mb *bus.MessageBus, cha
 		if err != nil {
 			return err
 		}
-		register(chanMgr, dc, hot)
+		registerSingleton(chanMgr, dc, hot)
 		return nil
 	}
 	for accountID, acct := range chCfg.Accounts {
@@ -109,7 +142,7 @@ func registerDiscordChannels(chCfg config.ChannelConfig, mb *bus.MessageBus, cha
 		if err != nil {
 			return err
 		}
-		register(chanMgr, dc, hot)
+		registerSingleton(chanMgr, dc, hot)
 	}
 	return nil
 }
@@ -120,7 +153,7 @@ func registerSlackChannels(chCfg config.ChannelConfig, mb *bus.MessageBus, chanM
 		if err != nil {
 			return err
 		}
-		register(chanMgr, sl, hot)
+		registerSingleton(chanMgr, sl, hot)
 		return nil
 	}
 	for accountID, acct := range chCfg.Accounts {
@@ -132,7 +165,7 @@ func registerSlackChannels(chCfg config.ChannelConfig, mb *bus.MessageBus, chanM
 		if err != nil {
 			return err
 		}
-		register(chanMgr, sl, hot)
+		registerSingleton(chanMgr, sl, hot)
 	}
 	return nil
 }
@@ -178,7 +211,17 @@ func registerFeishuChannels(chCfg config.ChannelConfig, mb *bus.MessageBus, chan
 		if err != nil {
 			return err
 		}
-		register(chanMgr, lk, hot)
+		// Long-conn opens a Feishu WebSocket — two replicas would
+		// both subscribe to im.message.receive_v1 and the bot owner
+		// would see every reply twice. Webhook mode receives via an
+		// HTTP route and is already idempotent at the gateway entry
+		// (HandleWebhook is called once per HTTP POST), so it skips
+		// the lease.
+		if acct.UseLongConn {
+			registerSingleton(chanMgr, lk, hot)
+		} else {
+			register(chanMgr, lk, hot)
+		}
 	}
 	return nil
 }
@@ -214,7 +257,7 @@ func registerWeChatChannels(rec store.ConfigRecord, chCfg config.ChannelConfig, 
 				chanMgr.Unregister("wechat", deadAccount)
 			})
 		}
-		register(chanMgr, wc, hot)
+		registerSingleton(chanMgr, wc, hot)
 	}
 	return nil
 }

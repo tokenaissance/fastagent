@@ -12,6 +12,12 @@ import (
 type Manager struct {
 	mu       sync.Mutex
 	channels map[string]Channel // key: "channel:accountID"
+	// singleton tracks which registered channels are gated by the
+	// Leaser (one process at a time per (channel, accountID)). Set by
+	// RegisterSingleton; non-singleton channels (webhook adapters,
+	// Web fanout, plugin channels) are not present in the map and run
+	// their Start unconditionally on every replica.
+	singleton map[string]struct{}
 	// tgTokens tracks Telegram bot tokens already claimed by this
 	// process so we never start two pollers on the same token (they'd
 	// fight over the long-poll lock and spam 409 Conflict forever).
@@ -20,17 +26,39 @@ type Manager struct {
 	// mid-poll (see Unregister).
 	tgTokens map[string]struct{}
 	bus      *bus.MessageBus
+	// leaser + holderID drive the cross-process singleton gate. nil
+	// leaser (or NopLeaser) reduces RegisterSingleton to plain Register.
+	// holderID is the per-process identifier persisted into
+	// channel_leases.holder_id and must stay stable across renewals.
+	leaser   Leaser
+	holderID string
 	// Captured by Start so RegisterAndStart can hot-launch goroutines for
 	// channels added after the initial bootstrap. nil until Start runs.
 	rootCtx context.Context
 }
 
-// NewManager creates a new channel manager.
+// NewManager creates a new channel manager with no cross-process
+// singleton support — all singleton-marked channels reduce to plain
+// channels (Start on every replica). Use NewManagerWithLeaser when
+// running multi-instance to gate polling adapters.
 func NewManager(mb *bus.MessageBus) *Manager {
+	return NewManagerWithLeaser(mb, NopLeaser{}, "")
+}
+
+// NewManagerWithLeaser wires a cross-process Leaser. `holderID` must be
+// unique per process (typically a UUID minted at boot) and stable for
+// the process lifetime so RenewChannelLease keeps matching the row.
+func NewManagerWithLeaser(mb *bus.MessageBus, leaser Leaser, holderID string) *Manager {
+	if leaser == nil {
+		leaser = NopLeaser{}
+	}
 	return &Manager{
-		channels: make(map[string]Channel),
-		tgTokens: make(map[string]struct{}),
-		bus:      mb,
+		channels:  make(map[string]Channel),
+		singleton: make(map[string]struct{}),
+		tgTokens:  make(map[string]struct{}),
+		bus:       mb,
+		leaser:    leaser,
+		holderID:  holderID,
 	}
 }
 
@@ -60,6 +88,21 @@ func (m *Manager) Register(ch Channel) {
 	m.channels[key] = ch
 }
 
+// RegisterSingleton is like Register but marks the channel as needing
+// cross-process leader election. Only one replica's Start runs at a
+// time per (channel, accountID); peers wait on the Leaser until the
+// active holder dies. Use for polling / persistent-connection adapters
+// (Telegram long-poll, WeChat iLink long-poll, Discord WS, Slack
+// Socket Mode, Feishu long-conn) — anything that would deliver inbound
+// twice if two processes spoke the same upstream protocol at once.
+func (m *Manager) RegisterSingleton(ch Channel) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key := channelKey(ch.Name(), ch.AccountID())
+	m.channels[key] = ch
+	m.singleton[key] = struct{}{}
+}
+
 // RegisterAndStart adds a channel AND, if Start has already run, kicks
 // off its polling goroutine immediately. Used by the dashboard's
 // channel-config handlers so a freshly-saved Telegram bot starts
@@ -68,16 +111,36 @@ func (m *Manager) Register(ch Channel) {
 // Safe to call before Start too — falls back to plain Register in that
 // case (Start picks it up like any other entry).
 func (m *Manager) RegisterAndStart(ch Channel) {
+	m.registerAndStart(ch, false)
+}
+
+// RegisterSingletonAndStart is the hot-add path for singleton-gated
+// adapters. Same shape as RegisterAndStart, but the launched goroutine
+// goes through the Leaser instead of calling ch.Start directly.
+func (m *Manager) RegisterSingletonAndStart(ch Channel) {
+	m.registerAndStart(ch, true)
+}
+
+func (m *Manager) registerAndStart(ch Channel, singleton bool) {
 	m.mu.Lock()
 	key := channelKey(ch.Name(), ch.AccountID())
 	m.channels[key] = ch
+	if singleton {
+		m.singleton[key] = struct{}{}
+	}
 	ctx := m.rootCtx
+	leaser := m.leaser
+	holderID := m.holderID
 	m.mu.Unlock()
 	if ctx == nil {
 		return
 	}
 	go func() {
-		slog.Info("hot-starting channel", "key", key)
+		slog.Info("hot-starting channel", "key", key, "singleton", singleton)
+		if singleton {
+			runWithLease(ctx, ch, leaser, holderID)
+			return
+		}
 		if err := ch.Start(ctx); err != nil {
 			slog.Error("channel stopped with error", "key", key, "error", err)
 		}
@@ -103,9 +166,13 @@ func (m *Manager) Start(ctx context.Context) {
 	m.mu.Lock()
 	m.rootCtx = ctx
 	chans := make(map[string]Channel, len(m.channels))
+	singletons := make(map[string]bool, len(m.channels))
 	for k, v := range m.channels {
 		chans[k] = v
+		_, singletons[k] = m.singleton[k]
 	}
+	leaser := m.leaser
+	holderID := m.holderID
 	m.mu.Unlock()
 
 	var wg sync.WaitGroup
@@ -119,14 +186,19 @@ func (m *Manager) Start(ctx context.Context) {
 
 	// Start each channel
 	for key, ch := range chans {
+		singleton := singletons[key]
 		wg.Add(1)
-		go func(k string, c Channel) {
+		go func(k string, c Channel, s bool) {
 			defer wg.Done()
-			slog.Info("starting channel", "key", k)
+			slog.Info("starting channel", "key", k, "singleton", s)
+			if s {
+				runWithLease(ctx, c, leaser, holderID)
+				return
+			}
 			if err := c.Start(ctx); err != nil {
 				slog.Error("channel stopped with error", "key", k, "error", err)
 			}
-		}(key, ch)
+		}(key, ch, singleton)
 	}
 
 	wg.Wait()

@@ -202,6 +202,19 @@ type Store interface {
 	// next job is due instead of polling.
 	GetNextDueTime(ctx context.Context) (time.Time, error)
 
+	// --- Channel leases (singleton gate for polling channels) ---
+	//
+	// Cross-process leader election for one (channel, account_id) pair.
+	// AcquireChannelLease returns true on either fresh acquisition,
+	// renewal-via-acquire, or steal-after-expiry. RenewChannelLease
+	// returns false (NOT an error) when the lease was lost — callers
+	// must stop the underlying poller immediately to avoid duplicate
+	// inbound delivery. ReleaseChannelLease deletes the row so a peer
+	// can take over without waiting for TTL.
+	AcquireChannelLease(ctx context.Context, channel, accountID, holderID string, ttl time.Duration) (bool, error)
+	RenewChannelLease(ctx context.Context, channel, accountID, holderID string, ttl time.Duration) (bool, error)
+	ReleaseChannelLease(ctx context.Context, channel, accountID, holderID string) error
+
 	// --- Goals (per agent × session) ---
 	//
 	// At most one row per (agent_id, session_key); enforced by a

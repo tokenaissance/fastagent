@@ -1408,6 +1408,21 @@ func (d *DBStore) migrationSQL() []string {
 		// all time") when the table grows.
 		`CREATE INDEX IF NOT EXISTS idx_token_usage_agent ON token_usage_daily (agent_id, day)`,
 		`CREATE INDEX IF NOT EXISTS idx_token_usage_user ON token_usage_daily (user_id, day)`,
+		// channel_leases gates polling / persistent-connection channel
+		// adapters (WeChat, Telegram, Discord, Slack, Feishu long-conn)
+		// to one process at a time. Without it, two cloud replicas
+		// sharing the same bot token would both long-poll the upstream
+		// server and the user would receive every reply twice. The
+		// leaseholder renews periodically; on crash the lease expires
+		// and another instance takes over. See channels.Manager and
+		// channels.runWithLease.
+		`CREATE TABLE IF NOT EXISTS channel_leases (
+			channel TEXT NOT NULL,
+			account_id TEXT NOT NULL,
+			holder_id TEXT NOT NULL,
+			expires_at TIMESTAMP NOT NULL,
+			PRIMARY KEY (channel, account_id)
+		)`,
 	}
 }
 
@@ -2754,6 +2769,102 @@ func (d *DBStore) GetNextDueTime(ctx context.Context) (time.Time, error) {
 		return time.Time{}, nil
 	}
 	return parseTimeString(s.String), nil
+}
+
+// --- Channel leases ---
+//
+// Cross-process singleton gate for polling / persistent-connection
+// channel adapters. The pattern is one row per (channel, account_id);
+// the holder writes its instanceID into holder_id and renews
+// expires_at on a periodic tick. A peer wanting to take over has to
+// wait until expires_at has passed — at that point the same upsert
+// query atomically rotates the row to the new holder.
+
+// AcquireChannelLease attempts to take the (channel, accountID) lease
+// for `ttl`. Returns true only when the row was either absent, already
+// held by holderID (renew), or expired (steal). A concurrent acquirer
+// that loses the race gets (false, nil) — not an error.
+func (d *DBStore) AcquireChannelLease(ctx context.Context, channel, accountID, holderID string, ttl time.Duration) (bool, error) {
+	now := time.Now()
+	expires := now.Add(ttl)
+	if d.dialect == "postgres" {
+		// ON CONFLICT updates the row only when the previous holder's
+		// lease has expired OR we already hold it (renew). The WHERE
+		// clause is essential — without it, a second instance would
+		// steal the lease the moment its INSERT collided.
+		res, err := d.db.ExecContext(ctx,
+			`INSERT INTO channel_leases (channel, account_id, holder_id, expires_at)
+				VALUES ($1, $2, $3, $4)
+				ON CONFLICT (channel, account_id) DO UPDATE
+				SET holder_id = EXCLUDED.holder_id, expires_at = EXCLUDED.expires_at
+				WHERE channel_leases.expires_at < $5 OR channel_leases.holder_id = $3`,
+			channel, accountID, holderID, expires, now)
+		if err != nil {
+			return false, err
+		}
+		n, _ := res.RowsAffected()
+		return n > 0, nil
+	}
+	// SQLite path: ON CONFLICT DO UPDATE ... WHERE is supported in
+	// modernc.org/sqlite (SQLite 3.24+). Same semantics as the PG
+	// branch above; placeholder syntax differs.
+	res, err := d.db.ExecContext(ctx,
+		`INSERT INTO channel_leases (channel, account_id, holder_id, expires_at)
+			VALUES (?, ?, ?, ?)
+			ON CONFLICT (channel, account_id) DO UPDATE
+			SET holder_id = excluded.holder_id, expires_at = excluded.expires_at
+			WHERE channel_leases.expires_at < ? OR channel_leases.holder_id = ?`,
+		channel, accountID, holderID, expires, now, holderID)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// RenewChannelLease extends an already-held lease. Returns false (not
+// an error) when the row's holder_id no longer matches — meaning the
+// previous holder's TTL elapsed and a peer took over while we were
+// off-cpu. Callers MUST treat false as "stop polling immediately": the
+// peer is now driving inbound for this (channel, account_id) pair.
+func (d *DBStore) RenewChannelLease(ctx context.Context, channel, accountID, holderID string, ttl time.Duration) (bool, error) {
+	expires := time.Now().Add(ttl)
+	var res sql.Result
+	var err error
+	if d.dialect == "postgres" {
+		res, err = d.db.ExecContext(ctx,
+			`UPDATE channel_leases SET expires_at = $1
+				WHERE channel = $2 AND account_id = $3 AND holder_id = $4`,
+			expires, channel, accountID, holderID)
+	} else {
+		res, err = d.db.ExecContext(ctx,
+			`UPDATE channel_leases SET expires_at = ?
+				WHERE channel = ? AND account_id = ? AND holder_id = ?`,
+			expires, channel, accountID, holderID)
+	}
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// ReleaseChannelLease voluntarily drops the lease so a peer can pick
+// it up on its next acquire attempt without waiting for TTL. Bounded
+// by holder_id so a stale Release from an evicted instance can't
+// accidentally invalidate the current holder's row.
+func (d *DBStore) ReleaseChannelLease(ctx context.Context, channel, accountID, holderID string) error {
+	var err error
+	if d.dialect == "postgres" {
+		_, err = d.db.ExecContext(ctx,
+			`DELETE FROM channel_leases WHERE channel = $1 AND account_id = $2 AND holder_id = $3`,
+			channel, accountID, holderID)
+	} else {
+		_, err = d.db.ExecContext(ctx,
+			`DELETE FROM channel_leases WHERE channel = ? AND account_id = ? AND holder_id = ?`,
+			channel, accountID, holderID)
+	}
+	return err
 }
 
 // --- Projects ---

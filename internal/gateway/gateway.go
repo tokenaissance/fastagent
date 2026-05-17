@@ -20,6 +20,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/fastclaw-ai/fastclaw/internal/agent"
 	"github.com/fastclaw-ai/fastclaw/internal/bus"
 	"github.com/fastclaw-ai/fastclaw/internal/channels"
@@ -260,7 +262,15 @@ func New(env *config.EnvConfig) (*Gateway, error) {
 	}
 	ws := wsInner
 
-	chanMgr := channels.NewManager(mb)
+	// holderID is the per-process identifier stamped into
+	// channel_leases.holder_id. Stable for the lifetime of this
+	// gateway so renewals keep matching the row; a peer process
+	// generates its own and can only steal the lease once ours
+	// expires. Logged at boot so ops can correlate "who is currently
+	// driving this WeChat bot" with a specific replica.
+	holderID := uuid.NewString()
+	slog.Info("gateway holder id", "id", holderID)
+	chanMgr := channels.NewManagerWithLeaser(mb, storeLeaser{st: st}, holderID)
 	// Always-on web channel: routes cron-fired (and any other
 	// async-emitted) outbound messages to the dashboard's SSE
 	// subscribers so the user sees the agent's reply live instead of
