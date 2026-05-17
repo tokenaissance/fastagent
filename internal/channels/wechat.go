@@ -3,15 +3,20 @@ package channels
 import (
 	"bytes"
 	"context"
+	"crypto/aes"
+	"crypto/md5"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -53,6 +58,20 @@ const (
 	wechatTypingStatusCancel = 2
 
 	wechatTypingTimeout = 8 * time.Second
+
+	// CDN constants for image/file upload. Mirrors the upstream weclaw
+	// daemon: iLink mints a per-upload URL via /ilink/bot/getuploadurl,
+	// the bot AES-128-ECB-encrypts the bytes, POSTs ciphertext to the
+	// CDN, and gets back an X-Encrypted-Param header that gets fed into
+	// the ImageItem.media.encrypt_query_param.
+	wechatCDNBaseURL        = "https://novac2c.cdn.weixin.qq.com/c2c"
+	wechatCDNMediaTypeImage = 1
+	wechatCDNEncryptType    = 1 // AES-128-ECB
+
+	// Media-send timeout. Covers the getuploadurl round-trip + CDN POST
+	// + the second sendmessage. Longer than wechatSendTimeout because
+	// the CDN leg can be slow for larger images.
+	wechatMediaSendTimeout = 90 * time.Second
 )
 
 // WeChat is the iLink long-poll adapter for one logged-in WeChat bot.
@@ -275,9 +294,15 @@ func (w *WeChat) Send(chatID, text string) error {
 
 // SendMessage posts a reply to a iLink user. iLink doesn't have native
 // markdown, inline keyboards, or message edits, so most of the
-// OutboundMessage fields are intentionally ignored — we only honor
-// Text, ChatID, and ContextToken (carried implicitly via ReplyToMsgID
-// on iLink's side; see context_token note below).
+// OutboundMessage fields are intentionally ignored — we honor Text,
+// ChatID, MediaItems, and the per-chat ContextToken cached from the
+// last inbound (used both by SendTyping and by the image-send path).
+//
+// Text and images are sent as separate iLink messages: a text-only
+// sendmessage first (if there's text), then one sendmessage per image
+// after each has been uploaded to the iLink CDN. Failures on individual
+// images are logged but don't abort the rest of the reply — partial
+// delivery is better than dropping the whole turn for one bad upload.
 func (w *WeChat) SendMessage(msg bus.OutboundMessage) error {
 	if msg.Text == "" && len(msg.MediaItems) == 0 {
 		return nil
@@ -286,17 +311,36 @@ func (w *WeChat) SendMessage(msg bus.OutboundMessage) error {
 	// will literally show *bold* / [link](url) syntax. Strip it
 	// best-effort, same way weclaw's MarkdownToPlainText helper does.
 	plain := wechatStripMarkdown(msg.Text)
-	if plain == "" {
-		// No usable text to send (image-only output not supported yet
-		// — see dispatchInbound's TODO). Log and drop rather than
-		// posting an empty payload that iLink would reject.
-		slog.Debug("wechat send: nothing to send after markdown strip", "chat", msg.ChatID)
-		return nil
+	if plain != "" {
+		if err := w.sendTextOnly(msg.ChatID, plain); err != nil {
+			return err
+		}
 	}
+	for _, item := range msg.MediaItems {
+		if len(item.Bytes) == 0 {
+			continue
+		}
+		if err := w.sendImage(msg.ChatID, item); err != nil {
+			slog.Warn("wechat send image failed",
+				"account", w.accountID, "chat", msg.ChatID,
+				"filename", item.Filename, "error", err)
+		}
+	}
+	return nil
+}
+
+// sendTextOnly is the simple text-message path used by SendMessage when
+// there is any plain text to send. Kept distinct from sendImage so each
+// path can carry its own timeout + payload shape.
+func (w *WeChat) sendTextOnly(chatID, plain string) error {
+	w.ctxTokensMu.Lock()
+	contextToken := w.ctxTokens[chatID]
+	w.ctxTokensMu.Unlock()
+
 	body := wechatSendRequest{
 		Msg: wechatSendMsg{
 			FromUserID:   w.accountID,
-			ToUserID:     msg.ChatID,
+			ToUserID:     chatID,
 			ClientID:     uuid.NewString(),
 			MessageType:  wechatMsgTypeBot,
 			MessageState: wechatMsgStateFinish,
@@ -306,6 +350,7 @@ func (w *WeChat) SendMessage(msg bus.OutboundMessage) error {
 					TextItem: &wechatTextItem{Text: plain},
 				},
 			},
+			ContextToken: contextToken,
 		},
 		BaseInfo: wechatBaseInfo{},
 	}
@@ -552,6 +597,7 @@ type wechatMessage struct {
 type wechatItem struct {
 	Type      int              `json:"type"`
 	TextItem  *wechatTextItem  `json:"text_item,omitempty"`
+	ImageItem *wechatImageItem `json:"image_item,omitempty"`
 	VoiceItem *wechatVoiceItem `json:"voice_item,omitempty"`
 }
 
@@ -606,4 +652,219 @@ type wechatSendTypingRequest struct {
 type wechatSendTypingResponse struct {
 	Ret    int    `json:"ret"`
 	ErrMsg string `json:"errmsg,omitempty"`
+}
+
+// --- CDN image upload + send (mirrors weclaw/messaging/cdn.go + media.go) ---
+//
+// iLink's image flow is two-leg:
+//   1. POST /ilink/bot/getuploadurl to mint a one-shot CDN upload URL
+//      (the bot supplies a random filekey + AES-128 key + plaintext
+//      md5; server returns either a full URL or just a query param to
+//      tack onto the well-known CDN endpoint).
+//   2. POST the AES-128-ECB-encrypted bytes to that URL; server replies
+//      with an X-Encrypted-Param header that becomes the
+//      ImageItem.media.encrypt_query_param for the eventual sendmessage.
+//
+// AES key wire format is a base64-encoded *hex string* (not the raw
+// 16 bytes) — quirk of the iLink protocol, preserved here for
+// compatibility with the upstream daemon.
+
+type wechatImageItem struct {
+	URL     string           `json:"url,omitempty"`
+	Media   *wechatMediaInfo `json:"media,omitempty"`
+	MidSize int              `json:"mid_size,omitempty"` // ciphertext size
+}
+
+type wechatMediaInfo struct {
+	EncryptQueryParam string `json:"encrypt_query_param"`
+	AESKey            string `json:"aes_key"`      // base64(hex(raw_key))
+	EncryptType       int    `json:"encrypt_type"` // 1 = AES-128-ECB
+}
+
+type wechatGetUploadURLRequest struct {
+	FileKey     string         `json:"filekey"`
+	MediaType   int            `json:"media_type"`
+	ToUserID    string         `json:"to_user_id"`
+	RawSize     int            `json:"rawsize"`
+	RawFileMD5  string         `json:"rawfilemd5"`
+	FileSize    int            `json:"filesize"`
+	NoNeedThumb bool           `json:"no_need_thumb"`
+	AESKey      string         `json:"aeskey"`
+	BaseInfo    wechatBaseInfo `json:"base_info"`
+}
+
+type wechatGetUploadURLResponse struct {
+	Ret           int    `json:"ret"`
+	ErrMsg        string `json:"errmsg,omitempty"`
+	UploadParam   string `json:"upload_param"`
+	UploadFullURL string `json:"upload_full_url,omitempty"`
+}
+
+// wechatUploadedFile is the post-upload handle: enough to mint an
+// ImageItem.media reference for the follow-up sendmessage.
+type wechatUploadedFile struct {
+	DownloadParam string
+	AESKeyHex     string
+	CipherSize    int
+}
+
+// sendImage uploads one MediaItem's bytes to the iLink CDN and posts a
+// type=2 image message referencing the result. Called per-item by
+// SendMessage; errors are returned to the caller so it can log + continue.
+func (w *WeChat) sendImage(chatID string, item bus.MediaItem) error {
+	ctx, cancel := context.WithTimeout(context.Background(), wechatMediaSendTimeout)
+	defer cancel()
+
+	uploaded, err := w.uploadImageToCDN(ctx, chatID, item.Bytes)
+	if err != nil {
+		return fmt.Errorf("upload: %w", err)
+	}
+
+	w.ctxTokensMu.Lock()
+	contextToken := w.ctxTokens[chatID]
+	w.ctxTokensMu.Unlock()
+
+	body := wechatSendRequest{
+		Msg: wechatSendMsg{
+			FromUserID:   w.accountID,
+			ToUserID:     chatID,
+			ClientID:     uuid.NewString(),
+			MessageType:  wechatMsgTypeBot,
+			MessageState: wechatMsgStateFinish,
+			ItemList: []wechatItem{{
+				Type: wechatItemTypeImage,
+				ImageItem: &wechatImageItem{
+					Media: &wechatMediaInfo{
+						EncryptQueryParam: uploaded.DownloadParam,
+						AESKey:            base64.StdEncoding.EncodeToString([]byte(uploaded.AESKeyHex)),
+						EncryptType:       wechatCDNEncryptType,
+					},
+					MidSize: uploaded.CipherSize,
+				},
+			}},
+			ContextToken: contextToken,
+		},
+		BaseInfo: wechatBaseInfo{},
+	}
+	var resp wechatSendResponse
+	if err := w.doPost(ctx, "/ilink/bot/sendmessage", body, &resp); err != nil {
+		return fmt.Errorf("send: %w", err)
+	}
+	if resp.Ret != 0 {
+		return fmt.Errorf("send: ret=%d errmsg=%s", resp.Ret, resp.ErrMsg)
+	}
+	slog.Debug("wechat image sent",
+		"account", w.accountID, "chat", chatID, "filename", item.Filename, "bytes", len(item.Bytes))
+	return nil
+}
+
+func (w *WeChat) uploadImageToCDN(ctx context.Context, toUserID string, data []byte) (*wechatUploadedFile, error) {
+	filekey := make([]byte, 16)
+	aeskey := make([]byte, 16)
+	if _, err := rand.Read(filekey); err != nil {
+		return nil, fmt.Errorf("filekey: %w", err)
+	}
+	if _, err := rand.Read(aeskey); err != nil {
+		return nil, fmt.Errorf("aeskey: %w", err)
+	}
+	filekeyHex := hex.EncodeToString(filekey)
+	aeskeyHex := hex.EncodeToString(aeskey)
+
+	hash := md5.Sum(data)
+	rawMD5 := hex.EncodeToString(hash[:])
+	cipherSize := wechatAESECBPaddedSize(len(data))
+
+	upReq := wechatGetUploadURLRequest{
+		FileKey:     filekeyHex,
+		MediaType:   wechatCDNMediaTypeImage,
+		ToUserID:    toUserID,
+		RawSize:     len(data),
+		RawFileMD5:  rawMD5,
+		FileSize:    cipherSize,
+		NoNeedThumb: true,
+		AESKey:      aeskeyHex,
+		BaseInfo:    wechatBaseInfo{},
+	}
+	var upResp wechatGetUploadURLResponse
+	if err := w.doPost(ctx, "/ilink/bot/getuploadurl", upReq, &upResp); err != nil {
+		return nil, fmt.Errorf("getuploadurl: %w", err)
+	}
+	if upResp.Ret != 0 {
+		return nil, fmt.Errorf("getuploadurl ret=%d errmsg=%s", upResp.Ret, upResp.ErrMsg)
+	}
+
+	encrypted, err := wechatAESECBEncrypt(data, aeskey)
+	if err != nil {
+		return nil, fmt.Errorf("encrypt: %w", err)
+	}
+
+	// Server may hand back a full upload URL or just a query param;
+	// in the latter case construct against the well-known CDN host.
+	cdnURL := strings.TrimSpace(upResp.UploadFullURL)
+	if cdnURL == "" {
+		if upResp.UploadParam == "" {
+			return nil, fmt.Errorf("getuploadurl returned no URL")
+		}
+		cdnURL = fmt.Sprintf("%s/upload?encrypted_query_param=%s&filekey=%s",
+			wechatCDNBaseURL, url.QueryEscape(upResp.UploadParam), url.QueryEscape(filekeyHex))
+	}
+
+	downloadParam, err := wechatUploadCDNBytes(ctx, encrypted, cdnURL)
+	if err != nil {
+		return nil, fmt.Errorf("cdn upload: %w", err)
+	}
+	return &wechatUploadedFile{
+		DownloadParam: downloadParam,
+		AESKeyHex:     aeskeyHex,
+		CipherSize:    cipherSize,
+	}, nil
+}
+
+// wechatUploadCDNBytes POSTs the AES-encrypted payload to the CDN and
+// returns the X-Encrypted-Param header from the response — the opaque
+// token the bot later embeds as encrypt_query_param so the recipient's
+// WeChat client can fetch + decrypt.
+func wechatUploadCDNBytes(ctx context.Context, encrypted []byte, cdnURL string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, cdnURL, bytes.NewReader(encrypted))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/octet-stream")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+	}
+	downloadParam := resp.Header.Get("X-Encrypted-Param")
+	if downloadParam == "" {
+		return "", fmt.Errorf("missing X-Encrypted-Param header")
+	}
+	return downloadParam, nil
+}
+
+func wechatAESECBEncrypt(plaintext, key []byte) ([]byte, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	padLen := aes.BlockSize - (len(plaintext) % aes.BlockSize)
+	padded := make([]byte, len(plaintext)+padLen)
+	copy(padded, plaintext)
+	for i := len(plaintext); i < len(padded); i++ {
+		padded[i] = byte(padLen)
+	}
+	encrypted := make([]byte, len(padded))
+	for i := 0; i < len(padded); i += aes.BlockSize {
+		block.Encrypt(encrypted[i:i+aes.BlockSize], padded[i:i+aes.BlockSize])
+	}
+	return encrypted, nil
+}
+
+func wechatAESECBPaddedSize(plaintextSize int) int {
+	return (plaintextSize/aes.BlockSize + 1) * aes.BlockSize
 }
