@@ -908,6 +908,39 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, map[string]any{"reply": reply})
 }
 
+// handleChatSteer buffers a message into an in-flight turn for the
+// session. It does NOT open a stream or emit an event — the running
+// turn (started by the earlier /api/chat/stream POST) folds the message
+// in between tool rounds and emits the "steer" event on its existing
+// SSE. 200 {"buffered":true} when a turn was active; 409
+// {"buffered":false} when none is running, so the client falls back to
+// a normal /api/chat/stream send.
+func (s *Server) handleChatSteer(w http.ResponseWriter, r *http.Request) {
+	var req chatRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	ag := s.resolveAgent(r, req.AgentID)
+	if ag == nil {
+		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "agent not found"})
+		return
+	}
+	if s.effectiveUserID(r) == "" {
+		jsonResponse(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if strings.TrimSpace(req.Message) == "" {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "empty message"})
+		return
+	}
+	if ag.SteerWeb(req.SessionID, req.ProjectID, req.Message) {
+		jsonResponse(w, http.StatusOK, map[string]any{"buffered": true})
+		return
+	}
+	jsonResponse(w, http.StatusConflict, map[string]any{"buffered": false})
+}
+
 // agentTurnTimeout is the upper bound on how long an agent goroutine
 // is allowed to run after the client connection drops. Bumped to 45m
 // after fan-out delegate_task work (6 parallel subagents × ~10m each

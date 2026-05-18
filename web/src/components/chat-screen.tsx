@@ -5,7 +5,7 @@ import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { useAgentIdFromURL } from "@/hooks/use-agent-id";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { getAgent, getChatHistoryWithCursor, getChatSessions, getChatTodo, getMe, listAgentFiles, listProjects, renameChatSession, revealAgentWorkspace, sendChatStream, uploadAgentFiles, getSkills, type ChatHistoryMessage, type ChatStreamEvent, type SkillInfo, type TodoItem, type ToolResultMetadata, type WorkspaceFile } from "@/lib/api";
+import { getAgent, getChatHistoryWithCursor, getChatSessions, getChatTodo, getMe, listAgentFiles, listProjects, renameChatSession, revealAgentWorkspace, sendChatStream, steerChat, uploadAgentFiles, getSkills, type ChatHistoryMessage, type ChatStreamEvent, type SkillInfo, type TodoItem, type ToolResultMetadata, type WorkspaceFile } from "@/lib/api";
 import { Bot, Send, Copy, Check, Pencil, Wrench, ChevronDown, ChevronRight, Download, X, File, FileText, FolderSearch, Image as ImageIcon, FileCode, Film, Music, Puzzle, SlidersHorizontal, ShieldCheck, Paperclip, Square, FolderOpen, RefreshCw, Eye, Code2, RotateCcw, ListChecks, Terminal } from "lucide-react";
 import Link from "next/link";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
@@ -172,6 +172,10 @@ interface ChatMessage {
   toolCalls?: { id: string; name: string; arguments: string; result?: string; metadata?: ToolResultMetadata }[];
   files?: ProducedFile[];
   attachments?: UserAttachment[];
+  // Optimistically-rendered steer bubble awaiting the server's persisted
+  // "steer" echo. Used only to dedup against that echo (cleared on
+  // match) — not rendered differently.
+  pendingSteer?: boolean;
   // Assistant-side metadata (e.g. iteration-cap badge). Stamped from
   // either the live content event's `metadata` payload or the
   // ChatHistoryMessage.metadata on a refresh.
@@ -893,6 +897,11 @@ export function ChatScreen() {
             }
             break;
           }
+          case "steer": {
+            claim();
+            applySteerEvent(data.data?.content || "");
+            break;
+          }
           case "done": {
             claim();
             // Defensive clear — content events should already have
@@ -1178,15 +1187,38 @@ export function ChatScreen() {
     }
   }, [input]);
 
-  const handleSend = useCallback(async (overrideText?: string) => {
+  // applySteerEvent renders a server "steer" echo as a user bubble,
+  // reconciling against the optimistic pendingSteer bubble (if any) so
+  // the message isn't duplicated. seq-dedup is already applied upstream
+  // by both event consumers.
+  const applySteerEvent = useCallback((content: string) => {
+    if (!content) return;
+    setMessages((prev) => {
+      const idx = prev.findIndex(
+        (m) => m.role === "user" && m.pendingSteer && m.content === content,
+      );
+      if (idx >= 0) {
+        const updated = [...prev];
+        updated[idx] = { ...updated[idx], pendingSteer: undefined };
+        return updated;
+      }
+      return [
+        ...prev,
+        { id: `s-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, role: "user", content, timestamp: Date.now() },
+      ];
+    });
+  }, []);
+
+  const handleSend = useCallback(async (overrideText?: string, force?: boolean) => {
     // overrideText lets caller post a message that didn't come from
     // the composer (e.g. the plan-approval button clicking "go"). When
     // present it bypasses the input field entirely — composer state
-    // stays as the user left it.
+    // stays as the user left it. force bypasses the in-flight guard;
+    // used by the steer 409 fallback (server confirmed no active turn).
     const composerText = (overrideText ?? input).trim();
     const text = composerText;
     // Allow sending with attachments only (no text), but require at least one.
-    if ((!text && attachments.length === 0) || !selectedAgent || sending) return;
+    if ((!text && attachments.length === 0) || !selectedAgent || (sending && !force)) return;
 
     // `/project/<pid>` is the lazy-create marker the sidebar dropped
     // us at. Captured here so it can ride the first chat request body;
@@ -1542,6 +1574,13 @@ export function ChatScreen() {
             }
             break;
           }
+          case "steer": {
+            // A message the user injected mid-turn was folded into the
+            // running turn server-side. Render it as a user bubble
+            // (reconciled against the optimistic pendingSteer bubble).
+            applySteerEvent(evt.data?.content || "");
+            break;
+          }
           case "error": {
             // Surface backend errors as a chat bubble. Without this the
             // turn just hangs — the model failed (provider 4xx/5xx,
@@ -1692,6 +1731,39 @@ export function ChatScreen() {
     abortRef.current?.abort();
   }, []);
 
+  // handleSteer fires while a turn is streaming: it buffers the message
+  // into the running turn (the agent folds it in between tool rounds and
+  // streams a "steer" echo on the existing SSE). On 409 (no active turn
+  // — the turn just ended) it falls back to a normal send so nothing is
+  // lost.
+  const handleSteer = useCallback(async () => {
+    const text = input.trim();
+    // Only ever called from handleKeyDown's `if (sending)` branch;
+    // within one render React state is snapshot-consistent, so `sending`
+    // is necessarily true here.
+    if (!text || !selectedAgent || !sending) return;
+    setInput("");
+    const optimisticId = `s-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    setMessages((prev) => [
+      ...prev,
+      { id: optimisticId, role: "user", content: text, timestamp: Date.now(), pendingSteer: true },
+    ]);
+    let ok = false;
+    try {
+      ok = await steerChat(selectedAgent, sessionId, text, urlProjectId);
+    } catch (err) {
+      setMessages((prev) => [
+        ...prev.filter((m) => m.id !== optimisticId),
+        { id: `e-${Date.now()}`, role: "agent", content: `Steer failed: ${err instanceof Error ? err.message : "unknown error"}`, timestamp: Date.now() },
+      ]);
+      return;
+    }
+    if (!ok) {
+      setMessages((prev) => prev.filter((m) => m.id !== optimisticId));
+      await handleSend(text, true);
+    }
+  }, [input, selectedAgent, sending, sessionId, urlProjectId, handleSend]);
+
   const handleFilePick = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const picked = e.target.files;
     if (!picked || picked.length === 0) return;
@@ -1744,7 +1816,13 @@ export function ChatScreen() {
 
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      handleSend();
+      // While a turn is streaming, Enter steers the running turn instead
+      // of being blocked; otherwise it's a normal send.
+      if (sending) {
+        handleSteer();
+      } else {
+        handleSend();
+      }
     }
   };
 
@@ -2318,7 +2396,7 @@ export function ChatScreen() {
                             ? `Message ${agentName || selectedAgent}... ("/" to pick a skill)`
                             : "Select an agent first"
                     }
-                    disabled={!selectedAgent || sending || isReadOnlyView}
+                    disabled={!selectedAgent || isReadOnlyView}
                     rows={3}
                     className="block w-full resize-none bg-transparent text-[15px] placeholder:text-muted-foreground/50 outline-none disabled:opacity-50"
                     style={{ maxHeight: 240, minHeight: 72 }}
@@ -2412,7 +2490,7 @@ export function ChatScreen() {
                             ? `Message ${agentName || selectedAgent}... ("/" to pick a skill)`
                             : "Select an agent first"
                     }
-                    disabled={!selectedAgent || sending || isReadOnlyView}
+                    disabled={!selectedAgent || isReadOnlyView}
                     rows={1}
                     className="flex-1 resize-none bg-transparent text-[15px] leading-8 placeholder:text-muted-foreground/50 outline-none disabled:opacity-50"
                     style={{ maxHeight: 200, minHeight: 32 }}

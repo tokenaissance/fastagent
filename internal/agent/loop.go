@@ -403,6 +403,46 @@ func (a *Agent) HandleWebChatStream(ctx context.Context, sessionId, projectIDHin
 	return a.HandleMessage(ctx, msg)
 }
 
+// SteerWeb buffers a steering message for an in-flight web turn on the
+// given session. Returns true if a turn was active and the message was
+// buffered (the running loop will fold it in between tool rounds and
+// emit a "steer" event on the existing SSE), false if no turn is
+// running — in which case the caller should fall back to a normal send.
+// Session resolution mirrors HandleWebChatStream exactly so we land on
+// the same *session.Session pointer the running turn holds.
+func (a *Agent) SteerWeb(sessionId, projectIDHint, text string) bool {
+	if sessionId == "" {
+		sessionId = "web-ui"
+	}
+	channel, accountID, chatID, projectID := a.recoverWebTriple(sessionId)
+	if projectID == "" {
+		projectID = projectIDHint
+	}
+	sess := a.sessions.Get(channel, accountID, chatID, projectID)
+	return sess.PushSteerIfActive(provider.Message{
+		Role:      "user",
+		Content:   text,
+		Timestamp: time.Now().UnixMilli(),
+	})
+}
+
+// SteerInbound buffers a steering message for an in-flight turn keyed by
+// the inbound message's (channel, accountID, chatID, projectID) — the
+// SAME fields HandleMessage resolves the session with (NOT the
+// taskqueue's per-agent accountID), so the pointer matches the running
+// turn. `text` is the already-formatted body the Submit path would have
+// delivered (e.g. the group `\[name\]:` prefix). Returns false when no
+// turn is active so the caller falls back to taskQueue.Submit.
+func (a *Agent) SteerInbound(msg bus.InboundMessage, text string) bool {
+	sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID, msg.ProjectID)
+	return sess.PushSteerIfActive(provider.Message{
+		Role:      "user",
+		Content:   text,
+		Metadata:  senderMetadata(msg),
+		Timestamp: time.Now().UnixMilli(),
+	})
+}
+
 // recoverWebTriple maps a URL `?session=` token (which can be a
 // session_key for any channel, OR a legacy web chat_id) to the full
 // (channel, accountID, chatID, projectID) tuple downstream callers
@@ -1316,6 +1356,12 @@ func (a *Agent) handlePlanMode(ctx context.Context, msg bus.InboundMessage) stri
 	chatterUID := a.chatterUserID(msg)
 	ctx = sandbox.WithUserID(ctx, chatterUID)
 	sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID, msg.ProjectID)
+	// Steering during plan drafting: plan mode has no ReAct loop to drain
+	// into, so a mid-draft steer is parked in history and answered on
+	// the user's next turn — which matches the plan-mode contract
+	// (review the plan, then reply to execute).
+	sess.BeginTurn()
+	defer a.flushLeftoverSteer(sess)
 	defer padOrphanToolResults(sess)
 
 	// Mirror the regular path's user-message construction so multimodal
@@ -1376,6 +1422,39 @@ func (a *Agent) handlePlanMode(ctx context.Context, msg bus.InboundMessage) stri
 	}})
 	emitEvent(ctx, ChatEvent{Type: "done"})
 	return resp.Content
+}
+
+// appendSteer folds drained steer messages into the running turn: each
+// is persisted to the session, added to the live LLM message slice, and
+// echoed as a "steer" event so the web UI renders it as a user bubble
+// (persisted → late-join backfill + seq-dedup work for free).
+func (a *Agent) appendSteer(ctx context.Context, sess *session.Session, messages []provider.Message, steer []provider.Message) []provider.Message {
+	for _, sm := range steer {
+		sess.Append(sm)
+		messages = append(messages, sm)
+		emitEvent(ctx, ChatEvent{Type: "steer", Data: map[string]any{"content": sm.Content}})
+		slog.Info("steer message folded into running turn", "agent", a.name)
+	}
+	return messages
+}
+
+// flushLeftoverSteer handles the end-of-turn race: a steer accepted by
+// PushSteerIfActive after the loop's last drain but before the turn was
+// declared done (realistically only the max-iteration synthesis call,
+// an errored turn, or a sub-millisecond window — the between-rounds and
+// pre-done drains cover every normal path). It's persisted to history
+// so it isn't lost and rides the next turn's context; we deliberately
+// do NOT re-run a hidden turn for it (kept simple + avoids the
+// IM-has-no-reply asymmetry of a recursive redispatch).
+func (a *Agent) flushLeftoverSteer(sess *session.Session) {
+	leftover := sess.EndTurn()
+	for _, m := range leftover {
+		sess.Append(m)
+	}
+	if len(leftover) > 0 {
+		slog.Warn("steer arrived at end of turn; parked in history for the next turn",
+			"agent", a.name, "count", len(leftover))
+	}
 }
 
 // HandleMessage processes an inbound message through the ReAct loop.
@@ -1445,6 +1524,15 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	// identifier); goal tools need the durable session.Session.SessionKey
 	// to address rows in agent_goals.
 	a.registry.SetGoalSessionKey(sess.SessionKey())
+
+	// Steering: mark a turn in-flight so messages arriving mid-run are
+	// buffered onto the session (drained between tool iterations below)
+	// instead of starting a separate turn. flushLeftoverSteer parks any
+	// steer that lost the end-of-turn race into history. Registered
+	// before padOrphanToolResults so it runs LAST (defers are LIFO) —
+	// orphan padding settles history first.
+	sess.BeginTurn()
+	defer a.flushLeftoverSteer(sess)
 
 	// Safety net for client-aborted turns: if the loop exits with a
 	// tool_use that never got its matching tool_result appended (the
@@ -1585,8 +1673,25 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		a.meterTokens(ctx, sess.Key(), resp.Usage)
 
 		if !resp.HasToolCalls() {
-			sess.Append(provider.Message{Role: "assistant", Content: resp.Content, Thinking: resp.Thinking, Timestamp: time.Now().UnixMilli(), RawAssistant: resp.RawAssistant})
+			asst := provider.Message{Role: "assistant", Content: resp.Content, Thinking: resp.Thinking, Timestamp: time.Now().UnixMilli(), RawAssistant: resp.RawAssistant}
+			sess.Append(asst)
 			emitEvent(ctx, ChatEvent{Type: "content", Data: map[string]any{"content": resp.Content}})
+			// End-of-turn steer race: a message buffered after the last
+			// between-rounds drain but before we declare the turn done.
+			// Fold it in and keep going instead of returning, so the
+			// user's mid-flight instruction isn't deferred to a new turn.
+			if steer := sess.DrainSteer(); len(steer) > 0 {
+				// Carry the just-produced answer into the next LLM call
+				// only when it has text. A no-text, no-tool-call
+				// assistant message is an invalid turn for Anthropic
+				// (an assistant turn needs a non-empty content block),
+				// and this is the only path that would re-send one.
+				if resp.Content != "" {
+					messages = append(messages, asst)
+				}
+				messages = a.appendSteer(ctx, sess, messages, steer)
+				continue
+			}
 			emitEvent(ctx, ChatEvent{Type: "done"})
 			a.runPostTurn(ctx, msg, messages, totalToolCalls, chatterMem)
 			return resp.Content
@@ -1812,6 +1917,13 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 			allFailedRounds++
 		} else {
 			allFailedRounds = 0
+		}
+
+		// Steering: messages that arrived while this tool round ran are
+		// folded in here, between rounds, so the next LLM call sees them
+		// and can change course.
+		if steer := sess.DrainSteer(); len(steer) > 0 {
+			messages = a.appendSteer(ctx, sess, messages, steer)
 		}
 	}
 
