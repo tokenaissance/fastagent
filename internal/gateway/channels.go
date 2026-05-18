@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"time"
 
@@ -266,10 +267,17 @@ func registerWeChatChannels(rec store.ConfigRecord, chCfg config.ChannelConfig, 
 // Accounts map. If the row is left empty after the removal the whole
 // row gets deleted. Runs in the adapter's polling goroutine so the
 // HTTP request ctx isn't available — use a fresh background ctx.
+//
+// Idempotent: ErrNotFound on the GetConfig lookup means the row is
+// already gone (dashboard-side disconnect, or a sibling account's
+// purge that emptied the row first) — that's success, not an error.
 func purgeWeChatAccount(st store.Store, rowID, deadAccount string) error {
 	ctx := context.Background()
 	rec, err := st.GetConfig(ctx, rowID)
 	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil
+		}
 		return err
 	}
 	if rec == nil {
