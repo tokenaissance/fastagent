@@ -64,6 +64,15 @@ type Store interface {
 	GetSession(ctx context.Context, userID, agentID, sessionKey string) (*SessionRecord, error)
 	SaveSession(ctx context.Context, userID, agentID, sessionKey string, session *SessionRecord) error
 	ListSessions(ctx context.Context, userID, agentID string) ([]SessionMeta, error)
+	// ListSessionOwnerPairs returns every distinct (user_id, agent_id)
+	// pair present in the sessions table. Used by the admin Chats page
+	// to discover non-owner sessions: when a chatter binds their own bot
+	// to a public agent (or messages a public agent on the web), the
+	// session row is saved under that chatter's user_id, not the agent
+	// owner's — so an owner-keyed ListSessions misses them. Iterating
+	// pairs lets the admin view enumerate every (chatter, agent) tuple
+	// that has chat history, regardless of who owns the agent.
+	ListSessionOwnerPairs(ctx context.Context) ([]SessionOwnerPair, error)
 	DeleteSession(ctx context.Context, userID, agentID, sessionKey string) error
 	RenameSession(ctx context.Context, userID, agentID, sessionKey, title string) error
 	// MoveSession reassigns a session to a different project (or
@@ -373,6 +382,16 @@ type SessionEventRecord struct {
 	Type       string    `json:"type"`
 	Data       []byte    `json:"data,omitempty"`
 	CreatedAt  time.Time `json:"createdAt"`
+}
+
+// SessionOwnerPair is one (user_id, agent_id) tuple returned by
+// ListSessionOwnerPairs — represents "this user has at least one
+// session with this agent." The admin Chats view fans out per pair to
+// pull each chatter's session list, so non-owner conversations on
+// public agents (where session.user_id ≠ agent.user_id) get surfaced.
+type SessionOwnerPair struct {
+	UserID  string `json:"userId"`
+	AgentID string `json:"agentId"`
 }
 
 // SessionMeta is summary info for a session (for listing).

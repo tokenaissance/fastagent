@@ -1965,6 +1965,31 @@ func (d *DBStore) ListSessions(ctx context.Context, userID, agentID string) ([]S
 	return metas, rows.Err()
 }
 
+// ListSessionOwnerPairs enumerates every distinct (user_id, agent_id)
+// tuple in the sessions table. The admin Chats page calls this to find
+// all conversation owners (chatters/binders) across all agents — the
+// per-(owner, agent) ListSessions would miss sessions where a non-owner
+// user chats with a public agent or binds an IM bot to it, because
+// those rows live under the chatter's user_id, not the agent owner's.
+func (d *DBStore) ListSessionOwnerPairs(ctx context.Context) ([]SessionOwnerPair, error) {
+	rows, err := d.db.QueryContext(ctx,
+		`SELECT DISTINCT user_id, agent_id FROM sessions
+			WHERE user_id <> '' AND agent_id <> ''`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var pairs []SessionOwnerPair
+	for rows.Next() {
+		var p SessionOwnerPair
+		if err := rows.Scan(&p.UserID, &p.AgentID); err != nil {
+			return nil, err
+		}
+		pairs = append(pairs, p)
+	}
+	return pairs, rows.Err()
+}
+
 // LookupSessionTriple is ResolveActiveSessionKey's inverse: given a
 // session_key (the canonical row id), return the (channel, accountID,
 // chatID) it belongs to. Used by handlers that take a session_key from

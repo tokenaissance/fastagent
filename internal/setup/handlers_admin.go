@@ -523,18 +523,21 @@ func (s *Server) respondAllAgents(w http.ResponseWriter, r *http.Request) {
 // fanning out per-agent on the client. Super_admin only — registered on
 // /api/admin/chats and gated by the admin middleware.
 //
-// Implementation note: we don't go through the agent runtime here. The
-// runtime's session listing is keyed by the caller's userID (super_admin
-// browsing another user's agent gets an empty list — sessions stay
-// per-caller). Instead we bind a fresh StoreAdapter to each agent's OWNER
-// userID and ask it for that owner's sessions, which is what we want
-// for the cross-tenant overview.
+// Implementation note: we fan out per (chatter user_id, agent_id) pair
+// from the sessions table, NOT per agent. A non-owner who binds their
+// own bot to a public agent (or chats with a public agent on the web)
+// writes session rows under their own user_id — an iteration keyed by
+// agent.owner would miss those sessions entirely. The pair fan-out
+// captures every chatter regardless of whether they own the agent. The
+// "Owner" column then reflects the chat's actual user, so the actAs
+// link in the dashboard can impersonate the real session owner instead
+// of the agent owner (who may have no read access to the session).
 func (s *Server) handleAdminChats(w http.ResponseWriter, r *http.Request) {
 	if s.dataStore == nil {
 		jsonResponse(w, http.StatusServiceUnavailable, map[string]any{"error": "no data store"})
 		return
 	}
-	records, err := s.dataStore.ListAllAgents(r.Context())
+	pairs, err := s.dataStore.ListSessionOwnerPairs(r.Context())
 	if err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
@@ -551,23 +554,38 @@ func (s *Server) handleAdminChats(w http.ResponseWriter, r *http.Request) {
 		ownerCache[uid] = a
 		return a
 	}
+	agentCache := map[string]*store.AgentRecord{}
+	resolveAgent := func(agentID string) *store.AgentRecord {
+		if agentID == "" {
+			return nil
+		}
+		if a, ok := agentCache[agentID]; ok {
+			return a
+		}
+		a, _ := s.dataStore.GetAgent(r.Context(), agentID)
+		agentCache[agentID] = a
+		return a
+	}
 	out := make([]map[string]any, 0)
-	for _, ar := range records {
-		if ar.UserID == "" {
+	for _, p := range pairs {
+		ag := resolveAgent(p.AgentID)
+		if ag == nil {
+			// Orphan session row whose agent has been deleted — skip
+			// rather than surfacing a row with a blank Agent column.
 			continue
 		}
-		adapter := session.NewStoreAdapter(s.dataStore, ar.UserID)
-		sessions, err := adapter.ListWebSessions(r.Context(), ar.ID)
+		adapter := session.NewStoreAdapter(s.dataStore, p.UserID)
+		sessions, err := adapter.ListWebSessions(r.Context(), p.AgentID)
 		if err != nil {
 			continue
 		}
-		owner := resolveOwner(ar.UserID)
+		owner := resolveOwner(p.UserID)
 		for _, ws := range sessions {
 			entry := map[string]any{
 				"id":           ws.ID,
-				"agentId":      ar.ID,
-				"agentName":    ar.Name,
-				"userId":       ar.UserID,
+				"agentId":      p.AgentID,
+				"agentName":    ag.Name,
+				"userId":       p.UserID,
 				"channel":      ws.Channel,
 				"accountId":    ws.AccountID,
 				"chatId":       ws.ChatID,
