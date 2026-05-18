@@ -316,9 +316,15 @@ func (s *Server) resolveAgent(r *http.Request, agentID string) AgentHandle {
 	// attached, AgentByID succeeds on subsequent requests.
 	if ag == nil {
 		injector, hasInjector := s.userResolver.(api.AgentInjector)
+		// super_admin can lazy-attach foreign agents regardless of actAs
+		// mode. In actAs mode, EffectiveUserID() is the impersonated user
+		// — attaching the agent to THAT user's UserSpace is exactly what
+		// the admin Chats "Open" flow needs to read sessions written
+		// under user_id=impersonated. The previous `!ident.IsActingAs()`
+		// gate blocked this case and the chat panel rendered empty even
+		// though the session_messages rows existed in the DB.
 		canAttach := hasInjector &&
-			(ident.AuthMethod == "apikey" ||
-				(ident.Role == users.RoleSuperAdmin && !ident.IsActingAs()))
+			(ident.AuthMethod == "apikey" || ident.Role == users.RoleSuperAdmin)
 		if !canAttach && hasInjector && uid != "" && s.dataStore != nil {
 			if rec, err := s.dataStore.GetAgent(r.Context(), agentID); err == nil && rec != nil && rec.IsPublic {
 				canAttach = true
