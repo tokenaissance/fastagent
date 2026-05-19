@@ -178,8 +178,11 @@ type SandboxCfg struct {
 	// Boxlite (https://github.com/boxlite-ai/boxlite) is a hosted sandbox
 	// service speaking the REST spec at openapi/rest-sandbox-open-api.yaml.
 	// BoxliteURL is the full base URL (default https://api.boxlite.ai/v1);
-	// BoxliteKey is the OAuth client_secret; ClientID and Prefix default
-	// to "default" when empty so the minimum config is just (URL, Key).
+	// BoxliteKey is the apikey sent as `Authorization: Bearer <key>`
+	// directly (no OAuth exchange — that path was removed upstream).
+	// ClientID is retained for back-compat with older config rows but
+	// no longer wired to anything. Prefix defaults to "default" when
+	// empty so the minimum config is just (URL, Key).
 	BoxliteURL      string `json:"boxliteUrl,omitempty"`
 	BoxliteClientID string `json:"boxliteClientId,omitempty"`
 	BoxliteKey      string `json:"boxliteKey,omitempty"`

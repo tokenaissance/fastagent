@@ -23,10 +23,12 @@ import (
 // Boxlite REST sandbox provider — talks the OpenAPI spec at
 // https://github.com/boxlite-ai/boxlite/blob/main/openapi/rest-sandbox-open-api.yaml
 //
-// Auth is OAuth2 client_credentials (POST /oauth/tokens with form-encoded
-// client_id + client_secret). Tokens are cached on the executor and
-// refreshed when they expire. The "API key" the operator pastes into the
-// admin UI is the OAuth client_secret.
+// Auth is a static API key sent as `Authorization: Bearer <apikey>`.
+// Earlier revisions did an OAuth2 client_credentials exchange against
+// /oauth/tokens — that endpoint was removed upstream; the key the
+// operator pastes is now the bearer token directly. BoxliteClientID is
+// retained on the config struct for back-compat (existing admin rows
+// keep working) but it isn't sent anywhere anymore.
 //
 // Lifecycle:
 //   POST   /{prefix}/boxes          create box (configured)
@@ -56,19 +58,20 @@ const (
 
 // BoxliteExecutor implements Executor against a remote Boxlite REST API.
 type BoxliteExecutor struct {
-	baseURL  string // already trimmed of trailing slash
-	prefix   string
+	baseURL string // already trimmed of trailing slash
+	prefix  string
+	// clientID is the legacy OAuth2 client_id, retained on the struct so
+	// older config rows that set it don't break the constructor. Unused
+	// after the apikey-as-bearer switch.
 	clientID string
-	secret   string
+	apiKey   string
 	image    string
 	timeout  time.Duration
 
 	client *http.Client
 
-	mu          sync.Mutex
-	boxID       string
-	accessToken string
-	tokenExp    time.Time
+	mu    sync.Mutex
+	boxID string
 
 	// hydration sources — same shape as E2BExecutor uses, so recreate()
 	// can rebuild /skills + /workspace from scratch when the box is gone.
@@ -79,7 +82,7 @@ type BoxliteExecutor struct {
 	sessionID string
 }
 
-func newBoxliteExecutor(ctx context.Context, baseURL, prefix, clientID, secret, image string, timeout time.Duration) (*BoxliteExecutor, error) {
+func newBoxliteExecutor(ctx context.Context, baseURL, prefix, clientID, apiKey, image string, timeout time.Duration) (*BoxliteExecutor, error) {
 	if baseURL == "" {
 		baseURL = defaultBoxliteURL
 	}
@@ -92,8 +95,8 @@ func newBoxliteExecutor(ctx context.Context, baseURL, prefix, clientID, secret, 
 	if image == "" {
 		image = defaultBoxliteImage
 	}
-	if secret == "" {
-		return nil, fmt.Errorf("boxlite: client_secret (apikey) is required")
+	if apiKey == "" {
+		return nil, fmt.Errorf("boxlite: apikey is required")
 	}
 	if timeout <= 0 {
 		timeout = 30 * time.Minute
@@ -107,15 +110,12 @@ func newBoxliteExecutor(ctx context.Context, baseURL, prefix, clientID, secret, 
 		baseURL:  strings.TrimRight(baseURL, "/"),
 		prefix:   prefix,
 		clientID: clientID,
-		secret:   secret,
+		apiKey:   apiKey,
 		image:    image,
 		timeout:  timeout,
 		client:   &http.Client{},
 	}
 
-	if err := e.refreshToken(ctx); err != nil {
-		return nil, fmt.Errorf("boxlite token: %w", err)
-	}
 	if err := e.createBox(ctx); err != nil {
 		return nil, fmt.Errorf("boxlite create box: %w", err)
 	}
@@ -128,66 +128,13 @@ func newBoxliteExecutor(ctx context.Context, baseURL, prefix, clientID, secret, 
 	return e, nil
 }
 
-// refreshToken does the OAuth2 client_credentials exchange. Callers must
-// hold e.mu OR call this before publishing the executor — currently only
-// the constructor calls it without the lock; everything else goes through
-// authHeader() which locks.
-func (e *BoxliteExecutor) refreshToken(ctx context.Context) error {
-	form := url.Values{}
-	form.Set("grant_type", "client_credentials")
-	form.Set("client_id", e.clientID)
-	form.Set("client_secret", e.secret)
-	form.Set("scope", "boxes:read boxes:write boxes:exec")
-
-	tokenCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(tokenCtx, "POST", e.baseURL+"/oauth/tokens", strings.NewReader(form.Encode()))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	resp, err := e.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
-	}
-	var tr struct {
-		AccessToken string `json:"access_token"`
-		ExpiresIn   int    `json:"expires_in"`
-	}
-	if err := json.Unmarshal(body, &tr); err != nil {
-		return fmt.Errorf("decode token: %w", err)
-	}
-	if tr.AccessToken == "" {
-		return fmt.Errorf("empty access_token in response: %s", string(body))
-	}
-	// Refresh 60s before the server-reported expiry — the WS attach
-	// keeps the connection open for the entire exec duration, so a
-	// token that expires mid-stream is annoying to recover from.
-	lifetime := time.Duration(tr.ExpiresIn) * time.Second
-	if lifetime <= 0 {
-		lifetime = 1 * time.Hour
-	}
-	e.accessToken = tr.AccessToken
-	e.tokenExp = time.Now().Add(lifetime - 60*time.Second)
-	return nil
-}
-
-// authHeader returns "Bearer <token>", refreshing the token transparently
-// when it's within the buffer of its expiry.
-func (e *BoxliteExecutor) authHeader(ctx context.Context) (string, error) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if e.accessToken == "" || time.Now().After(e.tokenExp) {
-		if err := e.refreshToken(ctx); err != nil {
-			return "", err
-		}
-	}
-	return "Bearer " + e.accessToken, nil
+// authHeader returns "Bearer <apikey>". The apikey IS the bearer token
+// in the new auth scheme — no exchange, no cache, no expiry handling.
+// Returns a (string, error) shape so callers (which previously needed
+// to handle token-refresh failures) don't have to be rewritten; the
+// error result is always nil today.
+func (e *BoxliteExecutor) authHeader(_ context.Context) (string, error) {
+	return "Bearer " + e.apiKey, nil
 }
 
 func (e *BoxliteExecutor) prefixPath(suffix string) string {
@@ -514,13 +461,7 @@ func isBoxliteGone(err error) bool {
 
 func (e *BoxliteExecutor) recreate(ctx context.Context) error {
 	slog.Info("boxlite box gone, recreating", "oldBoxID", e.boxID)
-	// Cheapest path: drop the local state and re-run the full
-	// constructor pipeline (token + create + start) so we get a fresh
-	// boxID. Token is still valid most of the time; refresh anyway in
-	// case the box-gone was actually an auth blip on a stale token.
-	if err := e.refreshToken(ctx); err != nil {
-		return fmt.Errorf("token: %w", err)
-	}
+	// Static apikey — no token refresh; just rebuild the box state.
 	if err := e.createBox(ctx); err != nil {
 		return fmt.Errorf("create: %w", err)
 	}
@@ -895,7 +836,7 @@ type BoxliteExecutorPool struct {
 	baseURL   string
 	prefix    string
 	clientID  string
-	secret    string
+	apiKey    string
 	image     string
 	home      string
 	timeout   time.Duration
@@ -909,7 +850,7 @@ func (p *BoxliteExecutorPool) Backend() string { return "boxlite" }
 // NewBoxliteExecutorPool constructs a Boxlite-backed pool. Defaults match
 // the public Boxlite Cloud — operators can override URL/prefix/clientID
 // for self-hosted runners or staging environments.
-func NewBoxliteExecutorPool(baseURL, prefix, clientID, secret, image, home string, timeout time.Duration) *BoxliteExecutorPool {
+func NewBoxliteExecutorPool(baseURL, prefix, clientID, apiKey, image, home string, timeout time.Duration) *BoxliteExecutorPool {
 	if baseURL == "" {
 		baseURL = defaultBoxliteURL
 	}
@@ -927,7 +868,7 @@ func NewBoxliteExecutorPool(baseURL, prefix, clientID, secret, image, home strin
 		baseURL:   baseURL,
 		prefix:    prefix,
 		clientID:  clientID,
-		secret:    secret,
+		apiKey:    apiKey,
 		image:     image,
 		home:      home,
 		timeout:   timeout,
@@ -949,7 +890,7 @@ func (p *BoxliteExecutorPool) Get(ctx context.Context, agentID, projectID, sessi
 	if ex, ok := p.executors[key]; ok {
 		return ex, nil
 	}
-	ex, err := newBoxliteExecutor(ctx, p.baseURL, p.prefix, p.clientID, p.secret, p.image, p.timeout)
+	ex, err := newBoxliteExecutor(ctx, p.baseURL, p.prefix, p.clientID, p.apiKey, p.image, p.timeout)
 	if err != nil {
 		return nil, err
 	}

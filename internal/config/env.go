@@ -38,7 +38,7 @@ type EnvSandbox struct {
 	E2BKey          string // E2B_API_KEY
 	BoxliteURL      string // FASTCLAW_SANDBOX_BOXLITE_URL — full base URL e.g. https://api.boxlite.ai/v1
 	BoxliteClientID string // FASTCLAW_SANDBOX_BOXLITE_CLIENT_ID — default "default"
-	BoxliteKey      string // BOXLITE_API_KEY — OAuth client_secret
+	BoxliteKey      string // BOXLITE_API_KEY — apikey sent as Authorization: Bearer
 	BoxlitePrefix   string // FASTCLAW_SANDBOX_BOXLITE_PREFIX — workspace prefix, default "default"
 }
 
