@@ -15,6 +15,7 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/agent/goal"
 	"github.com/fastclaw-ai/fastclaw/internal/agent/tools"
 	"github.com/fastclaw-ai/fastclaw/internal/bus"
+	"github.com/fastclaw-ai/fastclaw/internal/channels"
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 	"github.com/fastclaw-ai/fastclaw/internal/mcp"
 	"github.com/fastclaw-ai/fastclaw/internal/privacy"
@@ -1210,6 +1211,36 @@ func senderMetadata(msg bus.InboundMessage) map[string]any {
 	return md
 }
 
+// renderChannelHints emits per-turn protocol notes that the LLM can
+// only honor if it knows about them. Today there's exactly one: IM
+// channels with a single-text-per-bubble UI (WeChat — Telegram / LINE
+// are wired the same way later) accept the channels.SplitMessageMarker
+// token as "split this reply into multiple bubbles." Web and Discord
+// don't split, so we don't waste tokens advertising the capability
+// there. The marker constant is colocated with the splitter in
+// internal/channels/base.go so changing the wire token only touches
+// one place.
+//
+// Returns "" for non-IM channels so callers can append unconditionally.
+func renderChannelHints(msg bus.InboundMessage) string {
+	switch msg.Channel {
+	case "wechat":
+		// Keep the wording short. Sample alone is enough — the LLM picks
+		// up on the protocol from one well-formed example without us
+		// listing every rule.
+		return "## Reply Format\n\n" +
+			"You're replying through WeChat, which renders one chat bubble per " +
+			"message. To split your reply into separate bubbles, write " +
+			"`" + channels.SplitMessageMarker + "` on its own line between the " +
+			"parts. Each part is sent as a distinct message in order.\n\n" +
+			"Use this when a short, conversational, multi-beat reply reads more " +
+			"naturally than one long block (e.g. \"好。\\n" + channels.SplitMessageMarker +
+			"\\n第一条先到了。\\n" + channels.SplitMessageMarker + "\\n第二条在这。\"). " +
+			"For a single coherent answer, just reply normally — no marker needed."
+	}
+	return ""
+}
+
 // renderSender emits a per-turn system block naming who the message
 // came from on the originating IM channel. Used for GROUP messages so
 // the LLM can attribute each turn to the right speaker.
@@ -1583,8 +1614,11 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		slog.Info("context compacted", "agent", a.name, "log_file", compactResult.LogFile)
 	}
 
-	messages := make([]provider.Message, 0, len(sessionMsgs)+3)
+	messages := make([]provider.Message, 0, len(sessionMsgs)+4)
 	messages = append(messages, provider.Message{Role: "system", Content: systemPrompt})
+	if hints := renderChannelHints(msg); hints != "" {
+		messages = append(messages, provider.Message{Role: "system", Content: hints})
+	}
 	if senderMsg := renderSender(msg); senderMsg != "" {
 		messages = append(messages, provider.Message{Role: "system", Content: senderMsg})
 	}
@@ -2171,8 +2205,11 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 		sessionMsgs = compactResult.Messages
 	}
 
-	messages := make([]provider.Message, 0, len(sessionMsgs)+3)
+	messages := make([]provider.Message, 0, len(sessionMsgs)+4)
 	messages = append(messages, provider.Message{Role: "system", Content: systemPrompt})
+	if hints := renderChannelHints(msg); hints != "" {
+		messages = append(messages, provider.Message{Role: "system", Content: hints})
+	}
 	if senderMsg := renderSender(msg); senderMsg != "" {
 		messages = append(messages, provider.Message{Role: "system", Content: senderMsg})
 	}

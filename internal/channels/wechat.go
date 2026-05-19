@@ -303,6 +303,12 @@ func (w *WeChat) Send(chatID, text string) error {
 // after each has been uploaded to the iLink CDN. Failures on individual
 // images are logged but don't abort the rest of the reply — partial
 // delivery is better than dropping the whole turn for one bad upload.
+//
+// Multi-bubble replies: when the agent emits SplitMessageMarker, the
+// text is split into N bubbles, each sent as its own sendmessage.
+// Failure on one chunk stops the chain — partial delivery is preferable
+// to silently dropping later bubbles, but if iLink itself errored we
+// don't want to keep hammering the API.
 func (w *WeChat) SendMessage(msg bus.OutboundMessage) error {
 	if msg.Text == "" && len(msg.MediaItems) == 0 {
 		return nil
@@ -311,8 +317,8 @@ func (w *WeChat) SendMessage(msg bus.OutboundMessage) error {
 	// will literally show *bold* / [link](url) syntax. Strip it
 	// best-effort, same way weclaw's MarkdownToPlainText helper does.
 	plain := wechatStripMarkdown(msg.Text)
-	if plain != "" {
-		if err := w.sendTextOnly(msg.ChatID, plain); err != nil {
+	for _, chunk := range SplitOutboundText(plain) {
+		if err := w.sendTextOnly(msg.ChatID, chunk); err != nil {
 			return err
 		}
 	}
