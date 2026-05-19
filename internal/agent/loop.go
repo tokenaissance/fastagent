@@ -1543,6 +1543,12 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	// (where `npx skills add -g -y` writes). Tagging happens before
 	// any sandbox.Get call below so attachments + exec inherit it.
 	ctx = sandbox.WithUserID(ctx, chatterUID)
+	// Per-turn channel context for the skill-refresh diagnostic. Lets
+	// us correlate the "skills summary refreshed" log emitted inside
+	// refreshSkillsFromStore with the channel the request arrived on,
+	// to chase the "IM doesn't see agent skills" report.
+	slog.Info("turn: refreshing skills",
+		"agent", a.name, "channel", msg.Channel, "chat_id", msg.ChatID, "user", chatterUID)
 	a.refreshSkillsFromStore(chatterUID)
 	sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID, msg.ProjectID)
 	// Bind the registry to this chat's session so workspace.Store reads
@@ -2170,6 +2176,8 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 
 	chatterUID := a.chatterUserID(msg)
 	ctx = sandbox.WithUserID(ctx, chatterUID)
+	slog.Info("turn: refreshing skills",
+		"agent", a.name, "channel", msg.Channel, "chat_id", msg.ChatID, "user", chatterUID)
 	a.refreshSkillsFromStore(chatterUID)
 	sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID, msg.ProjectID)
 	a.bindSession(ctx, msg.Channel, msg.ChatID, msg.ProjectID)
@@ -2582,13 +2590,33 @@ func (a *Agent) chatterUserID(msg bus.InboundMessage) string {
 // disables the per-user layer.
 func (a *Agent) refreshSkillsFromStore(userID string) {
 	if a.workspaceStore == nil {
+		// IM-vs-web "missing agent skills" diagnostic: when this fires
+		// on an IM turn but not the matching web turn for the same
+		// agent, the chatter's UserSpace was built without a workspace
+		// store, so agent-scope OSS skills never hydrate. Warn (not
+		// debug) so it surfaces in default-level prod logs.
+		slog.Warn("refresh skills skipped: no workspace store",
+			"agent", a.name, "agentID", a.agentID, "user", userID)
 		return
 	}
 	loader := NewSkillsLoaderWithGlobal(a.homeDir, a.homePath, "", a.skillsCfg, a.globalSkillsCfg).
 		WithObjectStore(a.workspaceStore, a.agentID).
 		WithUserID(userID)
 	skills := loader.LoadSkills()
-	a.ctxBuilder.SetSkillsSummary(loader.BuildSkillsSummary(skills))
+	summary := loader.BuildSkillsSummary(skills)
+	a.ctxBuilder.SetSkillsSummary(summary)
+	// Per-turn fingerprint of the skill set the system prompt will
+	// ship. Lets us diff IM vs web for the same (agent, chatter) and
+	// confirm — or rule out — that agent-scope skills are reaching
+	// every channel. count==bundled-only is the "missing agent skills"
+	// signature.
+	names := make([]string, 0, len(skills))
+	for _, s := range skills {
+		names = append(names, s.Name)
+	}
+	slog.Info("skills summary refreshed",
+		"agent", a.name, "agentID", a.agentID, "user", userID,
+		"count", len(skills), "summary_bytes", len(summary), "names", names)
 }
 
 // ReloadWorkspaceFiles re-reads workspace .md files (SOUL.md, AGENTS.md, etc.)
