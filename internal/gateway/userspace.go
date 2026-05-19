@@ -362,14 +362,17 @@ func (sp *UserSpace) EnsureAgent(ctx context.Context, st store.Store, mb *bus.Me
 	// scope still wins, matching the precedence the owner's own
 	// loadUserSpace path uses.
 	//
-	// shareModelConfig (agent record) gates this: when false (default),
-	// the owner-fallback + agent-scope overlays are skipped entirely
-	// for chatters — they see only their own user-scope + system. The
-	// owner builds the agent with their own keys / model selection but
-	// none of that leaks to people they share the agent with unless
-	// they flip the toggle on the agent Models page. Owner's own
-	// loadUserSpace path (sp.UserID == rec.UserID) is unaffected and
-	// still gets the full agent-scope overlay.
+	// shareModelConfig (agent record) gates this: default true —
+	// chatters inherit the owner's keys + model selection out of the
+	// box, matching the "owner already pays for the agent, they're the
+	// one sharing it" mental model. Setting it to false explicitly
+	// opts out, in which case the owner-fallback + agent-scope
+	// overlays are skipped entirely for chatters and they see only
+	// their own user-scope + system. Owner's own loadUserSpace path
+	// (sp.UserID == rec.UserID) is unaffected and still gets the full
+	// agent-scope overlay. The default lives in
+	// setup.agentShareModelConfig — read it via the same helper here
+	// (inlined to avoid a package cycle).
 	//
 	// Exception: when the viewer (chatter) has *explicitly* set their
 	// own user-scope agents.defaults.model row, that choice wins over
@@ -383,7 +386,12 @@ func (sp *UserSpace) EnsureAgent(ctx context.Context, st store.Store, mb *bus.Me
 	// have UI to set them per-agent.
 	chatterPin := readUserScopeAgentDefaults(ctx, st, sp.UserID)
 	isForeign := rec.UserID != "" && rec.UserID != sp.UserID
-	shareCfg, _ := rec.Config["shareModelConfig"].(bool)
+	// Default true when the key is absent — keep aligned with
+	// setup.agentShareModelConfig.
+	shareCfg := true
+	if v, ok := rec.Config["shareModelConfig"].(bool); ok {
+		shareCfg = v
+	}
 	applyOwnerOverlays := !isForeign || shareCfg
 	if isForeign && applyOwnerOverlays {
 		if ownerCfg, err := assembleConfig(ctx, st, rec.UserID, ""); err == nil && ownerCfg != nil {

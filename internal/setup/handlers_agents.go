@@ -25,6 +25,23 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/workspace"
 )
 
+// agentShareModelConfig reports whether the agent's owner has opted to
+// share their model + provider configuration with chatters. Default
+// true: when the key is absent from rec.Config, sharing is on. Owners
+// explicitly opt OUT by writing `false`. Centralised here so the API
+// layer, the runtime overlay gate (EnsureAgent), and the listProviders
+// auth relaxation read the flag with one consistent default.
+func agentShareModelConfig(rec *store.AgentRecord) bool {
+	if rec == nil {
+		return true
+	}
+	v, ok := rec.Config["shareModelConfig"].(bool)
+	if !ok {
+		return true
+	}
+	return v
+}
+
 // agentScopeModel reads the per-agent model override from the configs
 // table — the kind=setting, scope=agent row that supersedes the
 // system/user defaults when set.
@@ -337,18 +354,22 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	// shareModelConfig controls whether a chatter using this agent
 	// inherits the owner's model + provider configuration. Default
-	// false (private — chatter brings their own keys, or the agent
-	// silently falls back to system). Stored in the agent's config
-	// blob so we don't need a schema migration; runtime reads it back
-	// in EnsureAgent to gate the owner-fallback + agent-scope overlays.
+	// true: sharing is on unless the owner explicitly opts out.
+	// Encoding: absent key = on (the new-agent default), explicit
+	// `false` = opt-out. We never store `true` — storing absence for
+	// the default keeps existing rows minimal and means a future
+	// default flip needs only one place to change (agentShareModelConfig
+	// above). Stored in the agent's config blob so we don't need a
+	// schema migration; runtime reads it back in EnsureAgent to gate
+	// the owner-fallback + agent-scope overlays.
 	if req.ShareModelConfig != nil {
 		if rec.Config == nil {
 			rec.Config = map[string]interface{}{}
 		}
 		if *req.ShareModelConfig {
-			rec.Config["shareModelConfig"] = true
-		} else {
 			delete(rec.Config, "shareModelConfig")
+		} else {
+			rec.Config["shareModelConfig"] = false
 		}
 	}
 	if err := s.dataStore.SaveAgent(r.Context(), rec); err != nil {
@@ -370,7 +391,7 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 	// own UserSpace also drop their stale rc.Model — without this they
 	// keep firing the previous model until the 30-min idle eviction.
 	s.invalidateAgent(rec.ID)
-	share, _ := rec.Config["shareModelConfig"].(bool)
+	share := agentShareModelConfig(rec)
 	jsonResponse(w, http.StatusOK, map[string]any{
 		"agent": map[string]any{
 			"id":               rec.ID,
@@ -399,7 +420,7 @@ func (s *Server) handleGetAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	desc, _ := rec.Config["description"].(string)
-	share, _ := rec.Config["shareModelConfig"].(bool)
+	share := agentShareModelConfig(rec)
 	uid := s.effectiveUserID(r)
 	role := "owner"
 	if rec.UserID != uid {

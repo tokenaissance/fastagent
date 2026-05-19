@@ -91,14 +91,14 @@ func (s *Server) authorizeScope(w http.ResponseWriter, r *http.Request, sc, scop
 			return true
 		}
 		// Non-owner read access on a shared agent: when the owner has
-		// flipped shareModelConfig on, the agent's runtime resolution
+		// shareModelConfig on (default), the agent's runtime resolution
 		// already includes its agent-scope providers for chatters
 		// (EnsureAgent overlays them in). The Models tab in the chatter's
 		// agent-settings dialog needs to surface those same rows — with
 		// masked keys — so the chatter knows which credentials the agent
 		// is using and which models are available. Writes stay owner-only.
 		if op == scopeRead {
-			if share, _ := rec.Config["shareModelConfig"].(bool); share {
+			if agentShareModelConfig(rec) {
 				if rec.IsPublic || s.callerOwnsAgent(r, scopeID) {
 					return true
 				}
