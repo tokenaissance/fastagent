@@ -30,7 +30,7 @@ func NewOpenAI(apiKey, apiBase string) *OpenAIProvider {
 	return &OpenAIProvider{
 		apiKey:  apiKey,
 		apiBase: NormalizeAPIBase(apiBase, "openai-chat"),
-		client:  &http.Client{},
+		client:  newLLMHTTPClient(),
 	}
 }
 

@@ -3,8 +3,37 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"strings"
+	"time"
 )
+
+// newLLMHTTPClient returns an *http.Client suitable for streaming LLM
+// API calls.
+//
+// Why not the zero-value &http.Client{}: it has no client-level timeout
+// (which we want — long SSE streams take minutes to drain) but also no
+// ResponseHeaderTimeout, so if the upstream server stops writing AFTER
+// completing the TCP/TLS handshake but BEFORE the headers come back,
+// `client.Do` blocks forever. We hit this in production: a chat goes
+// silent mid-conversation, the per-chat taskQueue serializes behind
+// the wedged request, every subsequent user message queues too, only
+// a pod restart recovers.
+//
+// DefaultTransport already provides sensible DialContext/Timeout
+// (30s), TLSHandshakeTimeout (10s), and IdleConnTimeout (90s) — we
+// only need to add ResponseHeaderTimeout. Clone() first because
+// mutating DefaultTransport would affect every other consumer in the
+// process (it's a documented global shared resource).
+//
+// 60s is conservative for LLM APIs: response headers come back well
+// under 1s on a healthy path; 60s catches a hung connection without
+// false-positives on a slow but live network.
+func newLLMHTTPClient() *http.Client {
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.ResponseHeaderTimeout = 60 * time.Second
+	return &http.Client{Transport: tr}
+}
 
 // Origin tags a Message that was produced by the runtime rather than a
 // real user / model exchange. Empty means "this came from the user

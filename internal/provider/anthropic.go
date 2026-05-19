@@ -27,7 +27,7 @@ func NewAnthropic(apiKey, apiBase string) *AnthropicProvider {
 	return &AnthropicProvider{
 		apiKey:  apiKey,
 		apiBase: NormalizeAPIBase(apiBase, "anthropic-messages"),
-		client:  &http.Client{},
+		client:  newLLMHTTPClient(),
 	}
 }
 
