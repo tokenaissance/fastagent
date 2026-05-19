@@ -247,12 +247,19 @@ func (d *Discord) onInteractionCreate(s *discordgo.Session, i *discordgo.Interac
 		"from", u.Username,
 	)
 
+	// MessageID is intentionally left empty. Slash commands arrive as
+	// Discord *interactions*, not channel messages — i.ID is the
+	// interaction id, which can't be used as a MessageReference target
+	// (Discord 400s with MESSAGE_REFERENCE_UNKNOWN_MESSAGE). The
+	// outbound path keys "send as reply" off ReplyToMsgID != "", so
+	// leaving it blank makes us send a plain channel message instead
+	// of a referenced one. Group dedup uses chatID+userID+text hash,
+	// not MessageID, so omitting it doesn't break anti-replay.
 	d.bus.Inbound <- bus.InboundMessage{
 		Channel:    "discord",
 		AccountID:  d.accountID,
 		ChatID:     i.ChannelID,
 		UserID:     u.ID,
-		MessageID:  i.ID,
 		Text:       text,
 		PeerKind:   peerKind,
 		SenderName: senderName,
@@ -320,11 +327,45 @@ func (d *Discord) SendMessage(msg bus.OutboundMessage) error {
 					Content:   chunk,
 					Reference: ref,
 				}); err != nil {
+					// Defense-in-depth: the MessageReference is purely
+					// cosmetic (renders the "Replying to @sender" quote
+					// bubble). If Discord rejects the referenced id —
+					// MESSAGE_REFERENCE_UNKNOWN_MESSAGE on a deleted
+					// source, an interaction id that slipped through,
+					// missing read perms on the channel, … — retry the
+					// same chunk without the reference so the reply
+					// still lands in the channel. Only retries when we
+					// actually attached a ref: errors on a plain send
+					// are real and propagate to the warn log.
+					if ref != nil {
+						if _, retryErr := d.session.ChannelMessageSendComplex(msg.ChatID, &discordgo.MessageSend{
+							Content: chunk,
+						}); retryErr == nil {
+							slog.Info("discord retry without reference succeeded",
+								"chat", msg.ChatID, "first_error", err)
+							continue
+						} else {
+							slog.Warn("discord chunk send failed (retry also failed)",
+								"i", i, "error", err, "retry_error", retryErr)
+							continue
+						}
+					}
 					slog.Warn("discord chunk send failed", "i", i, "error", err)
 				}
 				continue
 			}
 			if err := d.sendWithFiles(msg.ChatID, chunk, msg.MediaItems, ref); err != nil {
+				if ref != nil {
+					if retryErr := d.sendWithFiles(msg.ChatID, chunk, msg.MediaItems, nil); retryErr == nil {
+						slog.Info("discord retry without reference succeeded (with files)",
+							"chat", msg.ChatID, "first_error", err)
+						continue
+					} else {
+						slog.Warn("discord final chunk+files failed (retry also failed)",
+							"error", err, "retry_error", retryErr)
+						continue
+					}
+				}
 				slog.Warn("discord final chunk+files failed", "error", err)
 			}
 		}
@@ -338,7 +379,17 @@ func (d *Discord) SendMessage(msg bus.OutboundMessage) error {
 				ChannelID: msg.ChatID,
 			}
 		}
-		return d.sendWithFiles(msg.ChatID, "", msg.MediaItems, ref)
+		if err := d.sendWithFiles(msg.ChatID, "", msg.MediaItems, ref); err != nil {
+			if ref != nil {
+				if retryErr := d.sendWithFiles(msg.ChatID, "", msg.MediaItems, nil); retryErr == nil {
+					slog.Info("discord media-only retry without reference succeeded",
+						"chat", msg.ChatID, "first_error", err)
+					return nil
+				}
+			}
+			return err
+		}
+		return nil
 	}
 	return nil
 }
