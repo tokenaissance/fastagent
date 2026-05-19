@@ -1705,6 +1705,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 			return "Sorry, I encountered an error processing your request."
 		}
 		a.meterTokens(ctx, sess.Key(), resp.Usage)
+		a.maybeRecoverToolCalls(resp)
 
 		if !resp.HasToolCalls() {
 			asst := provider.Message{Role: "assistant", Content: resp.Content, Thinking: resp.Thinking, Timestamp: time.Now().UnixMilli(), RawAssistant: resp.RawAssistant}
@@ -2243,6 +2244,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 			return a.stringStream("Sorry, I encountered an error processing your request.")
 		}
 		a.meterTokens(ctx, sess.Key(), resp.Usage)
+		a.maybeRecoverToolCalls(resp)
 
 		if !resp.HasToolCalls() {
 			// Final response - use streaming
