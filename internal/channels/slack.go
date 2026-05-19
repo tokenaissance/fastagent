@@ -88,9 +88,14 @@ func (s *Slack) Send(chatID string, text string) error {
 // mrkdwn (auto-renders *bold* / _italic_ / `code` / lists). MediaItems
 // upload as files via files.uploadV2 — Slack auto-previews images.
 // Send text first so it appears above the file preview in the channel.
+//
+// Slack's mrkdwn doesn't render GFM tables — `|cell|cell|` ships as
+// raw text. Flatten tables to "label: value" / middle-dot lines first
+// so the chatter sees structured prose instead of pipe soup.
 func (s *Slack) SendMessage(msg bus.OutboundMessage) error {
 	if msg.Text != "" {
-		if err := s.Send(msg.ChatID, msg.Text); err != nil {
+		text := FlattenMarkdownTables(msg.Text)
+		if err := s.Send(msg.ChatID, text); err != nil {
 			slog.Warn("slack text send failed", "error", err)
 		}
 	}

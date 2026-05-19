@@ -155,7 +155,11 @@ func (l *Feishu) SendMessage(msg bus.OutboundMessage) error {
 	if err != nil {
 		return fmt.Errorf("feishu token: %w", err)
 	}
-	contentJSON, err := json.Marshal(map[string]string{"text": msg.Text})
+	// Feishu's `msg_type:"text"` path renders no markdown — GFM tables
+	// would arrive as literal `|cell|cell|` rows. Collapse them to
+	// label:value or middle-dot lines first.
+	text := FlattenMarkdownTables(msg.Text)
+	contentJSON, err := json.Marshal(map[string]string{"text": text})
 	if err != nil {
 		return fmt.Errorf("feishu marshal content: %w", err)
 	}

@@ -132,11 +132,16 @@ func (l *LINE) SendMessage(msg bus.OutboundMessage) error {
 		return nil
 	}
 
+	// LINE renders plain text only — no markdown anywhere. GFM tables
+	// would arrive as raw `|cell|cell|`; FlattenMarkdownTables collapses
+	// them to label:value or middle-dot lines first.
+	text := FlattenMarkdownTables(msg.Text)
+
 	// Pop a cached replyToken if present + unexpired. Single-use, so
 	// this also clears the slot — concurrent sends in the same turn
 	// only get one shot at the free reply path.
 	if tok := l.popReplyToken(msg.ChatID); tok != "" {
-		if err := l.postReply(tok, msg.Text); err == nil {
+		if err := l.postReply(tok, text); err == nil {
 			return nil
 		} else {
 			// reply can fail (token already consumed by a parallel
@@ -147,7 +152,7 @@ func (l *LINE) SendMessage(msg bus.OutboundMessage) error {
 				"account", l.accountID, "chat", msg.ChatID, "error", err)
 		}
 	}
-	return l.postPush(msg.ChatID, msg.Text)
+	return l.postPush(msg.ChatID, text)
 }
 
 // SendTyping is a no-op. LINE doesn't expose a typing indicator API

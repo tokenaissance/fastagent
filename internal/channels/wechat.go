@@ -316,7 +316,11 @@ func (w *WeChat) SendMessage(msg bus.OutboundMessage) error {
 	// iLink wants markdown stripped — clients render plain text and
 	// will literally show *bold* / [link](url) syntax. Strip it
 	// best-effort, same way weclaw's MarkdownToPlainText helper does.
-	plain := wechatStripMarkdown(msg.Text)
+	// FlattenMarkdownTables runs FIRST so GFM tables collapse to
+	// "label: value" / middle-dot lines BEFORE wechatStripMarkdown
+	// throws away the rest of the markdown — running it after would
+	// leave a bare `|cell|cell|` blob that's strictly worse.
+	plain := wechatStripMarkdown(FlattenMarkdownTables(msg.Text))
 	for _, chunk := range SplitOutboundText(plain) {
 		if err := w.sendTextOnly(msg.ChatID, chunk); err != nil {
 			return err

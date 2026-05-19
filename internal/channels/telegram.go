@@ -291,7 +291,11 @@ func (t *Telegram) SendMessage(msg bus.OutboundMessage) error {
 	if msg.ParseMode == "" {
 		msg.ParseMode = "Markdown"
 	}
-	body := convertMarkdownForTelegram(msg.Text, msg.ParseMode)
+	// Flatten GFM tables first — Telegram (every parse mode) renders
+	// `|cell|cell|` rows as literal text. FlattenMarkdownTables turns
+	// each into "label: value" lines that read like normal prose.
+	text := FlattenMarkdownTables(msg.Text)
+	body := convertMarkdownForTelegram(text, msg.ParseMode)
 
 	// Send the text body first (chunked if long).
 	if body != "" {

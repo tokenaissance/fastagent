@@ -300,7 +300,12 @@ func (d *Discord) SendMessage(msg bus.OutboundMessage) error {
 		// Discord 2000-char per-message limit. Send N-1 chunks
 		// without files, then the final chunk with files attached so
 		// the embedded preview lands at the end of the conversation.
-		chunks := splitDiscordMessage(msg.Text)
+		// Tables get flattened first — Discord renders bold/italic/
+		// code/lists natively but ignores GFM tables (pipes show as
+		// raw text); FlattenMarkdownTables turns each into a plain
+		// "label: value" / middle-dot block that scans cleanly.
+		text := FlattenMarkdownTables(msg.Text)
+		chunks := splitDiscordMessage(text)
 		for i, chunk := range chunks {
 			var ref *discordgo.MessageReference
 			if i == 0 && msg.ReplyToMsgID != "" {
