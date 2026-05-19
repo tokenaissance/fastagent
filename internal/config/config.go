@@ -257,6 +257,18 @@ type SkillsLearnerCfg struct {
 	Model        string `json:"model,omitempty"`
 }
 
+// WeChatCfg holds per-instance behavior toggles for the WeChat (iLink)
+// channel. Stored as a `channels.wechat` setting row (system scope).
+// Default zero value = split off: SendMessage collapses the marker into
+// a newline instead of producing multiple bubbles, and the per-turn
+// system-prompt hint that advertises the marker to the LLM is suppressed.
+type WeChatCfg struct {
+	// SplitReplies, when true, lets the agent emit channels.SplitMessageMarker
+	// to break one outbound text into multiple chat bubbles. Off by default
+	// because some users find the multi-bubble shape jarring.
+	SplitReplies bool `json:"splitReplies,omitempty"`
+}
+
 // Config is the in-memory runtime snapshot. The gateway assembles this at
 // boot by reading FASTCLAW_* env vars + database (system_settings, providers,
 // channels, agents). Callers never serialize it back out — DB tables are
@@ -283,6 +295,7 @@ type Config struct {
 	Memory        MemoryCfg                  `json:"memory,omitempty"`
 	Privacy       PrivacyCfg                 `json:"privacy,omitempty"`
 	SkillsLearner SkillsLearnerCfg           `json:"skillsLearner,omitempty"`
+	WeChat        WeChatCfg                  `json:"wechat,omitempty"`
 }
 
 // ModelCost holds pricing info for a model.

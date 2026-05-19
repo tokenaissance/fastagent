@@ -210,6 +210,9 @@ export interface ConfigResponse {
     boxliteKey?: string;
     boxlitePrefix?: string;
   };
+  wechat?: {
+    splitReplies?: boolean;
+  };
   hooks: { enabled: boolean; token?: string; path?: string; port?: number };
   cronJobs?: Array<Record<string, unknown>>;
   skills?: {

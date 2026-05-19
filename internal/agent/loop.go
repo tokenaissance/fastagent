@@ -60,6 +60,12 @@ type Agent struct {
 	ftsStore        *store.FTSStore
 	piiScrubEnabled bool
 	memoryCfg       config.MemoryCfg
+	// wechatSplitReplies mirrors cfg.WeChat.SplitReplies. Gates the
+	// per-turn system-prompt hint that advertises SplitMessageMarker
+	// to the LLM — see renderChannelHints below. The matching outbound
+	// gate lives on the WeChat adapter; both branches read the same
+	// channels.wechat setting so they can't drift.
+	wechatSplitReplies bool
 	// memoryStore is the optional Store-backed source of identity files
 	// (SOUL.md, IDENTITY.md, ...). Kept on the Agent so ReloadWorkspaceFiles
 	// can rewire a fresh ContextBuilder to keep reading from the Store
@@ -164,6 +170,7 @@ func NewAgentWithFullCfg(rc config.ResolvedAgent, prov provider.Provider, mb *bu
 	ag := NewAgentWithSkillsCfg(rc, prov, mb, homeDir, fullCfg.Skills)
 	ag.memoryCfg = fullCfg.Memory
 	ag.piiScrubEnabled = fullCfg.Privacy.PIIScrubbing.Enabled
+	ag.wechatSplitReplies = fullCfg.WeChat.SplitReplies
 
 	// Set up FTS store if configured
 	if fullCfg.Memory.FTS.Enabled {
@@ -1239,10 +1246,19 @@ func logSystemPromptFingerprint(agentName, channel, chatID, userID, prompt strin
 // internal/channels/base.go so changing the wire token only touches
 // one place.
 //
+// `wechatSplitEnabled` is the operator-controlled toggle from the
+// channels.wechat system setting. When false (the default) we skip the
+// hint entirely so the LLM doesn't learn the marker — and the matching
+// outbound gate in internal/channels/wechat.go collapses any stray
+// marker back to a newline. The two branches must stay in lockstep.
+//
 // Returns "" for non-IM channels so callers can append unconditionally.
-func renderChannelHints(msg bus.InboundMessage) string {
+func renderChannelHints(msg bus.InboundMessage, wechatSplitEnabled bool) string {
 	switch msg.Channel {
 	case "wechat":
+		if !wechatSplitEnabled {
+			return ""
+		}
 		// Keep the wording short. Sample alone is enough — the LLM picks
 		// up on the protocol from one well-formed example without us
 		// listing every rule.
@@ -1642,7 +1658,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 
 	messages := make([]provider.Message, 0, len(sessionMsgs)+4)
 	messages = append(messages, provider.Message{Role: "system", Content: systemPrompt})
-	if hints := renderChannelHints(msg); hints != "" {
+	if hints := renderChannelHints(msg, a.wechatSplitReplies); hints != "" {
 		messages = append(messages, provider.Message{Role: "system", Content: hints})
 	}
 	if senderMsg := renderSender(msg); senderMsg != "" {
@@ -2237,7 +2253,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 
 	messages := make([]provider.Message, 0, len(sessionMsgs)+4)
 	messages = append(messages, provider.Message{Role: "system", Content: systemPrompt})
-	if hints := renderChannelHints(msg); hints != "" {
+	if hints := renderChannelHints(msg, a.wechatSplitReplies); hints != "" {
 		messages = append(messages, provider.Message{Role: "system", Content: hints})
 	}
 	if senderMsg := renderSender(msg); senderMsg != "" {

@@ -15,7 +15,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Save, Check, Container } from "lucide-react";
+import { Save, Check, Container, MessageSquare } from "lucide-react";
 import { getConfig, updateConfig, getMe, type ConfigResponse } from "@/lib/api";
 
 export default function RuntimeSettingsPage() {
@@ -33,6 +33,8 @@ export default function RuntimeSettingsPage() {
   const [sandboxBoxliteImage, setSandboxBoxliteImage] = useState("");
   const [sandboxBoxliteKey, setSandboxBoxliteKey] = useState("");
   const [sandboxBoxliteURL, setSandboxBoxliteURL] = useState("");
+
+  const [wechatSplitReplies, setWechatSplitReplies] = useState(false);
 
   useEffect(() => {
     // Belt-and-suspenders gate: the layout already hides the nav item,
@@ -61,6 +63,7 @@ export default function RuntimeSettingsPage() {
           setSandboxE2BKey(cfg.sandbox?.e2bKey || "");
           setSandboxBoxliteKey(cfg.sandbox?.boxliteKey || "");
           setSandboxBoxliteURL(cfg.sandbox?.boxliteUrl || "");
+          setWechatSplitReplies(cfg.wechat?.splitReplies || false);
         })
         .catch(() => {})
         .finally(() => setLoading(false));
@@ -83,6 +86,9 @@ export default function RuntimeSettingsPage() {
         e2bKey: sandboxE2BKey || undefined,
         boxliteKey: sandboxBoxliteKey || undefined,
         boxliteUrl: sandboxBoxliteURL || undefined,
+      },
+      wechat: {
+        splitReplies: wechatSplitReplies,
       },
     });
     setSaving(false);
@@ -238,6 +244,25 @@ export default function RuntimeSettingsPage() {
             </div>
           </div>
         )}
+      </div>
+
+      <div className="rounded-lg border border-border bg-card">
+        <div className="p-5">
+          <div className="flex items-center justify-between">
+            <div>
+              <div className="flex items-center gap-2 mb-1">
+                <MessageSquare className="h-4 w-4 text-emerald-500" />
+                <h3 className="font-medium">WeChat multi-bubble replies</h3>
+              </div>
+              <p className="text-sm text-muted-foreground">
+                Let the agent split one reply into multiple WeChat bubbles using a
+                separator marker. Off by default — keeps each reply as a single
+                message.
+              </p>
+            </div>
+            <Switch checked={wechatSplitReplies} onCheckedChange={setWechatSplitReplies} />
+          </div>
+        </div>
       </div>
     </div>
   );

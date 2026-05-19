@@ -110,12 +110,26 @@ type WeChat struct {
 	// can disable the configs row + unregister the adapter; without it
 	// the loop would log the same warning every 5s forever.
 	onExpired func(accountID string)
+
+	// splitReplies gates SendMessage on the channels.wechat.splitReplies
+	// system setting. False (the default) collapses SplitMessageMarker
+	// to a newline so a stray marker doesn't show up as literal text and
+	// the reply stays in one bubble. The matching system-prompt hint in
+	// renderChannelHints is suppressed in lockstep, so the LLM normally
+	// won't emit the marker either.
+	splitReplies bool
 }
 
 // SetOnExpired registers a callback that fires when the bot token is
 // confirmed dead. The callback runs once; Start exits afterwards.
 func (w *WeChat) SetOnExpired(fn func(accountID string)) {
 	w.onExpired = fn
+}
+
+// SetSplitReplies toggles multi-bubble outbound. See the field doc on
+// WeChat.splitReplies for the full contract.
+func (w *WeChat) SetSplitReplies(enabled bool) {
+	w.splitReplies = enabled
 }
 
 // NewWeChat creates a new WeChat channel adapter from a connected
@@ -321,7 +335,17 @@ func (w *WeChat) SendMessage(msg bus.OutboundMessage) error {
 	// throws away the rest of the markdown — running it after would
 	// leave a bare `|cell|cell|` blob that's strictly worse.
 	plain := wechatStripMarkdown(FlattenMarkdownTables(msg.Text))
-	for _, chunk := range SplitOutboundText(plain) {
+	chunks := []string{plain}
+	if w.splitReplies {
+		chunks = SplitOutboundText(plain)
+	} else if strings.Contains(plain, SplitMessageMarker) {
+		// Split disabled but the LLM emitted the marker anyway (stale
+		// system-prompt cache, or a value baked into a prompt template
+		// the operator hasn't updated). Collapse to a newline so the
+		// raw `<|split|>` token doesn't surface as literal text.
+		chunks = []string{strings.ReplaceAll(plain, SplitMessageMarker, "\n")}
+	}
+	for _, chunk := range chunks {
 		if err := w.sendTextOnly(msg.ChatID, chunk); err != nil {
 			return err
 		}
