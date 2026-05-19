@@ -29,7 +29,8 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Brain, Plus, Pencil, Trash2, Check, Cpu, Loader2 } from "lucide-react";
+import { Switch } from "@/components/ui/switch";
+import { Brain, Plus, Pencil, Trash2, Check, Cpu, Loader2, Share2 } from "lucide-react";
 import {
   getAgent,
   getConfig,
@@ -135,6 +136,7 @@ export default function AgentModelsPage() {
   const [model, setModel] = useState("");
   const [systemDefault, setSystemDefault] = useState("");
   const [systemProviders, setSystemProviders] = useState<string[]>([]);
+  const [shareModelConfig, setShareModelConfig] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -240,6 +242,7 @@ export default function AgentModelsPage() {
       // type from before per-agent overrides moved out of the merged
       // config; the Go side never populates it.
       setModel(agentRec?.model || "");
+      setShareModelConfig(!!agentRec?.shareModelConfig);
     } finally {
       setLoading(false);
     }
@@ -483,6 +486,24 @@ export default function AgentModelsPage() {
     }
   };
 
+  // Optimistic — flip the UI immediately, then persist. On failure we
+  // revert. invalidateAgent on the server side drops every UserSpace
+  // that lazy-attached this agent so chatters see the new gate on
+  // their next message, no process restart required.
+  const handleShareToggle = async (next: boolean) => {
+    const prev = shareModelConfig;
+    setShareModelConfig(next);
+    setSaving(true);
+    try {
+      await updateAgent(agentId, { shareModelConfig: next });
+      flashSaved();
+    } catch {
+      setShareModelConfig(prev);
+    } finally {
+      setSaving(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="p-6 space-y-6 max-w-5xl mx-auto">
@@ -516,6 +537,39 @@ export default function AgentModelsPage() {
             <Plus className="h-4 w-4 mr-2" />
             Add Provider
           </Button>
+        </div>
+      </div>
+
+      {/* Share with chatters */}
+      <div className="rounded-lg border border-border bg-card p-5">
+        <div className="flex items-start justify-between gap-4">
+          <div className="flex items-start gap-3 min-w-0">
+            <Share2 className="h-4 w-4 text-primary mt-0.5 shrink-0" />
+            <div className="min-w-0">
+              <h3 className="font-medium">Share model config with chatters</h3>
+              <p className="text-sm text-muted-foreground mt-1">
+                {shareModelConfig ? (
+                  <>
+                    Chatters using <strong>{agentName || "this agent"}</strong>{" "}
+                    inherit your model and provider credentials. Your tokens
+                    are spent on their messages.
+                  </>
+                ) : (
+                  <>
+                    Only you use this configuration. Chatters bring their own
+                    model + providers under <em>User → Models</em>, otherwise
+                    the agent falls back to the system default.
+                  </>
+                )}
+              </p>
+            </div>
+          </div>
+          <Switch
+            checked={shareModelConfig}
+            onCheckedChange={handleShareToggle}
+            disabled={saving}
+            aria-label="Share model config with chatters"
+          />
         </div>
       </div>
 

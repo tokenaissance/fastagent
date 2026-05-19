@@ -31,6 +31,7 @@ import {
 } from "@/components/ui/table";
 import { Brain, Plus, Pencil, Trash2, Check, Cpu, Loader2 } from "lucide-react";
 import {
+  getAgent,
   getConfig,
   updateConfig,
   getMe,
@@ -43,6 +44,7 @@ import {
   type ModelEntry,
   type ProviderRow,
 } from "@/lib/api";
+import { useAgentIdFromURL } from "@/hooks/use-agent-id";
 
 // Keep these maps in sync with onboard's ProviderStep so the two flows
 // look and behave identically — same preset set, same labels, same
@@ -92,10 +94,12 @@ interface ProviderEntry {
   authType: string;
   models: ModelEntry[];
   // scope tells the row apart from the inherited (system) ones a regular
-  // user is allowed to see but not mutate. "system" rows render with an
-  // Inherited badge and disabled edit/delete actions; "user" rows are
-  // the caller's own and fully editable.
-  scope: "system" | "user";
+  // user is allowed to see but not mutate. "system" and "agent" rows
+  // render with an Inherited badge and disabled edit/delete; "user" rows
+  // are the caller's own and fully editable. "agent" only shows up when
+  // the page is mounted inside an agent context (chatter viewing a
+  // shared agent whose owner enabled shareModelConfig).
+  scope: "system" | "user" | "agent";
 }
 
 function emptyModel(): ModelEntry {
@@ -119,6 +123,19 @@ function presetModelRows(preset: string): ModelEntry[] {
 }
 
 export default function ModelsPage() {
+  // Agent context is auto-detected from the URL. The standalone /models
+  // page lives outside any /agents/<id>/ path, so the hook returns
+  // "default" and we render the plain user-scope view. When this same
+  // component is mounted inside the agent settings dialog (chatter
+  // viewing a shared agent), the URL is /agents/<id>/... and we pick up
+  // the id here — the inheritance chain then includes the agent-scope
+  // model + providers (when the owner enabled shareModelConfig).
+  const urlAgentId = useAgentIdFromURL();
+  const inAgentContext = urlAgentId !== "default" && urlAgentId !== "";
+  const [agentName, setAgentName] = useState("");
+  const [agentScopeModel, setAgentScopeModel] = useState("");
+  const [agentShares, setAgentShares] = useState(false);
+
   const [providers, setProviders] = useState<ProviderEntry[]>([]);
   const [model, setModel] = useState("");
   // System-only resolution from /api/config?meta. For super_admin this
@@ -174,16 +191,25 @@ export default function ModelsPage() {
     cleanModelRows.length === 0 ||
     cleanModelRows.every((t) => modelTests[t.idx]?.status === "success");
 
-  // Collect all provider/model options for default model dropdown
-  const allModelOptions: { value: string; label: string }[] = [];
-  for (const p of providers) {
-    for (const m of p.models) {
-      allModelOptions.push({
-        value: `${p.name}/${m.id}`,
-        label: `${p.name}/${m.name || m.id}`,
-      });
+  // Collect all provider/model options for the default-model dropdown.
+  // Dedupe on `provider/modelId` and walk inner→outer scope so the more
+  // specific row wins the label when two rows share a name (e.g. an
+  // agent-scope "openai" override shadowing the system "openai").
+  // providers[] is already pre-sorted agent → user → system by
+  // fetchConfig, so the natural traversal order is correct.
+  const allModelOptions: { value: string; label: string }[] = (() => {
+    const seen = new Set<string>();
+    const out: { value: string; label: string }[] = [];
+    for (const p of providers) {
+      for (const m of p.models) {
+        const value = `${p.name}/${m.id}`;
+        if (seen.has(value)) continue;
+        seen.add(value);
+        out.push({ value, label: `${p.name}/${m.name || m.id}` });
+      }
     }
-  }
+    return out;
+  })();
 
   // Providers are stored in the configs table and only round-trip through
   // the dedicated /api/providers endpoints — POST /api/config silently
@@ -198,18 +224,18 @@ export default function ModelsPage() {
   ) => {
     setLoading(true);
     try {
-      // Admin: their own scope (system) is the source of truth for them.
-      // Regular user: pull system AND user — system rows surface as
-      // "Inherited" so the user can see what their agents are getting
-      // for free, plus their own private overlay.
-      const requests: Array<Promise<{ providers?: ProviderRow[] } | null>> = [];
-      requests.push(listProviders("system", "").catch(() => null));
-      if (!asAdmin) {
-        requests.push(listProviders("user", userId).catch(() => null));
-      }
-      const [cfg, sysRes, userRes] = await Promise.all([
+      // Admin: system is the source of truth.
+      // Regular user: system (inherited) + own user-scope rows.
+      // Agent context (chatter on a shared agent): also pull the agent
+      //   record + agent-scope providers. The latter is gated on
+      //   shareModelConfig=true server-side; a 403 just means sharing is
+      //   off and we render the plain user-scope view.
+      const [cfg, sysRes, userRes, agentRec, agentRes] = await Promise.all([
         getConfig().catch(() => null),
-        ...requests,
+        listProviders("system", "").catch(() => null),
+        asAdmin ? Promise.resolve(null) : listProviders("user", userId).catch(() => null),
+        inAgentContext ? getAgent(urlAgentId).catch(() => null) : Promise.resolve(null),
+        inAgentContext ? listProviders("agent", urlAgentId).catch(() => null) : Promise.resolve(null),
       ]);
       const sysRows: ProviderRow[] = (sysRes && Array.isArray(sysRes.providers))
         ? (sysRes.providers as ProviderRow[])
@@ -217,7 +243,10 @@ export default function ModelsPage() {
       const userRows: ProviderRow[] = (userRes && Array.isArray(userRes.providers))
         ? (userRes.providers as ProviderRow[])
         : [];
-      const toEntry = (r: ProviderRow, sc: "system" | "user"): ProviderEntry => ({
+      const agentRows: ProviderRow[] = (agentRes && Array.isArray(agentRes.providers))
+        ? (agentRes.providers as ProviderRow[])
+        : [];
+      const toEntry = (r: ProviderRow, sc: "system" | "user" | "agent"): ProviderEntry => ({
         id: r.id,
         name: r.name,
         apiBase: r.apiBase || "",
@@ -228,15 +257,25 @@ export default function ModelsPage() {
         models: r.models || [],
         scope: sc,
       });
+      // Order: agent (most specific) → user → system. Read-only "agent"
+      // rows only appear for non-owners viewing a shared agent (the
+      // owner sees the dedicated AgentModelsPage that owns agent-scope
+      // editing); we still skip them for admins because admin's
+      // standalone /models page is system-scope only.
       const entries: ProviderEntry[] = asAdmin
         ? sysRows.map((r) => toEntry(r, "system"))
         : [
-            ...sysRows.map((r) => toEntry(r, "system")),
+            ...agentRows.map((r) => toEntry(r, "agent")),
             ...userRows.map((r) => toEntry(r, "user")),
+            ...sysRows.map((r) => toEntry(r, "system")),
           ];
       setProviders(entries);
       setModel(cfg?.agents?.defaults?.model || "");
       setSystemDefault(cfg?.meta?.systemDefaultModel || "");
+      const ag = (agentRec as { agent?: { name?: string; model?: string; shareModelConfig?: boolean } } | null)?.agent;
+      setAgentName(ag?.name || "");
+      setAgentScopeModel(ag?.model || "");
+      setAgentShares(!!ag?.shareModelConfig);
     } finally {
       setLoading(false);
     }
@@ -547,7 +586,15 @@ export default function ModelsPage() {
         <div>
           <h2 className="text-2xl font-semibold tracking-tight">Models</h2>
           <p className="text-sm text-muted-foreground mt-1">
-            Manage LLM providers and default model
+            {inAgentContext ? (
+              <>
+                Your model + providers for{" "}
+                <strong>{agentName || "this agent"}</strong>. Your override wins
+                over the agent&apos;s default.
+              </>
+            ) : (
+              <>Manage LLM providers and default model</>
+            )}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -576,16 +623,30 @@ export default function ModelsPage() {
       {/* Default Model — for non-admin we surface inheritance state the
           same way the agent Models page does, so users can see what
           they'd get for free vs what they've overridden. Super_admin is
-          the system source of truth, so the badges are noise for them. */}
+          the system source of truth, so the badges are noise for them.
+          In agent context the inheritance chain becomes
+          chatter-user → agent-scope → system, so we show the agent's
+          model in the placeholder and caption when sharing is on. */}
       {(() => {
-        const inheriting = !isSuperAdmin && (!model.trim() || model === systemDefault);
+        const inheriting = !isSuperAdmin && !model.trim();
         const overridden = !isSuperAdmin && !inheriting;
+        // What the runtime will actually use when the chatter has no
+        // override. EnsureAgent picks agent-scope first (only when the
+        // owner enabled sharing); otherwise it falls through to system.
+        const effectiveFallback = inAgentContext && agentShares && agentScopeModel
+          ? agentScopeModel
+          : systemDefault;
+        const fallbackSource = inAgentContext && agentShares && agentScopeModel
+          ? "agent"
+          : "system";
         return (
       <div className="rounded-lg border border-border bg-card p-5">
         <div className="flex items-center justify-between gap-2 mb-3">
           <div className="flex items-center gap-2">
             <Cpu className="h-4 w-4 text-primary" />
-            <h3 className="font-medium">Default Model</h3>
+            <h3 className="font-medium">
+              {inAgentContext ? "Active Model" : "Default Model"}
+            </h3>
             {!isSuperAdmin && (inheriting ? (
               <Badge variant="outline" className="text-[10px]">Inheriting</Badge>
             ) : (
@@ -607,7 +668,7 @@ export default function ModelsPage() {
         {allModelOptions.length > 0 ? (
           <Select value={inheriting ? "" : model} onValueChange={(v: string | null) => v && handleDefaultModelChange(v)}>
             <SelectTrigger className="font-mono text-sm max-w-md">
-              <SelectValue placeholder={inheriting ? `Inherit (${systemDefault || "no system default"})` : "Select a model"} />
+              <SelectValue placeholder={inheriting ? `Inherit (${effectiveFallback || "no default"})` : "Select a model"} />
             </SelectTrigger>
             {/* Default `w-(--anchor-width)` locks the popup to the
                 trigger's max-w-md. Long ids like
@@ -626,7 +687,7 @@ export default function ModelsPage() {
           <Input
             value={inheriting ? "" : model}
             onChange={(e) => setModel(e.target.value)}
-            placeholder={inheriting ? (systemDefault ? `Inherit (${systemDefault})` : "e.g. openai/gpt-4o") : "e.g. openai/gpt-4o"}
+            placeholder={inheriting ? (effectiveFallback ? `Inherit (${effectiveFallback})` : "e.g. openai/gpt-4o") : "e.g. openai/gpt-4o"}
             className="font-mono text-sm max-w-md"
           />
         )}
@@ -635,16 +696,30 @@ export default function ModelsPage() {
             <>Used by agents unless overridden in agent config.</>
           ) : inheriting ? (
             <>
-              Using system default
-              {systemDefault ? (
-                <>: <code className="text-[11px]">{systemDefault}</code></>
+              {fallbackSource === "agent" ? (
+                <>
+                  <strong>{agentName || "This agent"}</strong> uses{" "}
+                  <code className="text-[11px]">{effectiveFallback}</code> (inherited
+                  from the agent). Pick a model above to override it just for you.
+                </>
               ) : (
-                <> (none configured)</>
+                <>
+                  Using system default
+                  {effectiveFallback ? (
+                    <>: <code className="text-[11px]">{effectiveFallback}</code></>
+                  ) : (
+                    <> (none configured)</>
+                  )}
+                  . Pick a model above to override
+                  {inAgentContext ? <> for this agent.</> : <> for your agents only.</>}
+                </>
               )}
-              . Pick a model above to override for your agents only.
             </>
           ) : (
-            <>Override applies to your agents only. Format <code className="text-[11px]">provider/modelId</code>.</>
+            <>
+              Override applies to {inAgentContext ? <strong>you</strong> : <>your agents</>}.
+              Format <code className="text-[11px]">provider/modelId</code>.
+            </>
           )}
         </p>
       </div>
@@ -685,12 +760,25 @@ export default function ModelsPage() {
               {providers.map((provider) => {
                 // A row is editable if it's at the caller's own scope.
                 // For super_admin that's "system"; for everyone else
-                // it's "user". Inherited rows render read-only.
+                // it's "user". "agent" rows surfaced for a chatter on
+                // a shared agent are always read-only (owner owns them).
                 const editable = isSuperAdmin
                   ? provider.scope === "system"
                   : provider.scope === "user";
+                const sourceLabel =
+                  provider.scope === "agent"
+                    ? "Inherited from agent"
+                    : editable
+                      ? "Mine"
+                      : "Inherited";
+                const sourceTitle =
+                  provider.scope === "agent"
+                    ? "Configured on this agent by its owner — shared with chatters."
+                    : editable
+                      ? ""
+                      : "Configured by an admin and shared with all users.";
                 return (
-                <TableRow key={`${provider.scope}:${provider.name}`}>
+                <TableRow key={`${provider.scope}:${provider.id}`}>
                   <TableCell className="font-medium">{provider.name}</TableCell>
                   <TableCell>
                     <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs">
@@ -711,11 +799,11 @@ export default function ModelsPage() {
                         variant="outline"
                         className="bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20"
                       >
-                        Mine
+                        {sourceLabel}
                       </Badge>
                     ) : (
-                      <Badge variant="outline" className="text-muted-foreground" title="Configured by an admin and shared with all users">
-                        Inherited
+                      <Badge variant="outline" className="text-muted-foreground" title={sourceTitle}>
+                        {sourceLabel}
                       </Badge>
                     )}
                   </TableCell>
@@ -725,7 +813,7 @@ export default function ModelsPage() {
                         size="icon"
                         variant="ghost"
                         onClick={() => openEditDialog(provider)}
-                        title={editable ? "Edit" : "Read-only — admin owns this row"}
+                        title={editable ? "Edit" : "Read-only — inherited row"}
                         disabled={!editable}
                       >
                         <Pencil className="size-4" />
@@ -735,7 +823,7 @@ export default function ModelsPage() {
                         variant="ghost"
                         className="text-destructive hover:text-destructive"
                         onClick={() => handleDeleteProvider(provider)}
-                        title={editable ? "Remove" : "Read-only — admin owns this row"}
+                        title={editable ? "Remove" : "Read-only — inherited row"}
                         disabled={!editable}
                       >
                         <Trash2 className="size-4" />

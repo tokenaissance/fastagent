@@ -26,6 +26,7 @@ import AgentSchedulerPage from "@/app/agents/[id]/scheduler/page";
 import AgentUsagePage from "@/app/agents/[id]/usage/page";
 import AccountSettingsPage from "@/app/settings/account/page";
 import GeneralSettingsPage from "@/app/settings/general/page";
+import UserModelsPage from "@/app/models/page";
 import AboutSettingsPage from "@/app/settings/about/page";
 
 export type AgentSettingsTab =
@@ -72,9 +73,12 @@ const USER_TABS: Array<{ id: AgentSettingsTab; label: string; icon: TabIcon }> =
 // because the pages are self-contained and re-fetch on mount.
 //
 // role="viewer" hides the owner-only Agent tabs (Profile, Customize,
-// Models, Skills, Scheduler) and only exposes Channels under Agent —
-// viewers can still bind their own IM accounts to a shared agent, but
-// can't touch the agent's identity / skills / scheduling.
+// Skills, Scheduler, Usage) and only exposes Models + Channels under
+// Agent — viewers can pin their own model for the shared agent and
+// bind their own IM accounts, but can't touch the agent's identity /
+// skills / scheduling. The Models tab id is shared with owners; the
+// render branch below picks the agent-scope page for owners and the
+// user-scope page for viewers (same tab slot, different writer).
 export function AgentSettingsDialog({
   open,
   onOpenChange,
@@ -98,14 +102,15 @@ export function AgentSettingsDialog({
   const agentTabs = userOnly
     ? []
     : role === "viewer"
-      ? AGENT_TABS.filter((t) => t.id === "channels")
+      ? AGENT_TABS.filter((t) => t.id === "models" || t.id === "channels")
       : AGENT_TABS;
   const userTabs = isAdmin ? USER_TABS : USER_TABS.filter((t) => t.id !== "about");
   // Pick the landing tab: userOnly opens on General (User section);
-  // viewers land on Channels (their only Agent tab); owners on Profile.
+  // viewers land on Models (the first Agent tab they have); owners on
+  // Profile.
   const initialTab: AgentSettingsTab =
     defaultTab ??
-    (userOnly ? "general" : role === "viewer" ? "channels" : "profile");
+    (userOnly ? "general" : role === "viewer" ? "models" : "profile");
   const [tab, setTab] = React.useState<AgentSettingsTab>(initialTab);
 
   // Reset to the requested tab whenever the dialog re-opens, so a fresh
@@ -152,7 +157,8 @@ export function AgentSettingsDialog({
         <div className="overflow-y-auto">
           {tab === "profile" && <AgentProfilePanel />}
           {tab === "customize" && <AgentCustomizePage />}
-          {tab === "models" && <AgentModelsPage />}
+          {tab === "models" &&
+            (role === "viewer" ? <UserModelsPage /> : <AgentModelsPage />)}
           {tab === "skills" && <AgentSkillsPage />}
           {tab === "channels" && <AgentChannelsPage />}
           {tab === "scheduler" && <AgentSchedulerPage />}

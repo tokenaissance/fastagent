@@ -83,6 +83,12 @@ export interface AgentDetail {
   // agent under their own user_id (sessions/memory partition per
   // chatter). Owner-editable from the Edit dialog. Default false.
   isPublic?: boolean;
+  // shareModelConfig: when true, chatters using this agent inherit the
+  // owner's user-scope + agent-scope model and provider configuration
+  // (current "fall back to owner's keys" behavior). When false (default),
+  // chatters see only their own user-scope + system — they bring their
+  // own model/providers or the agent doesn't work for them.
+  shareModelConfig?: boolean;
   model: string;
   workspace?: string;
   maxTokens?: number;
@@ -1177,6 +1183,9 @@ export interface AgentUpdatePayload {
   // Toggle the "anyone with the link can chat" gate. Omit to leave the
   // current value alone.
   isPublic?: boolean;
+  // Toggle whether chatters using this agent inherit the owner's
+  // model + provider configuration. Omit to leave unchanged.
+  shareModelConfig?: boolean;
 }
 
 export async function updateAgent(id: string, agent: AgentUpdatePayload) {

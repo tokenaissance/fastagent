@@ -295,6 +295,31 @@ type UserSpace struct {
 	mu sync.Mutex
 }
 
+// readUserScopeAgentDefaults reads the (user=X, agent='') agents.defaults
+// row raw — distinct from assembleConfig, which merges system + user and
+// can't tell apart "user explicitly chose the system value" from "no
+// user-scope row at all". EnsureAgent uses this to detect a chatter's
+// *explicit* model preference, so it can win over owner / agent-scope
+// overrides for foreign agents. Returns the zero value when there's no
+// row, the row's data can't be unmarshaled, or userID is empty (system
+// caller — no per-user pin to honor).
+func readUserScopeAgentDefaults(ctx context.Context, st store.Store, userID string) config.AgentDefaults {
+	var out config.AgentDefaults
+	if userID == "" || st == nil {
+		return out
+	}
+	rec, err := st.GetConfigByName(ctx, store.KindSetting, userID, "", NSAgentDefaults)
+	if err != nil || rec == nil {
+		return out
+	}
+	blob, err := json.Marshal(rec.Data)
+	if err != nil {
+		return out
+	}
+	_ = json.Unmarshal(blob, &out)
+	return out
+}
+
 // EnsureAgent attaches an agent the user does not own to this UserSpace.
 // Used by super_admin chat: the admin operates on a foreign agent under
 // their own user_id namespace (sessions, memory, mem0 scope all stay
@@ -336,7 +361,31 @@ func (sp *UserSpace) EnsureAgent(ctx context.Context, st store.Store, mb *bus.Me
 	// agent-scope `agents.defaults` → agent-scope providers. Agent-
 	// scope still wins, matching the precedence the owner's own
 	// loadUserSpace path uses.
-	if rec.UserID != "" && rec.UserID != sp.UserID {
+	//
+	// shareModelConfig (agent record) gates this: when false (default),
+	// the owner-fallback + agent-scope overlays are skipped entirely
+	// for chatters — they see only their own user-scope + system. The
+	// owner builds the agent with their own keys / model selection but
+	// none of that leaks to people they share the agent with unless
+	// they flip the toggle on the agent Models page. Owner's own
+	// loadUserSpace path (sp.UserID == rec.UserID) is unaffected and
+	// still gets the full agent-scope overlay.
+	//
+	// Exception: when the viewer (chatter) has *explicitly* set their
+	// own user-scope agents.defaults.model row, that choice wins over
+	// both the owner's user-scope and the agent-scope override —
+	// "MY tokens, MY model". We detect this by reading the chatter's
+	// raw row directly (not the merged cfg, which can't distinguish
+	// "explicit user-scope = system default" from "no user-scope row")
+	// and re-pin the field after the overlay chain. Only Model is
+	// pinned today — fields like MaxTokens / Temp / Thinking still
+	// fall through the owner/agent overlays since the chatter doesn't
+	// have UI to set them per-agent.
+	chatterPin := readUserScopeAgentDefaults(ctx, st, sp.UserID)
+	isForeign := rec.UserID != "" && rec.UserID != sp.UserID
+	shareCfg, _ := rec.Config["shareModelConfig"].(bool)
+	applyOwnerOverlays := !isForeign || shareCfg
+	if isForeign && applyOwnerOverlays {
 		if ownerCfg, err := assembleConfig(ctx, st, rec.UserID, ""); err == nil && ownerCfg != nil {
 			ovr := ownerCfg.Agents.Defaults
 			if ovr.Model != "" {
@@ -376,43 +425,56 @@ func (sp *UserSpace) EnsureAgent(ctx context.Context, st store.Store, mb *bus.Me
 			}
 		}
 	}
-	if cfgRec, err := st.GetConfigByName(ctx, store.KindSetting, "", rc.ID, "agents.defaults"); err == nil && cfgRec != nil {
-		var ovr config.AgentDefaults
-		blob, _ := json.Marshal(cfgRec.Data)
-		_ = json.Unmarshal(blob, &ovr)
-		if ovr.Model != "" {
-			rc.Model = ovr.Model
+	if applyOwnerOverlays {
+		if cfgRec, err := st.GetConfigByName(ctx, store.KindSetting, "", rc.ID, "agents.defaults"); err == nil && cfgRec != nil {
+			var ovr config.AgentDefaults
+			blob, _ := json.Marshal(cfgRec.Data)
+			_ = json.Unmarshal(blob, &ovr)
+			if ovr.Model != "" {
+				rc.Model = ovr.Model
+			}
+			if ovr.MaxTokens > 0 {
+				rc.MaxTokens = ovr.MaxTokens
+			}
+			if ovr.Temperature > 0 {
+				rc.Temperature = ovr.Temperature
+			}
+			if ovr.MaxToolIterations > 0 {
+				rc.MaxToolIterations = ovr.MaxToolIterations
+			}
+			if ovr.MaxParallelToolCalls > 0 {
+				rc.MaxParallelToolCalls = ovr.MaxParallelToolCalls
+			}
+			if ovr.Thinking != "" {
+				rc.Thinking = ovr.Thinking
+			}
+			if ovr.PolicyPreset != "" {
+				rc.PolicyPreset = ovr.PolicyPreset
+			}
 		}
-		if ovr.MaxTokens > 0 {
-			rc.MaxTokens = ovr.MaxTokens
-		}
-		if ovr.Temperature > 0 {
-			rc.Temperature = ovr.Temperature
-		}
-		if ovr.MaxToolIterations > 0 {
-			rc.MaxToolIterations = ovr.MaxToolIterations
-		}
-		if ovr.MaxParallelToolCalls > 0 {
-			rc.MaxParallelToolCalls = ovr.MaxParallelToolCalls
-		}
-		if ovr.Thinking != "" {
-			rc.Thinking = ovr.Thinking
-		}
-		if ovr.PolicyPreset != "" {
-			rc.PolicyPreset = ovr.PolicyPreset
-		}
+	}
+	if chatterPin.Model != "" {
+		rc.Model = chatterPin.Model
 	}
 	// Overlay agent-scope providers — sp.Config.Providers carries only
 	// system+user rows (assembleConfig in loadUserSpace runs with
 	// agentID=""). Without this overlay, providerForAgent can't see the
 	// agent's own credentials and falls back to the shared provider,
 	// firing the agent's chosen model id at the wrong base URL.
-	if agentProvs, err := scope.AgentScopeProviders(ctx, st, rc.ID); err == nil {
-		for k, v := range agentProvs {
-			if rc.Providers == nil {
-				rc.Providers = make(map[string]config.ProviderConfig)
+	//
+	// Same gate as the agents.defaults overlay above: when a chatter
+	// uses a foreign agent whose owner hasn't opted into sharing,
+	// agent-scope provider rows stay private to the owner. The chatter
+	// runs on whatever their own user-scope providers (plus system)
+	// can offer.
+	if applyOwnerOverlays {
+		if agentProvs, err := scope.AgentScopeProviders(ctx, st, rc.ID); err == nil {
+			for k, v := range agentProvs {
+				if rc.Providers == nil {
+					rc.Providers = make(map[string]config.ProviderConfig)
+				}
+				rc.Providers[k] = v
 			}
-			rc.Providers[k] = v
 		}
 	}
 	ensureAgentHome(rc)

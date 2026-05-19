@@ -309,10 +309,11 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Name        string  `json:"name,omitempty"`
-		Description *string `json:"description,omitempty"` // ptr so empty-string clears it
-		Model       *string `json:"model,omitempty"`       // ptr so empty-string clears the agent-scope override
-		IsPublic    *bool   `json:"isPublic,omitempty"`    // ptr so caller can leave it unchanged
+		Name              string  `json:"name,omitempty"`
+		Description       *string `json:"description,omitempty"` // ptr so empty-string clears it
+		Model             *string `json:"model,omitempty"`       // ptr so empty-string clears the agent-scope override
+		IsPublic          *bool   `json:"isPublic,omitempty"`    // ptr so caller can leave it unchanged
+		ShareModelConfig  *bool   `json:"shareModelConfig,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
@@ -334,6 +335,22 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 	if req.IsPublic != nil {
 		rec.IsPublic = *req.IsPublic
 	}
+	// shareModelConfig controls whether a chatter using this agent
+	// inherits the owner's model + provider configuration. Default
+	// false (private — chatter brings their own keys, or the agent
+	// silently falls back to system). Stored in the agent's config
+	// blob so we don't need a schema migration; runtime reads it back
+	// in EnsureAgent to gate the owner-fallback + agent-scope overlays.
+	if req.ShareModelConfig != nil {
+		if rec.Config == nil {
+			rec.Config = map[string]interface{}{}
+		}
+		if *req.ShareModelConfig {
+			rec.Config["shareModelConfig"] = true
+		} else {
+			delete(rec.Config, "shareModelConfig")
+		}
+	}
 	if err := s.dataStore.SaveAgent(r.Context(), rec); err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
@@ -353,14 +370,16 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 	// own UserSpace also drop their stale rc.Model — without this they
 	// keep firing the previous model until the 30-min idle eviction.
 	s.invalidateAgent(rec.ID)
+	share, _ := rec.Config["shareModelConfig"].(bool)
 	jsonResponse(w, http.StatusOK, map[string]any{
 		"agent": map[string]any{
-			"id":       rec.ID,
-			"userId":   rec.UserID,
-			"name":     rec.Name,
-			"model":    s.agentScopeModel(r, rec.ID),
-			"config":   rec.Config,
-			"isPublic": rec.IsPublic,
+			"id":               rec.ID,
+			"userId":           rec.UserID,
+			"name":             rec.Name,
+			"model":            s.agentScopeModel(r, rec.ID),
+			"config":           rec.Config,
+			"isPublic":         rec.IsPublic,
+			"shareModelConfig": share,
 		},
 	})
 }
@@ -380,6 +399,7 @@ func (s *Server) handleGetAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	desc, _ := rec.Config["description"].(string)
+	share, _ := rec.Config["shareModelConfig"].(bool)
 	uid := s.effectiveUserID(r)
 	role := "owner"
 	if rec.UserID != uid {
@@ -387,15 +407,16 @@ func (s *Server) handleGetAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	jsonResponse(w, http.StatusOK, map[string]any{
 		"agent": map[string]any{
-			"id":          rec.ID,
-			"name":        rec.Name,
-			"description": desc,
-			"userId":      rec.UserID,
-			"role":        role,
-			"model":       s.agentScopeModel(r, rec.ID),
-			"avatarUrl":   "/api/agents/" + rec.ID + "/files/avatar.png",
-			"createdAt":   rec.CreatedAt,
-			"isPublic":    rec.IsPublic,
+			"id":               rec.ID,
+			"name":             rec.Name,
+			"description":      desc,
+			"userId":           rec.UserID,
+			"role":             role,
+			"model":            s.agentScopeModel(r, rec.ID),
+			"avatarUrl":        "/api/agents/" + rec.ID + "/files/avatar.png",
+			"createdAt":        rec.CreatedAt,
+			"isPublic":         rec.IsPublic,
+			"shareModelConfig": share,
 		},
 	})
 }

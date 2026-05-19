@@ -83,11 +83,39 @@ func (s *Server) authorizeScope(w http.ResponseWriter, r *http.Request, sc, scop
 			return false
 		}
 		rec, err := s.dataStore.GetAgent(r.Context(), scopeID)
-		if err != nil || rec == nil || rec.UserID != ident.UserID {
+		if err != nil || rec == nil {
 			jsonResponse(w, http.StatusForbidden, map[string]any{"ok": false, "error": "agent not yours"})
 			return false
 		}
-		return true
+		if rec.UserID == ident.UserID {
+			return true
+		}
+		// Non-owner read access on a shared agent: when the owner has
+		// flipped shareModelConfig on, the agent's runtime resolution
+		// already includes its agent-scope providers for chatters
+		// (EnsureAgent overlays them in). The Models tab in the chatter's
+		// agent-settings dialog needs to surface those same rows — with
+		// masked keys — so the chatter knows which credentials the agent
+		// is using and which models are available. Writes stay owner-only.
+		if op == scopeRead {
+			if share, _ := rec.Config["shareModelConfig"].(bool); share {
+				if rec.IsPublic || s.callerOwnsAgent(r, scopeID) {
+					return true
+				}
+				// Mirror requireAgentReadable's apikey-ACL gate so an
+				// apikey scoped to this agent can also read.
+				if ident.AuthMethod == "apikey" && ident.CanAccessAgent(scopeID) {
+					return true
+				}
+				// Signed-in user on a non-public shared agent: we don't
+				// have a separate "this user has been granted access"
+				// table beyond IsPublic / apikey ACL, so fall through
+				// to the standard 403 below. (If you build sharing
+				// invites later, gate them here.)
+			}
+		}
+		jsonResponse(w, http.StatusForbidden, map[string]any{"ok": false, "error": "agent not yours"})
+		return false
 	default:
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid scope"})
 		return false
