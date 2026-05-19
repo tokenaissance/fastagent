@@ -450,7 +450,9 @@ Then in your final reply, write: ![](/workspace/output.png)`
 You are in a group chat. Your bot username is @%s.
 Other agents in this group: %s.
 Only respond when directly mentioned with @%s, or when the conversation clearly needs your expertise.
-Messages from other bots will appear as "[BotName]: message" in the conversation history.`,
+Messages from other bots will appear as "[BotName]: message" in the conversation history.
+
+When you DO respond: your full skill catalog and tool registry above are still in scope — group coordination governs *when* to speak, not *what* you can do. If the user asks you to invoke a skill by name (e.g. "调用 X" / "use X to …"), check the <skill_catalog> first; "no such tool" is almost always a misread of a skill that's actually listed.`,
 			cb.groupCtx.BotUsername,
 			strings.Join(cb.groupCtx.Teammates, ", "),
 			cb.groupCtx.BotUsername,

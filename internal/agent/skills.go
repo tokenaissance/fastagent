@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 
 	"github.com/fastclaw-ai/fastclaw/internal/config"
@@ -277,6 +278,17 @@ func (sl *SkillsLoader) LoadSkills() []Skill {
 		}
 		result = append(result, s)
 	}
+	// Sort by name so the system prompt's skill ordering is stable
+	// across turns. Go map iteration is randomized, so without this a
+	// 122KB summary ends up with skills in a different position on
+	// every refresh — the model is sensitive to where a block sits
+	// (later blocks compete with more preceding context for
+	// attention), which produced an intermittent "model doesn't see
+	// skill X" symptom in long-tail group chats. Alphabetic is the
+	// cheapest stable order and also makes log diff'ing trivial.
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Name < result[j].Name
+	})
 	return result
 }
 
@@ -291,12 +303,53 @@ func (sl *SkillsLoader) BuildSkillsSummary(skills []Skill) string {
 	}
 	var sb strings.Builder
 	sb.WriteString(skillsDirective)
-	sb.WriteString("\n\n<skills>\n")
+	// Quick-reference catalog (name + first-line description) BEFORE
+	// the inline `<skills>` block. The full SKILL.md content can be
+	// 100+ KB total; a tiny name-only index up front lets the model
+	// match "the user said 'use skill X'" against the catalog in one
+	// pass instead of scanning the whole inline section. Catches the
+	// "我手头没有 X" hallucination that showed up in group chats where
+	// attention got diluted by the group_chat block — by the time the
+	// model reached `<skill name="X">`, it had already decided X
+	// didn't exist. Sorted (same order as the inline blocks below)
+	// for diff-friendly logs.
+	sb.WriteString("\n\n<skill_catalog>\nPre-installed skills available to this agent (full SKILL.md content follows below). Treat any user mention of one of these names as a request to invoke that skill via exec:\n")
+	for _, skill := range skills {
+		desc := firstSentence(skill.Description)
+		if desc == "" {
+			desc = "(no description)"
+		}
+		fmt.Fprintf(&sb, "- %s — %s\n", skill.Name, desc)
+	}
+	sb.WriteString("</skill_catalog>\n\n<skills>\n")
 	for _, skill := range skills {
 		fmt.Fprintf(&sb, "<skill name=%q layer=%q>\n%s\n</skill>\n", skill.Name, skill.Layer, skill.Content)
 	}
 	sb.WriteString("</skills>")
 	return sb.String()
+}
+
+// firstSentence returns the first sentence-ish chunk of s — used for
+// the skill-catalog one-liner. We bound the output to keep the catalog
+// scannable even when a skill's Description is a paragraph: cut at the
+// first ". " / "。" / newline, then hard-cap at 140 runes so a single
+// run-on sentence can't drown the index. Trimmed whitespace.
+func firstSentence(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	for _, sep := range []string{"\n", ". ", "。"} {
+		if i := strings.Index(s, sep); i >= 0 {
+			s = s[:i]
+		}
+	}
+	s = strings.TrimSpace(s)
+	const cap = 140
+	if r := []rune(s); len(r) > cap {
+		s = string(r[:cap]) + "…"
+	}
+	return s
 }
 
 // skillsDirective tells the LLM how to invoke pre-installed skills AND
