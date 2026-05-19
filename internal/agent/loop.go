@@ -1211,6 +1211,24 @@ func senderMetadata(msg bus.InboundMessage) map[string]any {
 	return md
 }
 
+// logSystemPromptFingerprint emits one structured line per turn that
+// proves what the LLM was *actually* told about skills. The refresh
+// log up the call stack only proves the loader produced N skills; this
+// confirms they survived the BuildSystemPromptAs assembly into the
+// system message we're about to ship. Used to chase the "group chat
+// doesn't see skills" report — diff this line between a DM turn and a
+// group turn for the same agent and the divergence point becomes
+// obvious.
+func logSystemPromptFingerprint(agentName, channel, chatID, userID, prompt string) {
+	skillCount := strings.Count(prompt, "<skill name=")
+	hasFeishu := strings.Contains(prompt, "feedback-to-feishu")
+	slog.Info("system prompt assembled",
+		"agent", agentName, "channel", channel, "chat_id", chatID, "user", userID,
+		"bytes", len(prompt),
+		"skill_blocks", skillCount,
+		"has_feedback_to_feishu", hasFeishu)
+}
+
 // renderChannelHints emits per-turn protocol notes that the LLM can
 // only honor if it knows about them. Today there's exactly one: IM
 // channels with a single-text-per-bubble UI (WeChat — Telegram / LINE
@@ -1409,6 +1427,7 @@ func (a *Agent) handlePlanMode(ctx context.Context, msg bus.InboundMessage) stri
 	}
 
 	systemPrompt := a.ctxBuilder.BuildSystemPromptAs(chatterUID, a.memory.WithUserID(chatterUID))
+	logSystemPromptFingerprint(a.name, msg.Channel, msg.ChatID, chatterUID, systemPrompt)
 	// Tool catalog injection: plan mode passes tools=nil to the LLM so
 	// it can't accidentally call anything, but that also hides the
 	// registry from the planning model. Without this, plans were written
@@ -1593,6 +1612,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 
 	chatterMem := a.memory.WithUserID(chatterUID)
 	systemPrompt := a.ctxBuilder.BuildSystemPromptAs(chatterUID, chatterMem)
+	logSystemPromptFingerprint(a.name, msg.Channel, msg.ChatID, chatterUID, systemPrompt)
 
 	// Hook: AfterSystemPrompt
 	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: AfterSystemPrompt, UserID: a.ownerUserID})
@@ -2196,6 +2216,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: BeforeSystemPrompt, UserID: a.ownerUserID})
 	chatterMem := a.memory.WithUserID(chatterUID)
 	systemPrompt := a.ctxBuilder.BuildSystemPromptAs(chatterUID, chatterMem)
+	logSystemPromptFingerprint(a.name, msg.Channel, msg.ChatID, chatterUID, systemPrompt)
 	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: AfterSystemPrompt, UserID: a.ownerUserID})
 
 	// Store raw user message — buildUserMessage handles multi-image
