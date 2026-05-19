@@ -94,12 +94,22 @@ func toAnthropicMessages(msgs []Message) (string, []anthropicMessage) {
 			continue
 		}
 		// If stripping orphan tool_calls would leave the assistant
-		// message with nothing to say (no text, no thinking, no
-		// content parts), drop it entirely. Anthropic rejects
-		// content-less messages with "expected a string or a list",
-		// so we can't just emit an empty hull.
+		// message with nothing text-shaped to say (no Content, no
+		// ContentParts, no Thinking), drop it entirely. Anthropic
+		// rejects content-less messages with "expected a string or a
+		// list", so we can't just emit an empty hull.
+		//
+		// RawAssistant is intentionally NOT part of this guard: when
+		// it's non-empty for an orphan turn it captured exactly the
+		// tool_use blocks we're about to strip (or an OpenAI-shape
+		// blob from a previous provider) — neither replays into a
+		// valid Anthropic message, so keeping the message around just
+		// to "preserve" RawAssistant produces `content: null` and a
+		// 400 ("messages.N.content: Input should be a valid array")
+		// on the next user turn. Real thinking content survives via
+		// Thinking / thinkingBlockFor, which DOES round-trip.
 		if orphanAssistant[i] && m.Content == "" && len(m.ContentParts) == 0 &&
-			m.Thinking == "" && len(m.RawAssistant) == 0 {
+			m.Thinking == "" {
 			continue
 		}
 

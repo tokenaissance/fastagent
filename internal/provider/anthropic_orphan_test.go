@@ -101,6 +101,58 @@ func TestToAnthropicMessagesOrphanAssistantEmpty(t *testing.T) {
 	}
 }
 
+// TestToAnthropicMessagesOrphanAssistantRawOnly covers the WeChat
+// "second message hits 400" case: a previous turn failed mid-loop, so
+// the assistant message kept its tool_use blocks but never got a
+// matching tool_result. Its RawAssistant was populated by the SSE
+// stream's [DONE] handler (so len(RawAssistant) > 0), but the field
+// holds the now-orphaned tool_use payload — not a thinking block — and
+// the assistant has no plain Content/Thinking to fall back on.
+//
+// Before the fix, the orphan-drop predicate gated on
+// `len(m.RawAssistant) == 0` and so refused to drop this message; the
+// later branches in toAnthropicMessages couldn't synthesize anything
+// for it and emitted `content: null`, triggering Anthropic's
+// "messages.N.content: Input should be a valid array".
+//
+// After the fix, RawAssistant is excluded from the predicate — orphan
+// + no text-shaped payload = drop.
+func TestToAnthropicMessagesOrphanAssistantRawOnly(t *testing.T) {
+	rawAsst := json.RawMessage(`{"role":"assistant","content":"","tool_calls":[{"id":"toolu_x","type":"function","function":{"name":"exec","arguments":"{}"}}]}`)
+	msgs := []Message{
+		{Role: "user", Content: "go"},
+		{
+			Role:         "assistant",
+			RawAssistant: rawAsst, // captured from a stream that never produced text
+			ToolCalls: []ToolCall{{
+				ID:       "toolu_x",
+				Type:     "function",
+				Function: FunctionCall{Name: "exec", Arguments: `{}`},
+			}},
+		},
+		// No tool reply, no follow-up assistant — orphan.
+		{Role: "user", Content: "好了吗"},
+	}
+
+	_, out := toAnthropicMessages(msgs)
+
+	// The orphan-only assistant must be dropped. Remaining wire
+	// messages: user "go", user "好了吗".
+	if len(out) != 2 {
+		t.Fatalf("expected 2 messages, got %d: %+v", len(out), out)
+	}
+	for _, am := range out {
+		if am.Role != "user" {
+			t.Errorf("unexpected role survived: %s (content=%s)", am.Role, string(am.Content))
+		}
+		// Anthropic rejects `null` content with the exact 400 we're
+		// trying to prevent; assert no message emits it.
+		if string(am.Content) == "null" || len(am.Content) == 0 {
+			t.Errorf("message has null/empty content (would 400): %+v", am)
+		}
+	}
+}
+
 func allText(out []anthropicMessage) string {
 	var sb strings.Builder
 	for _, am := range out {
