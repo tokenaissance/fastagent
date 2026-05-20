@@ -466,19 +466,20 @@ func (r *Registry) SetSandboxRoot(root string) {
 // on the host filesystem. This is the mode used for cloud deployments where
 // each user gets an isolated container/VM with their own runtime + files.
 //
-// Self-hosted installs additionally get a `host_exec` escape hatch so the
-// agent can help with operator-environment tasks (fastclaw upgrade,
-// ~/Downloads access, system tools) without losing the sandbox default
-// for everything else. Hosted (multi-tenant) deployments deliberately
-// skip this — chatters there don't own the daemon and host shell would
-// be a privilege-escalation surface.
+// Installs that explicitly opt in with FASTCLAW_ALLOW_HOST_EXEC=1
+// additionally get a `host_exec` escape hatch so the agent can help
+// with operator-environment tasks (fastclaw upgrade, ~/Downloads
+// access, system tools) without losing the sandbox default for
+// everything else. Default OFF — host_exec exposed to a chatter who
+// can prompt-inject is a privilege-escalation surface, so the gate
+// requires the operator to acknowledge the risk.
 func (r *Registry) SetExecutor(ex sandbox.Executor) {
 	r.executor = ex
 	// Re-register built-in tools to use the executor.
 	registerSandboxedFile(r, ex)
 	registerSandboxedApplyPatch(r, ex)
 	registerSandboxedExec(r, ex)
-	if !buildinfo.IsHostedDeploy() {
+	if buildinfo.IsHostExecAllowed() {
 		registerHostExec(r, r.envProvider, r.skillDirs)
 	}
 }
