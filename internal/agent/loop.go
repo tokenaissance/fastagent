@@ -1591,6 +1591,11 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	// wired) the executor used by exec/read_file/list_dir is tied to a
 	// session-private container.
 	a.bindSession(ctx, msg.Channel, msg.ChatID, msg.ProjectID)
+	// Flag whether this turn's chatter is the agent owner / channel
+	// admin. File tools use this to refuse identity-file reads from
+	// regular chatters (SOUL/IDENTITY/BOOTSTRAP/... leak as verbatim
+	// chat replies otherwise).
+	a.registry.SetCallerIsAdmin(a.isAdminChatter(msg))
 	// Plumb the persistent session_key for goal-scoped tools.
 	// SetSessionID above uses msg.ChatID (the channel-level chat
 	// identifier); goal tools need the durable session.Session.SessionKey
@@ -2217,6 +2222,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 	a.refreshSkillsFromStore(chatterUID)
 	sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID, msg.ProjectID)
 	a.bindSession(ctx, msg.Channel, msg.ChatID, msg.ProjectID)
+	a.registry.SetCallerIsAdmin(a.isAdminChatter(msg))
 	a.registry.SetGoalSessionKey(sess.SessionKey())
 
 	// Same orphan-tool_use safety net as HandleMessage. The streaming path
