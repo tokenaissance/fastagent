@@ -673,7 +673,17 @@ var agentScopeKeys = map[string]string{
 	"maxParallelToolCalls": "agents.defaults",
 	"thinking":             "agents.defaults",
 	"policy":               "agents.defaults",
-	"sandbox":              "sandbox",
+	// promptMode selects which framework sections BuildSystemPromptAs
+	// emits — see config.PromptMode* constants. Stored as a plain string
+	// under agents.defaults.promptMode.
+	"promptMode": "agents.defaults",
+	// toolAllowlist restricts which registered tools the LLM sees. Pass
+	// a JSON array: fastclaw agents config <name> set toolAllowlist '["message","image_gen"]'
+	// parseValue() unmarshals JSON so the array lands typed in the row.
+	// Empty (set toolAllowlist '[]') falls back to "all tools" in the
+	// runtime — see Registry.DefinitionsFiltered for that semantics.
+	"toolAllowlist": "agents.defaults",
+	"sandbox":       "sandbox",
 }
 
 var systemSettingNamespaces = []string{

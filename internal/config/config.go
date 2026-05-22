@@ -363,6 +363,12 @@ type AgentDefaults struct {
 	MaxParallelToolCalls int     `json:"maxParallelToolCalls,omitempty"`
 	Thinking             string  `json:"thinking,omitempty"`
 	PolicyPreset         string  `json:"policy,omitempty"`
+	// PromptMode + ToolAllowlist live here so the agent-scope
+	// `agents.defaults` config row (written by CLI and dashboard)
+	// round-trips into ResolvedAgent at userspace assembly time —
+	// see gateway/userspace.go where agentOverride is applied.
+	PromptMode    string   `json:"promptMode,omitempty"`
+	ToolAllowlist []string `json:"toolAllowlist,omitempty"`
 }
 
 // AgentEntry is the in-memory shape of one agent row, used during

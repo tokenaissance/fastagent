@@ -66,6 +66,81 @@ func (s *Server) saveAgentScopeModel(r *http.Request, agentID, model string) err
 	return scope.SaveSettingByScope(r.Context(), s.dataStore, scope.Agent, agentID, "agents.defaults", map[string]interface{}{"model": model})
 }
 
+// agentScopeDefaultsRead returns the current agent-scope agents.defaults
+// row data, or an empty map if the row doesn't exist yet. Callers use
+// this as the base for merge-aware patches (read-modify-write) so a
+// single PATCH that touches one field doesn't clobber the rest.
+func (s *Server) agentScopeDefaultsRead(r *http.Request, agentID string) map[string]interface{} {
+	rec, err := s.dataStore.GetConfigByName(r.Context(), store.KindSetting, "", agentID, "agents.defaults")
+	if err != nil || rec == nil || rec.Data == nil {
+		return map[string]interface{}{}
+	}
+	// Copy so callers mutating the result don't accidentally write
+	// back through the cached store object.
+	out := make(map[string]interface{}, len(rec.Data))
+	for k, v := range rec.Data {
+		out[k] = v
+	}
+	return out
+}
+
+// applyAgentScopeDefaultsPatch merges patch into the current
+// agents.defaults row and writes the result. Keys whose value is nil are
+// DELETED from the row (the caller's signal for "clear this override").
+// A row that ends up empty is removed entirely so MergedAgentConfig
+// falls all the way back to system/user defaults.
+func (s *Server) applyAgentScopeDefaultsPatch(r *http.Request, agentID string, patch map[string]interface{}) error {
+	if len(patch) == 0 {
+		return nil
+	}
+	data := s.agentScopeDefaultsRead(r, agentID)
+	for k, v := range patch {
+		if v == nil {
+			delete(data, k)
+			continue
+		}
+		data[k] = v
+	}
+	if len(data) == 0 {
+		return scope.SaveSettingByScope(r.Context(), s.dataStore, scope.Agent, agentID, "agents.defaults", nil)
+	}
+	return scope.SaveSettingByScope(r.Context(), s.dataStore, scope.Agent, agentID, "agents.defaults", data)
+}
+
+// agentScopePromptMode reads the per-agent promptMode override.
+func (s *Server) agentScopePromptMode(r *http.Request, agentID string) string {
+	rec, err := s.dataStore.GetConfigByName(r.Context(), store.KindSetting, "", agentID, "agents.defaults")
+	if err != nil || rec == nil {
+		return ""
+	}
+	if v, ok := rec.Data["promptMode"].(string); ok {
+		return v
+	}
+	return ""
+}
+
+// agentScopeToolAllowlist reads the per-agent tool allowlist override.
+// Returns nil when absent so the caller can distinguish "no override
+// configured" from "override is the empty list" (the latter would be a
+// weird thing to persist, but JSON allows it).
+func (s *Server) agentScopeToolAllowlist(r *http.Request, agentID string) []string {
+	rec, err := s.dataStore.GetConfigByName(r.Context(), store.KindSetting, "", agentID, "agents.defaults")
+	if err != nil || rec == nil {
+		return nil
+	}
+	raw, ok := rec.Data["toolAllowlist"].([]interface{})
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	for _, item := range raw {
+		if s, ok := item.(string); ok && s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 // effectiveUserID returns the resolved user_id for the request: the
 // caller's own id, or — for super_admin in actAs mode — the impersonated
 // user's id.
@@ -326,11 +401,20 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Name              string  `json:"name,omitempty"`
-		Description       *string `json:"description,omitempty"` // ptr so empty-string clears it
-		Model             *string `json:"model,omitempty"`       // ptr so empty-string clears the agent-scope override
-		IsPublic          *bool   `json:"isPublic,omitempty"`    // ptr so caller can leave it unchanged
-		ShareModelConfig  *bool   `json:"shareModelConfig,omitempty"`
+		Name              string    `json:"name,omitempty"`
+		Description       *string   `json:"description,omitempty"` // ptr so empty-string clears it
+		Model             *string   `json:"model,omitempty"`       // ptr so empty-string clears the agent-scope override
+		IsPublic          *bool     `json:"isPublic,omitempty"`    // ptr so caller can leave it unchanged
+		ShareModelConfig  *bool     `json:"shareModelConfig,omitempty"`
+		// PromptMode is a ptr so the caller can distinguish "leave
+		// unchanged" (omitted / null) from "clear override" (empty
+		// string). Allowed string values: "agent" | "chatbot" |
+		// "minimal" — empty falls back to system default ("agent").
+		PromptMode *string `json:"promptMode,omitempty"`
+		// ToolAllowlist same pointer dance — nil means "leave alone",
+		// [] means "clear override (= agent sees all tools again)",
+		// ["foo","bar"] sets the allowlist.
+		ToolAllowlist *[]string `json:"toolAllowlist,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
@@ -376,15 +460,56 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-	// Per-agent model override is its own configs row. nil = caller didn't
-	// touch it (e.g. a name-only patch); empty string = explicit "clear my
-	// override and fall back to user/system defaults" — the Models page's
-	// "Clear override" button relies on this. Non-empty saves the row.
+	// Per-agent defaults live in one configs row (kind=setting, scope=agent,
+	// namespace=agents.defaults). Collect every field the caller touched
+	// into a single merge-aware patch so e.g. updating promptMode doesn't
+	// clobber an existing model override and vice versa. nil pointer =
+	// caller didn't touch the field; ptr-to-empty = "clear this override".
+	defaultsPatch := map[string]interface{}{}
 	if req.Model != nil {
-		if err := s.saveAgentScopeModel(r, rec.ID, *req.Model); err != nil {
-			jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		m := strings.TrimSpace(*req.Model)
+		if m == "" {
+			defaultsPatch["model"] = nil
+		} else {
+			defaultsPatch["model"] = m
+		}
+	}
+	if req.PromptMode != nil {
+		pm := strings.TrimSpace(*req.PromptMode)
+		// Allow only the documented values plus empty (= clear).
+		// Anything else is a 400 — silently coercing to "agent" would
+		// mask typos from the dashboard or CLI.
+		switch pm {
+		case "":
+			defaultsPatch["promptMode"] = nil
+		case config.PromptModeAgent, config.PromptModeChatbot, config.PromptModeMinimal:
+			defaultsPatch["promptMode"] = pm
+		default:
+			jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "promptMode must be one of: agent, chatbot, minimal"})
 			return
 		}
+	}
+	if req.ToolAllowlist != nil {
+		// Empty slice → clear the override (agent sees all tools).
+		// Non-empty → store as-is. Empty strings inside the slice get
+		// dropped server-side so a sloppy frontend can't poison the
+		// allowlist with bare commas.
+		clean := make([]string, 0, len(*req.ToolAllowlist))
+		for _, name := range *req.ToolAllowlist {
+			name = strings.TrimSpace(name)
+			if name != "" {
+				clean = append(clean, name)
+			}
+		}
+		if len(clean) == 0 {
+			defaultsPatch["toolAllowlist"] = nil
+		} else {
+			defaultsPatch["toolAllowlist"] = clean
+		}
+	}
+	if err := s.applyAgentScopeDefaultsPatch(r, rec.ID, defaultsPatch); err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
 	}
 	// invalidateAgent (not invalidateUser) so super_admin / public-link
 	// viewers / apikey callers that lazy-attached this agent into their
@@ -398,6 +523,8 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 			"userId":           rec.UserID,
 			"name":             rec.Name,
 			"model":            s.agentScopeModel(r, rec.ID),
+			"promptMode":       s.agentScopePromptMode(r, rec.ID),
+			"toolAllowlist":    s.agentScopeToolAllowlist(r, rec.ID),
 			"config":           rec.Config,
 			"isPublic":         rec.IsPublic,
 			"shareModelConfig": share,
@@ -434,6 +561,8 @@ func (s *Server) handleGetAgent(w http.ResponseWriter, r *http.Request) {
 			"userId":           rec.UserID,
 			"role":             role,
 			"model":            s.agentScopeModel(r, rec.ID),
+			"promptMode":       s.agentScopePromptMode(r, rec.ID),
+			"toolAllowlist":    s.agentScopeToolAllowlist(r, rec.ID),
 			"avatarUrl":        "/api/agents/" + rec.ID + "/files/avatar.png",
 			"createdAt":        rec.CreatedAt,
 			"isPublic":         rec.IsPublic,

@@ -642,6 +642,15 @@ func loadUserSpace(ctx context.Context, userID string, mb *bus.MessageBus, st st
 			if agentOverride.PolicyPreset != "" {
 				rc.PolicyPreset = agentOverride.PolicyPreset
 			}
+			if agentOverride.PromptMode != "" {
+				rc.PromptMode = agentOverride.PromptMode
+			}
+			// Agent-scope ToolAllowlist replaces (not merges) — an
+			// operator who sets the list expects it to be authoritative,
+			// not appended to whatever AgentEntry.Tools carried in.
+			if len(agentOverride.ToolAllowlist) > 0 {
+				rc.ToolAllowlist = append([]string(nil), agentOverride.ToolAllowlist...)
+			}
 		}
 		// Same story for providers: assembleConfig was called with
 		// agentID="" so cfg.Providers (now in rc.Providers) only
