@@ -2596,6 +2596,22 @@ func (a *Agent) HomePath() string {
 	return a.homePath
 }
 
+// RegisteredTools returns the live tool registry projection — name +
+// description + source — for the dashboard's Tools tab. Reflects what
+// THIS agent currently has loaded: built-ins always, plus any MCP or
+// plugin tools attached at boot / hot-reload. Order is stable (builtins
+// first, then MCP, then plugin, sorted by name within each group).
+//
+// Used by GET /api/agents/{id}/tools/registered so the allowlist UI can
+// render a checkbox grid instead of forcing the operator to remember
+// tool names.
+func (a *Agent) RegisteredTools() []tools.ToolInfo {
+	if a.registry == nil {
+		return nil
+	}
+	return a.registry.RegisteredTools()
+}
+
 // WorkspacePath returns the agent's working directory for user-facing files.
 func (a *Agent) WorkspacePath() string {
 	return a.workspacePath

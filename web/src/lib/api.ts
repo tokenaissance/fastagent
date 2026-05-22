@@ -1164,6 +1164,32 @@ export async function getAgentStatus(
   return { status: res.status, agent: (data?.agent as AgentDetail) || null };
 }
 
+// AgentRegisteredTool is what /api/agents/{id}/tools/registered returns
+// per tool: name (the canonical identifier the allowlist uses),
+// description (one-liner for the picker UI), and source (where the tool
+// came from: builtin / mcp / plugin). Stable order is guaranteed by the
+// backend so dashboard renders are deterministic.
+export interface AgentRegisteredTool {
+  name: string;
+  description: string;
+  source: "builtin" | "mcp" | "plugin" | string;
+}
+
+// listAgentRegisteredTools fetches the live tool registry for an agent.
+// Drives the Tools tab's allowlist checkbox picker so operators can
+// click rather than type names from memory. Returns null on auth failure
+// or when the agent isn't loaded (the backend 404s in that case).
+export async function listAgentRegisteredTools(
+  id: string,
+): Promise<AgentRegisteredTool[] | null> {
+  const res = await apiFetch(
+    `/api/agents/${encodeURIComponent(id)}/tools/registered`,
+  );
+  if (!res.ok) return null;
+  const data = await res.json();
+  return (data?.tools as AgentRegisteredTool[]) || [];
+}
+
 export async function createAgent(agent: Partial<AgentDetail>) {
   const res = await apiFetch("/api/agents", {
     method: "POST",

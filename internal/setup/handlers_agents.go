@@ -16,6 +16,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/fastclaw-ai/fastclaw/internal/agent/tools"
 	"github.com/fastclaw-ai/fastclaw/internal/auth"
 	"github.com/fastclaw-ai/fastclaw/internal/buildinfo"
 	"github.com/fastclaw-ai/fastclaw/internal/config"
@@ -1354,3 +1355,33 @@ func (s *Server) requireOwnerOrSuperAdmin(w http.ResponseWriter, r *http.Request
 }
 
 var _ workspace.Store = (workspace.Store)(nil)
+
+// handleListAgentRegisteredTools returns the live tool registry for the
+// specified agent. Drives the Tools tab's allowlist checkbox picker —
+// the operator clicks rather than typing tool names from memory.
+//
+// Permission is read-level (owner / super_admin / shared-link viewer)
+// rather than owner-only because viewers might want to see what they
+// have access to, even if they can't change the allowlist. The PUT
+// path stays owner-gated.
+func (s *Server) handleListAgentRegisteredTools(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !s.requireAgentReadable(w, r, id) {
+		return
+	}
+	ag := s.resolveAgent(r, id)
+	if ag == nil {
+		// Agent isn't loaded in the caller's UserSpace and lazy-attach
+		// also failed. We could fall back to the DB record, but the
+		// whole point of this endpoint is the LIVE registry (MCP tools
+		// only exist once the agent is attached), so a 404 here is
+		// honest rather than misleadingly returning just the builtins.
+		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "agent not loaded"})
+		return
+	}
+	toolList := ag.RegisteredTools()
+	if toolList == nil {
+		toolList = []tools.ToolInfo{}
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{"tools": toolList})
+}

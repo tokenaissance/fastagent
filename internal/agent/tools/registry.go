@@ -510,6 +510,68 @@ func (r *Registry) Definitions() []provider.Tool {
 	return defs
 }
 
+// ToolInfo is the lightweight projection of a registered tool used by
+// introspection endpoints. Keeps the public API stable even if the
+// internal tool struct grows fields the dashboard doesn't care about.
+type ToolInfo struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	// Source distinguishes built-in tools from MCP / plugin contributions
+	// so the UI can hint where a tool came from. One of:
+	//   "builtin" — compiled into fastclaw
+	//   "mcp"     — exposed by a connected MCP server
+	//   "plugin"  — exposed by a JSON-RPC plugin subprocess
+	Source string `json:"source"`
+}
+
+func toolSourceName(s ToolSource) string {
+	switch s {
+	case SourceBuiltin:
+		return "builtin"
+	case SourceMCP:
+		return "mcp"
+	case SourcePlugin:
+		return "plugin"
+	default:
+		return "unknown"
+	}
+}
+
+// RegisteredTools returns name + description + source for every tool in
+// the registry, sorted by source then by name for stable UI rendering.
+// The sort matters because Go map iteration is random — without it the
+// dashboard checkbox list would reshuffle on every fetch, which is
+// disorienting.
+func (r *Registry) RegisteredTools() []ToolInfo {
+	out := make([]ToolInfo, 0, len(r.tools))
+	for name, t := range r.tools {
+		out = append(out, ToolInfo{
+			Name:        name,
+			Description: t.def.Function.Description,
+			Source:      toolSourceName(t.source),
+		})
+	}
+	// Sort: builtin first, then MCP, then plugin; within each group by
+	// name. Puts the commonly-toggled built-ins at the top of the
+	// dashboard list where the operator usually wants them.
+	sortRank := map[string]int{"builtin": 0, "mcp": 1, "plugin": 2}
+	// Simple insertion sort — tool lists are tiny (<50) so this is fine
+	// and avoids pulling sort.Slice + closure into the path.
+	for i := 1; i < len(out); i++ {
+		j := i
+		for j > 0 {
+			a, b := out[j-1], out[j]
+			ra, rb := sortRank[a.Source], sortRank[b.Source]
+			if ra < rb || (ra == rb && a.Name <= b.Name) {
+				break
+			}
+			out[j-1], out[j] = out[j], out[j-1]
+			j--
+		}
+	}
+	return out
+}
+
 // DefinitionsFiltered returns the subset of tool definitions whose name is
 // in allow. An empty / nil allow list returns ALL registered tools (no
 // filter), preserving legacy behavior for agents that don't configure a

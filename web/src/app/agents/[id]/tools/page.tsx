@@ -1,8 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
@@ -12,15 +11,21 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Check, MessageSquare, Wrench } from "lucide-react";
-import { getAgent, updateAgent } from "@/lib/api";
+import { Check, MessageSquare, Wrench, Info } from "lucide-react";
+import {
+  getAgent,
+  listAgentRegisteredTools,
+  updateAgent,
+  type AgentRegisteredTool,
+} from "@/lib/api";
 import { useAgentIdFromURL } from "@/hooks/use-agent-id";
 import { useAgentName } from "@/hooks/use-agent-name";
+import { cn } from "@/lib/utils";
 
-// Per-agent Tools page — what the LLM sees and how it thinks.
+// Per-agent Tools page.
 //
 //   Prompt Mode      — controls the FRAMEWORK section of the system prompt
-//                      (the fastclaw-authored boilerplate). Persona content
+//                      (fastclaw boilerplate). Persona content
 //                      (SOUL.md / IDENTITY.md / USER.md / MEMORY.md) is
 //                      always injected on top regardless of mode; edit it
 //                      in the Customize tab.
@@ -28,23 +33,39 @@ import { useAgentName } from "@/hooks/use-agent-name";
 //                      Empty list = no filter (sees every registered
 //                      tool, current default behavior).
 //
-// Both fields land on the agent-scope agents.defaults configs row, same
-// shape as model overrides. Server-side merge means saving one doesn't
-// clobber the other.
+// The allowlist UX is a clickable grid of pills sourced from the live
+// per-agent registry (/api/agents/{id}/tools/registered). Click toggles
+// in / out of the allowlist. We also surface a free-text "Additional"
+// field for tool names the live registry doesn't know about yet —
+// useful when an operator wants to pre-authorize an MCP-provided tool
+// that will appear after the next reload.
+
+const SOURCE_LABEL: Record<string, string> = {
+  builtin: "Built-in",
+  mcp: "MCP",
+  plugin: "Plugin",
+};
+
 export default function AgentToolsPage() {
   const agentId = useAgentIdFromURL();
   const agentName = useAgentName(agentId);
 
-  // "" means "no override saved" — runtime falls back to "agent". The
-  // select renders "" as the default choice (Agent — full framework
-  // prompt) so a fresh agent shows a sensible option without
-  // auto-creating a configs row on first render.
+  // "" means "no override saved" — runtime falls back to "agent".
   const [promptMode, setPromptMode] = useState<"" | "agent" | "chatbot" | "minimal">("");
-  // toolAllowlistText is the comma-separated form the user types into;
-  // we persist as []string on the server. Conversion happens at save
-  // time. Empty string = clear override (LLM sees all registered tools
-  // again).
-  const [toolAllowlistText, setToolAllowlistText] = useState("");
+  // Canonical allowlist as a set so toggling is O(1).
+  const [allowed, setAllowed] = useState<Set<string>>(new Set());
+  // Tools known to the live registry. null until first fetch
+  // resolves; empty array means the agent has 0 tools registered.
+  const [registered, setRegistered] = useState<AgentRegisteredTool[] | null>(null);
+  // registryUnavailable: backend returned 404 because the agent isn't
+  // attached in this UserSpace yet. Allowlist still works (we'll save
+  // the names operator typed) but the picker can't render.
+  const [registryUnavailable, setRegistryUnavailable] = useState(false);
+  // Names in the saved allowlist that are NOT in the live registry —
+  // shown in the "Additional" field so the operator can keep them
+  // without surprise data loss when MCP isn't connected yet.
+  const [extraText, setExtraText] = useState("");
+
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -53,15 +74,26 @@ export default function AgentToolsPage() {
     if (!agentId) return;
     setLoading(true);
     try {
-      const agentRec = await getAgent(agentId).catch(() => null);
+      const [agentRec, tools] = await Promise.all([
+        getAgent(agentId).catch(() => null),
+        listAgentRegisteredTools(agentId).catch(() => null),
+      ]);
       const pm = agentRec?.promptMode || "";
       if (pm === "agent" || pm === "chatbot" || pm === "minimal") {
         setPromptMode(pm);
       } else {
         setPromptMode("");
       }
-      const allow = agentRec?.toolAllowlist || [];
-      setToolAllowlistText(allow.join(", "));
+      const allow = new Set(agentRec?.toolAllowlist || []);
+      setAllowed(allow);
+      setRegistered(tools);
+      setRegistryUnavailable(tools === null);
+      // Compute extras: allowlist names that aren't in the live registry.
+      const registryNames = new Set((tools || []).map((t) => t.name));
+      const extras = (agentRec?.toolAllowlist || []).filter(
+        (n) => !registryNames.has(n),
+      );
+      setExtraText(extras.join(", "));
     } finally {
       setLoading(false);
     }
@@ -76,6 +108,51 @@ export default function AgentToolsPage() {
     setTimeout(() => setSaved(false), 2000);
   };
 
+  // Persist a merged allowlist built from the live registry checkboxes
+  // + the free-text "Additional" tools. Centralized so any change path
+  // (toggle / clear / extras blur) routes through one save.
+  const persistAllowlist = useCallback(
+    async (nextAllowed: Set<string>, nextExtras: string[]) => {
+      // Names in `nextAllowed` MAY include extras that are already there
+      // (when the user toggled an "additional" tool back on via checkbox
+      // — though we don't expose that UI). Use a final set to dedupe.
+      const merged = new Set<string>();
+      nextAllowed.forEach((n) => merged.add(n));
+      nextExtras.forEach((n) => merged.add(n));
+      const arr = Array.from(merged);
+      setSaving(true);
+      try {
+        await updateAgent(agentId, { toolAllowlist: arr });
+        flashSaved();
+      } finally {
+        setSaving(false);
+      }
+    },
+    [agentId],
+  );
+
+  const handleToggle = (name: string) => {
+    const next = new Set(allowed);
+    if (next.has(name)) {
+      next.delete(name);
+    } else {
+      next.add(name);
+    }
+    setAllowed(next);
+    const extras = extraText
+      .split(",")
+      .map((t) => t.trim())
+      .filter((t) => t.length > 0);
+    void persistAllowlist(next, extras);
+  };
+
+  const handleClearAll = () => {
+    setAllowed(new Set());
+    setExtraText("");
+    void persistAllowlist(new Set(), []);
+  };
+
+  // PromptMode change: optimistic update.
   const handlePromptModeChange = async (next: "" | "agent" | "chatbot" | "minimal") => {
     const prev = promptMode;
     setPromptMode(next);
@@ -90,44 +167,44 @@ export default function AgentToolsPage() {
     }
   };
 
-  // Tool allowlist saves on blur — the user types into a comma-
-  // separated input, we split & trim here, then send as string[].
-  // Empty result clears the override.
-  const handleToolAllowlistBlur = async () => {
-    const tools = toolAllowlistText
+  const handleExtrasBlur = () => {
+    const extras = extraText
       .split(",")
       .map((t) => t.trim())
       .filter((t) => t.length > 0);
-    setSaving(true);
-    try {
-      await updateAgent(agentId, { toolAllowlist: tools });
-      // Re-normalize displayed text so collapsed double commas /
-      // stripped whitespace are visible — the input never lies about
-      // what's stored.
-      setToolAllowlistText(tools.join(", "));
-      flashSaved();
-    } finally {
-      setSaving(false);
-    }
+    setExtraText(extras.join(", "));
+    void persistAllowlist(allowed, extras);
   };
 
-  const handleClearToolAllowlist = async () => {
-    setToolAllowlistText("");
-    setSaving(true);
-    try {
-      await updateAgent(agentId, { toolAllowlist: [] });
-      flashSaved();
-    } finally {
-      setSaving(false);
+  // Build display rows: live-registry tools first, then any "extras"
+  // (allowed names not in the registry). Stable order from backend.
+  const grouped = useMemo(() => {
+    if (!registered) return null;
+    const order: Record<string, AgentRegisteredTool[]> = {
+      builtin: [],
+      mcp: [],
+      plugin: [],
+      other: [],
+    };
+    for (const t of registered) {
+      const k = t.source in order ? t.source : "other";
+      order[k].push(t);
     }
-  };
+    return order;
+  }, [registered]);
+
+  const totalAllowed = allowed.size +
+    (extraText.trim() === ""
+      ? 0
+      : extraText.split(",").filter((s) => s.trim().length > 0).length);
+  const restricted = totalAllowed > 0;
 
   if (loading) {
     return (
       <div className="p-6 space-y-6 max-w-5xl mx-auto">
         <Skeleton className="h-10 w-48" />
         <Skeleton className="h-32 w-full" />
-        <Skeleton className="h-32 w-full" />
+        <Skeleton className="h-48 w-full" />
       </div>
     );
   }
@@ -217,46 +294,138 @@ export default function AgentToolsPage() {
           <div className="flex items-center gap-2">
             <Wrench className="h-4 w-4 text-primary" />
             <h3 className="font-medium">Tool allowlist</h3>
-            {toolAllowlistText.trim() === "" ? (
+            {!restricted ? (
               <Badge variant="outline" className="text-[10px]">
                 All tools
               </Badge>
             ) : (
               <Badge className="bg-primary/10 text-primary hover:bg-primary/10 text-[10px]">
-                Restricted
+                {totalAllowed} allowed
               </Badge>
             )}
           </div>
-          {toolAllowlistText.trim() !== "" && (
+          {restricted && (
             <Button
               variant="ghost"
               size="sm"
               className="h-7 text-xs"
-              onClick={handleClearToolAllowlist}
+              onClick={handleClearAll}
               disabled={saving}
             >
-              Clear override
+              Clear all
             </Button>
           )}
         </div>
-        <Input
-          value={toolAllowlistText}
-          onChange={(e) => setToolAllowlistText(e.target.value)}
-          onBlur={handleToolAllowlistBlur}
-          placeholder="e.g. message, image_gen, tts, memory_search"
-          className="font-mono text-sm max-w-2xl"
-          disabled={saving}
-        />
-        <p className="text-xs text-muted-foreground mt-2">
-          Comma-separated tool names. Empty = no filter (LLM sees every
-          registered tool, current default). Restrict to hide{" "}
-          <code className="text-[11px]">exec</code> /{" "}
-          <code className="text-[11px]">web_fetch</code> / etc. from
-          chatbot agents that should only call messaging tools. Names
-          that don&apos;t match a registered tool are silently dropped at
-          request time; if nothing in the list matches, the LLM sees no
-          tools (fail-closed).
+
+        <p className="text-xs text-muted-foreground mb-4">
+          Click a tool to toggle it. With nothing selected the LLM sees
+          <strong> every</strong> registered tool (legacy default). Once
+          you select at least one, the LLM sees <strong>only</strong> the
+          checked ones — common chatbot setup: <code className="text-[11px]">message</code>,{" "}
+          <code className="text-[11px]">image_gen</code>,{" "}
+          <code className="text-[11px]">tts</code>,{" "}
+          <code className="text-[11px]">memory_search</code>.
         </p>
+
+        {registryUnavailable && (
+          <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300 mb-4 flex items-start gap-2">
+            <Info className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+            <span>
+              Live tool registry unavailable — the agent isn&apos;t loaded
+              in your session yet. Open a chat with this agent once, then
+              come back here for the picker. The free-text field below
+              still works.
+            </span>
+          </div>
+        )}
+
+        {grouped && (
+          <div className="space-y-4">
+            {(["builtin", "mcp", "plugin", "other"] as const).map((src) => {
+              const items = grouped[src];
+              if (!items || items.length === 0) return null;
+              return (
+                <div key={src}>
+                  <div className="text-xs font-medium text-muted-foreground mb-2 uppercase tracking-wide">
+                    {SOURCE_LABEL[src] || "Other"}
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+                    {items.map((tool) => {
+                      const on = allowed.has(tool.name);
+                      return (
+                        <button
+                          key={tool.name}
+                          type="button"
+                          onClick={() => handleToggle(tool.name)}
+                          disabled={saving}
+                          className={cn(
+                            "text-left rounded-md border p-3 transition-colors",
+                            "hover:border-primary/40 focus:outline-none focus:ring-2 focus:ring-primary/30",
+                            on
+                              ? "border-primary/60 bg-primary/5"
+                              : "border-border bg-card",
+                          )}
+                        >
+                          <div className="flex items-center justify-between gap-2 mb-1">
+                            <code className="text-[12px] font-mono font-medium truncate">
+                              {tool.name}
+                            </code>
+                            <div
+                              className={cn(
+                                "h-4 w-4 rounded border flex items-center justify-center shrink-0",
+                                on
+                                  ? "border-primary bg-primary text-primary-foreground"
+                                  : "border-muted-foreground/30",
+                              )}
+                            >
+                              {on && <Check className="h-3 w-3" />}
+                            </div>
+                          </div>
+                          {tool.description && (
+                            <p className="text-[11px] text-muted-foreground line-clamp-2">
+                              {tool.description}
+                            </p>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })}
+            {Object.values(grouped).every((arr) => arr.length === 0) && (
+              <p className="text-sm text-muted-foreground italic">
+                No tools registered for this agent yet.
+              </p>
+            )}
+          </div>
+        )}
+
+        {/* Additional (free-text) — for pre-authorizing tool names that
+            aren't yet in the live registry (e.g. MCP tools that'll show
+            up after the next reload). */}
+        <div className="mt-6 pt-5 border-t border-border">
+          <div className="flex items-center gap-2 mb-2">
+            <h4 className="text-sm font-medium">Additional tool names</h4>
+            <Badge variant="outline" className="text-[10px]">
+              Advanced
+            </Badge>
+          </div>
+          <p className="text-xs text-muted-foreground mb-2">
+            Comma-separated names not in the live registry. Useful for
+            pre-authorizing MCP tools before the server is connected.
+            Names that never get registered are silently dropped at
+            request time.
+          </p>
+          <input
+            value={extraText}
+            onChange={(e) => setExtraText(e.target.value)}
+            onBlur={handleExtrasBlur}
+            placeholder="e.g. get_user_intimacy, unlock_feature"
+            className="font-mono text-sm w-full max-w-2xl rounded-md border border-input bg-background px-3 py-2 ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+            disabled={saving}
+          />
+        </div>
       </div>
     </div>
   );
