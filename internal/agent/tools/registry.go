@@ -510,6 +510,53 @@ func (r *Registry) Definitions() []provider.Tool {
 	return defs
 }
 
+// DefinitionsFiltered returns the subset of tool definitions whose name is
+// in allow. An empty / nil allow list returns ALL registered tools (no
+// filter), preserving legacy behavior for agents that don't configure a
+// whitelist. Names in allow that don't match a registered tool are
+// silently dropped — callers shouldn't crash because someone listed a
+// tool that hasn't loaded yet, especially across version skews where the
+// allowlist is stored separately from the running binary.
+//
+// Use this from the agent loop to restrict which tools an LLM sees on
+// each turn — keeps chatbot-style agents (companion, role-play) from
+// being tempted to call exec / web_fetch / read_file even though the
+// runtime registers them globally for other agents on the same instance.
+func (r *Registry) DefinitionsFiltered(allow []string) []provider.Tool {
+	if len(allow) == 0 {
+		return r.Definitions()
+	}
+	// Dedupe and drop empties so a sloppy allowlist (duplicates, blank
+	// entries) doesn't double-emit or shrink to nothing-via-blanks.
+	seen := make(map[string]struct{}, len(allow))
+	defs := make([]provider.Tool, 0, len(allow))
+	for _, name := range allow {
+		if name == "" {
+			continue
+		}
+		if _, dup := seen[name]; dup {
+			continue
+		}
+		seen[name] = struct{}{}
+		// Registry is keyed by tool name, so this is an O(1) lookup
+		// rather than scanning all registered tools per allow entry.
+		// Names that don't match a registered tool are silently
+		// dropped — across version skews the allowlist might
+		// reference tools the running binary hasn't loaded yet.
+		if t, ok := r.tools[name]; ok {
+			defs = append(defs, t.def)
+		}
+	}
+	// Allowlist with entries but zero matches → return empty (fail
+	// closed). This is the safer default for a security-conscious
+	// system: an operator typoing tool names ends up with an agent
+	// that can't call anything (loud, easy to debug) rather than one
+	// that silently exposes exec/web_fetch to a chatbot that should
+	// never see them. To get the "all tools" behavior, pass an empty
+	// allowlist explicitly.
+	return defs
+}
+
 // Execute runs a tool by name with the given arguments.
 func (r *Registry) Execute(ctx context.Context, name string, args string) (string, error) {
 	tool, ok := r.tools[name]

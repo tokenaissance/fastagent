@@ -44,6 +44,15 @@ type Agent struct {
 	maxToolIterations    int
 	maxParallelToolCalls int // 0 = unlimited
 	thinking             string
+	// promptMode is kept on Agent so ReloadWorkspaceFiles can re-apply it
+	// when it rebuilds ctxBuilder — without this, every skill install /
+	// dashboard reload silently drops the agent back to agent-mode prompt
+	// even after the operator explicitly chose chatbot/minimal.
+	promptMode string
+	// toolAllowlist limits which registered tools the LLM sees. Empty =
+	// no filter (legacy default). Lives on Agent so the registry-level
+	// filter persists across reload, same reasoning as promptMode.
+	toolAllowlist []string
 	homePath        string // agent's home: SOUL.md, sessions, memory, skills
 	workspacePath   string // working dir where agent creates user files
 	homeDir         string // FastClaw root, ~/.fastclaw
@@ -273,7 +282,7 @@ func NewAgentWithSkillsCfg(rc config.ResolvedAgent, prov provider.Provider, mb *
 		registry:             registry,
 		sessions:             session.NewManager(rc.Home + "/sessions"),
 		memory:               memory,
-		ctxBuilder:           newContextBuilderWithSandbox(rc.Home, workspace, memory, skillsSummary, rc.Thinking, rc.Sandbox.Enabled, rc.Sandbox.Backend),
+		ctxBuilder:           newContextBuilderWithSandbox(rc.Home, workspace, memory, skillsSummary, rc.Thinking, rc.Sandbox.Enabled, rc.Sandbox.Backend, rc.PromptMode),
 		hooks:                hooks,
 		model:                rc.Model,
 		maxTokens:            rc.MaxTokens,
@@ -281,6 +290,8 @@ func NewAgentWithSkillsCfg(rc config.ResolvedAgent, prov provider.Provider, mb *
 		maxToolIterations:    rc.MaxToolIterations,
 		maxParallelToolCalls: rc.MaxParallelToolCalls,
 		thinking:             rc.Thinking,
+		promptMode:           rc.PromptMode,
+		toolAllowlist:        append([]string(nil), rc.ToolAllowlist...),
 		homePath:        rc.Home,
 		workspacePath:   workspace,
 		homeDir:         homeDir,
@@ -329,11 +340,12 @@ func newContextBuilderWithThinking(home string, memory *Memory, skillsSummary st
 	return cb
 }
 
-func newContextBuilderWithSandbox(home, workspace string, memory *Memory, skillsSummary string, thinking string, sandboxEnabled bool, sandboxBackend string) *ContextBuilder {
+func newContextBuilderWithSandbox(home, workspace string, memory *Memory, skillsSummary string, thinking string, sandboxEnabled bool, sandboxBackend string, promptMode string) *ContextBuilder {
 	cb := newContextBuilderWithThinking(home, memory, skillsSummary, thinking)
 	cb.SetWorkspace(workspace)
 	cb.sandboxEnabled = sandboxEnabled
 	cb.sandboxBackend = sandboxBackend
+	cb.SetPromptMode(promptMode)
 	return cb
 }
 
@@ -1450,7 +1462,7 @@ func (a *Agent) handlePlanMode(ctx context.Context, msg bus.InboundMessage) stri
 	// as if delegate_task / web_search / camoufox-cli didn't exist —
 	// which defeated the whole point of having Plan mode set up fan-out
 	// work for the execution turn.
-	toolDefs := a.registry.Definitions()
+	toolDefs := a.registry.DefinitionsFiltered(a.toolAllowlist)
 	catalog := buildToolCatalogForPlan(toolDefs)
 	messages := []provider.Message{
 		{Role: "system", Content: systemPrompt},
@@ -1674,7 +1686,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	}
 	messages = append(messages, sessionMsgs...)
 
-	toolDefs := a.registry.Definitions()
+	toolDefs := a.registry.DefinitionsFiltered(a.toolAllowlist)
 
 	// Loop detection: track consecutive identical tool calls
 	type toolCallSig struct {
@@ -2270,7 +2282,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 	}
 	messages = append(messages, sessionMsgs...)
 
-	toolDefs := a.registry.Definitions()
+	toolDefs := a.registry.DefinitionsFiltered(a.toolAllowlist)
 
 	type toolCallSig struct {
 		name string
@@ -2605,6 +2617,13 @@ func (a *Agent) UpdateConfig(rc config.ResolvedAgent) {
 	// container.
 	a.ctxBuilder.sandboxEnabled = rc.Sandbox.Enabled
 	a.ctxBuilder.sandboxBackend = rc.Sandbox.Backend
+	// Propagate per-agent prompt mode + tool allowlist updates from
+	// dashboard saves. Without this, an operator switching an agent
+	// to chatbot mode in the UI would have to restart the binary for
+	// the change to take effect.
+	a.promptMode = rc.PromptMode
+	a.ctxBuilder.SetPromptMode(rc.PromptMode)
+	a.toolAllowlist = append([]string(nil), rc.ToolAllowlist...)
 }
 
 // chatterUserID picks the per-message chatter identity, falling back
@@ -2683,6 +2702,7 @@ func (a *Agent) ReloadWorkspaceFiles() {
 	skillsSummary := loader.BuildSkillsSummary(skills)
 	a.ctxBuilder = NewContextBuilder(a.homePath, a.memory, skillsSummary)
 	a.ctxBuilder.SetWorkspace(a.workspacePath)
+	a.ctxBuilder.SetPromptMode(a.promptMode)
 	// Preserve Store-backed identity reads across reload; without this,
 	// Postgres-mode pods silently fall back to pod-local filesystem.
 	// userID must also be re-pinned — the DB store requires a non-empty

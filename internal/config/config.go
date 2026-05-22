@@ -385,7 +385,33 @@ type AgentEntry struct {
 	Thinking          string                     `json:"thinking,omitempty"`
 	Sandbox           SandboxCfg                 `json:"sandbox,omitempty"`
 	PolicyPreset      string                     `json:"policy,omitempty"`
+	// PromptMode selects how heavily the framework system prompt
+	// participates in the assembled prompt. Empty = "agent" (current
+	// default) for backward compatibility. See PromptMode* constants.
+	PromptMode string `json:"promptMode,omitempty"`
 }
+
+// PromptMode controls which framework sections BuildSystemPromptAs emits.
+// Chatbot-style products (companion, customer support, role-play) cannot
+// inherit the agent-shaped instructions (task delegation, todo tracking,
+// tool-use discipline, sandbox rules) without their character bleeding
+// into a generic AI-assistant tone. PromptMode lets a deployment opt out
+// of those sections per agent.
+const (
+	// PromptModeAgent emits the full framework prompt (task delegation,
+	// todo.md, tool-use discipline, sandbox rules, workspace self-update,
+	// scheduling). Default when PromptMode is empty.
+	PromptModeAgent = "agent"
+	// PromptModeChatbot keeps the minimal identity scaffolding
+	// (file-purpose schema, confidentiality, date) and drops every
+	// agent-loop instruction so chatbot persona files (SOUL.md /
+	// IDENTITY.md / USER.md / MEMORY.md) shape behavior directly.
+	PromptModeChatbot = "chatbot"
+	// PromptModeMinimal emits ONLY the bootstrap files. The author is
+	// responsible for putting any framework guidance they need inside
+	// SOUL.md / IDENTITY.md themselves.
+	PromptModeMinimal = "minimal"
+)
 
 // ChannelConfig holds per-channel runtime configuration. Built by the
 // channels scope resolver from system/user/agent rows.
@@ -473,6 +499,15 @@ type AgentFileConfig struct {
 	ToolProviders     map[string]ToolProviderCfg `json:"toolProviders,omitempty"`
 	Tools             map[string]ToolCategoryCfg `json:"tools,omitempty"`
 	Providers         map[string]ProviderConfig  `json:"providers,omitempty"`
+	// PromptMode mirrors AgentEntry.PromptMode at the file-config layer.
+	// Non-empty values override the entry-level setting.
+	PromptMode string `json:"promptMode,omitempty"`
+	// ToolAllowlist restricts which tools the agent's LLM can see. Empty
+	// = no filter (all registered tools exposed, current behavior). When
+	// non-empty, only tools whose name is in the list are sent to the
+	// model. Useful for chatbot-style agents that should only call
+	// messaging tools, never exec/web_fetch/etc.
+	ToolAllowlist []string `json:"toolAllowlist,omitempty"`
 	// Admins gates write-mode slash commands (/new /reset /undo /retry /compact
 	// /model /personality) in IM channels. Keyed by channel name ("discord",
 	// "telegram", "slack", ...), each value is the platform-side user IDs
@@ -534,6 +569,13 @@ type ResolvedAgent struct {
 	// Admins is the per-channel admin allowlist for write-mode slash
 	// commands. See AgentFileConfig.Admins for semantics + default.
 	Admins map[string][]string
+	// PromptMode selects the system-prompt assembly profile. See
+	// AgentEntry.PromptMode for semantics. Empty = PromptModeAgent.
+	PromptMode string
+	// ToolAllowlist restricts which registered tools the LLM sees on
+	// each turn. Empty = no filter (all tools exposed). Populated from
+	// AgentEntry.Tools and/or AgentFileConfig.ToolAllowlist.
+	ToolAllowlist []string
 }
 
 type TeamEntry struct {
@@ -659,6 +701,12 @@ func (cfg *Config) MergedAgentConfig(entry AgentEntry) ResolvedAgent {
 	if entry.PolicyPreset != "" {
 		resolved.PolicyPreset = entry.PolicyPreset
 	}
+	if entry.PromptMode != "" {
+		resolved.PromptMode = entry.PromptMode
+	}
+	if len(entry.Tools) > 0 {
+		resolved.ToolAllowlist = append([]string(nil), entry.Tools...)
+	}
 
 	if len(cfg.MCPServers) > 0 {
 		resolved.MCPServers = make(map[string]MCPServerConfig, len(cfg.MCPServers))
@@ -733,6 +781,12 @@ func (cfg *Config) MergedAgentConfig(entry AgentEntry) ResolvedAgent {
 				resolved.Tools = make(map[string]ToolCategoryCfg)
 			}
 			resolved.Tools[k] = v
+		}
+		if fileCfg.PromptMode != "" {
+			resolved.PromptMode = fileCfg.PromptMode
+		}
+		if len(fileCfg.ToolAllowlist) > 0 {
+			resolved.ToolAllowlist = append([]string(nil), fileCfg.ToolAllowlist...)
 		}
 	}
 
