@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
@@ -10,59 +10,27 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Check, MessageSquare, Wrench, Info, Puzzle } from "lucide-react";
-import {
-  getAgent,
-  listAgentRegisteredTools,
-  updateAgent,
-  type AgentRegisteredTool,
-} from "@/lib/api";
+import { Check, MessageSquare, Puzzle } from "lucide-react";
+import { getAgent, updateAgent } from "@/lib/api";
 import { useAgentIdFromURL } from "@/hooks/use-agent-id";
 import { useAgentName } from "@/hooks/use-agent-name";
 
-// Per-agent Tools page — read-only after the architectural pivot.
+// Per-agent Tools page — one knob (mode), one extension point (plugins).
 //
 // Prompt Mode picks the framework prompt profile AND the built-in tool
-// surface in one go. There's no per-agent allowlist anymore — custom
-// tools come from Plugins (or MCP servers, eventually). This matches
-// the model fastclaw is converging on: mode is the only knob, plugins
-// are the extension point. Less to configure, less to misconfigure.
-//
-//   Agent     — full framework prompt + ALL built-in tools
-//   Chatbot   — slim framework + IM essentials (message / image_gen /
-//               tts / memory_search) — for companion / role-play /
-//               customer-support bots
-//   Customize — bootstrap files only, NO built-ins; the author writes
-//               the system prompt themselves via SOUL.md / IDENTITY.md
-//
-// Plugin + MCP tools are always exposed regardless of mode — install a
-// plugin to add custom tools (see /plugins/<plugin-id>/plugin.json).
+// surface. There's no per-agent allowlist anymore. There's also no
+// "active tools" preview — listing them adds visual weight without
+// enabling any action. What each mode includes is documented inline
+// next to the dropdown; for the full list at runtime, look at the
+// agent's chat session (tool calls in the transcript) or the
+// /api/agents/{id}/tools/registered endpoint.
 
 type PromptModeValue = "" | "agent" | "chatbot" | "customize";
-
-// chatbotBuiltinAllowlist mirrors the same constant in
-// internal/agent/loop.go — when chatbot mode is active, only these
-// built-in tools are exposed to the LLM. Surfaced client-side so the
-// "Active tools" panel can preview the effective set without making the
-// backend recompute (the live registry endpoint returns the FULL set;
-// the filter is mode-driven, applied here).
-const CHATBOT_BUILTIN_ALLOWLIST = new Set([
-  "message",
-  "image_gen",
-  "tts",
-  "memory_search",
-]);
 
 const MODE_LABEL: Record<string, string> = {
   agent: "Agent",
   chatbot: "Chatbot",
   customize: "Customize",
-};
-
-const SOURCE_LABEL: Record<string, string> = {
-  builtin: "Built-in",
-  mcp: "MCP",
-  plugin: "Plugin",
 };
 
 export default function AgentToolsPage() {
@@ -71,14 +39,6 @@ export default function AgentToolsPage() {
 
   // "" = no override saved; runtime falls back to "agent".
   const [promptMode, setPromptMode] = useState<PromptModeValue>("");
-  // Full live registry from the agent. null until first fetch resolves;
-  // empty array = the agent has 0 tools loaded.
-  const [registered, setRegistered] = useState<AgentRegisteredTool[] | null>(null);
-  // registryUnavailable: backend returned 404 because the agent isn't
-  // attached in this UserSpace yet. We still show the mode selector;
-  // the active-tools list just renders a helpful blank state.
-  const [registryUnavailable, setRegistryUnavailable] = useState(false);
-
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -87,18 +47,13 @@ export default function AgentToolsPage() {
     if (!agentId) return;
     setLoading(true);
     try {
-      const [agentRec, tools] = await Promise.all([
-        getAgent(agentId).catch(() => null),
-        listAgentRegisteredTools(agentId).catch(() => null),
-      ]);
+      const agentRec = await getAgent(agentId).catch(() => null);
       const pm = agentRec?.promptMode || "";
       if (pm === "agent" || pm === "chatbot" || pm === "customize") {
         setPromptMode(pm);
       } else {
         setPromptMode("");
       }
-      setRegistered(tools);
-      setRegistryUnavailable(tools === null);
     } finally {
       setLoading(false);
     }
@@ -127,51 +82,10 @@ export default function AgentToolsPage() {
     }
   };
 
-  // Effective mode: empty defaults to "agent" both runtime-side and in
-  // the UI display so the active-tools preview matches what the LLM
-  // would actually see right now.
-  const effectiveMode: "agent" | "chatbot" | "customize" =
-    promptMode === "" ? "agent" : promptMode;
-
-  // Filter the live registry by the same rules the runtime applies:
-  // - mode=agent     → all built-ins
-  // - mode=chatbot   → only CHATBOT_BUILTIN_ALLOWLIST built-ins
-  // - mode=customize → no built-ins
-  // - any mode       → plugin + MCP always pass through
-  const active = useMemo(() => {
-    if (!registered) return null;
-    const groups: Record<string, AgentRegisteredTool[]> = {
-      builtin: [],
-      mcp: [],
-      plugin: [],
-      other: [],
-    };
-    for (const t of registered) {
-      if (t.source === "builtin") {
-        if (effectiveMode === "agent") {
-          groups.builtin.push(t);
-        } else if (effectiveMode === "chatbot" && CHATBOT_BUILTIN_ALLOWLIST.has(t.name)) {
-          groups.builtin.push(t);
-        }
-        // customize: drop all built-ins
-      } else {
-        const k = t.source in groups ? t.source : "other";
-        groups[k].push(t);
-      }
-    }
-    return groups;
-  }, [registered, effectiveMode]);
-
-  const activeCount =
-    active === null
-      ? 0
-      : active.builtin.length + active.mcp.length + active.plugin.length + active.other.length;
-
   if (loading) {
     return (
       <div className="p-6 space-y-6 max-w-5xl mx-auto">
         <Skeleton className="h-10 w-48" />
-        <Skeleton className="h-32 w-full" />
         <Skeleton className="h-48 w-full" />
       </div>
     );
@@ -186,8 +100,8 @@ export default function AgentToolsPage() {
             What the LLM sees for{" "}
             <strong>{agentName || "this agent"}</strong>. The prompt mode
             picks both the framework prompt profile and the built-in tool
-            set. Custom tools come from plugins — they&apos;re always
-            exposed regardless of mode.
+            set. Custom tools come from plugins — always exposed
+            regardless of mode.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -228,11 +142,7 @@ export default function AgentToolsPage() {
           <SelectTrigger className="text-sm max-w-[240px]">
             {/* Explicit children override SelectValue's auto-extraction
                 from the active SelectItem — shadcn sometimes falls back
-                to rendering the raw `value` string (lowercase "agent" /
-                "chatbot" / "customize") instead of the SelectItem's
-                child text. Rendering MODE_LABEL[...] directly here is
-                belt + suspenders: the value source of truth is still
-                `promptMode`, but the trigger display is decoupled. */}
+                to rendering the raw `value` string. */}
             <SelectValue>{MODE_LABEL[promptMode || "agent"]}</SelectValue>
           </SelectTrigger>
           <SelectContent>
@@ -249,7 +159,8 @@ export default function AgentToolsPage() {
           </div>
           <div>
             <strong>Chatbot</strong> — slim framework so persona files shape
-            voice directly + only IM-essential built-ins (<code className="text-[10px]">message</code>,{" "}
+            voice directly + only IM-essential built-ins (
+            <code className="text-[10px]">message</code>,{" "}
             <code className="text-[10px]">image_gen</code>,{" "}
             <code className="text-[10px]">tts</code>,{" "}
             <code className="text-[10px]">memory_search</code>). For
@@ -262,79 +173,15 @@ export default function AgentToolsPage() {
             via plugins.
           </div>
         </div>
-      </div>
-
-      {/* Active Tools */}
-      <div className="rounded-lg border border-border bg-card p-5">
-        <div className="flex items-center justify-between gap-2 mb-3">
-          <div className="flex items-center gap-2">
-            <Wrench className="h-4 w-4 text-primary" />
-            <h3 className="font-medium">Active tools</h3>
-            <Badge variant="outline" className="text-[10px]">
-              {activeCount} in {MODE_LABEL[effectiveMode]} mode
-            </Badge>
-          </div>
-        </div>
-
-        {registryUnavailable && (
-          <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300 mb-4 flex items-start gap-2">
-            <Info className="h-3.5 w-3.5 mt-0.5 shrink-0" />
-            <span>
-              Live tool registry unavailable — the agent isn&apos;t loaded
-              in your session yet. Open a chat with this agent once, then
-              come back to see what tools are active.
-            </span>
-          </div>
-        )}
-
-        {active && activeCount === 0 && !registryUnavailable && (
-          <p className="text-sm text-muted-foreground italic">
-            {effectiveMode === "customize"
-              ? "No tools active. Customize mode strips all built-ins; install a plugin to add tools."
-              : "No tools registered for this agent yet."}
-          </p>
-        )}
-
-        {active && (
-          <div className="space-y-4">
-            {(["builtin", "mcp", "plugin", "other"] as const).map((src) => {
-              const items = active[src];
-              if (!items || items.length === 0) return null;
-              return (
-                <div key={src}>
-                  <div className="text-xs font-medium text-muted-foreground mb-2 uppercase tracking-wide">
-                    {SOURCE_LABEL[src] || "Other"} ({items.length})
-                  </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
-                    {items.map((tool) => (
-                      <div
-                        key={tool.name}
-                        className="rounded-md border border-border bg-background p-3"
-                      >
-                        <code className="text-[12px] font-mono font-medium block mb-1 truncate">
-                          {tool.name}
-                        </code>
-                        {tool.description && (
-                          <p className="text-[11px] text-muted-foreground line-clamp-2">
-                            {tool.description}
-                          </p>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        )}
-
-        <div className="mt-5 pt-4 border-t border-border flex items-start gap-2 text-xs text-muted-foreground">
+        <div className="mt-4 pt-3 border-t border-border flex items-start gap-2 text-xs text-muted-foreground">
           <Puzzle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
           <span>
-            Need a tool that&apos;s not here? Build a plugin —
-            see <code className="text-[11px]">~/.fastclaw/plugins/fastclaw-plugin-demo</code> for
-            a minimal example, or write an MCP server. Plugin / MCP tools
-            are always exposed regardless of mode.
+            Plugin and MCP tools are always exposed regardless of mode.
+            Build a plugin — see{" "}
+            <code className="text-[11px]">
+              ~/.fastclaw/plugins/fastclaw-plugin-demo
+            </code>{" "}
+            for a minimal example.
           </span>
         </div>
       </div>
