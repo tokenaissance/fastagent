@@ -336,7 +336,13 @@ func (w *WeChat) SendMessage(msg bus.OutboundMessage) error {
 	// leave a bare `|cell|cell|` blob that's strictly worse.
 	plain := wechatStripMarkdown(FlattenMarkdownTables(msg.Text))
 	chunks := []string{plain}
-	if w.splitReplies {
+	// AllowSplit is stamped on the OutboundMessage by the originating
+	// agent (or the gateway's task-callback for the main reply path).
+	// Per-agent setting: operators flip it per agent rather than once
+	// system-wide. w.splitReplies stays as a fallback for code paths
+	// that don't go through the agent (legacy or direct tests).
+	allowSplit := msg.AllowSplit || w.splitReplies
+	if allowSplit {
 		chunks = SplitOutboundText(plain)
 	} else if strings.Contains(plain, SplitMessageMarker) {
 		// Split disabled but the LLM emitted the marker anyway (stale

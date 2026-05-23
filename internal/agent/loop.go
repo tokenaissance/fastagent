@@ -177,7 +177,14 @@ func NewAgentWithFullCfg(rc config.ResolvedAgent, prov provider.Provider, mb *bu
 	ag := NewAgentWithSkillsCfg(rc, prov, mb, homeDir, fullCfg.Skills)
 	ag.memoryCfg = fullCfg.Memory
 	ag.piiScrubEnabled = fullCfg.Privacy.PIIScrubbing.Enabled
+	// Effective WeChat split-replies: per-agent override (when set) wins
+	// over the system default. Without the override the system value
+	// applies — preserves the existing system-level toggle so operators
+	// who set it at /settings/runtime keep their behavior across agents.
 	ag.wechatSplitReplies = fullCfg.WeChat.SplitReplies
+	if rc.WeChatSplitReplies != nil {
+		ag.wechatSplitReplies = *rc.WeChatSplitReplies
+	}
 
 	// Set up FTS store if configured
 	if fullCfg.Memory.FTS.Enabled {
@@ -234,7 +241,10 @@ func NewAgentWithSkillsCfg(rc config.ResolvedAgent, prov provider.Provider, mb *
 
 	memory := NewMemory(rc.Home)
 	registry := tools.NewRegistry(rc.Home, workspace)
-	tools.RegisterMessage(registry, mb)
+	// message tool is re-registered AFTER the Agent struct is built (see
+	// below) so its outbound-side closure can read agent.wechatSplitReplies
+	// at send time. The registerBuiltins pass inside NewRegistry already
+	// stamped a placeholder; tools.RegisterMessage replaces it.
 	tools.RegisterMemorySearch(registry, rc.Home)
 	tools.RegisterWebFetch(registry)
 
@@ -299,6 +309,12 @@ func NewAgentWithSkillsCfg(rc config.ResolvedAgent, prov provider.Provider, mb *
 		engine:          eng,
 		costTracker:     eng.costTracker,
 	}
+
+	// message tool — registered HERE (post-Agent) so the closure can read
+	// ag.wechatSplitReplies at every send. Per-agent setting can flip at
+	// runtime (UpdateConfig); the getter pulls the current value each
+	// time rather than capturing a stale snapshot.
+	tools.RegisterMessage(registry, mb, func() bool { return ag.wechatSplitReplies })
 
 	// delegate_task lets the parent agent fan a bounded subtask out to a
 	// fresh sub-agent context (own iteration budget, isolated messages).
@@ -2593,6 +2609,15 @@ func (a *Agent) HomePath() string {
 	return a.homePath
 }
 
+// WeChatSplitReplies returns the effective per-agent split-reply setting
+// — used by the gateway when constructing OutboundMessage so the WeChat
+// adapter knows whether to honor SplitMessageMarker. Populated at
+// agent boot from the merged config (per-agent override else system
+// WeChatCfg.SplitReplies); refreshed on UpdateConfig.
+func (a *Agent) WeChatSplitReplies() bool {
+	return a.wechatSplitReplies
+}
+
 // RegisteredTools returns the live tool registry projection — name +
 // description + source — for the dashboard's Tools tab. Reflects what
 // THIS agent currently has loaded: built-ins always, plus any MCP or
@@ -2674,6 +2699,12 @@ func (a *Agent) UpdateConfig(rc config.ResolvedAgent) {
 	// hook is needed for the tool surface.
 	a.promptMode = rc.PromptMode
 	a.ctxBuilder.SetPromptMode(rc.PromptMode)
+	// Per-agent WeChat split-replies. Nil override = keep whatever the
+	// system layer initialized at boot (don't reset to false). Non-nil
+	// = authoritative for this agent.
+	if rc.WeChatSplitReplies != nil {
+		a.wechatSplitReplies = *rc.WeChatSplitReplies
+	}
 }
 
 // chatterUserID picks the per-message chatter identity, falling back
@@ -2795,6 +2826,7 @@ func (a *Agent) sendMediaFiles(msg bus.InboundMessage, mediaPaths []string) {
 		AccountID:  msg.AccountID,
 		ChatID:     msg.ChatID,
 		MediaPaths: mediaPaths,
+		AllowSplit: a.wechatSplitReplies,
 	}
 	select {
 	case a.messageBus.Outbound <- outMsg:

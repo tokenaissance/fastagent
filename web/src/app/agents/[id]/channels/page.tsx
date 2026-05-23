@@ -37,6 +37,14 @@ import {
   QrCode,
 } from "lucide-react";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Badge } from "@/components/ui/badge";
+import {
   listAgentChannels,
   connectAgentTelegram,
   connectAgentDiscord,
@@ -46,6 +54,8 @@ import {
   startAgentWeChatLogin,
   pollAgentWeChatLoginStatus,
   disconnectAgentChannel,
+  getAgent,
+  updateAgent,
   type AgentChannel,
 } from "@/lib/api";
 import { useAgentIdFromURL } from "@/hooks/use-agent-id";
@@ -113,6 +123,14 @@ export default function AgentChannelsPage() {
   const [feishuOpen, setFeishuOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<AgentChannel | null>(null);
 
+  // WeChat multi-bubble per-agent override.
+  //   null     → inherit system setting
+  //   true     → force on for this agent
+  //   false    → force off for this agent
+  // Saved + flashed via the same updateAgent endpoint the Tools tab uses.
+  const [wechatSplit, setWechatSplit] = useState<boolean | null>(null);
+  const [wechatSplitSaving, setWechatSplitSaving] = useState(false);
+
   const refresh = useCallback(() => {
     if (!agentId) return;
     setLoading(true);
@@ -125,6 +143,47 @@ export default function AgentChannelsPage() {
   useEffect(() => {
     refresh();
   }, [refresh]);
+
+  // Load wechatSplitReplies once on mount. Independent from channels
+  // refresh — the setting persists even when WeChat isn't connected
+  // (operator may want to pre-configure before scanning the QR).
+  useEffect(() => {
+    if (!agentId) return;
+    let cancelled = false;
+    getAgent(agentId)
+      .then((rec) => {
+        if (cancelled) return;
+        const v = rec?.wechatSplitReplies;
+        // Tri-state: null/undefined → inherit, true/false → explicit
+        setWechatSplit(v === true || v === false ? v : null);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [agentId]);
+
+  // Tri-state select handler. "inherit" sends the reset flag so the
+  // backend deletes the agents.defaults row's wechatSplitReplies key;
+  // "on" / "off" send explicit booleans. We optimistically update local
+  // state and revert on failure.
+  const handleWechatSplitChange = async (next: "inherit" | "on" | "off") => {
+    const prev = wechatSplit;
+    const nextValue: boolean | null = next === "inherit" ? null : next === "on";
+    setWechatSplit(nextValue);
+    setWechatSplitSaving(true);
+    try {
+      if (next === "inherit") {
+        await updateAgent(agentId, { wechatSplitRepliesReset: true });
+      } else {
+        await updateAgent(agentId, { wechatSplitReplies: next === "on" });
+      }
+    } catch {
+      setWechatSplit(prev);
+    } finally {
+      setWechatSplitSaving(false);
+    }
+  };
 
   // First binding per channel type — the UI is currently single-bot,
   // even though the backend allows multiple. If multiple exist (legacy
@@ -204,6 +263,57 @@ export default function AgentChannelsPage() {
           })}
         </div>
       )}
+
+      {/* WeChat behavior — per-agent override of system-wide multi-bubble
+          setting. Renders regardless of WeChat connection state since
+          operators may want to pre-configure before scanning the QR. */}
+      <div className="rounded-lg border border-border bg-card p-5">
+        <div className="flex items-start justify-between gap-4 mb-3">
+          <div className="flex items-start gap-3 min-w-0">
+            <MessageSquare className="h-4 w-4 text-primary mt-0.5 shrink-0" />
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <h3 className="font-medium">WeChat multi-bubble replies</h3>
+                {wechatSplit === null ? (
+                  <Badge variant="outline" className="text-[10px]">
+                    Inheriting
+                  </Badge>
+                ) : (
+                  <Badge className="bg-primary/10 text-primary hover:bg-primary/10 text-[10px]">
+                    {wechatSplit ? "On" : "Off"}
+                  </Badge>
+                )}
+              </div>
+              <p className="text-sm text-muted-foreground mt-1">
+                Let this agent split one reply into multiple WeChat
+                bubbles using a separator marker. Default inherits the
+                system-wide toggle in Settings → Runtime; per-agent
+                override wins when set.
+              </p>
+            </div>
+          </div>
+          <Select
+            value={wechatSplit === null ? "inherit" : wechatSplit ? "on" : "off"}
+            onValueChange={(v: string | null) => {
+              if (v === "inherit" || v === "on" || v === "off") {
+                handleWechatSplitChange(v);
+              }
+            }}
+            disabled={wechatSplitSaving}
+          >
+            <SelectTrigger className="text-sm w-[140px]">
+              <SelectValue>
+                {wechatSplit === null ? "Inherit" : wechatSplit ? "On" : "Off"}
+              </SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="inherit">Inherit</SelectItem>
+              <SelectItem value="on">On</SelectItem>
+              <SelectItem value="off">Off</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
 
       <ConnectTelegramDialog
         open={telegramOpen}

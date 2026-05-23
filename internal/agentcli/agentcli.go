@@ -680,7 +680,12 @@ var agentScopeKeys = map[string]string{
 	// hardcoded in builtinAllowForMode (internal/agent/loop.go) —
 	// custom tools come from Plugin / MCP, not a per-agent allowlist.
 	"promptMode": "agents.defaults",
-	"sandbox":    "sandbox",
+	// wechatSplitReplies — per-agent override of the system-wide
+	// WeChat multi-bubble setting. Pass true/false to set; unset the
+	// key entirely (CLI lacks a "delete" verb today, so use the
+	// dashboard's Inherit toggle for that) to fall back to system.
+	"wechatSplitReplies": "agents.defaults",
+	"sandbox":            "sandbox",
 }
 
 var systemSettingNamespaces = []string{

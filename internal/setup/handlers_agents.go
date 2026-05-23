@@ -108,6 +108,22 @@ func (s *Server) applyAgentScopeDefaultsPatch(r *http.Request, agentID string, p
 	return scope.SaveSettingByScope(r.Context(), s.dataStore, scope.Agent, agentID, "agents.defaults", data)
 }
 
+// agentScopeWeChatSplitReplies reads the per-agent override of the
+// WeChat split-replies setting. Returns nil when absent so callers can
+// distinguish "inherit system" from "explicitly false". The dashboard
+// renders nil as the "Inherit" pill.
+func (s *Server) agentScopeWeChatSplitReplies(r *http.Request, agentID string) *bool {
+	rec, err := s.dataStore.GetConfigByName(r.Context(), store.KindSetting, "", agentID, "agents.defaults")
+	if err != nil || rec == nil {
+		return nil
+	}
+	v, ok := rec.Data["wechatSplitReplies"].(bool)
+	if !ok {
+		return nil
+	}
+	return &v
+}
+
 // agentScopePromptMode reads the per-agent promptMode override.
 func (s *Server) agentScopePromptMode(r *http.Request, agentID string) string {
 	rec, err := s.dataStore.GetConfigByName(r.Context(), store.KindSetting, "", agentID, "agents.defaults")
@@ -392,6 +408,13 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 		// PromptMode also drives the built-in tool surface; there is
 		// no separate allowlist field by design (extend via plugins).
 		PromptMode *string `json:"promptMode,omitempty"`
+		// WeChatSplitReplies per-agent override: nil = leave unchanged,
+		// non-nil pointer-to-bool = set explicit value (true/false).
+		// Distinct from "clear" which is a separate signal — the
+		// dashboard sends `wechatSplitRepliesReset: true` to delete
+		// the override and fall back to system default.
+		WeChatSplitReplies      *bool `json:"wechatSplitReplies,omitempty"`
+		WeChatSplitRepliesReset bool  `json:"wechatSplitRepliesReset,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
@@ -466,6 +489,13 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if req.WeChatSplitRepliesReset {
+		// Reset wins over set in the same request — the dashboard's
+		// "Inherit" pill writes this flag.
+		defaultsPatch["wechatSplitReplies"] = nil
+	} else if req.WeChatSplitReplies != nil {
+		defaultsPatch["wechatSplitReplies"] = *req.WeChatSplitReplies
+	}
 	if err := s.applyAgentScopeDefaultsPatch(r, rec.ID, defaultsPatch); err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
@@ -482,7 +512,8 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 			"userId":           rec.UserID,
 			"name":             rec.Name,
 			"model":            s.agentScopeModel(r, rec.ID),
-			"promptMode":       s.agentScopePromptMode(r, rec.ID),
+			"promptMode":         s.agentScopePromptMode(r, rec.ID),
+			"wechatSplitReplies": s.agentScopeWeChatSplitReplies(r, rec.ID),
 			"config":           rec.Config,
 			"isPublic":         rec.IsPublic,
 			"shareModelConfig": share,
@@ -519,7 +550,8 @@ func (s *Server) handleGetAgent(w http.ResponseWriter, r *http.Request) {
 			"userId":           rec.UserID,
 			"role":             role,
 			"model":            s.agentScopeModel(r, rec.ID),
-			"promptMode":       s.agentScopePromptMode(r, rec.ID),
+			"promptMode":         s.agentScopePromptMode(r, rec.ID),
+			"wechatSplitReplies": s.agentScopeWeChatSplitReplies(r, rec.ID),
 			"avatarUrl":        "/api/agents/" + rec.ID + "/files/avatar.png",
 			"createdAt":        rec.CreatedAt,
 			"isPublic":         rec.IsPublic,

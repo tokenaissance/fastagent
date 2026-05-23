@@ -368,6 +368,10 @@ type AgentDefaults struct {
 	// ResolvedAgent at userspace assembly time — see
 	// gateway/userspace.go where agentOverride is applied.
 	PromptMode string `json:"promptMode,omitempty"`
+	// WeChatSplitReplies — per-agent override of WeChatCfg.SplitReplies.
+	// Nil at this layer means the agent-scope row has no opinion; the
+	// effective value falls back to system-level WeChatCfg.SplitReplies.
+	WeChatSplitReplies *bool `json:"wechatSplitReplies,omitempty"`
 }
 
 // AgentEntry is the in-memory shape of one agent row, used during
@@ -396,6 +400,15 @@ type AgentEntry struct {
 	// hardcoded in builtinAllowForMode (internal/agent/loop.go) —
 	// extension via Plugin / MCP, not per-agent allowlists, by design.
 	PromptMode string `json:"promptMode,omitempty"`
+	// WeChatSplitReplies overrides the system-wide WeChatCfg.SplitReplies
+	// setting for THIS agent. Nil = inherit system default; non-nil =
+	// authoritative for this agent. Pointer (not bool) because we need
+	// to distinguish "operator hasn't touched it" from "operator
+	// explicitly turned it off". The agent uses the effective value to
+	// (1) decide whether to advertise the SplitMessageMarker in the
+	// system-prompt hint, and (2) stamp OutboundMessage.AllowSplit so
+	// the WeChat adapter knows whether to honor the marker.
+	WeChatSplitReplies *bool `json:"wechatSplitReplies,omitempty"`
 }
 
 // PromptMode controls which framework sections BuildSystemPromptAs emits.
@@ -513,6 +526,9 @@ type AgentFileConfig struct {
 	// PromptMode mirrors AgentEntry.PromptMode at the file-config layer.
 	// Non-empty values override the entry-level setting.
 	PromptMode string `json:"promptMode,omitempty"`
+	// WeChatSplitReplies mirrors AgentEntry.WeChatSplitReplies. Nil =
+	// inherit; non-nil = authoritative for this agent.
+	WeChatSplitReplies *bool `json:"wechatSplitReplies,omitempty"`
 	// Admins gates write-mode slash commands (/new /reset /undo /retry /compact
 	// /model /personality) in IM channels. Keyed by channel name ("discord",
 	// "telegram", "slack", ...), each value is the platform-side user IDs
@@ -578,6 +594,11 @@ type ResolvedAgent struct {
 	// built-in tool set the LLM sees. See AgentEntry.PromptMode for
 	// semantics. Empty = PromptModeAgent.
 	PromptMode string
+	// WeChatSplitReplies — nil = inherit system WeChatCfg.SplitReplies,
+	// non-nil = authoritative for this agent. The agent stamps the
+	// EFFECTIVE value (override OR system default) on every
+	// OutboundMessage.AllowSplit at send time.
+	WeChatSplitReplies *bool
 }
 
 type TeamEntry struct {
@@ -706,6 +727,10 @@ func (cfg *Config) MergedAgentConfig(entry AgentEntry) ResolvedAgent {
 	if entry.PromptMode != "" {
 		resolved.PromptMode = entry.PromptMode
 	}
+	if entry.WeChatSplitReplies != nil {
+		v := *entry.WeChatSplitReplies
+		resolved.WeChatSplitReplies = &v
+	}
 
 	if len(cfg.MCPServers) > 0 {
 		resolved.MCPServers = make(map[string]MCPServerConfig, len(cfg.MCPServers))
@@ -783,6 +808,10 @@ func (cfg *Config) MergedAgentConfig(entry AgentEntry) ResolvedAgent {
 		}
 		if fileCfg.PromptMode != "" {
 			resolved.PromptMode = fileCfg.PromptMode
+		}
+		if fileCfg.WeChatSplitReplies != nil {
+			v := *fileCfg.WeChatSplitReplies
+			resolved.WeChatSplitReplies = &v
 		}
 	}
 
