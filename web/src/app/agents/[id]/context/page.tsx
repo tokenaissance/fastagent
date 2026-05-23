@@ -15,14 +15,15 @@ import { getAgent, updateAgent } from "@/lib/api";
 import { useAgentIdFromURL } from "@/hooks/use-agent-id";
 import { useAgentName } from "@/hooks/use-agent-name";
 
-// Per-agent Tools page — one knob (mode), one extension point (plugins).
+// Per-agent Context page — one knob (mode), one extension point (plugins).
 //
-// Prompt Mode picks the framework prompt profile AND the built-in tool
-// surface. There's no per-agent allowlist anymore. There's also no
-// "active tools" preview — listing them adds visual weight without
-// enabling any action. What each mode includes is documented inline
-// next to the dropdown; for the full list at runtime, look at the
-// agent's chat session (tool calls in the transcript) or the
+// "Context" rather than "Tools" because the page is really about how
+// the LLM's context window gets assembled: which framework sections
+// participate in the system prompt AND which built-in tools come
+// along. Prompt Mode picks both in one go. There's no per-agent
+// allowlist anymore — what each mode includes is documented inline
+// next to the dropdown; for the live tool list at runtime, look at
+// the agent's chat session (tool calls in the transcript) or the
 // /api/agents/{id}/tools/registered endpoint.
 
 type PromptModeValue = "" | "agent" | "chatbot" | "customize";
@@ -33,7 +34,7 @@ const MODE_LABEL: Record<string, string> = {
   customize: "Customize",
 };
 
-export default function AgentToolsPage() {
+export default function AgentContextPage() {
   const agentId = useAgentIdFromURL();
   const agentName = useAgentName(agentId);
 
@@ -95,7 +96,7 @@ export default function AgentToolsPage() {
     <div className="p-6 space-y-6 max-w-5xl mx-auto">
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-2xl font-semibold tracking-tight">Tools</h2>
+          <h2 className="text-2xl font-semibold tracking-tight">Context</h2>
           <p className="text-sm text-muted-foreground mt-1">
             What the LLM sees for{" "}
             <strong>{agentName || "this agent"}</strong>. The prompt mode
@@ -158,13 +159,14 @@ export default function AgentToolsPage() {
             built-in tools. Default for autonomous task agents.
           </div>
           <div>
-            <strong>Chatbot</strong> — slim framework so persona files shape
-            voice directly + only IM-essential built-ins (
-            <code className="text-[10px]">message</code>,{" "}
+            <strong>Chatbot</strong> — slim framework so persona files
+            shape voice directly. Built-ins narrowed to just{" "}
             <code className="text-[10px]">image_gen</code>,{" "}
             <code className="text-[10px]">tts</code>,{" "}
-            <code className="text-[10px]">memory_search</code>). For
-            companion / role-play / customer-support bots.
+            <code className="text-[10px]">memory_search</code> — the
+            main reply emits as plain text, multi-bubble via the inline
+            split marker. For companion / role-play / customer-support
+            bots.
           </div>
           <div>
             <strong>Customize</strong> — only the date anchor + your

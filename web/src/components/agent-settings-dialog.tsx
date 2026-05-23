@@ -7,12 +7,12 @@ import {
   CoinsIcon,
   IdCardIcon,
   InfoIcon,
+  LayersIcon,
   Palette,
   RadioIcon,
   SparklesIcon,
   UserCog,
   Wand2Icon,
-  WrenchIcon,
 } from "lucide-react";
 
 import { Dialog, DialogContent } from "@/components/ui/dialog";
@@ -21,7 +21,7 @@ import { cn } from "@/lib/utils";
 import AgentProfilePanel from "@/components/agent-profile-panel";
 import AgentCustomizePage from "@/app/agents/[id]/customize/page";
 import AgentModelsPage from "@/app/agents/[id]/models/page";
-import AgentToolsPage from "@/app/agents/[id]/tools/page";
+import AgentContextPage from "@/app/agents/[id]/context/page";
 import AgentSkillsPage from "@/app/agents/[id]/skills/page";
 import AgentChannelsPage from "@/app/agents/[id]/channels/page";
 import AgentSchedulerPage from "@/app/agents/[id]/scheduler/page";
@@ -35,7 +35,7 @@ export type AgentSettingsTab =
   | "profile"
   | "customize"
   | "models"
-  | "tools"
+  | "context"
   | "skills"
   | "channels"
   | "scheduler"
@@ -50,7 +50,7 @@ const AGENT_TABS: Array<{ id: AgentSettingsTab; label: string; icon: TabIcon }> 
   { id: "profile", label: "Profile", icon: IdCardIcon },
   { id: "customize", label: "Customize", icon: Wand2Icon },
   { id: "models", label: "Models", icon: BrainIcon },
-  { id: "tools", label: "Tools", icon: WrenchIcon },
+  { id: "context", label: "Context", icon: LayersIcon },
   { id: "skills", label: "Skills", icon: SparklesIcon },
   { id: "channels", label: "Channels", icon: RadioIcon },
   { id: "scheduler", label: "Scheduler", icon: ClockIcon },
@@ -163,7 +163,7 @@ export function AgentSettingsDialog({
           {tab === "customize" && <AgentCustomizePage />}
           {tab === "models" &&
             (role === "viewer" ? <UserModelsPage /> : <AgentModelsPage />)}
-          {tab === "tools" && <AgentToolsPage />}
+          {tab === "context" && <AgentContextPage />}
           {tab === "skills" && <AgentSkillsPage />}
           {tab === "channels" && <AgentChannelsPage />}
           {tab === "scheduler" && <AgentSchedulerPage />}
