@@ -2645,18 +2645,26 @@ func (a *Agent) RegisteredTools() []tools.ToolInfo {
 // to the LLM in chatbot mode. Picked for IM-native companion / customer-
 // support / role-play products:
 //
-//   - message       : send text/media to the channel
 //   - image_gen     : self-generated images (registered only if a
 //                     provider is configured; absence is fine)
 //   - tts           : voice messages (same conditional registration)
 //   - memory_search : recall long-term facts about the chatter
 //
-// Notably absent: exec, file ops, web_fetch / web_search, scheduling,
+// Notably absent — the `message` tool. The main reply is emitted via
+// the LLM's normal `content` channel (the gateway's task callback turns
+// that into an OutboundMessage automatically) and multi-bubble output
+// uses SplitMessageMarker inline, not tool calls. Letting `message`
+// into chatbot mode tempts the LLM into agent-style "I'll send a
+// 'thinking...' message first, then my real reply" patterns that look
+// jarring in a companion product. Operators who need OOB messaging
+// (cron-triggered greetings, multi-recipient broadcasts) should fall
+// back to `agent` mode or write a plugin.
+//
+// Also absent: exec, file ops, web_fetch / web_search, scheduling,
 // delegation — all agent-loop machinery that doesn't belong in a chat
 // persona's voice. Add new built-ins here only when they're universally
 // useful for chatbot products; everything else belongs in a plugin.
 var chatbotBuiltinAllowlist = []string{
-	"message",
 	"image_gen",
 	"tts",
 	"memory_search",
