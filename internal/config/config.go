@@ -169,12 +169,24 @@ type TaskQueueCfg struct {
 }
 
 // SandboxCfg holds sandbox configuration for an agent.
+//
+// Image is the legacy single-slot image/template/snapshot — read-only
+// fallback now. The per-backend fields (DockerImage / E2BTemplate /
+// BoxliteSnapshot) are authoritative when set, so switching Backend in
+// the dashboard preserves each backend's last-entered value instead of
+// overwriting the shared slot. Consumers should prefer the per-backend
+// field for the active Backend and fall through to Image only when the
+// per-backend field is empty (migration path for configs predating the
+// split).
 type SandboxCfg struct {
-	Enabled bool   `json:"enabled"`
-	Image   string `json:"image,omitempty"`
-	Policy  string `json:"policy,omitempty"`
-	Backend string `json:"backend,omitempty"`
-	E2BKey  string `json:"e2bKey,omitempty"`
+	Enabled         bool   `json:"enabled"`
+	Image           string `json:"image,omitempty"`
+	DockerImage     string `json:"dockerImage,omitempty"`
+	E2BTemplate     string `json:"e2bTemplate,omitempty"`
+	BoxliteSnapshot string `json:"boxliteSnapshot,omitempty"`
+	Policy          string `json:"policy,omitempty"`
+	Backend         string `json:"backend,omitempty"`
+	E2BKey          string `json:"e2bKey,omitempty"`
 	// Boxlite (https://github.com/boxlite-ai/boxlite) is a hosted sandbox
 	// service speaking the REST spec at openapi/rest-sandbox-open-api.yaml.
 	// BoxliteURL is the full base URL (default https://api.boxlite.ai/v1);

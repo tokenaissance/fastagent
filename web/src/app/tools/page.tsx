@@ -145,6 +145,7 @@ export default function ToolsPage() {
           </div>
         ) : activeCat ? (
           <CategoryPanel
+            key={activeCat.name}
             catalog={activeCat}
             providers={providers}
             setProvider={updateProvider}
@@ -279,7 +280,15 @@ function CategoryPanel({
                 </SelectContent>
               </Select>
             </div>
-            {selected && (
+            {selected && selected.name === "none" ? (
+              <p className="text-xs text-muted-foreground pt-1">
+                No external backend. To take effect, make{" "}
+                <code className="font-mono">none/default</code> the only entry
+                in the fallback chain below — the <code className="font-mono">{catalog.name}</code>{" "}
+                tool will then be hidden from agents, and the model will fall
+                back to whatever native search capability it has (or do without).
+              </p>
+            ) : selected && (
               <ProviderFields
                 provider={selected}
                 settings={providers[selected.name] || {}}

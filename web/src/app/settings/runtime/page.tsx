@@ -49,15 +49,20 @@ export default function RuntimeSettingsPage() {
           setSandboxEnabled(cfg.sandbox?.enabled || false);
           const backend = cfg.sandbox?.backend || "docker";
           setSandboxBackend(backend);
+          // Each backend has its own persisted field. For configs
+          // predating the split there's only the legacy `image` slot,
+          // so we migrate it into the backend it belonged to (the saved
+          // `backend`) and leave the other two empty.
           const savedImage = cfg.sandbox?.image || "";
-          if (backend === "e2b") {
-            const looksLikeDockerImage = savedImage.includes(":") || savedImage.includes("/");
-            setSandboxE2BTemplate(looksLikeDockerImage || !savedImage ? "base" : savedImage);
-          } else if (backend === "boxlite") {
-            setSandboxBoxliteImage(savedImage);
-          } else {
-            setSandboxDockerImage(savedImage);
-          }
+          setSandboxDockerImage(
+            cfg.sandbox?.dockerImage ?? (backend === "docker" ? savedImage : ""),
+          );
+          setSandboxE2BTemplate(
+            cfg.sandbox?.e2bTemplate ?? (backend === "e2b" ? savedImage || "base" : "base"),
+          );
+          setSandboxBoxliteImage(
+            cfg.sandbox?.boxliteSnapshot ?? (backend === "boxlite" ? savedImage : ""),
+          );
           setSandboxE2BKey(cfg.sandbox?.e2bKey || "");
           setSandboxBoxliteKey(cfg.sandbox?.boxliteKey || "");
           setSandboxBoxliteURL(cfg.sandbox?.boxliteUrl || "");
@@ -69,7 +74,11 @@ export default function RuntimeSettingsPage() {
 
   const handleSave = async () => {
     setSaving(true);
-    const image =
+    // Persist every backend's field so switching the dropdown after a
+    // save still surfaces the value the user typed for that backend.
+    // Also mirror the active backend's value into the legacy `image`
+    // slot so consumers that haven't migrated still resolve correctly.
+    const activeImage =
       sandboxBackend === "e2b"
         ? sandboxE2BTemplate
         : sandboxBackend === "boxlite"
@@ -79,7 +88,10 @@ export default function RuntimeSettingsPage() {
       sandbox: {
         enabled: sandboxEnabled,
         backend: sandboxBackend,
-        image: image || undefined,
+        image: activeImage || undefined,
+        dockerImage: sandboxDockerImage || undefined,
+        e2bTemplate: sandboxE2BTemplate || undefined,
+        boxliteSnapshot: sandboxBoxliteImage || undefined,
         e2bKey: sandboxE2BKey || undefined,
         boxliteKey: sandboxBoxliteKey || undefined,
         boxliteUrl: sandboxBoxliteURL || undefined,

@@ -97,13 +97,19 @@ func buildSystemSandboxPool(cfg config.SandboxCfg, ws workspace.Store) sandbox.E
 	}
 	var inner sandbox.ExecutorPool
 	home, _ := config.HomeDir()
+	// Prefer the per-backend image field (DockerImage / E2BTemplate /
+	// BoxliteSnapshot); fall back to the legacy shared Image slot for
+	// configs predating the split.
 	switch cfg.Backend {
 	case "e2b":
 		apiKey := cfg.E2BKey
 		if apiKey == "" {
 			apiKey = os.Getenv("E2B_API_KEY")
 		}
-		template := cfg.Image
+		template := cfg.E2BTemplate
+		if template == "" {
+			template = cfg.Image
+		}
 		if template == "" {
 			template = "base"
 		}
@@ -115,20 +121,28 @@ func buildSystemSandboxPool(cfg config.SandboxCfg, ws workspace.Store) sandbox.E
 		if secret == "" {
 			secret = os.Getenv("BOXLITE_API_KEY")
 		}
+		snapshot := cfg.BoxliteSnapshot
+		if snapshot == "" {
+			snapshot = cfg.Image
+		}
 		inner = sandbox.NewBoxliteExecutorPool(
 			cfg.BoxliteURL,
 			cfg.BoxlitePrefix,
 			cfg.BoxliteClientID,
 			secret,
-			cfg.Image,
+			snapshot,
 			home,
 			30*time.Minute,
 		)
 		slog.Info("system sandbox executor pool created",
-			"backend", "boxlite", "image", cfg.Image, "url", cfg.BoxliteURL)
+			"backend", "boxlite", "image", snapshot, "url", cfg.BoxliteURL)
 	default:
+		image := cfg.DockerImage
+		if image == "" {
+			image = cfg.Image
+		}
 		policy := &sandbox.Policy{NetMode: cfg.Network}
-		inner = sandbox.NewDockerExecutorPool(cfg.Image, home, policy)
+		inner = sandbox.NewDockerExecutorPool(image, home, policy)
 		slog.Info("system sandbox executor pool created",
 			"backend", "docker", "network", cfg.Network)
 	}

@@ -215,7 +215,13 @@ export interface ConfigResponse {
   sandbox?: {
     enabled: boolean;
     backend?: string;
+    // Legacy single-slot image field; read-only fallback. The per-
+    // backend fields below are authoritative when set so switching
+    // backends in the UI preserves each backend's last-entered value.
     image?: string;
+    dockerImage?: string;
+    e2bTemplate?: string;
+    boxliteSnapshot?: string;
     e2bKey?: string;
     boxliteUrl?: string;
     boxliteClientId?: string;
