@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Switch } from "@/components/ui/switch";
 import {
   Select,
   SelectContent,
@@ -10,7 +11,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Check, MessageSquare, Puzzle } from "lucide-react";
+import { Check, MessageSquare, MessagesSquare, Puzzle } from "lucide-react";
 import { getAgent, updateAgent } from "@/lib/api";
 import { useAgentIdFromURL } from "@/hooks/use-agent-id";
 import { useAgentName } from "@/hooks/use-agent-name";
@@ -40,6 +41,11 @@ export default function AgentContextPage() {
 
   // "" = no override saved; runtime falls back to "agent".
   const [promptMode, setPromptMode] = useState<PromptModeValue>("");
+  // Per-agent multi-bubble toggle. Applies to every IM channel the
+  // agent is bound to. False is the default; null on the wire is
+  // treated as false here.
+  const [splitReplies, setSplitReplies] = useState(false);
+  const [splitRepliesSaving, setSplitRepliesSaving] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -55,6 +61,7 @@ export default function AgentContextPage() {
       } else {
         setPromptMode("");
       }
+      setSplitReplies(agentRec?.splitReplies === true);
     } finally {
       setLoading(false);
     }
@@ -80,6 +87,23 @@ export default function AgentContextPage() {
       setPromptMode(prev);
     } finally {
       setSaving(false);
+    }
+  };
+
+  // Optimistic toggle for splitReplies. No "inherit" state anymore —
+  // system-level fallback was removed; false is the absolute default
+  // when nothing is saved.
+  const handleSplitRepliesChange = async (next: boolean) => {
+    const prev = splitReplies;
+    setSplitReplies(next);
+    setSplitRepliesSaving(true);
+    try {
+      await updateAgent(agentId, { splitReplies: next });
+      flashSaved();
+    } catch {
+      setSplitReplies(prev);
+    } finally {
+      setSplitRepliesSaving(false);
     }
   };
 
@@ -185,6 +209,34 @@ export default function AgentContextPage() {
             </code>{" "}
             for a minimal example.
           </span>
+        </div>
+      </div>
+
+      {/* Multi-bubble replies — applies to every IM channel. Lives here
+          rather than in the Channels tab because it's a property of how
+          the LLM communicates, not of the channel binding. */}
+      <div className="rounded-lg border border-border bg-card p-5">
+        <div className="flex items-start justify-between gap-4">
+          <div className="flex items-start gap-3 min-w-0">
+            <MessagesSquare className="h-4 w-4 text-primary mt-0.5 shrink-0" />
+            <div className="min-w-0">
+              <h3 className="font-medium">Multi-bubble replies</h3>
+              <p className="text-sm text-muted-foreground mt-1">
+                Let the agent split one reply into multiple chat bubbles
+                using a separator marker — natural for short, multi-beat
+                replies in IM. Applies to every IM channel
+                (WeChat / Telegram / Discord / Slack / LINE / Feishu);
+                ignored on web. Off by default — keeps each reply as a
+                single message.
+              </p>
+            </div>
+          </div>
+          <Switch
+            checked={splitReplies}
+            onCheckedChange={handleSplitRepliesChange}
+            disabled={splitRepliesSaving}
+            aria-label="Multi-bubble replies"
+          />
         </div>
       </div>
     </div>

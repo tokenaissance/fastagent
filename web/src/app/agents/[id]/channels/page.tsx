@@ -30,7 +30,6 @@ import {
   Plus,
   Trash2,
   Send,
-  MessageSquare,
   CheckCircle2,
   ExternalLink,
   Loader2,
@@ -46,8 +45,6 @@ import {
   startAgentWeChatLogin,
   pollAgentWeChatLoginStatus,
   disconnectAgentChannel,
-  getAgent,
-  updateAgent,
   type AgentChannel,
 } from "@/lib/api";
 import { useAgentIdFromURL } from "@/hooks/use-agent-id";
@@ -115,13 +112,6 @@ export default function AgentChannelsPage() {
   const [feishuOpen, setFeishuOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<AgentChannel | null>(null);
 
-  // Per-agent multi-bubble toggle. Applies uniformly to every IM
-  // channel the agent is bound to. Stored as nullable bool server-side
-  // but only effectively two states (off/on) — null and false are
-  // equivalent. Defaults to off.
-  const [splitReplies, setSplitReplies] = useState(false);
-  const [splitRepliesSaving, setSplitRepliesSaving] = useState(false);
-
   const refresh = useCallback(() => {
     if (!agentId) return;
     setLoading(true);
@@ -134,39 +124,6 @@ export default function AgentChannelsPage() {
   useEffect(() => {
     refresh();
   }, [refresh]);
-
-  // Load splitReplies once on mount. Independent from channels refresh
-  // — the setting persists even when no IM channels are connected yet
-  // (operator may want to pre-configure before scanning the QR).
-  useEffect(() => {
-    if (!agentId) return;
-    let cancelled = false;
-    getAgent(agentId)
-      .then((rec) => {
-        if (cancelled) return;
-        setSplitReplies(rec?.splitReplies === true);
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [agentId]);
-
-  // Optimistic update. Send explicit boolean; backend stores it on
-  // the agents.defaults row. There's no separate "reset" path
-  // anymore — false IS the default, no inheritance to fall back to.
-  const handleSplitRepliesChange = async (next: boolean) => {
-    const prev = splitReplies;
-    setSplitReplies(next);
-    setSplitRepliesSaving(true);
-    try {
-      await updateAgent(agentId, { splitReplies: next });
-    } catch {
-      setSplitReplies(prev);
-    } finally {
-      setSplitRepliesSaving(false);
-    }
-  };
 
   // First binding per channel type — the UI is currently single-bot,
   // even though the backend allows multiple. If multiple exist (legacy
@@ -246,34 +203,6 @@ export default function AgentChannelsPage() {
           })}
         </div>
       )}
-
-      {/* Multi-bubble replies — per-agent toggle. Applies to every IM
-          channel the agent is bound to. Renders regardless of channel
-          connection state since operators may want to pre-configure. */}
-      <div className="rounded-lg border border-border bg-card p-5">
-        <div className="flex items-start justify-between gap-4">
-          <div className="flex items-start gap-3 min-w-0">
-            <MessageSquare className="h-4 w-4 text-primary mt-0.5 shrink-0" />
-            <div className="min-w-0">
-              <h3 className="font-medium">Multi-bubble replies</h3>
-              <p className="text-sm text-muted-foreground mt-1">
-                Let the agent split one reply into multiple chat bubbles
-                using a separator marker — natural for short, multi-beat
-                replies in IM. Applies to every IM channel
-                (WeChat / Telegram / Discord / Slack / LINE / Feishu);
-                ignored on web. Off by default — keeps each reply as a
-                single message.
-              </p>
-            </div>
-          </div>
-          <Switch
-            checked={splitReplies}
-            onCheckedChange={handleSplitRepliesChange}
-            disabled={splitRepliesSaving}
-            aria-label="Multi-bubble replies"
-          />
-        </div>
-      </div>
 
       <ConnectTelegramDialog
         open={telegramOpen}
