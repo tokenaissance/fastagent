@@ -226,7 +226,14 @@ export default function AgentToolsPage() {
           disabled={saving}
         >
           <SelectTrigger className="text-sm max-w-[240px]">
-            <SelectValue />
+            {/* Explicit children override SelectValue's auto-extraction
+                from the active SelectItem — shadcn sometimes falls back
+                to rendering the raw `value` string (lowercase "agent" /
+                "chatbot" / "customize") instead of the SelectItem's
+                child text. Rendering MODE_LABEL[...] directly here is
+                belt + suspenders: the value source of truth is still
+                `promptMode`, but the trigger display is decoupled. */}
+            <SelectValue>{MODE_LABEL[promptMode || "agent"]}</SelectValue>
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="agent">Agent</SelectItem>
