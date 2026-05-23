@@ -108,7 +108,7 @@ type OutboundMessage struct {
 	// honor SplitMessageMarker and emit multiple bubbles. False (default)
 	// collapses the marker to a newline so a stray marker doesn't leak
 	// as literal text. Stamped by the originating Agent based on its
-	// effective wechatSplitReplies setting (per-agent override OR system
+	// effective splitReplies setting (per-agent override OR system
 	// default) — see internal/agent/loop.go. Harmless on non-WeChat
 	// channels: they ignore the field.
 	AllowSplit bool

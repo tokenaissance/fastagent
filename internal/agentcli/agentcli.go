@@ -680,12 +680,13 @@ var agentScopeKeys = map[string]string{
 	// hardcoded in builtinAllowForMode (internal/agent/loop.go) —
 	// custom tools come from Plugin / MCP, not a per-agent allowlist.
 	"promptMode": "agents.defaults",
-	// wechatSplitReplies — per-agent override of the system-wide
-	// WeChat multi-bubble setting. Pass true/false to set; unset the
-	// key entirely (CLI lacks a "delete" verb today, so use the
-	// dashboard's Inherit toggle for that) to fall back to system.
-	"wechatSplitReplies": "agents.defaults",
-	"sandbox":            "sandbox",
+	// splitReplies — per-agent multi-bubble toggle. When true, the
+	// dispatcher splits the reply at SplitMessageMarker before sending
+	// to any IM channel (WeChat / Telegram / Discord / Slack / LINE /
+	// Feishu). System-level fallback is gone — false is the default
+	// when the key is absent.
+	"splitReplies": "agents.defaults",
+	"sandbox":      "sandbox",
 }
 
 var systemSettingNamespaces = []string{

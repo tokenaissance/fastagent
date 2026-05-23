@@ -444,8 +444,8 @@ func New(env *config.EnvConfig) (*Gateway, error) {
 			// AllowSplit lets the WeChat adapter honor SplitMessageMarker
 			// for multi-bubble output. Sourced from the originating
 			// agent's per-agent setting (or the system fallback baked
-			// into it at boot) — see Agent.WeChatSplitReplies.
-			AllowSplit: ag.WeChatSplitReplies(),
+			// into it at boot) — see Agent.SplitReplies.
+			AllowSplit: ag.SplitReplies(),
 		}
 		// Bounded enqueue. If routeOutbound is wedged the task
 		// shouldn't sit on its taskQueue slot forever — let ctx's

@@ -102,11 +102,11 @@ export interface AgentDetail {
   // function of this mode — there's no separate allowlist field by
   // design. Extend tools via Plugin or MCP, not per-agent toggles.
   promptMode?: string;
-  // wechatSplitReplies is the per-agent WeChat multi-bubble override.
-  // null / undefined = inherit system default (system Settings →
-  // Runtime → WeChat multi-bubble replies). true / false = explicit
-  // per-agent value.
-  wechatSplitReplies?: boolean | null;
+  // splitReplies is the per-agent multi-bubble override. Applies to
+  // every IM channel uniformly — when on, the agent may emit the
+  // SplitMessageMarker between bubbles and the dispatcher honors it.
+  // null / undefined / false-ish = single bubble per reply (default).
+  splitReplies?: boolean | null;
   soul?: string;
   skills?: string[];
   tools?: string[];
@@ -1234,12 +1234,12 @@ export interface AgentUpdatePayload {
   // (only the date anchor + bootstrap files — author writes the whole
   // system prompt themselves via SOUL.md / IDENTITY.md). Pass "" to clear.
   promptMode?: "" | "agent" | "chatbot" | "customize";
-  // WeChat multi-bubble per-agent override. Tri-state: omit to leave
-  // the saved value alone; pass `true`/`false` to set explicit; pass
-  // `wechatSplitRepliesReset: true` to delete the override and fall
-  // back to system default (the "Inherit" pill in the dashboard).
-  wechatSplitReplies?: boolean;
-  wechatSplitRepliesReset?: boolean;
+  // Multi-bubble per-agent override (applies to all IM channels).
+  // Tri-state: omit to leave the saved value alone; pass true/false to
+  // set explicit; pass `splitRepliesReset: true` to delete the override
+  // so default behavior (single bubble) applies.
+  splitReplies?: boolean;
+  splitRepliesReset?: boolean;
 }
 
 export async function updateAgent(id: string, agent: AgentUpdatePayload) {

@@ -67,12 +67,13 @@ type Agent struct {
 	ftsStore        *store.FTSStore
 	piiScrubEnabled bool
 	memoryCfg       config.MemoryCfg
-	// wechatSplitReplies mirrors cfg.WeChat.SplitReplies. Gates the
+	// splitReplies is the per-agent multi-bubble toggle. Gates the
 	// per-turn system-prompt hint that advertises SplitMessageMarker
-	// to the LLM — see renderChannelHints below. The matching outbound
-	// gate lives on the WeChat adapter; both branches read the same
-	// channels.wechat setting so they can't drift.
-	wechatSplitReplies bool
+	// to the LLM (see renderChannelHints) AND stamps
+	// OutboundMessage.AllowSplit so the dispatcher splits the reply at
+	// the marker before handing each chunk to the channel adapter.
+	// Per-agent only — there's no system-level fallback.
+	splitReplies bool
 	// memoryStore is the optional Store-backed source of identity files
 	// (SOUL.md, IDENTITY.md, ...). Kept on the Agent so ReloadWorkspaceFiles
 	// can rewire a fresh ContextBuilder to keep reading from the Store
@@ -177,13 +178,12 @@ func NewAgentWithFullCfg(rc config.ResolvedAgent, prov provider.Provider, mb *bu
 	ag := NewAgentWithSkillsCfg(rc, prov, mb, homeDir, fullCfg.Skills)
 	ag.memoryCfg = fullCfg.Memory
 	ag.piiScrubEnabled = fullCfg.Privacy.PIIScrubbing.Enabled
-	// Effective WeChat split-replies: per-agent override (when set) wins
-	// over the system default. Without the override the system value
-	// applies — preserves the existing system-level toggle so operators
-	// who set it at /settings/runtime keep their behavior across agents.
-	ag.wechatSplitReplies = fullCfg.WeChat.SplitReplies
-	if rc.WeChatSplitReplies != nil {
-		ag.wechatSplitReplies = *rc.WeChatSplitReplies
+	// Multi-bubble split-replies: per-agent only — system-level toggle
+	// was removed since "every agent splits the same way" is rarely
+	// what an operator wants for a deployment running multiple personas.
+	// nil override = off (default); non-nil = explicit value.
+	if rc.SplitReplies != nil {
+		ag.splitReplies = *rc.SplitReplies
 	}
 
 	// Set up FTS store if configured
@@ -242,7 +242,7 @@ func NewAgentWithSkillsCfg(rc config.ResolvedAgent, prov provider.Provider, mb *
 	memory := NewMemory(rc.Home)
 	registry := tools.NewRegistry(rc.Home, workspace)
 	// message tool is re-registered AFTER the Agent struct is built (see
-	// below) so its outbound-side closure can read agent.wechatSplitReplies
+	// below) so its outbound-side closure can read agent.splitReplies
 	// at send time. The registerBuiltins pass inside NewRegistry already
 	// stamped a placeholder; tools.RegisterMessage replaces it.
 	tools.RegisterMemorySearch(registry, rc.Home)
@@ -311,10 +311,10 @@ func NewAgentWithSkillsCfg(rc config.ResolvedAgent, prov provider.Provider, mb *
 	}
 
 	// message tool — registered HERE (post-Agent) so the closure can read
-	// ag.wechatSplitReplies at every send. Per-agent setting can flip at
+	// ag.splitReplies at every send. Per-agent setting can flip at
 	// runtime (UpdateConfig); the getter pulls the current value each
 	// time rather than capturing a stale snapshot.
-	tools.RegisterMessage(registry, mb, func() bool { return ag.wechatSplitReplies })
+	tools.RegisterMessage(registry, mb, func() bool { return ag.splitReplies })
 
 	// delegate_task lets the parent agent fan a bounded subtask out to a
 	// fresh sub-agent context (own iteration budget, isolated messages).
@@ -1263,41 +1263,48 @@ func logSystemPromptFingerprint(agentName, channel, chatID, userID, prompt strin
 
 // renderChannelHints emits per-turn protocol notes that the LLM can
 // only honor if it knows about them. Today there's exactly one: IM
-// channels with a single-text-per-bubble UI (WeChat — Telegram / LINE
-// are wired the same way later) accept the channels.SplitMessageMarker
-// token as "split this reply into multiple bubbles." Web and Discord
-// don't split, so we don't waste tokens advertising the capability
-// there. The marker constant is colocated with the splitter in
+// channels with a single-message-per-bubble UI accept the
+// channels.SplitMessageMarker token as "split this reply into multiple
+// bubbles." The marker constant is colocated with the splitter in
 // internal/channels/base.go so changing the wire token only touches
-// one place.
+// one place; the actual split happens in the channels manager's
+// dispatcher, uniformly across all IM adapters.
 //
-// `wechatSplitEnabled` is the operator-controlled toggle from the
-// channels.wechat system setting. When false (the default) we skip the
-// hint entirely so the LLM doesn't learn the marker — and the matching
-// outbound gate in internal/channels/wechat.go collapses any stray
-// marker back to a newline. The two branches must stay in lockstep.
+// `splitEnabled` is the per-agent toggle. When false (the default) we
+// skip the hint so the LLM never learns the marker — and the dispatcher
+// collapses any stray marker back to a newline. The two branches must
+// stay in lockstep.
 //
-// Returns "" for non-IM channels so callers can append unconditionally.
-func renderChannelHints(msg bus.InboundMessage, wechatSplitEnabled bool) string {
-	switch msg.Channel {
-	case "wechat":
-		if !wechatSplitEnabled {
-			return ""
-		}
-		// Keep the wording short. Sample alone is enough — the LLM picks
-		// up on the protocol from one well-formed example without us
-		// listing every rule.
-		return "## Reply Format\n\n" +
-			"You're replying through WeChat, which renders one chat bubble per " +
-			"message. To split your reply into separate bubbles, write " +
-			"`" + channels.SplitMessageMarker + "` on its own line between the " +
-			"parts. Each part is sent as a distinct message in order.\n\n" +
-			"Use this when a short, conversational, multi-beat reply reads more " +
-			"naturally than one long block (e.g. \"好。\\n" + channels.SplitMessageMarker +
-			"\\n第一条先到了。\\n" + channels.SplitMessageMarker + "\\n第二条在这。\"). " +
-			"For a single coherent answer, just reply normally — no marker needed."
+// Returns "" for non-IM channels (web, api) so they don't waste tokens
+// on a hint the chatter wouldn't perceive — web renders one bubble per
+// chat-message anyway.
+func renderChannelHints(msg bus.InboundMessage, splitEnabled bool) string {
+	if !splitEnabled || !isIMChannel(msg.Channel) {
+		return ""
 	}
-	return ""
+	// Sample alone is enough — the LLM picks up the protocol from one
+	// well-formed example without us listing every rule.
+	return "## Reply Format\n\n" +
+		"This channel renders one chat bubble per message. To split your " +
+		"reply into separate bubbles, write `" + channels.SplitMessageMarker +
+		"` on its own line between the parts. Each part is sent as a " +
+		"distinct message in order.\n\n" +
+		"Use this when a short, conversational, multi-beat reply reads more " +
+		"naturally than one long block (e.g. \"好。\\n" + channels.SplitMessageMarker +
+		"\\n第一条先到了。\\n" + channels.SplitMessageMarker + "\\n第二条在这。\"). " +
+		"For a single coherent answer, just reply normally — no marker needed."
+}
+
+// isIMChannel returns true for channels with single-message-per-bubble
+// UX where splitting one logical reply into multiple sequential
+// messages reads naturally. Web/API channels render long replies in
+// place — splitting there adds nothing.
+func isIMChannel(channel string) bool {
+	switch channel {
+	case "wechat", "telegram", "discord", "slack", "line", "feishu":
+		return true
+	}
+	return false
 }
 
 // renderSender emits a per-turn system block naming who the message
@@ -1688,7 +1695,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 
 	messages := make([]provider.Message, 0, len(sessionMsgs)+4)
 	messages = append(messages, provider.Message{Role: "system", Content: systemPrompt})
-	if hints := renderChannelHints(msg, a.wechatSplitReplies); hints != "" {
+	if hints := renderChannelHints(msg, a.splitReplies); hints != "" {
 		messages = append(messages, provider.Message{Role: "system", Content: hints})
 	}
 	if senderMsg := renderSender(msg); senderMsg != "" {
@@ -2284,7 +2291,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 
 	messages := make([]provider.Message, 0, len(sessionMsgs)+4)
 	messages = append(messages, provider.Message{Role: "system", Content: systemPrompt})
-	if hints := renderChannelHints(msg, a.wechatSplitReplies); hints != "" {
+	if hints := renderChannelHints(msg, a.splitReplies); hints != "" {
 		messages = append(messages, provider.Message{Role: "system", Content: hints})
 	}
 	if senderMsg := renderSender(msg); senderMsg != "" {
@@ -2609,13 +2616,13 @@ func (a *Agent) HomePath() string {
 	return a.homePath
 }
 
-// WeChatSplitReplies returns the effective per-agent split-reply setting
+// SplitReplies returns the effective per-agent split-reply setting
 // — used by the gateway when constructing OutboundMessage so the WeChat
 // adapter knows whether to honor SplitMessageMarker. Populated at
 // agent boot from the merged config (per-agent override else system
 // WeChatCfg.SplitReplies); refreshed on UpdateConfig.
-func (a *Agent) WeChatSplitReplies() bool {
-	return a.wechatSplitReplies
+func (a *Agent) SplitReplies() bool {
+	return a.splitReplies
 }
 
 // RegisteredTools returns the live tool registry projection — name +
@@ -2702,8 +2709,8 @@ func (a *Agent) UpdateConfig(rc config.ResolvedAgent) {
 	// Per-agent WeChat split-replies. Nil override = keep whatever the
 	// system layer initialized at boot (don't reset to false). Non-nil
 	// = authoritative for this agent.
-	if rc.WeChatSplitReplies != nil {
-		a.wechatSplitReplies = *rc.WeChatSplitReplies
+	if rc.SplitReplies != nil {
+		a.splitReplies = *rc.SplitReplies
 	}
 }
 
@@ -2826,7 +2833,7 @@ func (a *Agent) sendMediaFiles(msg bus.InboundMessage, mediaPaths []string) {
 		AccountID:  msg.AccountID,
 		ChatID:     msg.ChatID,
 		MediaPaths: mediaPaths,
-		AllowSplit: a.wechatSplitReplies,
+		AllowSplit: a.splitReplies,
 	}
 	select {
 	case a.messageBus.Outbound <- outMsg:

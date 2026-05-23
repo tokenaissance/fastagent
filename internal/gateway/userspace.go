@@ -650,9 +650,9 @@ func loadUserSpace(ctx context.Context, userID string, mb *bus.MessageBus, st st
 			// from "explicitly false". Non-nil from the row means the
 			// operator made a deliberate choice; nil falls through to
 			// system WeChatCfg.SplitReplies later in NewAgentWithFullCfg.
-			if agentOverride.WeChatSplitReplies != nil {
-				v := *agentOverride.WeChatSplitReplies
-				rc.WeChatSplitReplies = &v
+			if agentOverride.SplitReplies != nil {
+				v := *agentOverride.SplitReplies
+				rc.SplitReplies = &v
 			}
 		}
 		// Same story for providers: assembleConfig was called with
