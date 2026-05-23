@@ -13,7 +13,10 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 )
 
-// bootstrapFiles are loaded in order to build the system prompt.
+// bootstrapFiles are loaded in order to build the system prompt for
+// AGENT mode. The full list — including the agent-loop scaffolding
+// files (AGENTS.md / HEARTBEAT.md / TOOLS.md) that describe orchestration
+// patterns, scheduled self-checks, and tool-usage notes.
 var bootstrapFiles = []string{
 	"AGENTS.md",
 	"BOOTSTRAP.md",
@@ -21,6 +24,26 @@ var bootstrapFiles = []string{
 	"SOUL.md",
 	"USER.md",
 	"TOOLS.md",
+	"IDENTITY.md",
+}
+
+// chatbotBootstrapFiles drops the agent-loop scaffolding from the
+// bootstrap set: AGENTS.md (sub-agent orchestration), HEARTBEAT.md
+// (scheduled self-checks), and TOOLS.md (tool-usage notes) don't apply
+// to a chatbot persona — they bloat the prompt with content the LLM
+// can't act on and shouldn't reference. The four files that DO matter
+// for chat:
+//
+//   BOOTSTRAP.md — first-turn greeting / name-onboarding hook
+//   SOUL.md      — voice, tone, principles
+//   USER.md      — what we know about the current chatter
+//   IDENTITY.md  — what the agent itself is
+//
+// (MEMORY.md is loaded separately further down so it can be per-chatter.)
+var chatbotBootstrapFiles = []string{
+	"BOOTSTRAP.md",
+	"SOUL.md",
+	"USER.md",
 	"IDENTITY.md",
 }
 
@@ -527,7 +550,16 @@ Then in your final reply, write: ![](/workspace/output.png)`
 	// bucket keeps a public-link visitor from inheriting the owner's
 	// notes. Everything else (SOUL/IDENTITY/AGENTS/BOOTSTRAP/HEARTBEAT/
 	// TOOLS) is part of the agent's identity and stays owner-scoped.
-	for _, name := range bootstrapFiles {
+	//
+	// Chatbot / customize modes use a narrower list — see
+	// chatbotBootstrapFiles for the rationale. The agent-loop
+	// scaffolding files only matter when the agent actually fans out
+	// tasks / runs scheduled self-checks / writes tool-usage notes.
+	files := bootstrapFiles
+	if mode != config.PromptModeAgent {
+		files = chatbotBootstrapFiles
+	}
+	for _, name := range files {
 		uid := cb.userID
 		if name == "USER.md" {
 			uid = chatterUID
@@ -538,8 +570,14 @@ Then in your final reply, write: ![](/workspace/output.png)`
 		}
 	}
 
-	// 4. Skills
-	if cb.skillsSummary != "" {
+	// 4. Skills catalog. Skills are invoked via the `exec` tool (which
+	// chatbot mode doesn't expose) and run scripts that produce side
+	// effects — neither concern belongs in a chat persona. Crucially
+	// each skill's full SKILL.md gets INLINED into the prompt below,
+	// so a handful of installed skills can balloon the system prompt
+	// by tens of thousands of tokens. Drop the whole section for
+	// non-agent modes.
+	if mode == config.PromptModeAgent && cb.skillsSummary != "" {
 		parts = append(parts, fmt.Sprintf("# Skills\n%s", cb.skillsSummary))
 	}
 
