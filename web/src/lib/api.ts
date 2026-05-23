@@ -98,11 +98,10 @@ export interface AgentDetail {
   // promptMode is what the backend currently has saved on the
   // agents.defaults row. Empty / undefined = no override (runtime
   // falls back to "agent"). See AgentUpdatePayload.promptMode for
-  // the allowed values.
+  // the allowed values. The built-in tool set the LLM sees is a
+  // function of this mode — there's no separate allowlist field by
+  // design. Extend tools via Plugin or MCP, not per-agent toggles.
   promptMode?: string;
-  // toolAllowlist is what the backend currently has saved. Empty /
-  // undefined = no override (LLM sees all registered tools).
-  toolAllowlist?: string[];
   soul?: string;
   skills?: string[];
   tools?: string[];
@@ -1226,15 +1225,10 @@ export interface AgentUpdatePayload {
   // PromptMode selects how heavily the framework system prompt
   // participates: "agent" (full, default), "chatbot" (slim — drops
   // task-delegation / tool-use discipline / workspace-update so
-  // companion / role-play personas stay in character), "minimal"
-  // (only the date anchor + bootstrap files). Pass "" to clear.
-  promptMode?: "" | "agent" | "chatbot" | "minimal";
-  // ToolAllowlist restricts which registered tools the LLM sees on
-  // each turn. Pass [] to clear the override (= agent sees all
-  // tools, current behavior). Pass ["message","image_gen",...] to
-  // restrict — useful for chatbot products that should only call
-  // messaging tools, never exec/web_fetch/etc.
-  toolAllowlist?: string[];
+  // companion / role-play personas stay in character), "customize"
+  // (only the date anchor + bootstrap files — author writes the whole
+  // system prompt themselves via SOUL.md / IDENTITY.md). Pass "" to clear.
+  promptMode?: "" | "agent" | "chatbot" | "customize";
 }
 
 export async function updateAgent(id: string, agent: AgentUpdatePayload) {

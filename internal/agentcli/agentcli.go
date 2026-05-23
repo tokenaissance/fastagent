@@ -674,16 +674,13 @@ var agentScopeKeys = map[string]string{
 	"thinking":             "agents.defaults",
 	"policy":               "agents.defaults",
 	// promptMode selects which framework sections BuildSystemPromptAs
-	// emits — see config.PromptMode* constants. Stored as a plain string
-	// under agents.defaults.promptMode.
+	// emits AND which built-in tools the LLM sees. One of "agent",
+	// "chatbot", "customize". Stored as a plain string under
+	// agents.defaults.promptMode. The built-in tool set per mode is
+	// hardcoded in builtinAllowForMode (internal/agent/loop.go) —
+	// custom tools come from Plugin / MCP, not a per-agent allowlist.
 	"promptMode": "agents.defaults",
-	// toolAllowlist restricts which registered tools the LLM sees. Pass
-	// a JSON array: fastclaw agents config <name> set toolAllowlist '["message","image_gen"]'
-	// parseValue() unmarshals JSON so the array lands typed in the row.
-	// Empty (set toolAllowlist '[]') falls back to "all tools" in the
-	// runtime — see Registry.DefinitionsFiltered for that semantics.
-	"toolAllowlist": "agents.defaults",
-	"sandbox":       "sandbox",
+	"sandbox":    "sandbox",
 }
 
 var systemSettingNamespaces = []string{

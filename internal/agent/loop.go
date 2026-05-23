@@ -47,12 +47,10 @@ type Agent struct {
 	// promptMode is kept on Agent so ReloadWorkspaceFiles can re-apply it
 	// when it rebuilds ctxBuilder — without this, every skill install /
 	// dashboard reload silently drops the agent back to agent-mode prompt
-	// even after the operator explicitly chose chatbot/minimal.
+	// even after the operator explicitly chose chatbot/customize.
+	// PromptMode also drives the per-turn tool filter via
+	// builtinAllowForMode below.
 	promptMode string
-	// toolAllowlist limits which registered tools the LLM sees. Empty =
-	// no filter (legacy default). Lives on Agent so the registry-level
-	// filter persists across reload, same reasoning as promptMode.
-	toolAllowlist []string
 	homePath        string // agent's home: SOUL.md, sessions, memory, skills
 	workspacePath   string // working dir where agent creates user files
 	homeDir         string // FastClaw root, ~/.fastclaw
@@ -291,7 +289,6 @@ func NewAgentWithSkillsCfg(rc config.ResolvedAgent, prov provider.Provider, mb *
 		maxParallelToolCalls: rc.MaxParallelToolCalls,
 		thinking:             rc.Thinking,
 		promptMode:           rc.PromptMode,
-		toolAllowlist:        append([]string(nil), rc.ToolAllowlist...),
 		homePath:        rc.Home,
 		workspacePath:   workspace,
 		homeDir:         homeDir,
@@ -1462,7 +1459,7 @@ func (a *Agent) handlePlanMode(ctx context.Context, msg bus.InboundMessage) stri
 	// as if delegate_task / web_search / camoufox-cli didn't exist —
 	// which defeated the whole point of having Plan mode set up fan-out
 	// work for the execution turn.
-	toolDefs := a.registry.DefinitionsFiltered(a.toolAllowlist)
+	toolDefs := a.registry.DefinitionsForMode(builtinAllowForMode(a.promptMode))
 	catalog := buildToolCatalogForPlan(toolDefs)
 	messages := []provider.Message{
 		{Role: "system", Content: systemPrompt},
@@ -1686,7 +1683,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	}
 	messages = append(messages, sessionMsgs...)
 
-	toolDefs := a.registry.DefinitionsFiltered(a.toolAllowlist)
+	toolDefs := a.registry.DefinitionsForMode(builtinAllowForMode(a.promptMode))
 
 	// Loop detection: track consecutive identical tool calls
 	type toolCallSig struct {
@@ -2282,7 +2279,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 	}
 	messages = append(messages, sessionMsgs...)
 
-	toolDefs := a.registry.DefinitionsFiltered(a.toolAllowlist)
+	toolDefs := a.registry.DefinitionsForMode(builtinAllowForMode(a.promptMode))
 
 	type toolCallSig struct {
 		name string
@@ -2602,14 +2599,50 @@ func (a *Agent) HomePath() string {
 // plugin tools attached at boot / hot-reload. Order is stable (builtins
 // first, then MCP, then plugin, sorted by name within each group).
 //
-// Used by GET /api/agents/{id}/tools/registered so the allowlist UI can
-// render a checkbox grid instead of forcing the operator to remember
-// tool names.
+// Returns the FULL registry. Mode-based filtering happens client-side
+// in the dashboard so the operator can see "what would be active in
+// chatbot mode" without committing.
 func (a *Agent) RegisteredTools() []tools.ToolInfo {
 	if a.registry == nil {
 		return nil
 	}
 	return a.registry.RegisteredTools()
+}
+
+// chatbotBuiltinAllowlist is the curated set of built-in tools exposed
+// to the LLM in chatbot mode. Picked for IM-native companion / customer-
+// support / role-play products:
+//
+//   - message       : send text/media to the channel
+//   - image_gen     : self-generated images (registered only if a
+//                     provider is configured; absence is fine)
+//   - tts           : voice messages (same conditional registration)
+//   - memory_search : recall long-term facts about the chatter
+//
+// Notably absent: exec, file ops, web_fetch / web_search, scheduling,
+// delegation — all agent-loop machinery that doesn't belong in a chat
+// persona's voice. Add new built-ins here only when they're universally
+// useful for chatbot products; everything else belongs in a plugin.
+var chatbotBuiltinAllowlist = []string{
+	"message",
+	"image_gen",
+	"tts",
+	"memory_search",
+}
+
+// builtinAllowForMode returns the built-in tool name allowlist for the
+// given prompt mode. Plugin / MCP tools are always included regardless
+// — see Registry.DefinitionsForMode. nil means "all built-ins";
+// []string{} means "no built-ins"; a non-empty slice means "only these".
+func builtinAllowForMode(mode string) []string {
+	switch mode {
+	case config.PromptModeChatbot:
+		return chatbotBuiltinAllowlist
+	case config.PromptModeCustomize:
+		return []string{} // explicit empty — no built-ins
+	default: // agent (or empty/unknown — defaults to agent for back-compat)
+		return nil // nil = all built-ins exposed
+	}
 }
 
 // WorkspacePath returns the agent's working directory for user-facing files.
@@ -2633,13 +2666,14 @@ func (a *Agent) UpdateConfig(rc config.ResolvedAgent) {
 	// container.
 	a.ctxBuilder.sandboxEnabled = rc.Sandbox.Enabled
 	a.ctxBuilder.sandboxBackend = rc.Sandbox.Backend
-	// Propagate per-agent prompt mode + tool allowlist updates from
-	// dashboard saves. Without this, an operator switching an agent
-	// to chatbot mode in the UI would have to restart the binary for
-	// the change to take effect.
+	// Propagate per-agent prompt mode updates from dashboard saves.
+	// Without this, an operator switching an agent to chatbot mode in
+	// the UI would have to restart the binary for the change to take
+	// effect. The tool filter follows promptMode automatically via
+	// builtinAllowForMode at request time, so no separate hot-reload
+	// hook is needed for the tool surface.
 	a.promptMode = rc.PromptMode
 	a.ctxBuilder.SetPromptMode(rc.PromptMode)
-	a.toolAllowlist = append([]string(nil), rc.ToolAllowlist...)
 }
 
 // chatterUserID picks the per-message chatter identity, falling back

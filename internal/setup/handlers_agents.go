@@ -120,28 +120,6 @@ func (s *Server) agentScopePromptMode(r *http.Request, agentID string) string {
 	return ""
 }
 
-// agentScopeToolAllowlist reads the per-agent tool allowlist override.
-// Returns nil when absent so the caller can distinguish "no override
-// configured" from "override is the empty list" (the latter would be a
-// weird thing to persist, but JSON allows it).
-func (s *Server) agentScopeToolAllowlist(r *http.Request, agentID string) []string {
-	rec, err := s.dataStore.GetConfigByName(r.Context(), store.KindSetting, "", agentID, "agents.defaults")
-	if err != nil || rec == nil {
-		return nil
-	}
-	raw, ok := rec.Data["toolAllowlist"].([]interface{})
-	if !ok {
-		return nil
-	}
-	out := make([]string, 0, len(raw))
-	for _, item := range raw {
-		if s, ok := item.(string); ok && s != "" {
-			out = append(out, s)
-		}
-	}
-	return out
-}
-
 // effectiveUserID returns the resolved user_id for the request: the
 // caller's own id, or — for super_admin in actAs mode — the impersonated
 // user's id.
@@ -410,12 +388,10 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 		// PromptMode is a ptr so the caller can distinguish "leave
 		// unchanged" (omitted / null) from "clear override" (empty
 		// string). Allowed string values: "agent" | "chatbot" |
-		// "minimal" — empty falls back to system default ("agent").
+		// "customize" — empty falls back to system default ("agent").
+		// PromptMode also drives the built-in tool surface; there is
+		// no separate allowlist field by design (extend via plugins).
 		PromptMode *string `json:"promptMode,omitempty"`
-		// ToolAllowlist same pointer dance — nil means "leave alone",
-		// [] means "clear override (= agent sees all tools again)",
-		// ["foo","bar"] sets the allowlist.
-		ToolAllowlist *[]string `json:"toolAllowlist,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
@@ -483,29 +459,11 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 		switch pm {
 		case "":
 			defaultsPatch["promptMode"] = nil
-		case config.PromptModeAgent, config.PromptModeChatbot, config.PromptModeMinimal:
+		case config.PromptModeAgent, config.PromptModeChatbot, config.PromptModeCustomize:
 			defaultsPatch["promptMode"] = pm
 		default:
-			jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "promptMode must be one of: agent, chatbot, minimal"})
+			jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "promptMode must be one of: agent, chatbot, customize"})
 			return
-		}
-	}
-	if req.ToolAllowlist != nil {
-		// Empty slice → clear the override (agent sees all tools).
-		// Non-empty → store as-is. Empty strings inside the slice get
-		// dropped server-side so a sloppy frontend can't poison the
-		// allowlist with bare commas.
-		clean := make([]string, 0, len(*req.ToolAllowlist))
-		for _, name := range *req.ToolAllowlist {
-			name = strings.TrimSpace(name)
-			if name != "" {
-				clean = append(clean, name)
-			}
-		}
-		if len(clean) == 0 {
-			defaultsPatch["toolAllowlist"] = nil
-		} else {
-			defaultsPatch["toolAllowlist"] = clean
 		}
 	}
 	if err := s.applyAgentScopeDefaultsPatch(r, rec.ID, defaultsPatch); err != nil {
@@ -525,7 +483,6 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 			"name":             rec.Name,
 			"model":            s.agentScopeModel(r, rec.ID),
 			"promptMode":       s.agentScopePromptMode(r, rec.ID),
-			"toolAllowlist":    s.agentScopeToolAllowlist(r, rec.ID),
 			"config":           rec.Config,
 			"isPublic":         rec.IsPublic,
 			"shareModelConfig": share,
@@ -563,7 +520,6 @@ func (s *Server) handleGetAgent(w http.ResponseWriter, r *http.Request) {
 			"role":             role,
 			"model":            s.agentScopeModel(r, rec.ID),
 			"promptMode":       s.agentScopePromptMode(r, rec.ID),
-			"toolAllowlist":    s.agentScopeToolAllowlist(r, rec.ID),
 			"avatarUrl":        "/api/agents/" + rec.ID + "/files/avatar.png",
 			"createdAt":        rec.CreatedAt,
 			"isPublic":         rec.IsPublic,

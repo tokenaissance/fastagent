@@ -363,12 +363,11 @@ type AgentDefaults struct {
 	MaxParallelToolCalls int     `json:"maxParallelToolCalls,omitempty"`
 	Thinking             string  `json:"thinking,omitempty"`
 	PolicyPreset         string  `json:"policy,omitempty"`
-	// PromptMode + ToolAllowlist live here so the agent-scope
-	// `agents.defaults` config row (written by CLI and dashboard)
-	// round-trips into ResolvedAgent at userspace assembly time —
-	// see gateway/userspace.go where agentOverride is applied.
-	PromptMode    string   `json:"promptMode,omitempty"`
-	ToolAllowlist []string `json:"toolAllowlist,omitempty"`
+	// PromptMode lives here so the agent-scope `agents.defaults`
+	// config row (written by CLI and dashboard) round-trips into
+	// ResolvedAgent at userspace assembly time — see
+	// gateway/userspace.go where agentOverride is applied.
+	PromptMode string `json:"promptMode,omitempty"`
 }
 
 // AgentEntry is the in-memory shape of one agent row, used during
@@ -385,15 +384,17 @@ type AgentEntry struct {
 	MaxToolIterations    int                        `json:"maxToolIterations,omitempty"`
 	MaxParallelToolCalls int                        `json:"maxParallelToolCalls,omitempty"`
 	Skills            []string                   `json:"skills,omitempty"`
-	Tools             []string                   `json:"tools,omitempty"`
 	MCPServers        map[string]MCPServerConfig `json:"mcpServers,omitempty"`
 	AlwaysLoadSkills  []string                   `json:"alwaysLoadSkills,omitempty"`
 	Thinking          string                     `json:"thinking,omitempty"`
 	Sandbox           SandboxCfg                 `json:"sandbox,omitempty"`
 	PolicyPreset      string                     `json:"policy,omitempty"`
 	// PromptMode selects how heavily the framework system prompt
-	// participates in the assembled prompt. Empty = "agent" (current
-	// default) for backward compatibility. See PromptMode* constants.
+	// participates AND which built-in tools the LLM sees. Empty =
+	// "agent" (current default) for backward compatibility. See
+	// PromptMode* constants. The built-in tool set per mode is
+	// hardcoded in builtinAllowForMode (internal/agent/loop.go) —
+	// extension via Plugin / MCP, not per-agent allowlists, by design.
 	PromptMode string `json:"promptMode,omitempty"`
 }
 
@@ -413,10 +414,14 @@ const (
 	// agent-loop instruction so chatbot persona files (SOUL.md /
 	// IDENTITY.md / USER.md / MEMORY.md) shape behavior directly.
 	PromptModeChatbot = "chatbot"
-	// PromptModeMinimal emits ONLY the bootstrap files. The author is
-	// responsible for putting any framework guidance they need inside
-	// SOUL.md / IDENTITY.md themselves.
-	PromptModeMinimal = "minimal"
+	// PromptModeCustomize emits ONLY the bootstrap files (plus a date
+	// anchor). The author is responsible for putting any framework
+	// guidance they need inside SOUL.md / IDENTITY.md themselves —
+	// this mode hands the floor over to the persona files completely.
+	// (Renamed from PromptModeMinimal to make the intent more obvious:
+	// you're CUSTOMIZING the system prompt yourself, not asking fastclaw
+	// for a minimal version of its built-in one.)
+	PromptModeCustomize = "customize"
 )
 
 // ChannelConfig holds per-channel runtime configuration. Built by the
@@ -508,12 +513,6 @@ type AgentFileConfig struct {
 	// PromptMode mirrors AgentEntry.PromptMode at the file-config layer.
 	// Non-empty values override the entry-level setting.
 	PromptMode string `json:"promptMode,omitempty"`
-	// ToolAllowlist restricts which tools the agent's LLM can see. Empty
-	// = no filter (all registered tools exposed, current behavior). When
-	// non-empty, only tools whose name is in the list are sent to the
-	// model. Useful for chatbot-style agents that should only call
-	// messaging tools, never exec/web_fetch/etc.
-	ToolAllowlist []string `json:"toolAllowlist,omitempty"`
 	// Admins gates write-mode slash commands (/new /reset /undo /retry /compact
 	// /model /personality) in IM channels. Keyed by channel name ("discord",
 	// "telegram", "slack", ...), each value is the platform-side user IDs
@@ -575,13 +574,10 @@ type ResolvedAgent struct {
 	// Admins is the per-channel admin allowlist for write-mode slash
 	// commands. See AgentFileConfig.Admins for semantics + default.
 	Admins map[string][]string
-	// PromptMode selects the system-prompt assembly profile. See
-	// AgentEntry.PromptMode for semantics. Empty = PromptModeAgent.
+	// PromptMode selects the system-prompt assembly profile AND the
+	// built-in tool set the LLM sees. See AgentEntry.PromptMode for
+	// semantics. Empty = PromptModeAgent.
 	PromptMode string
-	// ToolAllowlist restricts which registered tools the LLM sees on
-	// each turn. Empty = no filter (all tools exposed). Populated from
-	// AgentEntry.Tools and/or AgentFileConfig.ToolAllowlist.
-	ToolAllowlist []string
 }
 
 type TeamEntry struct {
@@ -710,9 +706,6 @@ func (cfg *Config) MergedAgentConfig(entry AgentEntry) ResolvedAgent {
 	if entry.PromptMode != "" {
 		resolved.PromptMode = entry.PromptMode
 	}
-	if len(entry.Tools) > 0 {
-		resolved.ToolAllowlist = append([]string(nil), entry.Tools...)
-	}
 
 	if len(cfg.MCPServers) > 0 {
 		resolved.MCPServers = make(map[string]MCPServerConfig, len(cfg.MCPServers))
@@ -790,9 +783,6 @@ func (cfg *Config) MergedAgentConfig(entry AgentEntry) ResolvedAgent {
 		}
 		if fileCfg.PromptMode != "" {
 			resolved.PromptMode = fileCfg.PromptMode
-		}
-		if len(fileCfg.ToolAllowlist) > 0 {
-			resolved.ToolAllowlist = append([]string(nil), fileCfg.ToolAllowlist...)
 		}
 	}
 
