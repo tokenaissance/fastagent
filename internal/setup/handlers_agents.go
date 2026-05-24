@@ -108,6 +108,32 @@ func (s *Server) applyAgentScopeDefaultsPatch(r *http.Request, agentID string, p
 	return scope.SaveSettingByScope(r.Context(), s.dataStore, scope.Agent, agentID, "agents.defaults", data)
 }
 
+// applyAgentScopePluginsPatch merges per-agent plugin enable
+// overrides into the (scope=agent, name=plugins.enabled) row.
+//
+// patch keys whose value is true/false are written; the rest of the
+// row is preserved (so a UI toggle for one plugin doesn't clobber
+// overrides for sibling plugins). When reset is true, the entire row
+// is dropped — agent falls back to system-wide plugin enable state.
+func (s *Server) applyAgentScopePluginsPatch(r *http.Request, agentID string, patch map[string]bool, reset bool) error {
+	if reset {
+		return scope.SaveSettingByScope(r.Context(), s.dataStore, scope.Agent, agentID, "plugins.enabled", nil)
+	}
+	if len(patch) == 0 {
+		return nil
+	}
+	data := map[string]interface{}{}
+	if rec, err := s.dataStore.GetConfigByName(r.Context(), store.KindSetting, "", agentID, "plugins.enabled"); err == nil && rec != nil {
+		for k, v := range rec.Data {
+			data[k] = v
+		}
+	}
+	for k, v := range patch {
+		data[k] = v
+	}
+	return scope.SaveSettingByScope(r.Context(), s.dataStore, scope.Agent, agentID, "plugins.enabled", data)
+}
+
 // agentScopeSplitReplies reads the per-agent multi-bubble override.
 // Returns nil when absent — nil is treated as false by every runtime
 // consumer, so the distinction only matters for the GET response (the
@@ -135,6 +161,26 @@ func (s *Server) agentScopePromptMode(r *http.Request, agentID string) string {
 		return v
 	}
 	return ""
+}
+
+// agentScopePlugins reads the per-agent plugin enable overlay. Returns
+// nil when no row exists. Keyed pluginID → bool; missing keys fall
+// through to the system-wide plugin entry's enabled state.
+func (s *Server) agentScopePlugins(r *http.Request, agentID string) map[string]bool {
+	rec, err := s.dataStore.GetConfigByName(r.Context(), store.KindSetting, "", agentID, "plugins.enabled")
+	if err != nil || rec == nil {
+		return nil
+	}
+	out := make(map[string]bool, len(rec.Data))
+	for k, v := range rec.Data {
+		if b, ok := v.(bool); ok {
+			out[k] = b
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // agentScopeAutoPersist reads the per-agent autoPersist override.
@@ -438,6 +484,12 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 		// system default (currently effectively disabled).
 		AutoPersist      *bool `json:"autoPersist,omitempty"`
 		AutoPersistReset bool  `json:"autoPersistReset,omitempty"`
+		// Plugins per-agent enable overlay. Keys are plugin IDs, values
+		// are bool. Patch semantics: only the keys present in this map
+		// get written; other keys in the existing row are preserved.
+		// To clear all overrides for this agent, send pluginsReset:true.
+		Plugins      map[string]bool `json:"plugins,omitempty"`
+		PluginsReset bool            `json:"pluginsReset,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
@@ -528,6 +580,16 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
+	// Plugins-enabled overlay: separate config row (scope=agent,
+	// name=plugins.enabled), so doesn't go through the agents.defaults
+	// patch path. Reset clears the row entirely; otherwise we merge
+	// the incoming map keys into the existing data.
+	if req.PluginsReset || req.Plugins != nil {
+		if err := s.applyAgentScopePluginsPatch(r, rec.ID, req.Plugins, req.PluginsReset); err != nil {
+			jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+	}
 	// invalidateAgent (not invalidateUser) so super_admin / public-link
 	// viewers / apikey callers that lazy-attached this agent into their
 	// own UserSpace also drop their stale rc.Model — without this they
@@ -543,6 +605,7 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 			"promptMode":       s.agentScopePromptMode(r, rec.ID),
 			"splitReplies":     s.agentScopeSplitReplies(r, rec.ID),
 			"autoPersist":      s.agentScopeAutoPersist(r, rec.ID),
+			"plugins":          s.agentScopePlugins(r, rec.ID),
 			"config":           rec.Config,
 			"isPublic":         rec.IsPublic,
 			"shareModelConfig": share,
@@ -582,6 +645,7 @@ func (s *Server) handleGetAgent(w http.ResponseWriter, r *http.Request) {
 			"promptMode":       s.agentScopePromptMode(r, rec.ID),
 			"splitReplies":     s.agentScopeSplitReplies(r, rec.ID),
 			"autoPersist":      s.agentScopeAutoPersist(r, rec.ID),
+			"plugins":          s.agentScopePlugins(r, rec.ID),
 			"avatarUrl":        "/api/agents/" + rec.ID + "/files/avatar.png",
 			"createdAt":        rec.CreatedAt,
 			"isPublic":         rec.IsPublic,

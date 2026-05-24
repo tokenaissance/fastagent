@@ -115,6 +115,11 @@ export interface AgentDetail {
   // this is the only path the agent has to remember a chatter across
   // sessions.
   autoPersist?: boolean | null;
+  // plugins is the per-agent hook-plugin enable overlay: pluginID →
+  // enabled. Missing keys fall back to the system-wide enable state
+  // (visible via /api/plugins). null/undefined means "no per-agent
+  // override at all".
+  plugins?: Record<string, boolean> | null;
   soul?: string;
   skills?: string[];
   tools?: string[];
@@ -1260,6 +1265,11 @@ export interface AgentUpdatePayload {
   // profile) and MEMORY.md (long-term facts) — see Agent.autoPersist.
   autoPersist?: boolean;
   autoPersistReset?: boolean;
+  // Per-agent plugin enable overrides (patch semantics — keys not in
+  // the map are preserved). Pass pluginsReset:true to clear ALL
+  // per-agent overrides and fall back to system-wide enable state.
+  plugins?: Record<string, boolean>;
+  pluginsReset?: boolean;
 }
 
 export async function updateAgent(id: string, agent: AgentUpdatePayload) {
@@ -1269,6 +1279,26 @@ export async function updateAgent(id: string, agent: AgentUpdatePayload) {
     body: JSON.stringify(agent),
   });
   return res.json();
+}
+
+// HookPlugin is the metadata shape returned by /api/plugins/hook —
+// read-only listing of hook-type plugins available on this install.
+// Operators pick which to enable per-agent on the Context page.
+export interface HookPlugin {
+  id: string;
+  name?: string;
+  description?: string;
+  version?: string;
+}
+
+export async function listHookPlugins(): Promise<HookPlugin[]> {
+  try {
+    const res = await apiFetch("/api/plugins/hook");
+    if (!res.ok) return [];
+    return (await res.json()) as HookPlugin[];
+  } catch {
+    return [];
+  }
 }
 
 export interface AgentFileConfig {

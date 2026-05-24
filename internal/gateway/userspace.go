@@ -14,6 +14,7 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/agent"
 	"github.com/fastclaw-ai/fastclaw/internal/bus"
 	"github.com/fastclaw-ai/fastclaw/internal/config"
+	"github.com/fastclaw-ai/fastclaw/internal/plugin"
 	"github.com/fastclaw-ai/fastclaw/internal/provider"
 	"github.com/fastclaw-ai/fastclaw/internal/sandbox"
 	"github.com/fastclaw-ai/fastclaw/internal/scope"
@@ -305,6 +306,11 @@ type UserSpace struct {
 	Provider    provider.Provider
 	Agents      *agent.Manager
 	SandboxPool sandbox.ExecutorPool
+	// PluginMgr is borrowed from the gateway (process-wide singleton).
+	// Held here so EnsureAgent — the foreign-agent attach path — can
+	// register hook plugins onto the lazy-built agent without
+	// reaching back into the gateway. Nil when systemPlugins is off.
+	PluginMgr *plugin.Manager
 
 	mu sync.Mutex
 }
@@ -575,6 +581,16 @@ func (sp *UserSpace) EnsureAgent(ctx context.Context, st store.Store, mb *bus.Me
 			ag.ToolRegistry().SetSandboxRoot(rc.Workspace)
 		}
 	}
+	// Wire hook plugins onto the freshly-attached agent. Mirrors what
+	// loadUserSpace does for owner agents — without this, hook
+	// plugins would only fire for the agent's owner and never for
+	// chatters who reach the agent through a foreign-attach (channel
+	// binding, public link, super_admin browse).
+	if sp.PluginMgr != nil {
+		if ag := sp.Agents.AgentByID(rc.ID); ag != nil {
+			registerHookPluginsForAgent(ctx, sp.PluginMgr, st, ag)
+		}
+	}
 	slog.Info("agent injected into foreign user space",
 		"caller", sp.UserID, "agent", rc.ID, "owner", rec.UserID)
 	return nil
@@ -591,7 +607,7 @@ func (sp *UserSpace) EnsureAgent(ctx context.Context, st store.Store, mb *bus.Me
 // by the resulting UserSpace. Pass nil when sandbox is disabled at
 // system scope; agents will run with path-only file roots in that
 // case.
-func loadUserSpace(ctx context.Context, userID string, mb *bus.MessageBus, st store.Store, ws workspace.Store, meter usage.Meter, systemSandboxPool sandbox.ExecutorPool) (*UserSpace, error) {
+func loadUserSpace(ctx context.Context, userID string, mb *bus.MessageBus, st store.Store, ws workspace.Store, meter usage.Meter, systemSandboxPool sandbox.ExecutorPool, pluginMgr *plugin.Manager) (*UserSpace, error) {
 	if userID == "" {
 		return nil, fmt.Errorf("loadUserSpace: userID required")
 	}
@@ -752,6 +768,16 @@ func loadUserSpace(ctx context.Context, userID string, mb *bus.MessageBus, st st
 
 	pool := attachSandboxToAgents(systemSandboxPool, userID, resolved, agentMgr)
 
+	// Wire hook plugins onto each agent's HookRegistry. Per-agent
+	// enable comes from the configs row at (scope=agent, agent_id=X,
+	// name=plugins.enabled) — falling back to the plugin manifest's
+	// boot-time enabled state when there's no per-agent override.
+	if pluginMgr != nil {
+		for _, ag := range agentMgr.All() {
+			registerHookPluginsForAgent(ctx, pluginMgr, st, ag)
+		}
+	}
+
 	slog.Info("loaded user space", "user", userID, "agents", agentMgr.Names())
 
 	return &UserSpace{
@@ -760,7 +786,75 @@ func loadUserSpace(ctx context.Context, userID string, mb *bus.MessageBus, st st
 		Provider:    prov,
 		Agents:      agentMgr,
 		SandboxPool: pool,
+		PluginMgr:   pluginMgr,
 	}, nil
+}
+
+// registerHookPluginsForAgent walks every running hook-type plugin
+// and attaches it to ag.HookRegistry IF this agent has explicitly
+// opted in via the per-agent plugins.enabled row.
+//
+// Default is OPT-IN: a plugin being enabled system-wide only means
+// its process runs and is available to attach. Each agent must
+// individually set `plugins.enabled[<id>] = true` (via the dashboard
+// Plugins card or directly in the configs table) for the plugin's
+// hooks to fire on its turns. System-wide enable without per-agent
+// opt-in = plugin idle for that agent.
+//
+// Rationale: hook plugins can change agent behavior in surprising
+// ways (extra messages, modified prompts, recorded conversation
+// data). Default-deny avoids accidentally affecting agents the
+// operator didn't intend.
+//
+// Idempotent at the manager level (Process is already running), but
+// the HookRegistry side accumulates — call sites must not double-
+// register for the same agent. Today the only call sites are
+// loadUserSpace (once per UserSpace boot) and EnsureAgent (once per
+// foreign attach), neither of which fires twice for the same agent.
+func registerHookPluginsForAgent(ctx context.Context, pluginMgr *plugin.Manager, st store.Store, ag *agent.Agent) {
+	overrides := readAgentScopePluginsEnabled(ctx, st, ag.Name())
+	if len(overrides) == 0 {
+		return // fast path: no opt-ins for this agent
+	}
+	for _, inst := range pluginMgr.HookPlugins() {
+		id := inst.Manifest.ID
+		// Opt-in: only attach if this agent explicitly set true.
+		// Missing key or explicit false → skip.
+		if !overrides[id] {
+			continue
+		}
+		if inst.Process == nil || !inst.Process.IsRunning() {
+			slog.Warn("plugin: agent opted in but plugin not running",
+				"plugin", id, "agent", ag.Name())
+			continue
+		}
+		if err := plugin.RegisterPluginHooks(ctx, pluginMgr, id, ag.HookRegistry(), ag.Name()); err != nil {
+			slog.Warn("plugin: hook register failed",
+				"plugin", id, "agent", ag.Name(), "error", err)
+		}
+	}
+}
+
+// readAgentScopePluginsEnabled reads the per-agent plugin enable
+// overlay from the configs table: scope=agent, name=plugins.enabled,
+// data = {"<pluginID>": true|false, ...}. Missing row / missing key
+// means "no override; use system default". Returns nil on lookup
+// error (callers treat nil as "no overrides").
+func readAgentScopePluginsEnabled(ctx context.Context, st store.Store, agentID string) map[string]bool {
+	if st == nil || agentID == "" {
+		return nil
+	}
+	rec, err := st.GetConfigByName(ctx, store.KindSetting, "", agentID, "plugins.enabled")
+	if err != nil || rec == nil {
+		return nil
+	}
+	out := make(map[string]bool, len(rec.Data))
+	for k, v := range rec.Data {
+		if b, ok := v.(bool); ok {
+			out[k] = b
+		}
+	}
+	return out
 }
 
 // newProviderFromConfig picks an LLM provider for the resolved default
@@ -817,7 +911,12 @@ type userSpaceRegistry struct {
 	workspace         workspace.Store
 	meter             usage.Meter
 	systemSandboxPool sandbox.ExecutorPool
-	idleTTL           time.Duration
+	// pluginMgr is the shared (process-wide) plugin manager. Nil
+	// when systemPlugins is disabled. Used by loadUserSpace and
+	// EnsureAgent to register hook-type plugins onto each agent's
+	// HookRegistry, gated by per-agent plugins.enabled config.
+	pluginMgr *plugin.Manager
+	idleTTL   time.Duration
 }
 
 type userSpaceEntry struct {
@@ -825,7 +924,7 @@ type userSpaceEntry struct {
 	lastUsed time.Time
 }
 
-func newUserSpaceRegistry(mb *bus.MessageBus, st store.Store, ws workspace.Store, meter usage.Meter, systemSandboxPool sandbox.ExecutorPool) *userSpaceRegistry {
+func newUserSpaceRegistry(mb *bus.MessageBus, st store.Store, ws workspace.Store, meter usage.Meter, systemSandboxPool sandbox.ExecutorPool, pluginMgr *plugin.Manager) *userSpaceRegistry {
 	return &userSpaceRegistry{
 		spaces:            make(map[string]*userSpaceEntry),
 		bus:               mb,
@@ -833,6 +932,7 @@ func newUserSpaceRegistry(mb *bus.MessageBus, st store.Store, ws workspace.Store
 		workspace:         ws,
 		meter:             meter,
 		systemSandboxPool: systemSandboxPool,
+		pluginMgr:         pluginMgr,
 		idleTTL:           30 * time.Minute,
 	}
 }
@@ -860,7 +960,7 @@ func (r *userSpaceRegistry) getOrLoad(ctx context.Context, userID string) (*User
 		e.lastUsed = time.Now()
 		return e.space, nil
 	}
-	sp, err := loadUserSpace(ctx, userID, r.bus, r.store, r.workspace, r.meter, r.systemSandboxPool)
+	sp, err := loadUserSpace(ctx, userID, r.bus, r.store, r.workspace, r.meter, r.systemSandboxPool, r.pluginMgr)
 	if err != nil {
 		return nil, err
 	}

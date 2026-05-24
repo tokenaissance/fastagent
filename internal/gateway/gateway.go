@@ -352,7 +352,7 @@ func New(env *config.EnvConfig) (*Gateway, error) {
 		workspace:   ws,
 		usage:       meter,
 		sandboxPool: systemSandboxPool,
-		users:       newUserSpaceRegistry(mb, st, ws, meter, systemSandboxPool),
+		users:       newUserSpaceRegistry(mb, st, ws, meter, systemSandboxPool, pluginMgr),
 		chanMgr:     chanMgr,
 		webChan:     webChan,
 		scheduler:   scheduler,

@@ -1917,7 +1917,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		)
 
 		// Hook: BeforeModelCall
-		hcBefore := &HookContext{AgentName: a.name, Point: BeforeModelCall, Messages: messages, ChatID: msg.ChatID, UserID: a.ownerUserID}
+		hcBefore := &HookContext{AgentName: a.name, Point: BeforeModelCall, Messages: messages, Channel: msg.Channel, AccountID: msg.AccountID, ChatID: msg.ChatID, UserID: a.ownerUserID}
 		a.hooks.Run(ctx, hcBefore)
 
 		// PII scrubbing: redact sensitive data before sending to LLM
@@ -1955,7 +1955,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		resp, err := a.streamChatToResponse(ctx, llmMessages, callTools)
 
 		// Hook: AfterModelCall
-		hcAfter := &HookContext{AgentName: a.name, Point: AfterModelCall, Messages: messages, Response: resp, Error: err, StartTime: hcBefore.StartTime, ChatID: msg.ChatID, UserID: a.ownerUserID, GoalSessionKey: a.registry.GoalSessionKey()}
+		hcAfter := &HookContext{AgentName: a.name, Point: AfterModelCall, Messages: messages, Response: resp, Error: err, StartTime: hcBefore.StartTime, Channel: msg.Channel, AccountID: msg.AccountID, ChatID: msg.ChatID, UserID: a.ownerUserID, GoalSessionKey: a.registry.GoalSessionKey()}
 		a.hooks.Run(ctx, hcAfter)
 
 		if err != nil {
@@ -2057,6 +2057,9 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 				Point:     BeforeToolCall,
 				ToolName:  tc.Function.Name,
 				ToolArgs:  tc.Function.Arguments,
+				Channel:   msg.Channel,
+				AccountID: msg.AccountID,
+				ChatID:    msg.ChatID,
 				UserID:    a.ownerUserID,
 			})
 		}
@@ -2147,6 +2150,9 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 				ToolName:       r.toolName,
 				ToolResult:     resultContent,
 				Error:          r.err,
+				Channel:        msg.Channel,
+				AccountID:      msg.AccountID,
+				ChatID:         msg.ChatID,
 				UserID:         a.ownerUserID,
 				GoalSessionKey: a.registry.GoalSessionKey(),
 				IsPlanMode:     isPlanMode(msg.Params),
@@ -2418,6 +2424,8 @@ func (a *Agent) runPostTurn(ctx context.Context, msg bus.InboundMessage, message
 		ToolCallCount:  toolCallCount,
 		Workspace:      a.homePath,
 		UserID:         a.ownerUserID,
+		Channel:        msg.Channel,
+		AccountID:      msg.AccountID,
 		ChatID:         msg.ChatID,
 		Source:         msg.Source,
 		GoalSessionKey: a.registry.GoalSessionKey(),
@@ -2578,13 +2586,13 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 
 	// ReAct loop - use Chat for tool iterations
 	for i := 0; i < a.maxToolIterations; i++ {
-		hcBefore := &HookContext{AgentName: a.name, Point: BeforeModelCall, Messages: messages, ChatID: msg.ChatID, UserID: a.ownerUserID}
+		hcBefore := &HookContext{AgentName: a.name, Point: BeforeModelCall, Messages: messages, Channel: msg.Channel, AccountID: msg.AccountID, ChatID: msg.ChatID, UserID: a.ownerUserID}
 		a.hooks.Run(ctx, hcBefore)
 
 		dumpLLMRequest(a.name, a.model, messages, toolDefs)
 		resp, err := a.provider.Chat(ctx, messages, toolDefs, a.model, a.maxTokens, a.temperature)
 
-		hcAfter := &HookContext{AgentName: a.name, Point: AfterModelCall, Messages: messages, Response: resp, Error: err, StartTime: hcBefore.StartTime, ChatID: msg.ChatID, UserID: a.ownerUserID, GoalSessionKey: a.registry.GoalSessionKey()}
+		hcAfter := &HookContext{AgentName: a.name, Point: AfterModelCall, Messages: messages, Response: resp, Error: err, StartTime: hcBefore.StartTime, Channel: msg.Channel, AccountID: msg.AccountID, ChatID: msg.ChatID, UserID: a.ownerUserID, GoalSessionKey: a.registry.GoalSessionKey()}
 		a.hooks.Run(ctx, hcAfter)
 
 		if err != nil {
@@ -2721,7 +2729,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 
 		// Fire BeforeToolCall hooks
 		for _, tc := range resp.ToolCalls {
-			a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: BeforeToolCall, ToolName: tc.Function.Name, ToolArgs: tc.Function.Arguments, UserID: a.ownerUserID})
+			a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: BeforeToolCall, ToolName: tc.Function.Name, ToolArgs: tc.Function.Arguments, Channel: msg.Channel, AccountID: msg.AccountID, ChatID: msg.ChatID, UserID: a.ownerUserID})
 		}
 
 		// Execute tools concurrently via SDK engine
@@ -2731,7 +2739,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 		for idx, r := range results {
 			tc := resp.ToolCalls[idx]
 			resultContent, meta := extractToolMeta(r.result)
-			a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: AfterToolCall, ToolName: r.toolName, ToolResult: resultContent, Error: r.err, UserID: a.ownerUserID, GoalSessionKey: a.registry.GoalSessionKey(), IsPlanMode: isPlanMode(msg.Params), Source: msg.Source})
+			a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: AfterToolCall, ToolName: r.toolName, ToolResult: resultContent, Error: r.err, Channel: msg.Channel, AccountID: msg.AccountID, ChatID: msg.ChatID, UserID: a.ownerUserID, GoalSessionKey: a.registry.GoalSessionKey(), IsPlanMode: isPlanMode(msg.Params), Source: msg.Source})
 
 			if r.err != nil {
 				slog.Warn("tool execution error", "agent", a.name, "name", r.toolName, "error", r.err)
