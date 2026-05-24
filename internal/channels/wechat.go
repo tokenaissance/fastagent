@@ -487,8 +487,15 @@ func (w *WeChat) SendMessage(msg bus.OutboundMessage) error {
 	// also collapses stray markers to newlines when AllowSplit is off,
 	// so we never see them here.
 	plain := wechatStripMarkdown(FlattenMarkdownTables(msg.Text))
-	if err := w.sendTextOnly(msg.ChatID, plain); err != nil {
-		return err
+	// Skip the text leg when the body has nothing visible left after
+	// markdown strip — caught the case where a multi-bubble split
+	// produced a chunk whose only content was whitespace or markdown
+	// punctuation, which `sendTextOnly` would otherwise post as a
+	// blank bubble alongside any attached media.
+	if strings.TrimSpace(plain) != "" {
+		if err := w.sendTextOnly(msg.ChatID, plain); err != nil {
+			return err
+		}
 	}
 	for _, item := range msg.MediaItems {
 		if len(item.Bytes) == 0 {
