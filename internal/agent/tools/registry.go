@@ -150,12 +150,26 @@ type Registry struct {
 	// never be visible from the UI — so we route identity writes here
 	// when set.
 	systemFileStore SystemFileStore
-	// userID is the chatter — passed through to systemFileStore for
-	// per-user files (USER.md, MEMORY.md) so chat-time writes land in
-	// that caller's row. Identity files (SOUL.md, IDENTITY.md,
+	// userID is the UserSpace owner — passed through to systemFileStore
+	// for per-user files (USER.md, MEMORY.md) when no per-turn chatter
+	// override is set. Identity files (SOUL.md, IDENTITY.md,
 	// BOOTSTRAP.md, ...) route through agentOwnerUserID instead — see
 	// systemFileUserID. Set once at agent boot via SetOwnerUserID.
+	//
+	// NOTE: for IM channels where one channel-owner UserSpace serves
+	// many distinct senders (each minted as its own app_user), the
+	// per-turn chatter is plumbed via chatterUserID below — this field
+	// is just the boot-time default / web-direct case where chatter ==
+	// owner.
 	userID string
+	// chatterUserID, when non-empty, overrides userID for per-user file
+	// routing (USER.md / MEMORY.md). Set per-turn by the agent loop
+	// from the resolved chatter so an IM message from a per-sender
+	// app_user lands writes in that sender's row rather than the
+	// channel-owner row. Reset implicitly each turn (overwritten by the
+	// next SetChatterUserID call). Empty means "no per-turn override,
+	// fall back to userID."
+	chatterUserID string
 	// agentOwnerUserID is agent.user_id (the human/account that owns
 	// this agent definition). Identity files write here so the
 	// canonical "shared template" everyone reads via owner-row fallback
@@ -268,12 +282,24 @@ func (r *Registry) SetSystemFileStore(s SystemFileStore, agentID string) {
 	}
 }
 
-// SetOwnerUserID records the chatter so per-user file writes go through
-// the systemFileStore tagged with the right user_id (per-user override).
-// Identity files route via SetAgentOwnerUserID instead. Set once at
-// agent boot from the UserSpace's owner.
+// SetOwnerUserID records the UserSpace owner used as the default per-
+// user file routing target. Identity files route via SetAgentOwnerUserID
+// instead. Set once at agent boot from the UserSpace's owner. The
+// per-turn chatter (different from the owner on IM multi-sender
+// channels) is plumbed via SetChatterUserID and takes precedence at
+// systemFileUserID time.
 func (r *Registry) SetOwnerUserID(userID string) {
 	r.userID = userID
+}
+
+// SetChatterUserID overrides the per-user file routing target for the
+// in-flight turn. Called by the agent loop at the top of HandleMessage /
+// HandleMessageStream with the resolved chatterUID so per-sender USER.md
+// / MEMORY.md writes (and reads, via the same systemFileUserID path)
+// land in the right row even when the UserSpace is owned by a channel
+// binder rather than the actual chatter. Pass "" to clear.
+func (r *Registry) SetChatterUserID(uid string) {
+	r.chatterUserID = uid
 }
 
 // SetAgentOwnerUserID records the agent's owning user_id (agent.user_id
@@ -300,12 +326,16 @@ func (r *Registry) SetUserSkillsRoot(dir string) {
 // to. Identity files (SOUL/IDENTITY/AGENTS/BOOTSTRAP/TOOLS/HEARTBEAT/
 // agent.json) route to agentOwnerUserID so the "shared template" lives
 // under a single, owner-keyed row; per-user files (USER.md, MEMORY.md)
-// route to the chatter (userID). Falls back to userID when the agent
-// owner isn't set — that's the single-user / legacy case where they
-// coincide anyway.
+// route to the per-turn chatter (chatterUserID when set, otherwise the
+// UserSpace owner userID). Falls back to userID when the agent owner
+// isn't set — that's the single-user / legacy case where they coincide
+// anyway.
 func (r *Registry) systemFileUserID(filename string) string {
 	if r.agentOwnerUserID != "" && identityFiles[filepath.Base(filepath.Clean(filename))] {
 		return r.agentOwnerUserID
+	}
+	if r.chatterUserID != "" {
+		return r.chatterUserID
 	}
 	return r.userID
 }
