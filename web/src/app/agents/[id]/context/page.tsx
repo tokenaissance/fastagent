@@ -11,7 +11,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Check, MessageSquare, MessagesSquare, Puzzle } from "lucide-react";
+import { Brain, Check, MessageSquare, MessagesSquare, Puzzle } from "lucide-react";
 import { getAgent, updateAgent } from "@/lib/api";
 import { useAgentIdFromURL } from "@/hooks/use-agent-id";
 import { useAgentName } from "@/hooks/use-agent-name";
@@ -46,6 +46,11 @@ export default function AgentContextPage() {
   // treated as false here.
   const [splitReplies, setSplitReplies] = useState(false);
   const [splitRepliesSaving, setSplitRepliesSaving] = useState(false);
+  // Per-agent auto-persist toggle. Off by default; null on the wire is
+  // treated as false here. When on, every N turns the runtime fires an
+  // LLM-driven distill pass that appends to USER.md / MEMORY.md.
+  const [autoPersist, setAutoPersist] = useState(false);
+  const [autoPersistSaving, setAutoPersistSaving] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -62,6 +67,7 @@ export default function AgentContextPage() {
         setPromptMode("");
       }
       setSplitReplies(agentRec?.splitReplies === true);
+      setAutoPersist(agentRec?.autoPersist === true);
     } finally {
       setLoading(false);
     }
@@ -104,6 +110,24 @@ export default function AgentContextPage() {
       setSplitReplies(prev);
     } finally {
       setSplitRepliesSaving(false);
+    }
+  };
+
+  // Optimistic toggle for autoPersist. Same shape as splitReplies; on
+  // failure roll back. The runtime falls back to system default (off
+  // in practice today, since the dead-code NewAgentWithFullCfg path
+  // never gets called) when no per-agent override is saved.
+  const handleAutoPersistChange = async (next: boolean) => {
+    const prev = autoPersist;
+    setAutoPersist(next);
+    setAutoPersistSaving(true);
+    try {
+      await updateAgent(agentId, { autoPersist: next });
+      flashSaved();
+    } catch {
+      setAutoPersist(prev);
+    } finally {
+      setAutoPersistSaving(false);
     }
   };
 
@@ -184,13 +208,19 @@ export default function AgentContextPage() {
           </div>
           <div>
             <strong>Chatbot</strong> — slim framework so persona files
-            shape voice directly. Built-ins narrowed to just{" "}
+            shape voice directly. Built-ins narrowed to{" "}
             <code className="text-[10px]">image_gen</code>,{" "}
             <code className="text-[10px]">tts</code>,{" "}
-            <code className="text-[10px]">memory_search</code> — the
-            main reply emits as plain text, multi-bubble via the inline
-            split marker. For companion / role-play / customer-support
-            bots.
+            <code className="text-[10px]">write_file</code>,{" "}
+            <code className="text-[10px]">edit_file</code> — the
+            last two let the LLM persist USER.md / MEMORY.md when it
+            learns about the chatter. Memory is the USER.md / MEMORY.md
+            sections inlined in the system prompt; no{" "}
+            <code className="text-[10px]">memory_search</code> escape
+            hatch (it scans logs chatbot mode doesn't write, returns
+            empty, and confuses the model). Main reply emits as plain
+            text, multi-bubble via the inline split marker. For
+            companion / role-play / customer-support bots.
           </div>
           <div>
             <strong>Customize</strong> — only the date anchor + your
@@ -236,6 +266,38 @@ export default function AgentContextPage() {
             onCheckedChange={handleSplitRepliesChange}
             disabled={splitRepliesSaving}
             aria-label="Multi-bubble replies"
+          />
+        </div>
+      </div>
+
+      {/* Auto-remember chatter — lives here because it's about how the
+          agent retains context across turns / sessions, parallel to how
+          Multi-bubble is about how it emits replies. */}
+      <div className="rounded-lg border border-border bg-card p-5">
+        <div className="flex items-start justify-between gap-4">
+          <div className="flex items-start gap-3 min-w-0">
+            <Brain className="h-4 w-4 text-primary mt-0.5 shrink-0" />
+            <div className="min-w-0">
+              <h3 className="font-medium">Auto-remember chatter</h3>
+              <p className="text-sm text-muted-foreground mt-1">
+                Backup persistence path: every 5 user-turns the runtime
+                fires a small LLM call that distills the recent
+                conversation into USER.md / MEMORY.md. The primary
+                path is the LLM writing those files directly via{" "}
+                <code className="text-[10px]">write_file</code> /{" "}
+                <code className="text-[10px]">edit_file</code> (now
+                available in Chatbot mode too) — this toggle just
+                makes sure something still gets persisted when the
+                model forgets to. Off by default to preserve the
+                stateless-across-sessions behavior.
+              </p>
+            </div>
+          </div>
+          <Switch
+            checked={autoPersist}
+            onCheckedChange={handleAutoPersistChange}
+            disabled={autoPersistSaving}
+            aria-label="Auto-remember chatter"
           />
         </div>
       </div>

@@ -79,6 +79,18 @@ type Agent struct {
 	// can rewire a fresh ContextBuilder to keep reading from the Store
 	// instead of silently falling back to pod-local filesystem.
 	memoryStore MemoryStore
+	// displayName mirrors agents.name (the operator-given name). Stamped
+	// on the ContextBuilder for the IDENTITY.md fallback line — kept on
+	// Agent too so ReloadWorkspaceFiles can re-apply after rebuilding
+	// the ContextBuilder from scratch.
+	displayName string
+	// dataStore is the full relational Store (when wired by the
+	// manager). Used for per-turn durable lookups that can't go through
+	// the narrower MemoryStore — currently just the autoPersist gate
+	// counting (chatter, agent) user-message rows so the cadence
+	// survives daemon restarts / UserSpace invalidations / idle
+	// evictions that all reset the in-memory turnCount.
+	dataStore store.Store
 	// workspaceStore is optional; when set, SkillsLoader hydrates per-agent
 	// and global skill dirs from the object store on every turn so skills
 	// uploaded post-boot or on a sibling replica become visible here.
@@ -178,13 +190,8 @@ func NewAgentWithFullCfg(rc config.ResolvedAgent, prov provider.Provider, mb *bu
 	ag := NewAgentWithSkillsCfg(rc, prov, mb, homeDir, fullCfg.Skills)
 	ag.memoryCfg = fullCfg.Memory
 	ag.piiScrubEnabled = fullCfg.Privacy.PIIScrubbing.Enabled
-	// Multi-bubble split-replies: per-agent only — system-level toggle
-	// was removed since "every agent splits the same way" is rarely
-	// what an operator wants for a deployment running multiple personas.
-	// nil override = off (default); non-nil = explicit value.
-	if rc.SplitReplies != nil {
-		ag.splitReplies = *rc.SplitReplies
-	}
+	// splitReplies is plumbed inside NewAgentWithSkillsCfg so foreign-
+	// attached agents also pick up the toggle; don't re-stamp here.
 
 	// Set up FTS store if configured
 	if fullCfg.Memory.FTS.Enabled {
@@ -308,6 +315,42 @@ func NewAgentWithSkillsCfg(rc config.ResolvedAgent, prov provider.Provider, mb *
 		messageBus:      mb,
 		engine:          eng,
 		costTracker:     eng.costTracker,
+	}
+
+	// Multi-bubble split-replies: per-agent only — system-level toggle
+	// was removed since "every agent splits the same way" is rarely
+	// what an operator wants for a deployment running multiple personas.
+	// nil override = off (default); non-nil = explicit value. Plumbed at
+	// this layer (not just NewAgentWithFullCfg) so foreign-attached
+	// agents — chatters reaching an agent they don't own via a channel
+	// binding — also pick up the toggle. Without this the wechat
+	// dispatcher hint never reaches the LLM for non-owner chatters and
+	// the model falls back to markdown `---` separators that render as
+	// one bubble.
+	if rc.SplitReplies != nil {
+		ag.splitReplies = *rc.SplitReplies
+	}
+	// Stamp the operator-given display name onto the context builder
+	// so an empty IDENTITY.md doesn't leak the base-model identity
+	// ("I am Claude") through to chatters — the system prompt's
+	// identity-fallback line uses this. Also keep on the Agent so
+	// ReloadWorkspaceFiles (which rebuilds the ContextBuilder from
+	// scratch) can re-apply it instead of losing the value.
+	ag.displayName = rc.DisplayName
+	ag.ctxBuilder.SetDisplayName(rc.DisplayName)
+	// Auto-persist memory toggle — per-agent override. The manager
+	// today only ever calls NewAgentWithSkillsCfg (not the unused
+	// NewAgentWithFullCfg), which means the system/user `memory`
+	// configs row is effectively dead in production — per-agent
+	// agents.defaults.autoPersist is the only working path. Set
+	// EveryNTurns default here too so the modulo check at the
+	// runPostTurn site doesn't panic when an operator enables
+	// AutoPersist without specifying a cadence.
+	if rc.AutoPersist != nil {
+		ag.memoryCfg.AutoPersist.Enabled = *rc.AutoPersist
+	}
+	if ag.memoryCfg.AutoPersist.EveryNTurns == 0 {
+		ag.memoryCfg.AutoPersist.EveryNTurns = 5
 	}
 
 	// message tool — registered HERE (post-Agent) so the closure can read
@@ -1251,14 +1294,112 @@ func senderMetadata(msg bus.InboundMessage) map[string]any {
 // doesn't see skills" report — diff this line between a DM turn and a
 // group turn for the same agent and the divergence point becomes
 // obvious.
-func logSystemPromptFingerprint(agentName, channel, chatID, userID, prompt string) {
+func (a *Agent) logSystemPromptFingerprint(channel, chatID, userID, prompt string) {
 	skillCount := strings.Count(prompt, "<skill name=")
 	hasFeishu := strings.Contains(prompt, "feedback-to-feishu")
+	// Per-chatter file presence — sized so we can tell at a glance
+	// whether the chatter's USER.md / MEMORY.md actually reached the
+	// model this turn. Zero on either means the section was omitted
+	// (no row, empty content, or chatterUID didn't resolve). Match
+	// against the canonical section header text used in context.go;
+	// keep this in sync with that file or the diagnostic goes dark.
+	hasUserMD := strings.Contains(prompt, "<current_chatter_profile")
+	hasMemorySection := strings.Contains(prompt, "<chatter_long_term_memory")
+	hasSoul := strings.Contains(prompt, "# SOUL.md")
+	hasIdentity := strings.Contains(prompt, "# IDENTITY.md")
+	// "Remembering things across conversations" is the chatbot-mode
+	// instruction block telling the LLM it CAN persist via write_file.
+	// If chatbot mode is misconfigured / not applied, this string
+	// won't be in the prompt and the model defaults to "I have no
+	// memory" reflexive replies.
+	hasPersistenceInstr := strings.Contains(prompt, "Remembering things across conversations")
+	mode := a.promptMode
+	if mode == "" {
+		mode = config.PromptModeAgent
+	}
 	slog.Info("system prompt assembled",
-		"agent", agentName, "channel", channel, "chat_id", chatID, "user", userID,
+		"agent", a.name, "channel", channel, "chat_id", chatID, "user", userID,
+		"mode", mode,
 		"bytes", len(prompt),
 		"skill_blocks", skillCount,
+		"has_user_md", hasUserMD,
+		"has_memory", hasMemorySection,
+		"has_soul", hasSoul,
+		"has_identity", hasIdentity,
+		"has_persistence_instr", hasPersistenceInstr,
 		"has_feedback_to_feishu", hasFeishu)
+}
+
+// renderChatbotPersistenceReminder returns a terse imperative system
+// message reminding the LLM that in chatbot mode it has write_file /
+// edit_file available and MUST use them to persist chatter info.
+//
+// Why a per-turn reminder rather than relying on the big "Remembering
+// things across conversations" block in the chatbotInfo prompt:
+// Sonnet 4.x in chatbot mode (no other tools, simple persona) reverts
+// to a strong training prior of "I am an AI without persistent
+// memory" — observed lying to chatters with phrasings like
+// "跨对话我没有记忆" even when the system prompt explicitly grants
+// the capability. Putting a short, imperative reminder right before
+// the user turn buys recency weight that outranks the training
+// prior in practice.
+//
+// userMD / memoryMD are the CURRENT contents of those files (the same
+// data that's already in the system prompt under <current_chatter_profile>
+// / <chatter_long_term_memory>). We inline them again here for two
+// reasons: 1) recency weight — they're now the very last system message
+// before the user turn, so the model can't miss them; 2) Sonnet was
+// observed reading the earlier system-prompt copies as schema docs
+// rather than chatter facts and denying knowledge in fresh sessions
+// even with "Name: 狗子" present. Double-rendering is wasted tokens
+// but observably wins.
+//
+// Empty for non-chatbot modes (no tool surface mismatch there).
+func renderChatbotPersistenceReminder(mode, displayName, userMD, memoryMD string) string {
+	if mode != config.PromptModeChatbot {
+		return ""
+	}
+	var sb strings.Builder
+
+	// Identity reinforcement. Sonnet 4.x ignores "Your name is X" lines
+	// in the middle of the system prompt and reverts to "I am Claude"
+	// for "你是谁" / "who are you" questions. Putting the identity in
+	// the per-turn reminder (last system message before the user turn)
+	// + framing it as a violation-warning seems to be what's required
+	// to override the training prior in practice.
+	if displayName != "" {
+		sb.WriteString("## Your identity (per-turn anchor)\n\n")
+		sb.WriteString(fmt.Sprintf("In this runtime you ARE **%s**. When a chatter asks \"你是谁\" / \"who are you\", introduce yourself as **%s** — never \"Claude\" or \"AI 助手\" / \"AI assistant\". Saying \"我是 Claude\" / \"I am Claude\" is a role violation; do not do it. IDENTITY.md / SOUL.md below may add personality / role detail on top of this name, but the name itself is %s.\n\n", displayName, displayName, displayName))
+	}
+
+	sb.WriteString("## Chatter context (load-bearing — re-read every turn)\n\n")
+
+	if strings.TrimSpace(userMD) != "" {
+		sb.WriteString("These are facts about the person you're talking to RIGHT NOW (from USER.md you've persisted). Quote them verbatim when asked \"我是谁\" / \"你记得我吗\":\n\n")
+		sb.WriteString("```\n")
+		sb.WriteString(strings.TrimSpace(userMD))
+		sb.WriteString("\n```\n\n")
+	} else {
+		sb.WriteString("USER.md is empty — you do not yet know who this chatter is. When they share their name / role / preferences, you MUST call write_file('USER.md', ...) in the SAME turn so the next conversation has them.\n\n")
+	}
+
+	if strings.TrimSpace(memoryMD) != "" {
+		sb.WriteString("Long-term facts you've recorded about this chatter (from MEMORY.md):\n\n")
+		sb.WriteString("```\n")
+		sb.WriteString(strings.TrimSpace(memoryMD))
+		sb.WriteString("\n```\n\n")
+	}
+
+	sb.WriteString("## Persistence rules\n\n")
+	sb.WriteString("- You have `write_file` and `edit_file` in your tools — USE them whenever you learn something worth remembering.\n")
+	sb.WriteString("- Identity (name, role, preferences, location, what to call them) → `write_file('USER.md', ...)` or `edit_file('USER.md', ...)`. ALWAYS USER.md. Never MEMORY.md for these.\n")
+	sb.WriteString("- Recurring topics / decisions / project facts to hold across sessions → `MEMORY.md`.\n")
+	sb.WriteString("- **If MEMORY.md already contains identity-shaped content** (e.g. \"关于<name>\" with name / role / preferences mixed in), that's a prior mistake — when the chatter shares an identity update, MIGRATE the identity bits out of MEMORY.md into USER.md (write USER.md with the consolidated profile, then edit_file MEMORY.md to remove the identity bullets that just moved). Don't perpetuate the wrong structure by tacking on more identity in MEMORY.md.\n")
+	sb.WriteString("- NEVER say \"我记住了\" / \"I'll remember\" without actually calling the tool. The text is a lie; the tool call is the truth.\n")
+	sb.WriteString("- NEVER say \"我没有跨对话记忆\" / \"I have no cross-session memory\" — that is FALSE; USER.md and MEMORY.md persist forever once you write them.\n")
+	sb.WriteString("- When asked \"你记住我了吗\" / \"我是谁\", READ the USER.md block above this message. If it has content, the answer is yes — quote the name. If it's empty, the answer is \"not yet — tell me\" and then write whatever they say.")
+
+	return sb.String()
 }
 
 // renderChannelHints emits per-turn protocol notes that the LLM can
@@ -1452,7 +1593,14 @@ func buildToolCatalogForPlan(toolDefs []provider.Tool) string {
 func (a *Agent) handlePlanMode(ctx context.Context, msg bus.InboundMessage) string {
 	chatterUID := a.chatterUserID(msg)
 	ctx = sandbox.WithUserID(ctx, chatterUID)
+	ctx = store.WithChatterUserID(ctx, chatterUID)
 	sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID, msg.ProjectID)
+	// Session.ctx() builds its OWN context from session-held fields
+	// rather than inheriting the caller's ctx — without binding the
+	// chatter onto sess itself, the WithChatterUserID we just stamped
+	// above never reaches AppendSessionMessage / SaveSession and the
+	// chatter_user_id column stays empty.
+	sess.SetChatter(chatterUID)
 	// Steering during plan drafting: plan mode has no ReAct loop to drain
 	// into, so a mid-draft steer is parked in history and answered on
 	// the user's next turn — which matches the plan-mode contract
@@ -1475,7 +1623,7 @@ func (a *Agent) handlePlanMode(ctx context.Context, msg bus.InboundMessage) stri
 	}
 
 	systemPrompt := a.ctxBuilder.BuildSystemPromptAs(chatterUID, a.memory.WithUserID(chatterUID))
-	logSystemPromptFingerprint(a.name, msg.Channel, msg.ChatID, chatterUID, systemPrompt)
+	a.logSystemPromptFingerprint(msg.Channel, msg.ChatID, chatterUID, systemPrompt)
 	// Tool catalog injection: plan mode passes tools=nil to the LLM so
 	// it can't accidentally call anything, but that also hides the
 	// registry from the planning model. Without this, plans were written
@@ -1610,6 +1758,12 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	// (where `npx skills add -g -y` writes). Tagging happens before
 	// any sandbox.Get call below so attachments + exec inherit it.
 	ctx = sandbox.WithUserID(ctx, chatterUID)
+	// Tag ctx with the chatter so DBStore session writes stamp the
+	// chatter_user_id column (sessions / session_messages /
+	// session_events). user_id stays = UserSpace owner so admin views
+	// continue to list "all sessions on my bots"; chatter_user_id
+	// records the actual participant for per-chatter queries.
+	ctx = store.WithChatterUserID(ctx, chatterUID)
 	// Per-turn channel context for the skill-refresh diagnostic. Lets
 	// us correlate the "skills summary refreshed" log emitted inside
 	// refreshSkillsFromStore with the channel the request arrived on,
@@ -1618,6 +1772,12 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		"agent", a.name, "channel", msg.Channel, "chat_id", msg.ChatID, "user", chatterUID)
 	a.refreshSkillsFromStore(chatterUID)
 	sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID, msg.ProjectID)
+	// Bind chatter onto sess. Session.ctx() builds its own
+	// context.Background-rooted ctx for store calls, so the
+	// WithChatterUserID we stamped onto the caller ctx above does NOT
+	// reach AppendSessionMessage / SaveSession on its own — sess has to
+	// carry the chatter itself.
+	sess.SetChatter(chatterUID)
 	// Bind the registry to this chat's session so workspace.Store reads
 	// + writes get session-scoped paths and (when a sandbox pool is
 	// wired) the executor used by exec/read_file/list_dir is tied to a
@@ -1633,6 +1793,10 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	// identifier); goal tools need the durable session.Session.SessionKey
 	// to address rows in agent_goals.
 	a.registry.SetGoalSessionKey(sess.SessionKey())
+	// Per-user file writes (USER.md / MEMORY.md) need to land in the
+	// per-turn chatter's row, not the UserSpace owner — see
+	// Registry.systemFileUserID for the routing rule.
+	a.registry.SetChatterUserID(chatterUID)
 
 	// Steering: mark a turn in-flight so messages arriving mid-run are
 	// buffered onto the session (drained between tool iterations below)
@@ -1665,7 +1829,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 
 	chatterMem := a.memory.WithUserID(chatterUID)
 	systemPrompt := a.ctxBuilder.BuildSystemPromptAs(chatterUID, chatterMem)
-	logSystemPromptFingerprint(a.name, msg.Channel, msg.ChatID, chatterUID, systemPrompt)
+	a.logSystemPromptFingerprint(msg.Channel, msg.ChatID, chatterUID, systemPrompt)
 
 	// Hook: AfterSystemPrompt
 	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: AfterSystemPrompt, UserID: a.ownerUserID})
@@ -1704,6 +1868,14 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	if paramsMsg := renderClientParams(msg.Params); paramsMsg != "" {
 		messages = append(messages, provider.Message{Role: "system", Content: paramsMsg})
 	}
+	// Persistence reminder — chatbot-only, positioned just before the
+	// session history so recency weight outranks the model's training
+	// prior of "I have no cross-session memory". See
+	// renderChatbotPersistenceReminder for why this isn't enough to put
+	// in the main system prompt alone.
+	if reminder := renderChatbotPersistenceReminder(a.promptMode, a.displayName, chatterMem.LoadUserFile(), chatterMem.LoadMemory()); reminder != "" {
+		messages = append(messages, provider.Message{Role: "system", Content: reminder})
+	}
 	messages = append(messages, sessionMsgs...)
 
 	toolDefs := a.registry.DefinitionsForMode(builtinAllowForMode(a.promptMode))
@@ -1725,6 +1897,15 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	// directly instead of burning more rounds chasing dead URLs.
 	allFailedRounds := 0
 	const failedRoundsLimit = 3
+
+	// replyParts accumulates every non-empty assistant text segment
+	// emitted across iterations (preamble lines before tool calls + the
+	// final answer). IM channels deliver a single OutboundMessage per
+	// turn, so without accumulation only the last segment reaches WeChat
+	// while the chat panel shows all of them. Joined with
+	// channels.SplitMessageMarker at return time; manager.dispatchOutbound
+	// splits on it (AllowSplit=true) or collapses to newlines otherwise.
+	var replyParts []string
 
 	// ReAct loop
 	for i := 0; i < a.maxToolIterations; i++ {
@@ -1790,6 +1971,9 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 			asst := provider.Message{Role: "assistant", Content: resp.Content, Thinking: resp.Thinking, Timestamp: time.Now().UnixMilli(), RawAssistant: resp.RawAssistant}
 			sess.Append(asst)
 			emitEvent(ctx, ChatEvent{Type: "content", Data: map[string]any{"content": resp.Content}})
+			if resp.Content != "" {
+				replyParts = append(replyParts, resp.Content)
+			}
 			// End-of-turn steer race: a message buffered after the last
 			// between-rounds drain but before we declare the turn done.
 			// Fold it in and keep going instead of returning, so the
@@ -1808,12 +1992,13 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 			}
 			emitEvent(ctx, ChatEvent{Type: "done"})
 			a.runPostTurn(ctx, msg, messages, totalToolCalls, chatterMem)
-			return resp.Content
+			return joinReplyParts(replyParts)
 		}
 
 		// Emit assistant content before tool calls if present
 		if resp.Content != "" {
 			emitEvent(ctx, ChatEvent{Type: "content", Data: map[string]any{"content": resp.Content}})
+			replyParts = append(replyParts, resp.Content)
 		}
 
 		// Emit tool_call events
@@ -2073,9 +2258,34 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		"content":  finalContent,
 		"metadata": capMeta,
 	}})
+	if finalContent != "" {
+		replyParts = append(replyParts, finalContent)
+	}
 	emitEvent(ctx, ChatEvent{Type: "done"})
 	a.runPostTurn(ctx, msg, messages, totalToolCalls, chatterMem)
-	return finalContent
+	return joinReplyParts(replyParts)
+}
+
+// joinReplyParts joins accumulated assistant text segments with
+// channels.SplitMessageMarker so manager.dispatchOutbound can deliver
+// them as separate IM bubbles when AllowSplit is true. Channels
+// without AllowSplit collapse the marker to a newline at dispatch
+// time, so users still see every segment in one message instead of
+// dropping all but the last.
+func joinReplyParts(parts []string) string {
+	out := parts[:0:0]
+	for _, p := range parts {
+		if strings.TrimSpace(p) != "" {
+			out = append(out, p)
+		}
+	}
+	if len(out) == 0 {
+		return ""
+	}
+	if len(out) == 1 {
+		return out[0]
+	}
+	return strings.Join(out, channels.SplitMessageMarker)
 }
 
 // isFailedToolResult is the agent loop's heuristic for "this tool
@@ -2174,9 +2384,11 @@ func padOrphanToolResults(sess *session.Session) {
 // on a public agent accrues their *own* MEMORY.md / USER.md, not the
 // owner's. nil falls back to the agent-scoped Memory (legacy behavior).
 //
-// FIXME: HandleMessageStream (the SSE path) does not call runPostTurn,
-// so PostTurn hooks never fire on web chat. Tracked separately — see
-// docs/design/goal.md §9.
+// Streaming (HandleMessageStream) and non-streaming (HandleMessage) both
+// fire this. The streaming path calls it from inside the background
+// goroutine that drains the SSE stream, after the final assistant
+// message has been appended to the session — i.e. after the user's
+// reply is fully on-record.
 func (a *Agent) runPostTurn(ctx context.Context, msg bus.InboundMessage, messages []provider.Message, toolCallCount int, chatterMem *Memory) {
 	if chatterMem == nil {
 		chatterMem = a.memory
@@ -2212,12 +2424,50 @@ func (a *Agent) runPostTurn(ctx context.Context, msg bus.InboundMessage, message
 		IsPlanMode:     isPlanMode(msg.Params),
 	})
 
-	// Auto-persist memory every N turns
-	if a.memoryCfg.AutoPersist.Enabled && a.turnCount%a.memoryCfg.AutoPersist.EveryNTurns == 0 {
+	// Auto-persist memory every N user turns.
+	//
+	// Cadence is keyed on a DURABLE counter — `session_messages.role='user'`
+	// rows for this (agent, chatter). Originally this was `a.turnCount`,
+	// an int field on Agent that resets to 0 on daemon restart,
+	// UserSpace invalidation (any agent-scope dashboard save fires
+	// InvalidateAgent), and 30-minute idle eviction. That made it
+	// practically untestable — flipping the dashboard toggle to
+	// observe the next fire reset the counter to 0 every time. Reading
+	// from the DB removes the reset entirely and also gives a natural
+	// per-chatter cadence (the in-memory counter was shared across
+	// all chatters of the same agent).
+	//
+	// Falls back to skipping fire when dataStore isn't wired
+	// (single-user local mode without persistence) — autoPersist
+	// without persistence is meaningless anyway.
+	var chatterUID string
+	if chatterMem != nil {
+		chatterUID = chatterMem.UserID()
+	}
+	willFire := false
+	chatterTurns := 0
+	if a.dataStore != nil && a.memoryCfg.AutoPersist.Enabled && a.memoryCfg.AutoPersist.EveryNTurns > 0 && chatterUID != "" {
+		n, err := a.dataStore.CountChatterUserMessages(ctx, a.name, chatterUID)
+		if err != nil {
+			slog.Warn("auto-persist: count query failed", "agent", a.name, "chatter", chatterUID, "error", err)
+		} else {
+			chatterTurns = n
+			willFire = n > 0 && n%a.memoryCfg.AutoPersist.EveryNTurns == 0
+		}
+	}
+	slog.Info("auto-persist gate",
+		"agent", a.name,
+		"chatter", chatterUID,
+		"enabled", a.memoryCfg.AutoPersist.Enabled,
+		"chatter_turns", chatterTurns,
+		"every_n_turns", a.memoryCfg.AutoPersist.EveryNTurns,
+		"will_fire", willFire)
+	if willFire {
 		model := a.memoryCfg.AutoPersist.Model
 		if model == "" {
 			model = a.model
 		}
+		slog.Info("auto-persist firing", "agent", a.name, "chatter", chatterUID, "model", model, "chatter_turns", chatterTurns, "messages", len(messages))
 		go AutoPersistMemory(ctx, chatterMem, a.provider, model, messages)
 	}
 
@@ -2249,13 +2499,24 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 
 	chatterUID := a.chatterUserID(msg)
 	ctx = sandbox.WithUserID(ctx, chatterUID)
+	// Tag ctx so DBStore session writes stamp chatter_user_id — see
+	// the HandleMessage path for the rationale.
+	ctx = store.WithChatterUserID(ctx, chatterUID)
 	slog.Info("turn: refreshing skills",
 		"agent", a.name, "channel", msg.Channel, "chat_id", msg.ChatID, "user", chatterUID)
 	a.refreshSkillsFromStore(chatterUID)
 	sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID, msg.ProjectID)
+	// Bind chatter onto sess so its ctx() embeds WithChatterUserID
+	// for DBStore session writes — Session.ctx() rebuilds ctx from its
+	// own fields, so the chatter has to live on sess itself.
+	sess.SetChatter(chatterUID)
 	a.bindSession(ctx, msg.Channel, msg.ChatID, msg.ProjectID)
 	a.registry.SetCallerIsAdmin(a.isAdminChatter(msg))
 	a.registry.SetGoalSessionKey(sess.SessionKey())
+	// Per-user file writes (USER.md / MEMORY.md) need to land in the
+	// per-turn chatter's row, not the UserSpace owner — see
+	// Registry.systemFileUserID for the routing rule.
+	a.registry.SetChatterUserID(chatterUID)
 
 	// Same orphan-tool_use safety net as HandleMessage. The streaming path
 	// previously lacked this, so loop detection (which appends an assistant
@@ -2270,7 +2531,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: BeforeSystemPrompt, UserID: a.ownerUserID})
 	chatterMem := a.memory.WithUserID(chatterUID)
 	systemPrompt := a.ctxBuilder.BuildSystemPromptAs(chatterUID, chatterMem)
-	logSystemPromptFingerprint(a.name, msg.Channel, msg.ChatID, chatterUID, systemPrompt)
+	a.logSystemPromptFingerprint(msg.Channel, msg.ChatID, chatterUID, systemPrompt)
 	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: AfterSystemPrompt, UserID: a.ownerUserID})
 
 	// Store raw user message — buildUserMessage handles multi-image
@@ -2300,6 +2561,9 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 	if paramsMsg := renderClientParams(msg.Params); paramsMsg != "" {
 		messages = append(messages, provider.Message{Role: "system", Content: paramsMsg})
 	}
+	if reminder := renderChatbotPersistenceReminder(a.promptMode, a.displayName, chatterMem.LoadUserFile(), chatterMem.LoadMemory()); reminder != "" {
+		messages = append(messages, provider.Message{Role: "system", Content: reminder})
+	}
 	messages = append(messages, sessionMsgs...)
 
 	toolDefs := a.registry.DefinitionsForMode(builtinAllowForMode(a.promptMode))
@@ -2310,6 +2574,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 	}
 	var lastSig toolCallSig
 	consecutiveCount := 0
+	totalToolCalls := 0
 
 	// ReAct loop - use Chat for tool iterations
 	for i := 0; i < a.maxToolIterations; i++ {
@@ -2335,10 +2600,18 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 			if err != nil {
 				slog.Error("LLM stream failed, falling back", "agent", a.name, "error", err)
 				sess.Append(provider.Message{Role: "assistant", Content: resp.Content})
+				a.runPostTurn(ctx, msg, append(messages, provider.Message{Role: "assistant", Content: resp.Content}), totalToolCalls, chatterMem)
 				return a.stringStream(resp.Content)
 			}
 
-			// Collect content in background for session storage
+			// Collect content in background for session storage.
+			// Capture inbound msg + per-turn state out here — the goroutine
+			// below shadows `msg` with the local assistant Message, and
+			// runPostTurn needs the inbound (channel / chat_id / source).
+			inboundMsg := msg
+			messagesAtTurnStart := messages
+			capturedToolCalls := totalToolCalls
+			capturedChatterMem := chatterMem
 			outCh := make(chan provider.StreamChunk, 64)
 			outReader := provider.NewStreamReader(outCh)
 			go func() {
@@ -2396,6 +2669,11 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 					}
 				}
 				sess.Append(msg)
+				// Fire PostTurn now that the assistant message is
+				// persisted. Auto-persist (memory.go) lives behind
+				// runPostTurn; without this call the streaming path
+				// silently skipped it — see the FIXME at runPostTurn.
+				a.runPostTurn(ctx, inboundMsg, append(messagesAtTurnStart, msg), capturedToolCalls, capturedChatterMem)
 			}()
 			return outReader
 		}
@@ -2448,6 +2726,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 
 		// Execute tools concurrently via SDK engine
 		results := a.engine.executeToolsConcurrently(ctx, a.registry, resp.ToolCalls, a.workspacePath)
+		totalToolCalls += len(results)
 
 		for idx, r := range results {
 			tc := resp.ToolCalls[idx]
@@ -2469,7 +2748,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 	}
 
 	slog.Warn("max tool iterations reached — streaming forced final delivery", "agent", a.name, "max", a.maxToolIterations)
-	return a.streamFinalDeliveryAfterCap(ctx, messages, sess)
+	return a.streamFinalDeliveryAfterCap(ctx, msg, messages, sess, totalToolCalls, chatterMem)
 }
 
 // streamFinalDeliveryAfterCap runs one extra ChatStream with tools
@@ -2477,7 +2756,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 // with iteration-cap metadata so the chat UI can badge the bubble.
 // Returned StreamReader matches the contract of the normal "final
 // response" branch above so callers don't need a special case.
-func (a *Agent) streamFinalDeliveryAfterCap(ctx context.Context, messages []provider.Message, sess *session.Session) *provider.StreamReader {
+func (a *Agent) streamFinalDeliveryAfterCap(ctx context.Context, inboundMsg bus.InboundMessage, messages []provider.Message, sess *session.Session, toolCallCount int, chatterMem *Memory) *provider.StreamReader {
 	capMeta := iterationCapMetadata(a.maxToolIterations)
 	finalMessages := append(messages, capReachedNudge(a.maxToolIterations))
 	sr, err := a.provider.ChatStream(ctx, finalMessages, nil, a.model, a.maxTokens, a.temperature)
@@ -2485,8 +2764,10 @@ func (a *Agent) streamFinalDeliveryAfterCap(ctx context.Context, messages []prov
 		// Streaming endpoint failed — persist+emit a fallback line
 		// with the badge so the user still gets the signal.
 		fallback := fmt.Sprintf("I've reached the maximum number of tool iterations (%d) and couldn't synthesize a final response. The work above represents what I gathered before hitting the limit.", a.maxToolIterations)
-		sess.Append(provider.Message{Role: "assistant", Content: fallback, Metadata: capMeta, Timestamp: time.Now().UnixMilli()})
+		fallbackMsg := provider.Message{Role: "assistant", Content: fallback, Metadata: capMeta, Timestamp: time.Now().UnixMilli()}
+		sess.Append(fallbackMsg)
 		emitEvent(ctx, ChatEvent{Type: "content", Data: map[string]any{"content": fallback, "metadata": capMeta}})
+		a.runPostTurn(ctx, inboundMsg, append(messages, fallbackMsg), toolCallCount, chatterMem)
 		return a.stringStream(fallback)
 	}
 
@@ -2557,6 +2838,10 @@ func (a *Agent) streamFinalDeliveryAfterCap(ctx context.Context, messages []prov
 			"content":  "",
 			"metadata": capMeta,
 		}})
+		// Fire PostTurn so AutoPersist (and any future PostTurn hook)
+		// runs on the streaming path too — see the no-tool-calls
+		// branch in HandleMessageStream for the rationale.
+		a.runPostTurn(ctx, inboundMsg, append(messages, finalMsg), toolCallCount, chatterMem)
 	}()
 	return outReader
 }
@@ -2648,7 +2933,33 @@ func (a *Agent) RegisteredTools() []tools.ToolInfo {
 //   - image_gen     : self-generated images (registered only if a
 //                     provider is configured; absence is fine)
 //   - tts           : voice messages (same conditional registration)
-//   - memory_search : recall long-term facts about the chatter
+//   - write_file    : persist USER.md / MEMORY.md when the LLM learns
+//                     something worth keeping. Routing in
+//                     systemFileUserID sends USER.md/MEMORY.md to the
+//                     per-chatter row, so each chatter accrues their
+//                     own profile / memory. Path resolution rejects
+//                     arbitrary paths via identityFileBlocked +
+//                     workspace scoping, so this isn't a general
+//                     "let the chatbot write anywhere" hole — just
+//                     the canonical per-chatter notes.
+//   - edit_file     : same rationale; preferred over write_file when
+//                     surgically updating MEMORY.md so the model
+//                     doesn't accidentally clobber prior entries.
+//
+// Notably absent: `read_file` / `list_dir` — chatbot mode shouldn't
+// browse the filesystem; USER.md / MEMORY.md content is already loaded
+// into the system prompt by the bootstrap pass, so read tools would
+// only enable poking at things the chatter shouldn't see. apply_patch
+// is also out (multi-file batch is agent-mode territory).
+//
+// Also notably absent: `memory_search`. It scans
+// <workspace>/memory/logs/*.jsonl, which chatbot mode never writes —
+// so the tool ALWAYS returns "No matching entries found" and the
+// model reads that as "I have no memory of you", overriding the
+// in-prompt MEMORY.md section it should have trusted. Removing it
+// forces the model to rely on the USER.md / MEMORY.md sections
+// rendered into the system prompt, which is the only persistence
+// path chatbot mode actually exposes.
 //
 // Notably absent — the `message` tool. The main reply is emitted via
 // the LLM's normal `content` channel (the gateway's task callback turns
@@ -2660,14 +2971,15 @@ func (a *Agent) RegisteredTools() []tools.ToolInfo {
 // (cron-triggered greetings, multi-recipient broadcasts) should fall
 // back to `agent` mode or write a plugin.
 //
-// Also absent: exec, file ops, web_fetch / web_search, scheduling,
-// delegation — all agent-loop machinery that doesn't belong in a chat
-// persona's voice. Add new built-ins here only when they're universally
-// useful for chatbot products; everything else belongs in a plugin.
+// Also absent: exec, web_fetch / web_search, scheduling, delegation
+// — all agent-loop machinery that doesn't belong in a chat persona's
+// voice. Add new built-ins here only when they're universally useful
+// for chatbot products; everything else belongs in a plugin.
 var chatbotBuiltinAllowlist = []string{
 	"image_gen",
 	"tts",
-	"memory_search",
+	"write_file",
+	"edit_file",
 }
 
 // builtinAllowForMode returns the built-in tool name allowlist for the
@@ -2799,6 +3111,7 @@ func (a *Agent) ReloadWorkspaceFiles() {
 	a.ctxBuilder = NewContextBuilder(a.homePath, a.memory, skillsSummary)
 	a.ctxBuilder.SetWorkspace(a.workspacePath)
 	a.ctxBuilder.SetPromptMode(a.promptMode)
+	a.ctxBuilder.SetDisplayName(a.displayName)
 	// Preserve Store-backed identity reads across reload; without this,
 	// Postgres-mode pods silently fall back to pod-local filesystem.
 	// userID must also be re-pinned — the DB store requires a non-empty

@@ -137,6 +137,23 @@ func (s *Server) agentScopePromptMode(r *http.Request, agentID string) string {
 	return ""
 }
 
+// agentScopeAutoPersist reads the per-agent autoPersist override.
+// Returns nil when absent — same convention as agentScopeSplitReplies.
+// Drives the runPostTurn AutoPersistMemory pass (LLM-distilled writes to
+// USER.md / MEMORY.md) which is the only chatter-memory persistence
+// path in chatbot mode.
+func (s *Server) agentScopeAutoPersist(r *http.Request, agentID string) *bool {
+	rec, err := s.dataStore.GetConfigByName(r.Context(), store.KindSetting, "", agentID, "agents.defaults")
+	if err != nil || rec == nil {
+		return nil
+	}
+	v, ok := rec.Data["autoPersist"].(bool)
+	if !ok {
+		return nil
+	}
+	return &v
+}
+
 // effectiveUserID returns the resolved user_id for the request: the
 // caller's own id, or — for super_admin in actAs mode — the impersonated
 // user's id.
@@ -416,6 +433,11 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 		// the override and fall back to system default.
 		SplitReplies      *bool `json:"splitReplies,omitempty"`
 		SplitRepliesReset bool  `json:"splitRepliesReset,omitempty"`
+		// AutoPersist per-agent override — same semantics as SplitReplies.
+		// `autoPersistReset:true` clears the override and falls back to
+		// system default (currently effectively disabled).
+		AutoPersist      *bool `json:"autoPersist,omitempty"`
+		AutoPersistReset bool  `json:"autoPersistReset,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
@@ -497,6 +519,11 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 	} else if req.SplitReplies != nil {
 		defaultsPatch["splitReplies"] = *req.SplitReplies
 	}
+	if req.AutoPersistReset {
+		defaultsPatch["autoPersist"] = nil
+	} else if req.AutoPersist != nil {
+		defaultsPatch["autoPersist"] = *req.AutoPersist
+	}
 	if err := s.applyAgentScopeDefaultsPatch(r, rec.ID, defaultsPatch); err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
@@ -513,8 +540,9 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 			"userId":           rec.UserID,
 			"name":             rec.Name,
 			"model":            s.agentScopeModel(r, rec.ID),
-			"promptMode":         s.agentScopePromptMode(r, rec.ID),
-			"splitReplies": s.agentScopeSplitReplies(r, rec.ID),
+			"promptMode":       s.agentScopePromptMode(r, rec.ID),
+			"splitReplies":     s.agentScopeSplitReplies(r, rec.ID),
+			"autoPersist":      s.agentScopeAutoPersist(r, rec.ID),
 			"config":           rec.Config,
 			"isPublic":         rec.IsPublic,
 			"shareModelConfig": share,
@@ -551,8 +579,9 @@ func (s *Server) handleGetAgent(w http.ResponseWriter, r *http.Request) {
 			"userId":           rec.UserID,
 			"role":             role,
 			"model":            s.agentScopeModel(r, rec.ID),
-			"promptMode":         s.agentScopePromptMode(r, rec.ID),
-			"splitReplies": s.agentScopeSplitReplies(r, rec.ID),
+			"promptMode":       s.agentScopePromptMode(r, rec.ID),
+			"splitReplies":     s.agentScopeSplitReplies(r, rec.ID),
+			"autoPersist":      s.agentScopeAutoPersist(r, rec.ID),
 			"avatarUrl":        "/api/agents/" + rec.ID + "/files/avatar.png",
 			"createdAt":        rec.CreatedAt,
 			"isPublic":         rec.IsPublic,

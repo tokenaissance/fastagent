@@ -107,6 +107,14 @@ export interface AgentDetail {
   // SplitMessageMarker between bubbles and the dispatcher honors it.
   // null / undefined / false-ish = single bubble per reply (default).
   splitReplies?: boolean | null;
+  // autoPersist is the per-agent "remember the chatter automatically"
+  // toggle. When on, every N turns the runtime fires an LLM-driven
+  // distill pass that appends extracted facts to USER.md (chatter
+  // profile) and MEMORY.md (long-term notes). Mainly needed in chatbot
+  // mode — that mode's curated tool allowlist excludes write_file, so
+  // this is the only path the agent has to remember a chatter across
+  // sessions.
+  autoPersist?: boolean | null;
   soul?: string;
   skills?: string[];
   tools?: string[];
@@ -1246,6 +1254,12 @@ export interface AgentUpdatePayload {
   // so default behavior (single bubble) applies.
   splitReplies?: boolean;
   splitRepliesReset?: boolean;
+  // Auto-persist per-agent override. Same tri-state semantics as
+  // splitReplies. When true, every N turns the runtime runs a small
+  // LLM call that distills the conversation into USER.md (chatter
+  // profile) and MEMORY.md (long-term facts) — see Agent.autoPersist.
+  autoPersist?: boolean;
+  autoPersistReset?: boolean;
 }
 
 export async function updateAgent(id: string, agent: AgentUpdatePayload) {

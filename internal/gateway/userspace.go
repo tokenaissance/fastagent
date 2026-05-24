@@ -359,7 +359,7 @@ func (sp *UserSpace) EnsureAgent(ctx context.Context, st store.Store, mb *bus.Me
 	if err != nil || rec == nil {
 		return fmt.Errorf("EnsureAgent: agent %q not found", agentID)
 	}
-	resolved := config.ResolveAgents(sp.Config, []config.AgentEntry{{ID: rec.ID, UserID: rec.UserID}})
+	resolved := config.ResolveAgents(sp.Config, []config.AgentEntry{{ID: rec.ID, UserID: rec.UserID, Name: rec.Name}})
 	if len(resolved) != 1 {
 		return fmt.Errorf("EnsureAgent: ResolveAgents returned %d entries", len(resolved))
 	}
@@ -472,6 +472,23 @@ func (sp *UserSpace) EnsureAgent(ctx context.Context, st store.Store, mb *bus.Me
 			}
 			if ovr.PolicyPreset != "" {
 				rc.PolicyPreset = ovr.PolicyPreset
+			}
+			// Keep this overlay aligned with the owner-path equivalent in
+			// loadUserSpace — missing fields silently break per-agent
+			// settings for chatters who lazy-attach the agent via a
+			// channel binding (e.g. wechat multi-bubble hint never fires
+			// because rc.SplitReplies stays nil; chatbot persona renders
+			// in agent-prompt mode because rc.PromptMode stays "").
+			if ovr.PromptMode != "" {
+				rc.PromptMode = ovr.PromptMode
+			}
+			if ovr.SplitReplies != nil {
+				v := *ovr.SplitReplies
+				rc.SplitReplies = &v
+			}
+			if ovr.AutoPersist != nil {
+				v := *ovr.AutoPersist
+				rc.AutoPersist = &v
 			}
 		}
 	}
@@ -609,7 +626,7 @@ func loadUserSpace(ctx context.Context, userID string, mb *bus.MessageBus, st st
 
 	entries := make([]config.AgentEntry, 0, len(agentRecords))
 	for _, ar := range agentRecords {
-		entries = append(entries, config.AgentEntry{ID: ar.ID, UserID: ar.UserID})
+		entries = append(entries, config.AgentEntry{ID: ar.ID, UserID: ar.UserID, Name: ar.Name})
 	}
 
 	// Bindings used to live in their own kind=setting/name=bindings
@@ -667,6 +684,15 @@ func loadUserSpace(ctx context.Context, userID string, mb *bus.MessageBus, st st
 			if agentOverride.SplitReplies != nil {
 				v := *agentOverride.SplitReplies
 				rc.SplitReplies = &v
+			}
+			// Per-agent autoPersist — same pointer semantics. Non-nil
+			// here overrides the system/user memory.autoPersist.enabled
+			// for this agent specifically. Used most by chatbot-mode
+			// personas where the LLM can't write_file directly so the
+			// background distill pass is the only persistence path.
+			if agentOverride.AutoPersist != nil {
+				v := *agentOverride.AutoPersist
+				rc.AutoPersist = &v
 			}
 		}
 		// Same story for providers: assembleConfig was called with

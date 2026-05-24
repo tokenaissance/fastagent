@@ -371,6 +371,16 @@ type AgentDefaults struct {
 	// Nil at this layer means the agent-scope row has no opinion; the
 	// effective value falls back to system-level WeChatCfg.SplitReplies.
 	SplitReplies *bool `json:"splitReplies,omitempty"`
+	// AutoPersist — per-agent override of MemoryCfg.AutoPersist.Enabled.
+	// Pointer-typed for the same reason as SplitReplies: distinguishing
+	// "operator hasn't touched it" from "explicitly false". When non-nil,
+	// flips ag.memoryCfg.AutoPersist.Enabled at agent build time so the
+	// runPostTurn check at loop.go:2286 either fires the background
+	// distill-into-USER.md/MEMORY.md pass or skips it. Mainly useful in
+	// chatbot mode — that mode's curated tool allowlist has no write_file,
+	// so this is the only way for the agent to remember a chatter across
+	// sessions.
+	AutoPersist *bool `json:"autoPersist,omitempty"`
 }
 
 // AgentEntry is the in-memory shape of one agent row, used during
@@ -381,6 +391,10 @@ type AgentDefaults struct {
 type AgentEntry struct {
 	ID                   string                     `json:"id"`
 	UserID               string                     `json:"userId,omitempty"`
+	// Name mirrors agents.name (the operator-given display name) and is
+	// carried through to ResolvedAgent.DisplayName so the system prompt
+	// can stamp a fallback identity line when IDENTITY.md is empty.
+	Name                 string                     `json:"name,omitempty"`
 	Workspace            string                     `json:"workspace,omitempty"`
 	MaxTokens            int                        `json:"maxTokens,omitempty"`
 	Temperature          float64                    `json:"temperature,omitempty"`
@@ -408,6 +422,13 @@ type AgentEntry struct {
 	// system-prompt hint, and (2) stamp OutboundMessage.AllowSplit so
 	// the WeChat adapter knows whether to honor the marker.
 	SplitReplies *bool `json:"splitReplies,omitempty"`
+	// AutoPersist overrides MemoryCfg.AutoPersist.Enabled for this agent.
+	// Same pointer semantics as SplitReplies. When true, the agent's
+	// runPostTurn fires a background LLM call every N turns to distill
+	// recent messages into USER.md (chatter profile) and MEMORY.md
+	// (long-term facts) — the chatbot-mode persistence path since that
+	// mode's curated tool allowlist excludes write_file.
+	AutoPersist *bool `json:"autoPersist,omitempty"`
 }
 
 // PromptMode controls which framework sections BuildSystemPromptAs emits.
@@ -528,6 +549,9 @@ type AgentFileConfig struct {
 	// SplitReplies mirrors AgentEntry.SplitReplies. Nil =
 	// inherit; non-nil = authoritative for this agent.
 	SplitReplies *bool `json:"splitReplies,omitempty"`
+	// AutoPersist mirrors AgentEntry.AutoPersist. Nil = inherit;
+	// non-nil = authoritative for this agent.
+	AutoPersist *bool `json:"autoPersist,omitempty"`
 	// Admins gates write-mode slash commands (/new /reset /undo /retry /compact
 	// /model /personality) in IM channels. Keyed by channel name ("discord",
 	// "telegram", "slack", ...), each value is the platform-side user IDs
@@ -569,8 +593,13 @@ type SkillsLoadCfg struct {
 
 // ResolvedAgent is the fully merged config for a single agent.
 type ResolvedAgent struct {
-	ID                   string
-	UserID               string
+	ID     string
+	UserID string
+	// DisplayName mirrors agents.name — the human-readable name the
+	// operator gave the agent ("Bob", "tdj", "Sonny"). Used as a
+	// fallback identity line in the system prompt when IDENTITY.md
+	// is empty so the model doesn't introduce itself as "Claude".
+	DisplayName          string
 	Home                 string
 	Workspace            string
 	Model                string
@@ -598,6 +627,11 @@ type ResolvedAgent struct {
 	// EFFECTIVE value (override OR system default) on every
 	// OutboundMessage.AllowSplit at send time.
 	SplitReplies *bool
+	// AutoPersist — nil = inherit system MemoryCfg.AutoPersist.Enabled,
+	// non-nil = authoritative for this agent. Drives whether the
+	// runPostTurn hook fires AutoPersistMemory (the LLM-driven distill-
+	// to-USER.md/MEMORY.md pass) every N turns.
+	AutoPersist *bool
 }
 
 type TeamEntry struct {
@@ -690,6 +724,7 @@ func (cfg *Config) MergedAgentConfig(entry AgentEntry) ResolvedAgent {
 	resolved := ResolvedAgent{
 		ID:                   entry.ID,
 		UserID:               entry.UserID,
+		DisplayName:          entry.Name,
 		Home:                 home,
 		Workspace:            workspace,
 		Model:                cfg.Agents.Defaults.Model,
@@ -729,6 +764,10 @@ func (cfg *Config) MergedAgentConfig(entry AgentEntry) ResolvedAgent {
 	if entry.SplitReplies != nil {
 		v := *entry.SplitReplies
 		resolved.SplitReplies = &v
+	}
+	if entry.AutoPersist != nil {
+		v := *entry.AutoPersist
+		resolved.AutoPersist = &v
 	}
 
 	if len(cfg.MCPServers) > 0 {
@@ -811,6 +850,10 @@ func (cfg *Config) MergedAgentConfig(entry AgentEntry) ResolvedAgent {
 		if fileCfg.SplitReplies != nil {
 			v := *fileCfg.SplitReplies
 			resolved.SplitReplies = &v
+		}
+		if fileCfg.AutoPersist != nil {
+			v := *fileCfg.AutoPersist
+			resolved.AutoPersist = &v
 		}
 	}
 

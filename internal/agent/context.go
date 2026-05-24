@@ -171,6 +171,10 @@ type ContextBuilder struct {
 	workspace      string // working dir where agent creates user-facing files
 	memory         *Memory
 	skillsSummary  string
+	// displayName is the operator-given name from agents.name. Used as
+	// a fallback identity line when IDENTITY.md is empty so the model
+	// doesn't introduce itself as "Claude" / its base-model name.
+	displayName    string
 	groupCtx       *GroupContext
 	thinking       string // off, low, medium, high, adaptive
 	sandboxEnabled bool
@@ -220,6 +224,12 @@ func (cb *ContextBuilder) SetSkillsSummary(s string) { cb.skillsSummary = s }
 // SetPromptMode selects the system-prompt assembly profile. Empty / unknown
 // values fall back to agent mode (current default). See config.PromptMode*.
 func (cb *ContextBuilder) SetPromptMode(m string) { cb.promptMode = m }
+
+// SetDisplayName records the operator-given agent name (agents.name).
+// Used as the IDENTITY.md fallback in the system prompt — without
+// this the model defaults to its base-model identity ("I am Claude")
+// when neither IDENTITY.md nor SOUL.md states a name.
+func (cb *ContextBuilder) SetDisplayName(n string) { cb.displayName = n }
 
 // resolvedPromptMode returns the active mode with empty/unknown values
 // normalized to PromptModeAgent so callers can switch on the result.
@@ -290,7 +300,20 @@ func (cb *ContextBuilder) BuildSystemPromptAs(chatterUID string, chatterMem *Mem
 		// Slim identity scaffolding only. No "you are an AI agent on
 		// FastClaw" framing, no sandbox paths, no file-tool routing,
 		// no fastclaw branding. Persona files drive voice from here.
-		chatbotInfo := fmt.Sprintf(`Your identity (name, role, personality) is
+		const bt = "`"
+		const fence = "```"
+		// Identity-fallback line. When IDENTITY.md is empty (and SOUL.md
+		// doesn't name the agent either), the model defaults to its
+		// base-model identity ("I am Claude, made by Anthropic") in
+		// response to "你是谁". Stamping the operator-given display
+		// name unconditionally at the top of the system prompt gives
+		// the model a deterministic anchor. IDENTITY.md / SOUL.md, when
+		// present, still override via the bootstrap files section below.
+		identityHeader := ""
+		if cb.displayName != "" {
+			identityHeader = fmt.Sprintf("Your name is **%s** (this is the registered agent name in the FastClaw runtime). Introduce yourself as %s when asked \"你是谁\" / \"who are you\". If IDENTITY.md / SOUL.md below give a richer identity, use that on top of this; if they don't, this name stands.\n\n", cb.displayName, cb.displayName)
+		}
+		chatbotInfo := identityHeader + `Your identity (name, role, personality) is
 defined by IDENTITY.md and SOUL.md below. If those are empty, you do not
 yet have a name — follow BOOTSTRAP.md if present, otherwise greet the
 chatter neutrally and ask who you should be.
@@ -301,12 +324,78 @@ the conversation. Do NOT assume their name from MEMORY.md entries or
 from any past context — those may describe other chatters.
 
 File-purpose schema:
-- IDENTITY.md = what you are (Name, Role, specialization).
-- SOUL.md = how you behave (personality, tone, principles, language).
-- USER.md = who the current chatter is (their name, preferences).
-- MEMORY.md = long-term facts worth remembering across turns.
+- IDENTITY.md = what YOU are (Name, Role, specialization).
+- SOUL.md = how YOU behave (personality, tone, principles, language).
+- USER.md = who the CURRENT CHATTER is — their name, preferences, role,
+  context. This is the chatter you're talking to RIGHT NOW. If you see
+  a name here, that's the person on the other end of this conversation.
+- MEMORY.md = long-term facts about ongoing interactions with this
+  chatter — decisions made together, recurring topics, things they
+  want you to hold across sessions. NOT for the chatter's basic
+  identity (that goes in USER.md).
 
-%s`, dateLine)
+# Remembering things across conversations
+
+**You CAN remember chatters across sessions.** Do not claim otherwise.
+
+You have two write tools available: ` + bt + `edit_file` + bt + ` and ` + bt + `write_file` + bt + `.
+Calling them writes to USER.md / MEMORY.md, which the runtime loads
+back into your system prompt on every future turn (across sessions,
+across days). If a chatter asks "你会记住我吗" / "你能记住我吗" /
+"will you remember me", the truthful answer is **yes** — provided you
+actually write to those files. Saying "I have no cross-session memory"
+when you have write_file + edit_file in your tool list is a LIE; don't
+do it.
+
+When the chatter tells you their name or anything worth remembering,
+you MUST call write_file or edit_file in the SAME turn — not "I'll
+remember", actually persist it.
+
+WHERE to write (the most common mistake is dumping everything into
+MEMORY.md — pick the right file):
+
+- Chatter tells you their **name** / nickname / what to call them → ` + bt + `USER.md` + bt + `
+- Chatter tells you their **role / job / background** → ` + bt + `USER.md` + bt + `
+- Chatter tells you their **preferences** (language, tone, style) → ` + bt + `USER.md` + bt + `
+- Chatter tells you their **location / timezone** → ` + bt + `USER.md` + bt + `
+- A decision you made together that matters next time → ` + bt + `MEMORY.md` + bt + `
+- A recurring topic / ongoing project / shared context → ` + bt + `MEMORY.md` + bt + `
+- Chatter explicitly says "remember that X" (not about who they are) → ` + bt + `MEMORY.md` + bt + `
+
+Quick rule of thumb: if it answers "**who is this person**", it's
+USER.md. If it answers "**what's been going on with them**", it's
+MEMORY.md.
+
+How to write:
+- Pass a BARE filename (` + bt + `USER.md` + bt + `, ` + bt + `MEMORY.md` + bt + `) — the
+  runtime routes it to this chatter's per-user row. Do NOT path it.
+- Prefer ` + bt + `edit_file` + bt + ` for incremental updates so prior entries
+  aren't clobbered; use ` + bt + `write_file` + bt + ` for the first write or a
+  full rewrite.
+- Keep entries terse and structured. Example USER.md after the chatter
+  says "我叫品冠，做 PM 的":
+` + fence + `
+# Current Chatter
+- Name: 品冠
+- Role: 产品经理
+` + fence + `
+- It is fine to write SILENTLY between replies — you don't need to
+  announce "I'll remember that". Just acknowledge naturally in chat
+  and write to the file in the same turn.
+
+How to RECALL:
+- The CURRENT contents of USER.md and MEMORY.md are inlined below in
+  this very prompt. That IS your memory of this chatter — read those
+  sections, treat them as authoritative, do not look for memory
+  anywhere else. There is no "search" tool for chatter memory in this
+  mode; the files in your prompt are the entire picture.
+
+Files you must NOT edit: IDENTITY.md, SOUL.md, BOOTSTRAP.md — those
+define WHO YOU ARE, not who's talking to you. Asking the chatter to
+"forget what I told you" affects USER.md / MEMORY.md, never the
+identity files.
+
+` + dateLine
 		parts = append(parts, chatbotInfo)
 
 	default: // PromptModeAgent — full framework runtime info.
@@ -352,7 +441,14 @@ File-purpose schema:
 				"`", "`", "`", "`")
 		}
 
-		runtimeInfo := fmt.Sprintf(`You are an AI agent running on the FastClaw runtime.
+		// See chatbot-mode block for the rationale on the display-name
+		// fallback; same pattern here so agent-mode agents without an
+		// IDENTITY.md don't introduce themselves as Claude either.
+		agentIdentityHeader := ""
+		if cb.displayName != "" {
+			agentIdentityHeader = fmt.Sprintf("Your registered name in this FastClaw deployment is **%s**. Use that as your name unless IDENTITY.md / SOUL.md below give you a richer one.\n\n", cb.displayName)
+		}
+		runtimeInfo := agentIdentityHeader + fmt.Sprintf(`You are an AI agent running on the FastClaw runtime.
 Your identity (name, role, personality) is defined by IDENTITY.md and SOUL.md
 below — if those are empty, you do NOT yet have a name and must follow the
 bootstrap instructions in BOOTSTRAP.md before answering the user.
@@ -565,6 +661,23 @@ Then in your final reply, write: ![](/workspace/output.png)`
 			uid = chatterUID
 		}
 		content := cb.loadFileForUser(name, uid)
+		if name == "USER.md" {
+			// Per-chatter profile — wrap in XML-style tags so the model
+			// treats the content as authoritative reference data, not
+			// documentation. Plain markdown headers ("# USER.md" or
+			// "# About the current chatter") were being read by
+			// Sonnet 4.x as schema descriptions; the model would deny
+			// knowing the chatter's name in a fresh session even with
+			// "Name: 狗子" right there. Anthropic models respond
+			// strongly to <document> / <data> style tags as a "trust
+			// this content" cue, so we frame the section that way.
+			if content != "" {
+				parts = append(parts, fmt.Sprintf("<current_chatter_profile source=\"USER.md\">\nThis is who you are talking to right now. Treat the content below as factual, current, and authoritative — when the chatter asks \"我是谁\" / \"你记得我吗\", answer from THIS section.\n\n%s\n</current_chatter_profile>", content))
+			} else {
+				parts = append(parts, "<current_chatter_profile source=\"USER.md\">\n(empty — no profile recorded yet for this chatter. The moment they share their name / preferences / role, call write_file('USER.md', ...) so it appears here on future turns.)\n</current_chatter_profile>")
+			}
+			continue
+		}
 		if content != "" {
 			parts = append(parts, fmt.Sprintf("# %s\n%s", name, content))
 		}
@@ -582,9 +695,16 @@ Then in your final reply, write: ![](/workspace/output.png)`
 	}
 
 	// 4. Long-term memory — keyed by chatter, same rationale as USER.md.
+	// Always render the section header (with placeholder body when
+	// empty) so the LLM sees MEMORY.md as a known writable target,
+	// not a missing concept. In chatbot mode this section is the
+	// ENTIRE memory the model has of the chatter — no search tool to
+	// fall back to, so the instruction below is load-bearing.
 	mem := chatterMem.LoadMemory()
 	if mem != "" {
-		parts = append(parts, fmt.Sprintf("# Long-term Memory\n%s", mem))
+		parts = append(parts, fmt.Sprintf("<chatter_long_term_memory source=\"MEMORY.md\">\nFacts you have persisted about this chatter across earlier sessions. Treat as factual and current. Quote / reference these when relevant.\n\n%s\n</chatter_long_term_memory>", mem))
+	} else {
+		parts = append(parts, "<chatter_long_term_memory source=\"MEMORY.md\">\n(empty — nothing recorded yet for this chatter. Write to MEMORY.md when something is worth holding across sessions. Chatter identity / name goes in USER.md, not here.)\n</chatter_long_term_memory>")
 	}
 
 	// 5. Group chat awareness
