@@ -43,11 +43,11 @@ type AgentHandle interface {
 	// the next turn cold-starts at the new bind-mount path.
 	MoveWebChatSession(ctx context.Context, sessionId, projectID string) error
 	ReloadWorkspaceFiles()
-	// WriteSessionAttachments materializes user-uploaded image bytes (data
+	// WriteSessionAttachments materializes user-uploaded bytes (data
 	// URLs / HTTPS URLs) into the agent's session workspace so skills can
 	// read them via /workspace/<filename>. Returns the relative filenames
-	// in input order; per-image errors are skipped.
-	WriteSessionAttachments(ctx context.Context, sessionID, projectID string, urls []string) []string
+	// in input order; per-item errors are skipped.
+	WriteSessionAttachments(ctx context.Context, sessionID, projectID string, atts []agent.Attachment) []string
 	// RegisteredTools returns the live tool registry projection — what
 	// this agent currently has loaded (built-ins + MCP + plugin tools).
 	// Used by the Tools tab to render the allowlist checkbox picker.
