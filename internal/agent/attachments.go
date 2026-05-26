@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // maxAttachmentBytes caps a single attachment regardless of whether it
@@ -331,7 +332,10 @@ func sanitizeAttachmentName(raw string) string {
 	out := strings.TrimSpace(b.String())
 	out = strings.TrimLeft(out, ".") // hidden-dotfile prefix is rarely intended
 	if len(out) > maxAttachmentNameLen {
-		// Truncate from the stem so we preserve the extension.
+		// Truncate from the stem so we preserve the extension. Byte-
+		// slicing on UTF-8 would chop multi-byte runes (CJK filenames
+		// are 3 bytes/char) and yield invalid UTF-8 on disk, so back
+		// off to the nearest rune boundary at or below the byte budget.
 		ext := path.Ext(out)
 		stem := strings.TrimSuffix(out, ext)
 		keep := maxAttachmentNameLen - len(ext)
@@ -339,6 +343,9 @@ func sanitizeAttachmentName(raw string) string {
 			keep = 1
 		}
 		if len(stem) > keep {
+			for keep > 0 && !utf8.RuneStart(stem[keep]) {
+				keep--
+			}
 			stem = stem[:keep]
 		}
 		out = stem + ext

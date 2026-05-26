@@ -888,7 +888,6 @@ func (r chatRequest) inlineImageURLs() []string {
 	return out
 }
 
-
 // preMaterialized reports whether the caller already uploaded the
 // attachments + prefixed `[Attached: /workspace/...]` breadcrumb into
 // the message. The web client does this end-to-end (uploadAgentFiles +

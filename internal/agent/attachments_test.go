@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestSanitizeAttachmentName(t *testing.T) {
@@ -39,6 +40,23 @@ func TestSanitizeAttachmentNameTruncates(t *testing.T) {
 	}
 	if !strings.HasSuffix(got, ".pdf") {
 		t.Errorf("extension lost: %q", got)
+	}
+}
+
+// Regression: byte-slicing a multi-byte UTF-8 stem (e.g. CJK filenames
+// at 3 bytes/char) used to chop the last rune in half and leave invalid
+// UTF-8 on disk. Truncation must back off to a rune boundary.
+func TestSanitizeAttachmentNameUTF8Safe(t *testing.T) {
+	stem := strings.Repeat("中", 40) // 120 bytes, well over the 96 cap
+	got := sanitizeAttachmentName(stem + ".pdf")
+	if !utf8.ValidString(got) {
+		t.Errorf("invalid UTF-8 after truncate: %q", got)
+	}
+	if !strings.HasSuffix(got, ".pdf") {
+		t.Errorf("ext lost: %q", got)
+	}
+	if len(got) > maxAttachmentNameLen {
+		t.Errorf("over cap: len=%d", len(got))
 	}
 }
 
