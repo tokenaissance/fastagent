@@ -22,6 +22,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 	"github.com/fastclaw-ai/fastclaw/internal/store"
@@ -273,6 +274,88 @@ func SettingInto(ctx context.Context, st store.Store, namespace, userID, agentID
 		return err
 	}
 	return json.Unmarshal(blob, dst)
+}
+
+// BatchSettings resolves multiple namespaces in 2 ListConfigs calls instead
+// of N×2 GetConfigByName calls. It merges system-level and user-level rows
+// field-wise (user wins), matching the semantics of calling Setting() for
+// each namespace individually.
+//
+// agentID is passed through to ListConfigs — for loadUserConfig it's always "".
+func BatchSettings(
+	ctx context.Context,
+	st store.Store,
+	namespaces []string,
+	userID, agentID string,
+) (map[string]map[string]interface{}, error) {
+	if st == nil {
+		return nil, errors.New("scope.BatchSettings: store is required")
+	}
+
+	// 1 query: system-level rows (user_id="", agent_id=agentID)
+	systemRows, err := st.ListConfigs(ctx, store.KindSetting, "", agentID)
+	if err != nil {
+		return nil, fmt.Errorf("scope.BatchSettings: load system configs: %w", err)
+	}
+
+	// 1 query: user-level rows (user_id=X, agent_id=agentID)
+	var userRows []store.ConfigRecord
+	if userID != "" {
+		userRows, err = st.ListConfigs(ctx, store.KindSetting, userID, agentID)
+		if err != nil {
+			return nil, fmt.Errorf("scope.BatchSettings: load user configs: %w", err)
+		}
+	}
+
+	return mergeByNamespace(systemRows, userRows, namespaces), nil
+}
+
+// mergeByNamespace groups config rows by name and merges field-wise.
+// User-level values override system-level values (same semantics as Setting).
+func mergeByNamespace(
+	systemRows, userRows []store.ConfigRecord,
+	namespaces []string,
+) map[string]map[string]interface{} {
+	nsSet := make(map[string]struct{}, len(namespaces))
+	for _, ns := range namespaces {
+		nsSet[ns] = struct{}{}
+	}
+
+	result := make(map[string]map[string]interface{}, len(namespaces))
+
+	// Apply system layer first
+	for _, row := range systemRows {
+		if !row.Enabled {
+			continue
+		}
+		if _, ok := nsSet[row.Name]; !ok {
+			continue
+		}
+		if result[row.Name] == nil {
+			result[row.Name] = make(map[string]interface{})
+		}
+		for k, v := range row.Data {
+			result[row.Name][k] = v
+		}
+	}
+
+	// Apply user layer (overrides system)
+	for _, row := range userRows {
+		if !row.Enabled {
+			continue
+		}
+		if _, ok := nsSet[row.Name]; !ok {
+			continue
+		}
+		if result[row.Name] == nil {
+			result[row.Name] = make(map[string]interface{})
+		}
+		for k, v := range row.Data {
+			result[row.Name][k] = v
+		}
+	}
+
+	return result
 }
 
 // SaveSettingByScope is the legacy (scope, scopeID) form kept for the
