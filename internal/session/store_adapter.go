@@ -327,6 +327,30 @@ func extractObjective(text string) string {
 	return strings.TrimSpace(text[i+len(open) : i+len(open)+j])
 }
 
+// ExtractPreview derives the sidebar preview text and thumbnail URL from
+// a stored user message. Exported for the admin batch path which fetches
+// messages in bulk and applies preview logic outside ListWebSessions.
+func ExtractPreview(msg store.SessionMessage) (preview, thumbnail string) {
+	text := userText(msg)
+	img := userImage(msg)
+	if text == "" && img == "" {
+		return "", ""
+	}
+	if msg.Origin != "" {
+		if obj := extractObjective(text); obj != "" {
+			text = obj
+		}
+	}
+	preview = text
+	if preview == "" {
+		preview = "[image]"
+	}
+	if len(preview) > 100 {
+		preview = preview[:100] + "..."
+	}
+	return preview, img
+}
+
 // userText pulls the user-visible text from a stored user turn. Falls
 // back to ContentParts' "text" parts when Content is empty (the shape
 // produced by HandleMessageStream when the turn carried image

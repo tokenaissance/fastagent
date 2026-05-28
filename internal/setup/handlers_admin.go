@@ -480,20 +480,12 @@ func (s *Server) respondAllAgents(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-	// Resolve owner usernames once per unique userID — N agents could
-	// belong to a handful of users, so a per-row lookup would re-hit the
-	// store for the same id repeatedly.
-	ownerCache := map[string]*users.Account{}
-	resolveOwner := func(uid string) *users.Account {
-		if uid == "" {
-			return nil
+	// Pre-fetch all users in 1 query instead of N cached Get calls.
+	ownerMap := map[string]*users.Account{}
+	if allUsers, err := s.accounts.List(r.Context()); err == nil {
+		for _, u := range allUsers {
+			ownerMap[u.ID] = u
 		}
-		if a, ok := ownerCache[uid]; ok {
-			return a
-		}
-		a, _ := s.accounts.Get(r.Context(), uid)
-		ownerCache[uid] = a
-		return a
 	}
 	out := make([]map[string]any, 0, len(records))
 	for _, ar := range records {
@@ -505,7 +497,7 @@ func (s *Server) respondAllAgents(w http.ResponseWriter, r *http.Request) {
 			"userId":      ar.UserID,
 			"createdAt":   ar.CreatedAt,
 		}
-		if owner := resolveOwner(ar.UserID); owner != nil {
+		if owner := ownerMap[ar.UserID]; owner != nil {
 			entry["ownerUsername"] = owner.Username
 			entry["ownerEmail"] = owner.Email
 			if owner.DisplayName != "" {
@@ -537,74 +529,93 @@ func (s *Server) handleAdminChats(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusServiceUnavailable, map[string]any{"error": "no data store"})
 		return
 	}
-	pairs, err := s.dataStore.ListSessionOwnerPairs(r.Context())
+	ctx := r.Context()
+
+	// 1 query: all session metadata with (user_id, agent_id).
+	allSessions, err := s.dataStore.ListAllSessionMetas(ctx)
 	if err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-	ownerCache := map[string]*users.Account{}
-	resolveOwner := func(uid string) *users.Account {
-		if uid == "" {
-			return nil
-		}
-		if a, ok := ownerCache[uid]; ok {
-			return a
-		}
-		a, _ := s.accounts.Get(r.Context(), uid)
-		ownerCache[uid] = a
-		return a
+
+	// 1 query: first user message per session (for preview extraction).
+	firstMsgs, err := s.dataStore.BatchFirstUserMessages(ctx)
+	if err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
 	}
-	agentCache := map[string]*store.AgentRecord{}
-	resolveAgent := func(agentID string) *store.AgentRecord {
-		if agentID == "" {
-			return nil
+
+	// 1 query: all agents indexed by ID.
+	agentMap := map[string]*store.AgentRecord{}
+	if allAgents, err := s.dataStore.ListAllAgents(ctx); err == nil {
+		for i := range allAgents {
+			agentMap[allAgents[i].ID] = &allAgents[i]
 		}
-		if a, ok := agentCache[agentID]; ok {
-			return a
-		}
-		a, _ := s.dataStore.GetAgent(r.Context(), agentID)
-		agentCache[agentID] = a
-		return a
 	}
-	out := make([]map[string]any, 0)
-	for _, p := range pairs {
-		ag := resolveAgent(p.AgentID)
+
+	// 1 query: all users indexed by ID.
+	ownerMap := map[string]*users.Account{}
+	if allUsers, err := s.accounts.List(ctx); err == nil {
+		for _, u := range allUsers {
+			ownerMap[u.ID] = u
+		}
+	}
+
+	out := make([]map[string]any, 0, len(allSessions))
+	for _, sm := range allSessions {
+		ag := agentMap[sm.AgentID]
 		if ag == nil {
-			// Orphan session row whose agent has been deleted — skip
-			// rather than surfacing a row with a blank Agent column.
+			// Orphan session row whose agent has been deleted — skip.
 			continue
 		}
-		adapter := session.NewStoreAdapter(s.dataStore, p.UserID)
-		sessions, err := adapter.ListWebSessions(r.Context(), p.AgentID)
-		if err != nil {
+
+		// Derive preview from the batch-fetched first user message.
+		key := sm.UserID + "\x00" + sm.AgentID + "\x00" + sm.Key
+		msg, hasMsg := firstMsgs[key]
+		if !hasMsg {
 			continue
 		}
-		owner := resolveOwner(p.UserID)
-		for _, ws := range sessions {
-			entry := map[string]any{
-				"id":           ws.ID,
-				"agentId":      p.AgentID,
-				"agentName":    ag.Name,
-				"userId":       p.UserID,
-				"channel":      ws.Channel,
-				"accountId":    ws.AccountID,
-				"chatId":       ws.ChatID,
-				"projectId":    ws.ProjectID,
-				"title":        ws.Title,
-				"preview":      ws.Preview,
-				"thumbnailUrl": ws.ThumbnailURL,
-				"createdAt":    ws.CreatedAt,
-				"updatedAt":    ws.UpdatedAt,
-			}
-			if owner != nil {
-				entry["ownerUsername"] = owner.Username
-				entry["ownerEmail"] = owner.Email
-				if owner.DisplayName != "" {
-					entry["ownerDisplayName"] = owner.DisplayName
-				}
-			}
-			out = append(out, entry)
+		preview, thumb := session.ExtractPreview(msg)
+		if preview == "" {
+			continue
 		}
+
+		// Derive channel from legacy session_key shape when missing.
+		channel := sm.Channel
+		if channel == "" {
+			if i := strings.Index(sm.Key, "_"); i > 0 {
+				channel = sm.Key[:i]
+			}
+		}
+
+		title := sm.Title
+		if title == "" {
+			title = preview
+		}
+
+		entry := map[string]any{
+			"id":           sm.Key,
+			"agentId":      sm.AgentID,
+			"agentName":    ag.Name,
+			"userId":       sm.UserID,
+			"channel":      channel,
+			"accountId":    sm.AccountID,
+			"chatId":       sm.ChatID,
+			"projectId":    sm.ProjectID,
+			"title":        title,
+			"preview":      preview,
+			"thumbnailUrl": thumb,
+			"createdAt":    sm.UpdatedAt.UnixMilli(),
+			"updatedAt":    sm.UpdatedAt.UnixMilli(),
+		}
+		if owner := ownerMap[sm.UserID]; owner != nil {
+			entry["ownerUsername"] = owner.Username
+			entry["ownerEmail"] = owner.Email
+			if owner.DisplayName != "" {
+				entry["ownerDisplayName"] = owner.DisplayName
+			}
+		}
+		out = append(out, entry)
 	}
 	jsonResponse(w, http.StatusOK, map[string]any{"sessions": out})
 }
