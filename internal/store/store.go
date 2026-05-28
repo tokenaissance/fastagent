@@ -73,6 +73,15 @@ type Store interface {
 	// pairs lets the admin view enumerate every (chatter, agent) tuple
 	// that has chat history, regardless of who owns the agent.
 	ListSessionOwnerPairs(ctx context.Context) ([]SessionOwnerPair, error)
+	// ListAllSessionMetas returns every session row in the database with
+	// its owning (user_id, agent_id) attached. Used by the admin Chats
+	// page to load all sessions in 1 query instead of iterating per-pair.
+	ListAllSessionMetas(ctx context.Context) ([]SessionMetaWithOwner, error)
+	// BatchFirstUserMessages returns the first role='user' message for
+	// each session identified by (user_id, agent_id, session_key). The
+	// map key is "userID\x00agentID\x00sessionKey". Used by the admin
+	// Chats page to extract previews in 1 query instead of per-session.
+	BatchFirstUserMessages(ctx context.Context) (map[string]SessionMessage, error)
 	DeleteSession(ctx context.Context, userID, agentID, sessionKey string) error
 	RenameSession(ctx context.Context, userID, agentID, sessionKey, title string) error
 	// MoveSession reassigns a session to a different project (or
@@ -195,6 +204,10 @@ type Store interface {
 	QueryAllConfigs(ctx context.Context, kind string) ([]ConfigRecord, error)
 	GetConfig(ctx context.Context, id string) (*ConfigRecord, error)
 	GetConfigByName(ctx context.Context, kind, userID, agentID, name string) (*ConfigRecord, error)
+	// BatchGetConfigsByAgentIDs returns all config rows matching (kind, name)
+	// for the given set of agent IDs. Uses a standard SQL IN clause, compatible
+	// with both PostgreSQL and SQLite. Returns only enabled rows.
+	BatchGetConfigsByAgentIDs(ctx context.Context, kind, name string, agentIDs []string) ([]ConfigRecord, error)
 	SaveConfig(ctx context.Context, c *ConfigRecord) error
 	DeleteConfig(ctx context.Context, id string) error
 	LookupChannelByCredential(ctx context.Context, channelType, credKey string) (*ConfigRecord, error)
@@ -402,6 +415,15 @@ type SessionEventRecord struct {
 type SessionOwnerPair struct {
 	UserID  string `json:"userId"`
 	AgentID string `json:"agentId"`
+}
+
+// SessionMetaWithOwner extends SessionMeta with the owning (user_id,
+// agent_id) pair. Used by admin batch queries that load all sessions in
+// one pass instead of iterating per-pair.
+type SessionMetaWithOwner struct {
+	UserID  string `json:"userId"`
+	AgentID string `json:"agentId"`
+	SessionMeta
 }
 
 // SessionMeta is summary info for a session (for listing).

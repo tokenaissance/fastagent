@@ -2064,6 +2064,67 @@ func (d *DBStore) ListSessionOwnerPairs(ctx context.Context) ([]SessionOwnerPair
 	return pairs, rows.Err()
 }
 
+// ListAllSessionMetas returns every session row with its owning
+// (user_id, agent_id) pair. Single query replaces per-pair ListSessions
+// fan-out on the admin Chats page.
+func (d *DBStore) ListAllSessionMetas(ctx context.Context) ([]SessionMetaWithOwner, error) {
+	rows, err := d.db.QueryContext(ctx,
+		`SELECT user_id, agent_id, session_key, channel, account_id, chat_id, project_id, title, message_count, updated_at
+			FROM sessions
+			WHERE user_id <> '' AND agent_id <> ''
+			ORDER BY updated_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SessionMetaWithOwner
+	for rows.Next() {
+		var m SessionMetaWithOwner
+		if err := rows.Scan(&m.UserID, &m.AgentID, &m.Key, &m.Channel, &m.AccountID, &m.ChatID, &m.ProjectID, &m.Title, &m.MessageCount, &m.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// BatchFirstUserMessages returns the first role='user' message for every
+// session in the database. Uses ROW_NUMBER window function (supported by
+// both PostgreSQL and SQLite ≥ 3.25). Map key is "userID\x00agentID\x00sessionKey".
+func (d *DBStore) BatchFirstUserMessages(ctx context.Context) (map[string]SessionMessage, error) {
+	rows, err := d.db.QueryContext(ctx,
+		`SELECT user_id, agent_id, session_key, content, content_parts, origin
+		FROM (
+			SELECT user_id, agent_id, session_key, content, content_parts, origin,
+				ROW_NUMBER() OVER (PARTITION BY user_id, agent_id, session_key ORDER BY seq ASC) as rn
+			FROM session_messages
+			WHERE role = 'user'
+		) sub
+		WHERE rn = 1`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]SessionMessage)
+	for rows.Next() {
+		var userID, agentID, sessionKey string
+		var msg SessionMessage
+		var contentParts string
+		if err := rows.Scan(&userID, &agentID, &sessionKey, &msg.Content, &contentParts, &msg.Origin); err != nil {
+			return nil, err
+		}
+		msg.Role = "user"
+		if contentParts != "" && contentParts != "null" {
+			var v interface{}
+			if json.Unmarshal([]byte(contentParts), &v) == nil {
+				msg.ContentParts = v
+			}
+		}
+		out[userID+"\x00"+agentID+"\x00"+sessionKey] = msg
+	}
+	return out, rows.Err()
+}
+
 // LookupSessionTriple is ResolveActiveSessionKey's inverse: given a
 // session_key (the canonical row id), return the (channel, accountID,
 // chatID) it belongs to. Used by handlers that take a session_key from
@@ -2578,6 +2639,40 @@ func (d *DBStore) GetConfigByName(ctx context.Context, kind, userID, agentID, na
 			d.ph(1), d.ph(2), d.ph(3), d.ph(4)),
 		kind, userID, agentID, name)
 	return scanConfigRow(row)
+}
+
+// BatchGetConfigsByAgentIDs returns all enabled config rows matching (kind, name)
+// for the given set of agent IDs. Uses a standard SQL IN clause, compatible
+// with both PostgreSQL and SQLite.
+func (d *DBStore) BatchGetConfigsByAgentIDs(ctx context.Context, kind, name string, agentIDs []string) ([]ConfigRecord, error) {
+	if len(agentIDs) == 0 {
+		return []ConfigRecord{}, nil
+	}
+
+	placeholders := make([]string, len(agentIDs))
+	args := make([]interface{}, 0, 2+len(agentIDs))
+	args = append(args, kind, name)
+	for i, id := range agentIDs {
+		placeholders[i] = d.ph(i + 3)
+		args = append(args, id)
+	}
+
+	query := fmt.Sprintf(
+		`SELECT `+configSelectCols+`
+		 FROM configs
+		 WHERE kind = %s AND name = %s AND agent_id IN (%s) AND enabled = %s`,
+		d.ph(1), d.ph(2),
+		strings.Join(placeholders, ", "),
+		d.ph(len(agentIDs)+3),
+	)
+	args = append(args, true)
+
+	rows, err := d.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanConfigs(rows)
 }
 
 func (d *DBStore) SaveConfig(ctx context.Context, c *ConfigRecord) error {
