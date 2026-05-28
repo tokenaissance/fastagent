@@ -47,11 +47,27 @@ func (s *Server) loadUserConfig(r *http.Request) (*config.Config, error) {
 		Providers: map[string]config.ProviderConfig{},
 		Channels:  map[string]config.ChannelConfig{},
 	}
+
+	// Collect namespace names for batch query.
+	names := make([]string, len(settingNamespaces))
+	for i, ns := range settingNamespaces {
+		names[i] = ns.namespace
+	}
+
+	// Use Case layer: 2 ListConfigs calls replace 32 GetConfigByName calls.
+	merged, err := scope.BatchSettings(r.Context(), s.dataStore, names, uid, "")
+	if err != nil {
+		return nil, err
+	}
+
+	// Interface Adapter: unmarshal merged data into typed config structs.
 	for _, ns := range settingNamespaces {
-		if err := scope.SettingInto(r.Context(), s.dataStore, ns.namespace, uid, "", ns.dst(cfg)); err != nil {
-			return nil, err
+		if data, ok := merged[ns.namespace]; ok && len(data) > 0 {
+			blob, _ := json.Marshal(data)
+			_ = json.Unmarshal(blob, ns.dst(cfg))
 		}
 	}
+
 	if provs, err := scope.Providers(r.Context(), s.dataStore, uid, ""); err == nil {
 		for k, v := range provs {
 			cfg.Providers[k] = v
@@ -82,16 +98,29 @@ func loadAgentSkillEntriesForUser(ctx context.Context, st store.Store, userID st
 	if err != nil {
 		return nil, err
 	}
+	if len(agents) == 0 {
+		return nil, nil
+	}
+
+	// Batch query: 1 call replaces N GetConfigByName calls.
+	agentIDs := make([]string, len(agents))
+	for i, ar := range agents {
+		agentIDs[i] = ar.ID
+	}
+	configs, err := st.BatchGetConfigsByAgentIDs(ctx, store.KindSetting, "skills.entries", agentIDs)
+	if err != nil {
+		return nil, err
+	}
+
 	out := map[string]map[string]config.SkillEntryCfg{}
-	for _, ar := range agents {
-		rec, err := st.GetConfigByName(ctx, store.KindSetting, "", ar.ID, "skills.entries")
-		if err != nil || rec == nil || len(rec.Data) == 0 {
+	for _, cfg := range configs {
+		if len(cfg.Data) == 0 {
 			continue
 		}
-		blob, _ := json.Marshal(rec.Data)
+		blob, _ := json.Marshal(cfg.Data)
 		var entries map[string]config.SkillEntryCfg
 		if json.Unmarshal(blob, &entries) == nil && len(entries) > 0 {
-			out[ar.ID] = entries
+			out[cfg.AgentID] = entries
 		}
 	}
 	return out, nil
@@ -365,9 +394,12 @@ func (s *Server) resolveAllAgents(r *http.Request) []AgentHandle {
 // --- /api/status ---
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
+	// Query accounts.Count once and reuse for both "configured" and admin "users".
+	var userCount int
 	configured := false
 	if s.accounts != nil {
 		if n, err := s.accounts.Count(r.Context()); err == nil && n > 0 {
+			userCount = n
 			configured = true
 		}
 	}
@@ -390,10 +422,8 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	resp["userId"] = ident.UserID
 	resp["role"] = ident.Role
 	resp["isAdmin"] = ident.Role == "super_admin"
-	if resp["isAdmin"].(bool) && s.accounts != nil {
-		if n, err := s.accounts.Count(r.Context()); err == nil {
-			resp["users"] = n
-		}
+	if resp["isAdmin"].(bool) {
+		resp["users"] = userCount
 	}
 
 	if !configured {
@@ -445,18 +475,24 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	allAgents := s.resolveAllAgents(r)
 	if len(allAgents) > 0 {
+		// Pre-build ID→Name map from ListAgents (already queried by
+		// loadUserConfig via loadAgentSkillEntriesForUser). One query
+		// replaces N GetAgent calls in the loop below.
+		agentNameMap := map[string]string{}
+		if s.dataStore != nil {
+			uid := ident.EffectiveUserID()
+			if recs, err := s.dataStore.ListAgents(r.Context(), uid); err == nil {
+				for _, rec := range recs {
+					agentNameMap[rec.ID] = rec.Name
+				}
+			}
+		}
 		var agentList []map[string]string
 		for _, ag := range allAgents {
-			id := ag.Name() // AgentHandle.Name() returns the agent id
+			id := ag.Name()
 			entry := map[string]string{"id": id}
-			// Surface the human-friendly name from the agents row so the
-			// dashboard list reads "default" / "ImgAny" instead of
-			// "agt_…". Look-up failures fall back to id-only so a
-			// transient store error doesn't black out the panel.
-			if s.dataStore != nil {
-				if rec, _ := s.dataStore.GetAgent(r.Context(), id); rec != nil && rec.Name != "" {
-					entry["name"] = rec.Name
-				}
+			if name, ok := agentNameMap[id]; ok && name != "" {
+				entry["name"] = name
 			}
 			agentList = append(agentList, entry)
 		}
@@ -499,12 +535,14 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	// Compute the system-only resolution of agents.defaults so the
 	// dashboard can tell apart "inheriting from system" vs "overriding
-	// at my user scope" — `cfg` already merges user over system, so
-	// without this hint the UI sees the same value either way and
-	// can't render an Inheriting/Override badge.
+	// at my user scope". Use GetConfigByName directly (1 query) instead
+	// of scope.SettingInto which would resolve multiple levels.
 	sysDefaults := config.AgentsConfig{}.Defaults
 	if s.dataStore != nil {
-		_ = scope.SettingInto(r.Context(), s.dataStore, "agents.defaults", "", "", &sysDefaults)
+		if rec, err := s.dataStore.GetConfigByName(r.Context(), store.KindSetting, "", "", "agents.defaults"); err == nil && rec != nil {
+			blob, _ := json.Marshal(rec.Data)
+			_ = json.Unmarshal(blob, &sysDefaults)
+		}
 	}
 	// Marshal-then-extend keeps the response shape compatible (existing
 	// callers ignore the extra `meta` key) without forcing a refactor of

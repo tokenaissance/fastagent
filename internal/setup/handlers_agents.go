@@ -200,6 +200,38 @@ func (s *Server) agentScopeAutoPersist(r *http.Request, agentID string) *bool {
 	return &v
 }
 
+// agentDefaults holds all fields extracted from the agents.defaults row.
+// Used by handleGetAgent to read the row once instead of 4 times.
+type agentDefaults struct {
+	Model        string
+	PromptMode   string
+	SplitReplies *bool
+	AutoPersist  *bool
+}
+
+// agentScopeDefaults reads the agents.defaults row once and extracts all
+// fields. This replaces 4 separate GetConfigByName calls with 1.
+func (s *Server) agentScopeDefaults(r *http.Request, agentID string) agentDefaults {
+	rec, err := s.dataStore.GetConfigByName(r.Context(), store.KindSetting, "", agentID, "agents.defaults")
+	if err != nil || rec == nil {
+		return agentDefaults{}
+	}
+	var d agentDefaults
+	if v, ok := rec.Data["model"].(string); ok {
+		d.Model = v
+	}
+	if v, ok := rec.Data["promptMode"].(string); ok {
+		d.PromptMode = v
+	}
+	if v, ok := rec.Data["splitReplies"].(bool); ok {
+		d.SplitReplies = &v
+	}
+	if v, ok := rec.Data["autoPersist"].(bool); ok {
+		d.AutoPersist = &v
+	}
+	return d
+}
+
 // effectiveUserID returns the resolved user_id for the request: the
 // caller's own id, or — for super_admin in actAs mode — the impersonated
 // user's id.
@@ -249,6 +281,23 @@ func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
+	// Batch-fetch all agent model configs in 1 query (replaces N calls).
+	modelMap := make(map[string]string)
+	if len(owned) > 0 {
+		agentIDs := make([]string, len(owned))
+		for i, ar := range owned {
+			agentIDs[i] = ar.ID
+		}
+		if configs, err := s.dataStore.BatchGetConfigsByAgentIDs(
+			r.Context(), store.KindSetting, "agents.defaults", agentIDs,
+		); err == nil {
+			for _, cfg := range configs {
+				if model, ok := cfg.Data["model"].(string); ok {
+					modelMap[cfg.AgentID] = model
+				}
+			}
+		}
+	}
 	out := make([]map[string]any, 0, len(owned))
 	for _, ar := range owned {
 		desc, _ := ar.Config["description"].(string)
@@ -256,7 +305,7 @@ func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 			"id":          ar.ID,
 			"name":        ar.Name,
 			"description": desc,
-			"model":       s.agentScopeModel(r, ar.ID),
+			"model":       modelMap[ar.ID],
 			"avatarUrl":   "/api/agents/" + ar.ID + "/files/avatar.png",
 			"createdAt":   ar.CreatedAt,
 			"userId":      ar.UserID,
@@ -634,6 +683,10 @@ func (s *Server) handleGetAgent(w http.ResponseWriter, r *http.Request) {
 	if rec.UserID != uid {
 		role = "viewer"
 	}
+	// Read agents.defaults once (1 query) instead of 4 separate calls.
+	defaults := s.agentScopeDefaults(r, rec.ID)
+	plugins := s.agentScopePlugins(r, rec.ID)
+
 	jsonResponse(w, http.StatusOK, map[string]any{
 		"agent": map[string]any{
 			"id":               rec.ID,
@@ -641,11 +694,11 @@ func (s *Server) handleGetAgent(w http.ResponseWriter, r *http.Request) {
 			"description":      desc,
 			"userId":           rec.UserID,
 			"role":             role,
-			"model":            s.agentScopeModel(r, rec.ID),
-			"promptMode":       s.agentScopePromptMode(r, rec.ID),
-			"splitReplies":     s.agentScopeSplitReplies(r, rec.ID),
-			"autoPersist":      s.agentScopeAutoPersist(r, rec.ID),
-			"plugins":          s.agentScopePlugins(r, rec.ID),
+			"model":            defaults.Model,
+			"promptMode":       defaults.PromptMode,
+			"splitReplies":     defaults.SplitReplies,
+			"autoPersist":      defaults.AutoPersist,
+			"plugins":          plugins,
 			"avatarUrl":        "/api/agents/" + rec.ID + "/files/avatar.png",
 			"createdAt":        rec.CreatedAt,
 			"isPublic":         rec.IsPublic,
