@@ -1,11 +1,11 @@
 version: 2
 
-project_name: fastclaw
+project_name: fastagent
 
 builds:
-  - id: fastclaw
-    main: ./cmd/fastclaw
-    binary: fastclaw
+  - id: fastagent
+    main: ./cmd/fastagent
+    binary: fastagent
     env:
       - CGO_ENABLED=0
     goos:
@@ -31,8 +31,8 @@ checksum:
 
 release:
   github:
-    owner: fastclaw-ai
-    name: fastclaw
+    owner: tokenaissance
+    name: fastagent
 
 changelog:
   sort: asc

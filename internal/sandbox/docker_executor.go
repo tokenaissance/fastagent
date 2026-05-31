@@ -193,7 +193,7 @@ type DockerExecutorPool struct {
 	executors map[string]*DockerExecutor // key = poolKey(agentID, sessionID)
 	image     string
 	policy    *Policy
-	// workspaceRoot is FASTCLAW_HOME — each session gets a private mount
+	// workspaceRoot is FASTAGENT_HOME — each session gets a private mount
 	// rooted at workspaceRoot/workspaces/<agentID>/sessions/<sessionID>/.
 	workspaceRoot string
 }
@@ -296,10 +296,10 @@ func (p *DockerExecutorPool) Get(ctx context.Context, agentID, projectID, sessio
 	// (set by HandleMessage / HandleMessageStream); empty just skips
 	// the mount, which is the right fallback for non-chat callers.
 	if uid := UserIDFromContext(ctx); uid != "" {
-		base := os.Getenv("FASTCLAW_HOME")
+		base := os.Getenv("FASTAGENT_HOME")
 		if base == "" {
 			if h, err := os.UserHomeDir(); err == nil {
-				base = filepath.Join(h, ".fastclaw")
+				base = filepath.Join(h, ".fastagent")
 			}
 		}
 		if base != "" {

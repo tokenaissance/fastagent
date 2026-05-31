@@ -68,7 +68,7 @@ func ensureAgentHome(rc config.ResolvedAgent) {
 	}
 }
 
-// globalSkillsDirPath returns ~/.fastclaw/skills.
+// globalSkillsDirPath returns ~/.fastagent/skills.
 func globalSkillsDirPath() (string, error) {
 	home, err := config.HomeDir()
 	if err != nil {

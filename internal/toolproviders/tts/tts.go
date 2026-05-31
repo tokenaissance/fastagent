@@ -53,7 +53,7 @@ func writeAudio(data []byte, ext string) (toolproviders.Response, error) {
 	if ext == "" {
 		ext = "mp3"
 	}
-	f, err := os.CreateTemp("", "fastclaw-tts-*."+ext)
+	f, err := os.CreateTemp("", "fastagent-tts-*."+ext)
 	if err != nil {
 		return toolproviders.Response{}, fmt.Errorf("create tmp: %w", err)
 	}

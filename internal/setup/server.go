@@ -290,13 +290,13 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("DELETE /api/agents/{id}/channels/{type}/{accountId}", auth(s.handleDisconnectAgentChannel))
 
 	// Feishu (飞书) event webhook. UNAUTHENTICATED — Feishu posts here
-	// without a fastclaw bearer token. Per-event security comes from
+	// without a fastagent bearer token. Per-event security comes from
 	// the verification_token validated inside the adapter against the
 	// payload's header.token. The {appId} path segment scopes the
 	// receive to one registered channel.
 	mux.HandleFunc("POST /api/feishu/webhook/{appId}", s.handleFeishuWebhook)
 
-	// LINE Messaging API event webhook. UNAUTHENTICATED at the fastclaw
+	// LINE Messaging API event webhook. UNAUTHENTICATED at the fastagent
 	// layer — per-event security is HMAC-SHA256(channel_secret, body)
 	// validated by the adapter against the `x-line-signature` header.
 	// The {accountId} path segment is the bot's userId, scoping the

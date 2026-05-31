@@ -1,5 +1,5 @@
-// Package agentcli provides the data-layer operations that fastclaw's
-// `agents …` CLI subcommands run against the operator's own FastClaw
+// Package agentcli provides the data-layer operations that fastagent's
+// `agents …` CLI subcommands run against the operator's own FastAgent
 // store. The CLI is a thin convenience wrapper over the same store the
 // gateway and dashboard use — agents created here are indistinguishable
 // from agents created via the web UI.
@@ -215,7 +215,7 @@ func ensureOwner(ctx context.Context, st store.Store, opts InitOptions) (*users.
 		}
 		generated = password
 	}
-	email := defaultStr(opts.Email, username+"@local.fastclaw")
+	email := defaultStr(opts.Email, username+"@local.fastagent")
 	acct, err := accts.Create(ctx, users.CreateInput{
 		Username:    username,
 		Email:       email,

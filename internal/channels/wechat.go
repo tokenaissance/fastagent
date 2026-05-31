@@ -34,7 +34,7 @@ import (
 // platform. Pattern mirrors telegram.go: a single file owning the
 // HTTP client, long-poll loop, and outbound send. We deliberately
 // don't import a higher-level library — keeping the protocol surface
-// in-tree makes it easy to evolve alongside fastclaw's own message
+// in-tree makes it easy to evolve alongside fastagent's own message
 // types and avoids a Go-module dependency on an out-of-tree project.
 
 // iLink protocol constants. Matches the upstream WeChat bot API.

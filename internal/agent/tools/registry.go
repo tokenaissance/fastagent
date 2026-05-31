@@ -43,7 +43,7 @@ var identityFiles = map[string]bool{
 //   - bare basename ("SOUL.md", "agent.json"): the canonical
 //     single-segment form file tools route to systemRoot;
 //   - absolute path whose basename is an identity file
-//     ("/var/lib/fastclaw/agents/xyz/SOUL.md"): an LLM that copy-
+//     ("/var/lib/fastagent/agents/xyz/SOUL.md"): an LLM that copy-
 //     pasted the "Working Directory" hint from the system prompt
 //     may construct this form. Catch it so the gate isn't bypassed
 //     by `read_file("/.../SOUL.md")`.
@@ -179,7 +179,7 @@ type Registry struct {
 	// distinction" — systemFileUserID falls back to userID then.
 	agentOwnerUserID string
 	// userSkillsRoot is the on-disk PARENT of the chatter's per-user
-	// skills/ subdir (~/.fastclaw/users/<uid>/). A write to relative
+	// skills/ subdir (~/.fastagent/users/<uid>/). A write to relative
 	// path "skills/foo/SKILL.md" with this set lands at
 	// <userSkillsRoot>/skills/foo/SKILL.md — same shape rootForPath +
 	// resolvePathSandboxed expect for systemRoot. Set per-Agent from
@@ -314,7 +314,7 @@ func (r *Registry) SetAgentOwnerUserID(uid string) {
 }
 
 // SetUserSkillsRoot points chat-time `skills/...` writes at the
-// chatter's per-user skills dir (~/.fastclaw/users/<uid>/skills/).
+// chatter's per-user skills dir (~/.fastagent/users/<uid>/skills/).
 // Empty disables — `skills/...` then falls back to systemRoot (agent
 // home). Pair with SkillsLoader.WithUserID so the loader scans the
 // same dir on the next turn and the new skill becomes visible.
@@ -457,7 +457,7 @@ func NewRegistry(systemRoot, userRoot string) *Registry {
 // running background shell (started via exec with run_in_background)
 // so they don't outlive their owning agent. Safe to call multiple
 // times. Callers that don't have a clean shutdown hook can omit it —
-// the OS reaps zombies when the FastClaw process exits anyway.
+// the OS reaps zombies when the FastAgent process exits anyway.
 func (r *Registry) Close() {
 	if r.shellMgr != nil {
 		r.shellMgr.Close()
@@ -548,7 +548,7 @@ type ToolInfo struct {
 	Description string `json:"description"`
 	// Source distinguishes built-in tools from MCP / plugin contributions
 	// so the UI can hint where a tool came from. One of:
-	//   "builtin" — compiled into fastclaw
+	//   "builtin" — compiled into fastagent
 	//   "mcp"     — exposed by a connected MCP server
 	//   "plugin"  — exposed by a JSON-RPC plugin subprocess
 	Source string `json:"source"`
@@ -668,7 +668,7 @@ func (r *Registry) SetSandboxConfig(sbCfg *SandboxConfig) {
 // that traverse above it are rejected. When root is empty (default), no
 // restriction is applied — this is the local single-user mode. In cloud
 // mode the root is typically set to the user's directory
-// (~/.fastclaw/users/{userID}).
+// (~/.fastagent/users/{userID}).
 func (r *Registry) SetSandboxRoot(root string) {
 	r.sandboxRoot = root
 }
@@ -678,9 +678,9 @@ func (r *Registry) SetSandboxRoot(root string) {
 // on the host filesystem. This is the mode used for cloud deployments where
 // each user gets an isolated container/VM with their own runtime + files.
 //
-// Installs that explicitly opt in with FASTCLAW_ALLOW_HOST_EXEC=1
+// Installs that explicitly opt in with FASTAGENT_ALLOW_HOST_EXEC=1
 // additionally get a `host_exec` escape hatch so the agent can help
-// with operator-environment tasks (fastclaw upgrade, ~/Downloads
+// with operator-environment tasks (fastagent upgrade, ~/Downloads
 // access, system tools) without losing the sandbox default for
 // everything else. Default OFF — host_exec exposed to a chatter who
 // can prompt-inject is a privilege-escalation surface, so the gate

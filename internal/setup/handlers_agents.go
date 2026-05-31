@@ -447,7 +447,7 @@ func (s *Server) requireAgentOwner(w http.ResponseWriter, r *http.Request, agent
 // the URL can chat under their own user_id namespace, while the
 // agent's identity (SOUL/IDENTITY/skills) is reused from the owner's
 // row. This is the same gate /api/chat/history uses, so app_user
-// requests proxied through an integration with X-Fastclaw-End-User
+// requests proxied through an integration with X-Fastagent-End-User
 // can read artifacts for sessions they own without 403'ing on the
 // strict ownership check.
 // callerOwnsAgent returns true when the caller is the agent's owner, a
@@ -1325,7 +1325,7 @@ func (s *Server) handleAgentFile(w http.ResponseWriter, r *http.Request) {
 	}
 	// Workspace store not configured — fall back to direct FS read.
 	// The local FS layout mirrors the workspace store's:
-	// ~/.fastclaw/workspaces/<agent_id>/<path>.
+	// ~/.fastagent/workspaces/<agent_id>/<path>.
 	home, err := config.HomeDir()
 	if err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})

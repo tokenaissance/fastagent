@@ -230,7 +230,7 @@ type Channel interface {
 	Name() string
 	// AccountID returns the account identifier within the channel.
 	AccountID() string
-	// BotUsername returns the bot's username for this channel (e.g. "mike_fastclaw_bot").
+	// BotUsername returns the bot's username for this channel (e.g. "mike_fastagent_bot").
 	// Returns empty string if not applicable.
 	BotUsername() string
 	// Start begins listening for messages. It should block until ctx is cancelled.

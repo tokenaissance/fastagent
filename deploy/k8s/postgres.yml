@@ -1,17 +1,17 @@
 # Optional — in-cluster self-hosted Postgres, suitable for dev / single-node trials.
 # For production, prefer a managed service (Aliyun RDS / AWS RDS / etc.) and
-# point fastclaw.yaml's fastclaw-secrets.STORAGE_DSN at it; this file is not needed.
+# point fastagent.yaml's fastagent-secrets.STORAGE_DSN at it; this file is not needed.
 #
-# To use alongside fastclaw.yaml:
+# To use alongside fastagent.yaml:
 #   1. kubectl apply -f postgres.yml          (creates the resources below)
-#   2. In fastclaw.yaml, set fastclaw-secrets.STORAGE_DSN to:
-#        postgres://fastclaw:<POSTGRES_PASSWORD above>@fastclaw-db:5432/fastclaw?sslmode=disable
-#   3. kubectl apply -f fastclaw.yaml
+#   2. In fastagent.yaml, set fastagent-secrets.STORAGE_DSN to:
+#        postgres://fastagent:<POSTGRES_PASSWORD above>@fastagent-db:5432/fastagent?sslmode=disable
+#   3. kubectl apply -f fastagent.yaml
 apiVersion: v1
 kind: Secret
 metadata:
-  name: fastclaw-db
-  namespace: fastclaw
+  name: fastagent-db
+  namespace: fastagent
 type: Opaque
 stringData:
   POSTGRES_PASSWORD: "change-me-in-production"
@@ -19,8 +19,8 @@ stringData:
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: fastclaw-db
-  namespace: fastclaw
+  name: fastagent-db
+  namespace: fastagent
 spec:
   accessModes: [ReadWriteOnce]
   resources:
@@ -30,17 +30,17 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: fastclaw-db
-  namespace: fastclaw
+  name: fastagent-db
+  namespace: fastagent
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: fastclaw-db
+      app: fastagent-db
   template:
     metadata:
       labels:
-        app: fastclaw-db
+        app: fastagent-db
     spec:
       containers:
       - name: postgres
@@ -49,34 +49,34 @@ spec:
         - containerPort: 5432
         env:
         - name: POSTGRES_DB
-          value: fastclaw
+          value: fastagent
         - name: POSTGRES_USER
-          value: fastclaw
+          value: fastagent
         - name: POSTGRES_PASSWORD
           valueFrom:
             secretKeyRef:
-              name: fastclaw-db
+              name: fastagent-db
               key: POSTGRES_PASSWORD
         volumeMounts:
         - name: data
           mountPath: /var/lib/postgresql/data
         readinessProbe:
           exec:
-            command: ["pg_isready", "-U", "fastclaw"]
+            command: ["pg_isready", "-U", "fastagent"]
           initialDelaySeconds: 5
           periodSeconds: 5
       volumes:
       - name: data
         persistentVolumeClaim:
-          claimName: fastclaw-db
+          claimName: fastagent-db
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: fastclaw-db
-  namespace: fastclaw
+  name: fastagent-db
+  namespace: fastagent
 spec:
   selector:
-    app: fastclaw-db
+    app: fastagent-db
   ports:
   - port: 5432

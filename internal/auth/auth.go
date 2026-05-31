@@ -1,6 +1,6 @@
 // Package auth resolves an HTTP request to a user identity. It supports
 // two credential types:
-//   - cookie session ("fastclaw_session"): set by /api/login, validated
+//   - cookie session ("fastagent_session"): set by /api/login, validated
 //     against the web_sessions table; used by the web UI
 //   - Bearer apikey: validated against the apikeys table; used by API
 //     consumers and CLI clients
@@ -25,7 +25,7 @@ import (
 )
 
 // SessionCookieName is the cookie that backs the web UI's login state.
-const SessionCookieName = "fastclaw_session"
+const SessionCookieName = "fastagent_session"
 
 // SessionTTL is how long a freshly-issued login cookie is valid.
 const SessionTTL = 30 * 24 * time.Hour
@@ -276,11 +276,11 @@ func (r *Resolver) SwitchToAppUser(ctx context.Context, ident Identity, external
 
 // EndUserHeader is the per-request header that names the calling app's
 // end-user. When set on an api_key authenticated request, the auth
-// middleware will lazily mint (or look up) a fastclaw user for
+// middleware will lazily mint (or look up) a fastagent user for
 // (apikey, header) and switch the request identity to it. Sessions and
 // agent_files written under that identity then partition cleanly per
 // end-user instead of piling up under the api_key owner.
-const EndUserHeader = "X-Fastclaw-End-User"
+const EndUserHeader = "X-Fastagent-End-User"
 
 // ErrUnauthorized is returned when no valid credential is present.
 var ErrUnauthorized = errors.New("unauthorized")
@@ -396,7 +396,7 @@ done:
 			ident.ActAsUserID = act
 		}
 	}
-	// If the calling app named an end-user via X-Fastclaw-End-User on an
+	// If the calling app named an end-user via X-Fastagent-End-User on an
 	// api_key request, rebind to the corresponding app_user (lazy mint).
 	// We swallow errors here so a malformed header can't 401 a request —
 	// the request just stays under the api_key owner. The OpenAI

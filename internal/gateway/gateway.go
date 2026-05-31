@@ -61,12 +61,12 @@ func ToolProviderRegistry() *toolproviders.Registry { return toolProviderRegistr
 // the given agents using their merged config view (system + user + agent
 // scopes overlaid by the resolver).
 func registerAgentToolChains(cfg *config.Config, agents []*agent.Agent) {
-	envSearxNG := strings.TrimSpace(os.Getenv("FASTCLAW_SEARXNG_ENDPOINT"))
+	envSearxNG := strings.TrimSpace(os.Getenv("FASTAGENT_SEARXNG_ENDPOINT"))
 	for _, ag := range agents {
 		resolved := cfg.MergedAgentConfig(config.AgentEntry{ID: ag.Name()})
 		chain := buildToolChainFromResolved(resolved, "web_search")
 		// Fallback: if no web_search chain is configured AND
-		// FASTCLAW_SEARXNG_ENDPOINT is set in the environment,
+		// FASTAGENT_SEARXNG_ENDPOINT is set in the environment,
 		// synthesize a one-provider chain pointing at that endpoint.
 		// One-line setup ("docker run searxng …" + an env var) is the
 		// difference between an agent that can find the right URL on
@@ -97,7 +97,7 @@ func registerAgentToolChains(cfg *config.Config, agents []*agent.Agent) {
 }
 
 // synthesizeSearxNGChain builds an ad-hoc web_search chain backed
-// solely by the SearxNG provider, configured from FASTCLAW_SEARXNG_ENDPOINT.
+// solely by the SearxNG provider, configured from FASTAGENT_SEARXNG_ENDPOINT.
 // Lets a fresh install enable search without going through the
 // dashboard's tool-providers config — the most common reason a user
 // in the wild never sees web_search is that they didn't realize they
@@ -206,7 +206,7 @@ func (g *Gateway) Store() store.Store { return g.store }
 // TaskQueue returns the gateway's task queue.
 func (g *Gateway) TaskQueue() *taskqueue.Queue { return g.taskQueue }
 
-// EnvConfig returns the bootstrap config (FASTCLAW_* env vars).
+// EnvConfig returns the bootstrap config (FASTAGENT_* env vars).
 func (g *Gateway) EnvConfig() *config.EnvConfig { return g.envCfg }
 
 // New creates a Gateway. Storage + workspace + plugin manager + channel
@@ -232,7 +232,7 @@ func New(env *config.EnvConfig) (*Gateway, error) {
 	config.AgentFileConfigLoader = makeStoreFirstAgentFileLoader(st)
 
 	// Object store for agent-produced artifacts. Object store config lives
-	// in system_settings for runtime-edited fields and FASTCLAW_OBJECT_STORE_*
+	// in system_settings for runtime-edited fields and FASTAGENT_OBJECT_STORE_*
 	// env vars for ops-managed overrides.
 	osCfg := readObjectStoreCfg(st)
 	wsInner, err := workspace.Factory{
@@ -282,7 +282,7 @@ func New(env *config.EnvConfig) (*Gateway, error) {
 	chanMgr.Register(webChan)
 
 	// Cron scheduler reads jobs directly from the DB on each tick — no
-	// in-memory job list, no fastclaw.json copy. Each fired job carries
+	// in-memory job list, no fastagent.json copy. Each fired job carries
 	// its OwnerUserID so processInbound can route into the right space.
 	scheduler := cron.NewSchedulerFromStore(&cronStoreAdapter{st: st}, mb)
 	// Pre-flight delivery check: when the configured destination
@@ -338,7 +338,7 @@ func New(env *config.EnvConfig) (*Gateway, error) {
 
 	// Accounts service is used by the inbound routing loop to lazy-mint
 	// per-(channel, IM-sender) app_user rows so each chatter on an IM
-	// channel ends up with their own stable fastclaw u_xxx id (and thus
+	// channel ends up with their own stable fastagent u_xxx id (and thus
 	// their own per-chatter USER.md / MEMORY.md).
 	accts, err := users.NewAccounts(st)
 	if err != nil {
@@ -639,7 +639,7 @@ func defaultStr(v, fallback string) string {
 }
 
 // readObjectStoreCfg pulls the "objectstore" setting namespace, then
-// layers FASTCLAW_OBJECT_STORE_* env vars on top.
+// layers FASTAGENT_OBJECT_STORE_* env vars on top.
 func readObjectStoreCfg(st store.Store) config.ObjectStoreCfg {
 	cfg := &config.Config{}
 	if st != nil {
@@ -674,7 +674,7 @@ func readSystemTaskQueue(st store.Store) config.TaskQueueCfg {
 }
 
 // readSystemSandboxCfg reads the system-scope sandbox setting and
-// merges FASTCLAW_SANDBOX_* env vars on top. Source of truth for the
+// merges FASTAGENT_SANDBOX_* env vars on top. Source of truth for the
 // gateway-wide sandbox pool.
 func readSystemSandboxCfg(st store.Store) config.SandboxCfg {
 	cfg := &config.Config{}
