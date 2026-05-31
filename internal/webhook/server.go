@@ -24,7 +24,7 @@ type UserLookup interface {
 // WebhookRequest is the body of a webhook POST request.
 type WebhookRequest struct {
 	AgentID string `json:"agentId"`
-	UserID  string `json:"userId,omitempty"` // fastclaw user to route to (cloud mode)
+	UserID  string `json:"userId,omitempty"` // fastagent user to route to (cloud mode)
 	Message string `json:"message"`
 	Channel string `json:"channel"`
 	ChatID  string `json:"chatId"`

@@ -267,9 +267,9 @@ func (l *LINE) dispatchEvent(ev LINEEvent) {
 }
 
 // lineChatKey picks the most-specific chat identifier from a source
-// block and returns it alongside fastclaw's peerKind tag. LINE has
+// block and returns it alongside fastagent's peerKind tag. LINE has
 // three chat scopes: 1:1 with a user, multi-person room, and group.
-// We collapse room/group → "group" since fastclaw doesn't distinguish
+// We collapse room/group → "group" since fastagent doesn't distinguish
 // the two further down the pipeline.
 func lineChatKey(s LINESource) (chatID, peerKind string) {
 	switch s.Type {

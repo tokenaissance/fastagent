@@ -1,6 +1,6 @@
-## FastClaw Helm Chart — default values
+## FastAgent Helm Chart — default values
 ##
-## Same semantics as deploy/k8s/fastclaw.yaml: env-var driven, no
+## Same semantics as deploy/k8s/fastagent.yaml: env-var driven, no
 ## init-container sed, workspace artifacts go to an object store
 ## (S3 / OSS / R2 / B2 / MinIO / …) so multi-replica scales horizontally.
 
@@ -88,7 +88,7 @@ sandbox:
 ingress:
   enabled: false
   className: nginx              # or "alb" (Aliyun ACK ALB)
-  host: fastclaw.example.com
+  host: fastagent.example.com
   tls: false
   tlsSecret: ""
   certManagerIssuer: ""         # e.g. "letsencrypt-prod"
@@ -96,7 +96,7 @@ ingress:
   ## When using ALB Ingress (alb.ingress.kubernetes.io/*), override this map.
   annotations: {}
 
-## Extra FASTCLAW_* env vars passed through to the ConfigMap.
+## Extra FASTAGENT_* env vars passed through to the ConfigMap.
 extraEnv: {}
-  # FASTCLAW_LOG_LEVEL: "info"
-  # FASTCLAW_DAEMON_IDLE_TIMEOUT_SECONDS: "300"
+  # FASTAGENT_LOG_LEVEL: "info"
+  # FASTAGENT_DAEMON_IDLE_TIMEOUT_SECONDS: "300"

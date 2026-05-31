@@ -53,7 +53,7 @@ type Agent struct {
 	promptMode string
 	homePath        string // agent's home: SOUL.md, sessions, memory, skills
 	workspacePath   string // working dir where agent creates user files
-	homeDir         string // FastClaw root, ~/.fastclaw
+	homeDir         string // FastAgent root, ~/.fastagent
 	ownerUserID     string // the user that owns this agent (for hook namespacing)
 	// admins is the per-channel allowlist of chatters who can run write-
 	// mode slash commands (/new /undo /retry /compact /model /personality).
@@ -1103,8 +1103,8 @@ func (a *Agent) CostTracker() *costtracker.Tracker {
 }
 
 // dumpLLMRequest appends the full LLM-bound payload to a dedicated file
-// when FASTCLAW_DUMP_LLM is set. Default path is ~/.fastclaw/logs/llm-dump.log
-// (overridable via FASTCLAW_DUMP_LLM_FILE) — separate from gateway.log so
+// when FASTAGENT_DUMP_LLM is set. Default path is ~/.fastagent/logs/llm-dump.log
+// (overridable via FASTAGENT_DUMP_LLM_FILE) — separate from gateway.log so
 // the multi-thousand-line system prompt doesn't drown structured slog
 // entries, and tail-able regardless of whether the gateway runs under air,
 // daemon, or as a foreground process.
@@ -1112,15 +1112,15 @@ func (a *Agent) CostTracker() *costtracker.Tracker {
 // Multi-line content is written as one block per turn (not per-line slog
 // calls) so timestamps don't shred the system prompt.
 func dumpLLMRequest(agentName, model string, messages []provider.Message, tools []provider.Tool) {
-	if os.Getenv("FASTCLAW_DUMP_LLM") == "" {
+	if os.Getenv("FASTAGENT_DUMP_LLM") == "" {
 		return
 	}
-	path := os.Getenv("FASTCLAW_DUMP_LLM_FILE")
+	path := os.Getenv("FASTAGENT_DUMP_LLM_FILE")
 	if path == "" {
-		home := os.Getenv("FASTCLAW_HOME")
+		home := os.Getenv("FASTAGENT_HOME")
 		if home == "" {
 			if h, err := os.UserHomeDir(); err == nil {
-				home = h + "/.fastclaw"
+				home = h + "/.fastagent"
 			}
 		}
 		if home == "" {
@@ -3022,7 +3022,7 @@ func (a *Agent) UpdateConfig(rc config.ResolvedAgent) {
 	// propagation an agent that existed before sandbox was enabled keeps
 	// telling the LLM its home is the host absolute path, even after the
 	// executor itself has been swapped to Docker — model dutifully calls
-	// list_dir /Users/idoubi/.fastclaw/agents/<id>/agent and 404s in the
+	// list_dir /Users/idoubi/.fastagent/agents/<id>/agent and 404s in the
 	// container.
 	a.ctxBuilder.sandboxEnabled = rc.Sandbox.Enabled
 	a.ctxBuilder.sandboxBackend = rc.Sandbox.Backend

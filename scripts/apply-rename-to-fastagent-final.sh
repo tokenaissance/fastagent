@@ -79,41 +79,41 @@ echo -e "\n${YELLOW}1. 替换环境变量名称${NC}"
 echo "----------------------------------------"
 
 env_vars=(
-    "FASTCLAW_HOME:FASTAGENT_HOME"
-    "FASTCLAW_PORT:FASTAGENT_PORT"
-    "FASTCLAW_BIND:FASTAGENT_BIND"
-    "FASTCLAW_STORAGE_TYPE:FASTAGENT_STORAGE_TYPE"
-    "FASTCLAW_STORAGE_DSN:FASTAGENT_STORAGE_DSN"
-    "FASTCLAW_STORAGE_AUTO_MIGRATE:FASTAGENT_STORAGE_AUTO_MIGRATE"
-    "FASTCLAW_SANDBOX_ENABLED:FASTAGENT_SANDBOX_ENABLED"
-    "FASTCLAW_SANDBOX_BACKEND:FASTAGENT_SANDBOX_BACKEND"
-    "FASTCLAW_SANDBOX_IMAGE:FASTAGENT_SANDBOX_IMAGE"
-    "FASTCLAW_SANDBOX_BOXLITE_URL:FASTAGENT_SANDBOX_BOXLITE_URL"
-    "FASTCLAW_SANDBOX_BOXLITE_CLIENT_ID:FASTAGENT_SANDBOX_BOXLITE_CLIENT_ID"
-    "FASTCLAW_SANDBOX_BOXLITE_PREFIX:FASTAGENT_SANDBOX_BOXLITE_PREFIX"
-    "FASTCLAW_OBJECT_STORE_TYPE:FASTAGENT_OBJECT_STORE_TYPE"
-    "FASTCLAW_OBJECT_STORE_LOCAL_ROOT:FASTAGENT_OBJECT_STORE_LOCAL_ROOT"
-    "FASTCLAW_OBJECT_STORE_REGION:FASTAGENT_OBJECT_STORE_REGION"
-    "FASTCLAW_OBJECT_STORE_BUCKET:FASTAGENT_OBJECT_STORE_BUCKET"
-    "FASTCLAW_OBJECT_STORE_PREFIX:FASTAGENT_OBJECT_STORE_PREFIX"
-    "FASTCLAW_OBJECT_STORE_ACCESSKEY:FASTAGENT_OBJECT_STORE_ACCESSKEY"
-    "FASTCLAW_OBJECT_STORE_SECRETKEY:FASTAGENT_OBJECT_STORE_SECRETKEY"
-    "FASTCLAW_OBJECT_STORE_ACCOUNTID:FASTAGENT_OBJECT_STORE_ACCOUNTID"
-    "FASTCLAW_OBJECT_STORE_ENDPOINT:FASTAGENT_OBJECT_STORE_ENDPOINT"
-    "FASTCLAW_OBJECT_STORE_USESSL:FASTAGENT_OBJECT_STORE_USESSL"
-    "FASTCLAW_OBJECT_STORE_ALIYUN_INTERNAL:FASTAGENT_OBJECT_STORE_ALIYUN_INTERNAL"
-    "FASTCLAW_LOG_LEVEL:FASTAGENT_LOG_LEVEL"
-    "FASTCLAW_DEPLOY:FASTAGENT_DEPLOY"
-    "FASTCLAW_ALLOW_HOST_EXEC:FASTAGENT_ALLOW_HOST_EXEC"
-    "FASTCLAW_INSTALL_DIR:FASTAGENT_INSTALL_DIR"
-    "FASTCLAW_MODE:FASTAGENT_MODE"
-    "FASTCLAW_AUTH_TOKEN:FASTAGENT_AUTH_TOKEN"
-    "FASTCLAW_SEARXNG_ENDPOINT:FASTAGENT_SEARXNG_ENDPOINT"
-    "FASTCLAW_PLUGIN_CHAT_SEND_DELAY_MS:FASTAGENT_PLUGIN_CHAT_SEND_DELAY_MS"
-    "FASTCLAW_DUMP_LLM:FASTAGENT_DUMP_LLM"
-    "FASTCLAW_DUMP_LLM_FILE:FASTAGENT_DUMP_LLM_FILE"
-    "FASTCLAW_AGENT_ID:FASTAGENT_AGENT_ID"
-    "FASTCLAW_DAEMON_IDLE_TIMEOUT_SECONDS:FASTAGENT_DAEMON_IDLE_TIMEOUT_SECONDS"
+    "FASTAGENT_HOME:FASTAGENT_HOME"
+    "FASTAGENT_PORT:FASTAGENT_PORT"
+    "FASTAGENT_BIND:FASTAGENT_BIND"
+    "FASTAGENT_STORAGE_TYPE:FASTAGENT_STORAGE_TYPE"
+    "FASTAGENT_STORAGE_DSN:FASTAGENT_STORAGE_DSN"
+    "FASTAGENT_STORAGE_AUTO_MIGRATE:FASTAGENT_STORAGE_AUTO_MIGRATE"
+    "FASTAGENT_SANDBOX_ENABLED:FASTAGENT_SANDBOX_ENABLED"
+    "FASTAGENT_SANDBOX_BACKEND:FASTAGENT_SANDBOX_BACKEND"
+    "FASTAGENT_SANDBOX_IMAGE:FASTAGENT_SANDBOX_IMAGE"
+    "FASTAGENT_SANDBOX_BOXLITE_URL:FASTAGENT_SANDBOX_BOXLITE_URL"
+    "FASTAGENT_SANDBOX_BOXLITE_CLIENT_ID:FASTAGENT_SANDBOX_BOXLITE_CLIENT_ID"
+    "FASTAGENT_SANDBOX_BOXLITE_PREFIX:FASTAGENT_SANDBOX_BOXLITE_PREFIX"
+    "FASTAGENT_OBJECT_STORE_TYPE:FASTAGENT_OBJECT_STORE_TYPE"
+    "FASTAGENT_OBJECT_STORE_LOCAL_ROOT:FASTAGENT_OBJECT_STORE_LOCAL_ROOT"
+    "FASTAGENT_OBJECT_STORE_REGION:FASTAGENT_OBJECT_STORE_REGION"
+    "FASTAGENT_OBJECT_STORE_BUCKET:FASTAGENT_OBJECT_STORE_BUCKET"
+    "FASTAGENT_OBJECT_STORE_PREFIX:FASTAGENT_OBJECT_STORE_PREFIX"
+    "FASTAGENT_OBJECT_STORE_ACCESSKEY:FASTAGENT_OBJECT_STORE_ACCESSKEY"
+    "FASTAGENT_OBJECT_STORE_SECRETKEY:FASTAGENT_OBJECT_STORE_SECRETKEY"
+    "FASTAGENT_OBJECT_STORE_ACCOUNTID:FASTAGENT_OBJECT_STORE_ACCOUNTID"
+    "FASTAGENT_OBJECT_STORE_ENDPOINT:FASTAGENT_OBJECT_STORE_ENDPOINT"
+    "FASTAGENT_OBJECT_STORE_USESSL:FASTAGENT_OBJECT_STORE_USESSL"
+    "FASTAGENT_OBJECT_STORE_ALIYUN_INTERNAL:FASTAGENT_OBJECT_STORE_ALIYUN_INTERNAL"
+    "FASTAGENT_LOG_LEVEL:FASTAGENT_LOG_LEVEL"
+    "FASTAGENT_DEPLOY:FASTAGENT_DEPLOY"
+    "FASTAGENT_ALLOW_HOST_EXEC:FASTAGENT_ALLOW_HOST_EXEC"
+    "FASTAGENT_INSTALL_DIR:FASTAGENT_INSTALL_DIR"
+    "FASTAGENT_MODE:FASTAGENT_MODE"
+    "FASTAGENT_AUTH_TOKEN:FASTAGENT_AUTH_TOKEN"
+    "FASTAGENT_SEARXNG_ENDPOINT:FASTAGENT_SEARXNG_ENDPOINT"
+    "FASTAGENT_PLUGIN_CHAT_SEND_DELAY_MS:FASTAGENT_PLUGIN_CHAT_SEND_DELAY_MS"
+    "FASTAGENT_DUMP_LLM:FASTAGENT_DUMP_LLM"
+    "FASTAGENT_DUMP_LLM_FILE:FASTAGENT_DUMP_LLM_FILE"
+    "FASTAGENT_AGENT_ID:FASTAGENT_AGENT_ID"
+    "FASTAGENT_DAEMON_IDLE_TIMEOUT_SECONDS:FASTAGENT_DAEMON_IDLE_TIMEOUT_SECONDS"
 )
 
 for var_pair in "${env_vars[@]}"; do
@@ -128,8 +128,8 @@ done
 echo -e "\n${YELLOW}2. 替换文件系统路径${NC}"
 echo "----------------------------------------"
 
-replace_in_files '\.fastclaw' ".fastagent" "~/.fastclaw -> ~/.fastagent"
-replace_in_files '/\.fastclaw' "/.fastagent" "/data/.fastclaw -> /data/.fastagent"
+replace_in_files '\.fastagent' ".fastagent" "~/.fastagent -> ~/.fastagent"
+replace_in_files '/\.fastagent' "/.fastagent" "/data/.fastagent -> /data/.fastagent"
 
 # ============================================================
 # 3. HTTP Headers
@@ -137,9 +137,9 @@ replace_in_files '/\.fastclaw' "/.fastagent" "/data/.fastclaw -> /data/.fastagen
 echo -e "\n${YELLOW}3. 替换 HTTP Headers${NC}"
 echo "----------------------------------------"
 
-replace_in_files "x-fastclaw-agent-id" "x-fastagent-agent-id" "x-fastclaw-agent-id -> x-fastagent-agent-id"
-replace_in_files "x-fastclaw-session-key" "x-fastagent-session-key" "x-fastclaw-session-key -> x-fastagent-session-key"
-replace_in_files "x-fastclaw-channel" "x-fastagent-channel" "x-fastclaw-channel -> x-fastagent-channel"
+replace_in_files "x-fastagent-agent-id" "x-fastagent-agent-id" "x-fastagent-agent-id -> x-fastagent-agent-id"
+replace_in_files "x-fastagent-session-key" "x-fastagent-session-key" "x-fastagent-session-key -> x-fastagent-session-key"
+replace_in_files "x-fastagent-channel" "x-fastagent-channel" "x-fastagent-channel -> x-fastagent-channel"
 
 # ============================================================
 # 4. Cookie 名称
@@ -147,8 +147,8 @@ replace_in_files "x-fastclaw-channel" "x-fastagent-channel" "x-fastclaw-channel 
 echo -e "\n${YELLOW}4. 替换 Cookie 名称${NC}"
 echo "----------------------------------------"
 
-replace_in_files "fastclaw_session" "fastagent_session" "fastclaw_session -> fastagent_session"
-replace_in_files "fastclaw-affinity" "fastagent-affinity" "fastclaw-affinity -> fastagent-affinity"
+replace_in_files "fastagent_session" "fastagent_session" "fastagent_session -> fastagent_session"
+replace_in_files "fastagent-affinity" "fastagent-affinity" "fastagent-affinity -> fastagent-affinity"
 
 # ============================================================
 # 5. 命令和品牌名
@@ -156,10 +156,10 @@ replace_in_files "fastclaw-affinity" "fastagent-affinity" "fastclaw-affinity -> 
 echo -e "\n${YELLOW}5. 替换命令和品牌名${NC}"
 echo "----------------------------------------"
 
-replace_in_files "fastclaw upgrade" "fastagent upgrade" "fastclaw upgrade -> fastagent upgrade"
-replace_in_files "fastclaw version" "fastagent version" "fastclaw version -> fastagent version"
-replace_in_files "FastClaw:" "FastAgent:" "FastClaw: -> FastAgent:"
-replace_in_files "fastclaw connect dialog" "fastagent connect dialog" "fastclaw connect dialog -> fastagent connect dialog"
+replace_in_files "fastagent upgrade" "fastagent upgrade" "fastagent upgrade -> fastagent upgrade"
+replace_in_files "fastagent version" "fastagent version" "fastagent version -> fastagent version"
+replace_in_files "FastAgent:" "FastAgent:" "FastAgent: -> FastAgent:"
+replace_in_files "fastagent connect dialog" "fastagent connect dialog" "fastagent connect dialog -> fastagent connect dialog"
 
 # ============================================================
 # 6. Bot 用户名示例（注释中）
@@ -167,7 +167,7 @@ replace_in_files "fastclaw connect dialog" "fastagent connect dialog" "fastclaw 
 echo -e "\n${YELLOW}6. 替换注释中的示例${NC}"
 echo "----------------------------------------"
 
-replace_in_files "mike_fastclaw_bot" "mike_fastagent_bot" "mike_fastclaw_bot -> mike_fastagent_bot"
+replace_in_files "mike_fastagent_bot" "mike_fastagent_bot" "mike_fastagent_bot -> mike_fastagent_bot"
 
 # ============================================================
 # 7. PostgreSQL 数据库名称
@@ -175,11 +175,11 @@ replace_in_files "mike_fastclaw_bot" "mike_fastagent_bot" "mike_fastclaw_bot -> 
 echo -e "\n${YELLOW}7. 替换 PostgreSQL 数据库名称${NC}"
 echo "----------------------------------------"
 
-replace_in_files "POSTGRES_DB: fastclaw" "POSTGRES_DB: fastagent" "POSTGRES_DB: fastclaw -> fastagent"
-replace_in_files "POSTGRES_USER: fastclaw" "POSTGRES_USER: fastagent" "POSTGRES_USER: fastclaw -> fastagent"
-replace_in_files "postgres://fastclaw:" "postgres://fastagent:" "postgres://fastclaw: -> postgres://fastagent:"
-replace_in_files "@host:5432/fastclaw" "@host:5432/fastagent" "@.../fastclaw -> @.../fastagent"
-replace_in_files 'pg_isready", "-U", "fastclaw"' 'pg_isready", "-U", "fastagent"' "pg_isready -U fastclaw -> fastagent"
+replace_in_files "POSTGRES_DB: fastagent" "POSTGRES_DB: fastagent" "POSTGRES_DB: fastagent -> fastagent"
+replace_in_files "POSTGRES_USER: fastagent" "POSTGRES_USER: fastagent" "POSTGRES_USER: fastagent -> fastagent"
+replace_in_files "postgres://fastagent:" "postgres://fastagent:" "postgres://fastagent: -> postgres://fastagent:"
+replace_in_files "@host:5432/fastagent" "@host:5432/fastagent" "@.../fastclaw -> @.../fastagent"
+replace_in_files 'pg_isready", "-U", "fastagent"' 'pg_isready", "-U", "fastagent"' "pg_isready -U fastclaw -> fastagent"
 
 # ============================================================
 # 8. Helm Chart 名称和标签

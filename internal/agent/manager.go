@@ -166,7 +166,7 @@ func (m *Manager) buildAgent(rc config.ResolvedAgent, prov provider.Provider, mb
 	ag := NewAgentWithSkillsCfg(rc, providerForAgent(rc, prov), mb, homeDir, m.opts.globalSkillsCfg)
 	ag.SetOwnerUserID(m.uid)
 	// Per-user skills bucket: chat-time `skills/...` writes route to
-	// ~/.fastclaw/users/<uid>/, where SkillsLoader's "personal" layer
+	// ~/.fastagent/users/<uid>/, where SkillsLoader's "personal" layer
 	// also scans (see SkillsLoader.WithUserID). Set userID on the
 	// registry up front (the systemFileStore branch below also sets
 	// it, but only when memoryStore is wired — without this hoist a

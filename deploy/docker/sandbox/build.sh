@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the fastclaw-sandbox runtime image used by the agent's exec
+# Build the fastagent-sandbox runtime image used by the agent's exec
 # sandbox. Bundles Python + Node + Camoufox (anti-detect Firefox) so
 # the camoufox-cli skill works on the first turn without any pip/npm
 # round-trips.

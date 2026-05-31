@@ -14,7 +14,7 @@ import (
 //
 // agentSkillsDir is the per-agent skills directory (conventionally
 // <agentHome>/skills). Agent-initiated installs always land under that path —
-// never in the global ~/.fastclaw/skills/ — so one agent can't alter another
+// never in the global ~/.fastagent/skills/ — so one agent can't alter another
 // agent's capabilities just by chatting.
 //
 // onReload is called after a successful install so the owning agent can

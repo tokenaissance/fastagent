@@ -1,0 +1,47 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "fastagent.fullname" . }}-config
+  labels:
+    {{- include "fastagent.labels" . | nindent 4 }}
+data:
+  FASTAGENT_PORT: {{ .Values.gateway.port | quote }}
+  FASTAGENT_BIND: "all"
+  FASTAGENT_STORAGE_TYPE: "postgres"
+  FASTAGENT_STORAGE_AUTO_MIGRATE: "true"
+
+  ## Object store
+  FASTAGENT_OBJECT_STORE_TYPE: {{ .Values.objectStore.type | quote }}
+  {{- with .Values.objectStore.bucket }}
+  FASTAGENT_OBJECT_STORE_BUCKET: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.objectStore.region }}
+  FASTAGENT_OBJECT_STORE_REGION: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.objectStore.endpoint }}
+  FASTAGENT_OBJECT_STORE_ENDPOINT: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.objectStore.accountId }}
+  FASTAGENT_OBJECT_STORE_ACCOUNTID: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.objectStore.prefix }}
+  FASTAGENT_OBJECT_STORE_PREFIX: {{ . | quote }}
+  {{- end }}
+  FASTAGENT_OBJECT_STORE_USESSL: {{ .Values.objectStore.useSSL | quote }}
+  {{- if .Values.objectStore.aliyunInternal }}
+  FASTAGENT_OBJECT_STORE_ALIYUN_INTERNAL: "true"
+  {{- end }}
+
+  ## Sandbox
+  {{- if .Values.sandbox.enabled }}
+  FASTAGENT_SANDBOX_BACKEND: {{ .Values.sandbox.backend | quote }}
+  {{- with .Values.sandbox.image }}
+  FASTAGENT_SANDBOX_IMAGE: {{ . | quote }}
+  {{- end }}
+  {{- end }}
+
+  {{- with .Values.extraEnv }}
+  {{- range $k, $v := . }}
+  {{ $k }}: {{ $v | quote }}
+  {{- end }}
+  {{- end }}

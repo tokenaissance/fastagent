@@ -22,7 +22,7 @@ import (
 )
 
 // Feishu (飞书) bot adapter. Webhook-driven: inbound messages arrive via
-// HTTPS POSTs from Feishu's open platform to the fastclaw webhook route
+// HTTPS POSTs from Feishu's open platform to the fastagent webhook route
 // (set up in internal/setup/server.go); outbound replies go through
 // /open-apis/im/v1/messages with a tenant_access_token we mint on
 // demand and cache.
@@ -30,7 +30,7 @@ import (
 // Long-connection (WebSocket) is also offered by Feishu but uses
 // Protobuf framing — too much surface area to hand-roll without the
 // official SDK. Webhook is JSON-only and integrates with the existing
-// fastclaw HTTP server. Trade-off: needs a publicly reachable URL.
+// fastagent HTTP server. Trade-off: needs a publicly reachable URL.
 //
 // AppID is the credential_key + accountID. AppSecret is held in
 // AccountConfig.BotToken (semantic match: "the secret credential the
@@ -280,7 +280,7 @@ func (l *Feishu) HandleWebhook(body []byte) (responseBody []byte, status int, er
 	_ = json.Unmarshal(body, &peek)
 	if peek.Encrypt != "" {
 		if l.encryptKey == "" {
-			return nil, http.StatusBadRequest, errors.New("feishu webhook is encrypted but no encryptKey configured (set 加密策略 → Encrypt Key in fastclaw connect dialog, or clear it in feishu console)")
+			return nil, http.StatusBadRequest, errors.New("feishu webhook is encrypted but no encryptKey configured (set 加密策略 → Encrypt Key in fastagent connect dialog, or clear it in feishu console)")
 		}
 		plain, derr := decryptFeishuPayload(l.encryptKey, peek.Encrypt)
 		if derr != nil {
@@ -309,11 +309,11 @@ func (l *Feishu) HandleWebhook(body []byte) (responseBody []byte, status int, er
 		// against, anybody who guesses /api/feishu/webhook/<appId>
 		// can drive the bot. Operators must set the verification
 		// token in the Feishu Developer Console *and* paste it into
-		// fastclaw connect dialog. Constant-time compare on the
+		// fastagent connect dialog. Constant-time compare on the
 		// match to avoid timing leaks on the token.
 		if l.verificationToken == "" {
 			return nil, http.StatusUnauthorized,
-				errors.New("feishu webhook rejected: no verification token configured — set it in the Feishu console and fastclaw connect dialog")
+				errors.New("feishu webhook rejected: no verification token configured — set it in the Feishu console and fastagent connect dialog")
 		}
 		if subtle.ConstantTimeCompare([]byte(token), []byte(l.verificationToken)) != 1 {
 			return nil, http.StatusUnauthorized, errors.New("verification token mismatch")
@@ -339,7 +339,7 @@ func (l *Feishu) HandleWebhook(body []byte) (responseBody []byte, status int, er
 	// the token out of timing-attack reach.
 	if l.verificationToken == "" {
 		return nil, http.StatusUnauthorized,
-			errors.New("feishu webhook rejected: no verification token configured — set it in the Feishu console and fastclaw connect dialog")
+			errors.New("feishu webhook rejected: no verification token configured — set it in the Feishu console and fastagent connect dialog")
 	}
 	if subtle.ConstantTimeCompare([]byte(env.Header.Token), []byte(l.verificationToken)) != 1 {
 		return nil, http.StatusUnauthorized, errors.New("verification token mismatch")

@@ -835,7 +835,7 @@ type E2BExecutorPool struct {
 	workspace workspace.Store // optional — when set, /workspace is hydrated alongside /skills
 }
 
-// NewE2BExecutorPool — `home` is the FASTCLAW_HOME the docker backend
+// NewE2BExecutorPool — `home` is the FASTAGENT_HOME the docker backend
 // would have used for `-v` mounts; the pool uses it to resolve which
 // skill dirs to push into each fresh sandbox.
 func NewE2BExecutorPool(apiKey, template, home string, timeout time.Duration) *E2BExecutorPool {

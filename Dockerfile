@@ -24,7 +24,7 @@ COPY --from=web-builder /src/web/out internal/setup/web
 ARG VERSION=dev
 ARG COMMIT=unknown
 ARG DATE=unknown
-# Stamp BOTH symbol sets — `main.*` for the legacy `fastclaw version` CLI
+# Stamp BOTH symbol sets — `main.*` for the legacy `fastagent version` CLI
 # consumer and `internal/buildinfo.*` for the agent runtime + the About
 # page in the web UI. Mirrors the Makefile / scripts/release.sh ldflags
 # so a docker-built image identifies itself the same way the released
@@ -36,23 +36,23 @@ RUN CGO_ENABLED=0 go build \
       -X github.com/fastclaw-ai/fastclaw/internal/buildinfo.Version=${VERSION} \
       -X github.com/fastclaw-ai/fastclaw/internal/buildinfo.Commit=${COMMIT} \
       -X github.com/fastclaw-ai/fastclaw/internal/buildinfo.Date=${DATE}" \
-    -o /fastclaw ./cmd/fastclaw
+    -o /fastagent ./cmd/fastclaw
 
 # --- Stage 3: Runtime ---
 FROM alpine:3.21
 RUN apk add --no-cache ca-certificates tzdata
-COPY --from=go-builder /fastclaw /usr/local/bin/fastclaw
+COPY --from=go-builder /fastagent /usr/local/bin/fastagent
 
-# Default data directory. Override at runtime with FASTCLAW_HOME, but the
-# default value here lets `docker run fastclaw/fastclaw` work with no env.
-ENV FASTCLAW_HOME=/data/.fastclaw \
+# Default data directory. Override at runtime with FASTAGENT_HOME, but the
+# default value here lets `docker run tokenaissance/fastagent` work with no env.
+ENV FASTAGENT_HOME=/data/.fastagent \
     HOME=/data
-RUN mkdir -p /data/.fastclaw /data/.fastclaw/skills
-VOLUME /data/.fastclaw
+RUN mkdir -p /data/.fastagent /data/.fastagent/skills
+VOLUME /data/.fastagent
 
 # Bundle built-in skills
-COPY skills/ /data/.fastclaw/skills/
+COPY skills/ /data/.fastagent/skills/
 
 EXPOSE 18953
-ENTRYPOINT ["fastclaw"]
+ENTRYPOINT ["fastagent"]
 CMD ["gateway"]

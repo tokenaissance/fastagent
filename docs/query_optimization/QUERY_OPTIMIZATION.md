@@ -1,10 +1,10 @@
 # Query Optimization Guide
 
-This document describes the query optimization patterns used in FastClaw to eliminate N+1 queries and reduce database round-trips.
+This document describes the query optimization patterns used in FastAgent to eliminate N+1 queries and reduce database round-trips.
 
 ## Overview
 
-FastClaw follows Clean Architecture principles where:
+FastAgent follows Clean Architecture principles where:
 - **Use Case layer** (`internal/store/store.go`) defines batch query abstractions
 - **Frameworks & Drivers layer** (`internal/store/database.go`) implements SQL with dialect-aware placeholders
 - **Interface Adapter layer** (`internal/setup/handlers*.go`) uses batch methods to serve HTTP requests

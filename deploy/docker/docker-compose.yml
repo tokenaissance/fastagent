@@ -1,5 +1,5 @@
 ##
-## FastClaw — single-machine deployment with Postgres.
+## FastAgent — single-machine deployment with Postgres.
 ##
 ## Quick start:
 ##   docker compose up -d
@@ -8,38 +8,38 @@
 ##                                       # provider + first agent
 ##
 ## Or initialize from CLI without opening the web UI:
-##   docker compose exec fastclaw fastclaw admin create-user \
+##   docker compose exec fastagent fastagent admin create-user \
 ##     --username alice --email alice@example.com --password 'hunter2' \
 ##     --role super_admin
 ##
-## All runtime config goes through FASTCLAW_* env vars — no config file.
+## All runtime config goes through FASTAGENT_* env vars — no config file.
 ##
 services:
-  fastclaw:
+  fastagent:
     build:
       context: ../..
       dockerfile: Dockerfile
-    image: fastclaw/fastclaw:latest
+    image: ghcr.io/fastclaw-ai/fastclaw:latest
     restart: unless-stopped
     ports:
-      - "${FASTCLAW_PORT:-18953}:18953"
+      - "${FASTAGENT_PORT:-18953}:18953"
     volumes:
-      - fastclaw-data:/data/.fastclaw
+      - fastagent-data:/data/.fastagent
     environment:
-      # FASTCLAW_HOME — sqlite db path + sandbox root + skill cache live here
-      FASTCLAW_HOME: /data/.fastclaw
+      # FASTAGENT_HOME — sqlite db path + sandbox root + skill cache live here
+      FASTAGENT_HOME: /data/.fastagent
       # Bind to all interfaces so the host port mapping works
-      FASTCLAW_BIND: all
-      FASTCLAW_PORT: "18953"
+      FASTAGENT_BIND: all
+      FASTAGENT_PORT: "18953"
       # Postgres backend (sqlite would also work; use it by clearing
       # these two and removing the postgres service below)
-      FASTCLAW_STORAGE_TYPE: postgres
-      FASTCLAW_STORAGE_DSN: "postgres://fastclaw:${POSTGRES_PASSWORD:-fastclaw-secret}@postgres:5432/fastclaw?sslmode=disable"
-      FASTCLAW_STORAGE_AUTO_MIGRATE: "true"
+      FASTAGENT_STORAGE_TYPE: postgres
+      FASTAGENT_STORAGE_DSN: "postgres://fastagent:${POSTGRES_PASSWORD:-fastagent-secret}@postgres:5432/fastagent?sslmode=disable"
+      FASTAGENT_STORAGE_AUTO_MIGRATE: "true"
       # Sandbox (optional; uncomment to enable)
-      # FASTCLAW_SANDBOX_ENABLED: "true"
-      # FASTCLAW_SANDBOX_BACKEND: docker
-      # FASTCLAW_SANDBOX_IMAGE: python:3.12-slim
+      # FASTAGENT_SANDBOX_ENABLED: "true"
+      # FASTAGENT_SANDBOX_BACKEND: docker
+      # FASTAGENT_SANDBOX_IMAGE: python:3.12-slim
     depends_on:
       postgres:
         condition: service_healthy
@@ -49,17 +49,17 @@ services:
     image: postgres:16-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_DB: fastclaw
-      POSTGRES_USER: fastclaw
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fastclaw-secret}
+      POSTGRES_DB: fastagent
+      POSTGRES_USER: fastagent
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fastagent-secret}
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U fastclaw"]
+      test: ["CMD-SHELL", "pg_isready -U fastagent"]
       interval: 5s
       timeout: 3s
       retries: 5
 
 volumes:
-  fastclaw-data:
+  fastagent-data:
   postgres-data:

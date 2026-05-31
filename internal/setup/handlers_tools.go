@@ -148,7 +148,7 @@ func (s *Server) handleGetTools(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleSaveTools atomically updates the toolProviders and tools sections of
-// fastclaw.json. Only the admin/local user is allowed here — cloud tenants
+// fastagent.json. Only the admin/local user is allowed here — cloud tenants
 // get their own settings via a separate path (not wired yet). After save,
 // running agents are hot-reloaded so chains pick up new keys immediately.
 func (s *Server) handleSaveTools(w http.ResponseWriter, r *http.Request) {

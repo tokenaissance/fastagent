@@ -1674,7 +1674,7 @@ func (s *Server) handleMoveSessionProject(w http.ResponseWriter, r *http.Request
 }
 
 // handleFeishuWebhook receives Feishu / Feishu event POSTs. The route is
-// public (Feishu doesn't auth via fastclaw bearer); per-event security
+// public (Feishu doesn't auth via fastagent bearer); per-event security
 // is enforced inside the Feishu adapter by validating the payload's
 // header.token against the verification token stored at connect time.
 //
@@ -1715,7 +1715,7 @@ func (s *Server) handleFeishuWebhook(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleLINEWebhook receives LINE Messaging API event POSTs. The route
-// is public (LINE doesn't auth via fastclaw bearer); per-event security
+// is public (LINE doesn't auth via fastagent bearer); per-event security
 // comes from the HMAC-SHA256 signature in `x-line-signature` which the
 // adapter validates against channel_secret + the raw body.
 //
@@ -1844,7 +1844,7 @@ func newRandID() (string, error) {
 func generateRandomToken(length int) string {
 	b := make([]byte, length)
 	if _, err := rand.Read(b); err != nil {
-		return "fastclaw-default-token"
+		return "fastagent-default-token"
 	}
 	return hex.EncodeToString(b)
 }

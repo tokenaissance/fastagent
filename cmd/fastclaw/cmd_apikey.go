@@ -30,7 +30,7 @@ func apikeyCreateCmd() *cobra.Command {
 
 Key types:
   admin  — full platform access (only super_admin should own these)
-  user   — scoped to owner's resources; supports X-Fastclaw-End-User for app_user provisioning
+  user   — scoped to owner's resources; supports X-Fastagent-End-User for app_user provisioning
   agent  — locked to explicit agent list (requires --agents)`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			st, err := openStoreFromEnv()

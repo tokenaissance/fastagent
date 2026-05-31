@@ -364,7 +364,7 @@ type createUserReq struct {
 	// ExternalID is the calling app's own user identifier. Combined
 	// with the auth-derived apikey_id (NOT taken from the body) it
 	// makes provisioning idempotent: the same upstream user always
-	// resolves to the same fastclaw user_id. Optional for session
+	// resolves to the same fastagent user_id. Optional for session
 	// callers (web admin clicks); typical for upstream apikey
 	// provisioning where the caller wants a stable mapping back to
 	// their own user table.

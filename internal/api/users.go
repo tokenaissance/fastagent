@@ -10,10 +10,10 @@ import (
 
 // HandleProvisionAppUser handles POST /v1/users.
 //
-// Authenticated by api_key only. Mints (or returns) the fastclaw user
+// Authenticated by api_key only. Mints (or returns) the fastagent user
 // representing the calling app's end-user identified by external_id.
 // Idempotent: repeated calls with the same external_id return the same
-// fastclaw user_id, regardless of whether the row already existed.
+// fastagent user_id, regardless of whether the row already existed.
 //
 // Request body: { "external_id": "...", "display_name": "..." (optional) }
 // Response:     { "user_id": "u_…", "external_id": "...", "created": bool }
@@ -22,7 +22,7 @@ import (
 // user_id, so once the calling app has it, every downstream interaction
 // for that end-user partitions cleanly. Apps that prefer not to
 // pre-provision can skip this endpoint entirely and pass `user` in the
-// /v1/chat/completions body (or the X-Fastclaw-End-User header) on
+// /v1/chat/completions body (or the X-Fastagent-End-User header) on
 // every call — the auth layer lazy-mints on first sight either way.
 func (s *Server) HandleProvisionAppUser(w http.ResponseWriter, r *http.Request) {
 	ident, ok := auth.FromContext(r.Context())

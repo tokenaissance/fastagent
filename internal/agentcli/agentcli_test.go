@@ -14,7 +14,7 @@ import (
 // ready to use.
 func freshStore(t *testing.T) store.Store {
 	t.Helper()
-	t.Setenv("FASTCLAW_HOME", t.TempDir())
+	t.Setenv("FASTAGENT_HOME", t.TempDir())
 	st, err := store.New(&store.StorageConfig{
 		Type:        store.StorageSQLite,
 		AutoMigrate: true,

@@ -1,7 +1,7 @@
 // Package config holds runtime configuration types and ctx user-id plumbing.
 //
-// There is no fastclaw.json. Bootstrap settings (port, bind, storage DSN,
-// sandbox backend) come from FASTCLAW_* env vars; user-facing config (providers,
+// There is no fastagent.json. Bootstrap settings (port, bind, storage DSN,
+// sandbox backend) come from FASTAGENT_* env vars; user-facing config (providers,
 // channels, agents, etc.) lives in the database. The Config struct here is
 // the in-memory snapshot the gateway assembles at boot from those sources;
 // callers never read it from disk.
@@ -270,7 +270,7 @@ type SkillsLearnerCfg struct {
 }
 
 // Config is the in-memory runtime snapshot. The gateway assembles this at
-// boot by reading FASTCLAW_* env vars + database (system_settings, providers,
+// boot by reading FASTAGENT_* env vars + database (system_settings, providers,
 // channels, agents). Callers never serialize it back out — DB tables are
 // the persistent source of truth.
 type Config struct {
@@ -452,7 +452,7 @@ const (
 	// guidance they need inside SOUL.md / IDENTITY.md themselves —
 	// this mode hands the floor over to the persona files completely.
 	// (Renamed from PromptModeMinimal to make the intent more obvious:
-	// you're CUSTOMIZING the system prompt yourself, not asking fastclaw
+	// you're CUSTOMIZING the system prompt yourself, not asking fastagent
 	// for a minimal version of its built-in one.)
 	PromptModeCustomize = "customize"
 )
@@ -484,7 +484,7 @@ type AccountConfig struct {
 	// in the upstream console — adapters then expect plaintext bodies.
 	EncryptKey string `json:"encryptKey,omitempty"`
 	// UseLongConn switches inbound transport to a long-lived
-	// connection (WebSocket) initiated outbound from fastclaw rather
+	// connection (WebSocket) initiated outbound from fastagent rather
 	// than the platform POSTing to a public webhook. Currently only
 	// honored by the Feishu adapter; ignored by adapters that don't
 	// offer this mode. When true, verification/encrypt keys are
@@ -559,7 +559,7 @@ type AgentFileConfig struct {
 	// gate (anyone can run the command — backward-compatible default).
 	//
 	// On web/api the gate falls through to msg.UserID == agent owner UUID
-	// regardless of this field, since those channels carry the FastClaw
+	// regardless of this field, since those channels carry the FastAgent
 	// identity directly and don't need a per-platform allowlist.
 	Admins map[string][]string `json:"admins,omitempty"`
 }
@@ -646,20 +646,20 @@ type TeamConfig struct {
 	Routing map[string]string `json:"routing"`
 }
 
-// HomeDir returns the FastClaw root directory (default ~/.fastclaw).
+// HomeDir returns the FastAgent root directory (default ~/.fastagent).
 // Holds the sqlite db, sandbox roots, and FS-materialized agent caches.
 func HomeDir() (string, error) {
-	if h := os.Getenv("FASTCLAW_HOME"); h != "" {
+	if h := os.Getenv("FASTAGENT_HOME"); h != "" {
 		return h, nil
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".fastclaw"), nil
+	return filepath.Join(home, ".fastagent"), nil
 }
 
-// AgentHomeDir returns ~/.fastclaw/agents/{agentID}/agent — the FS cache
+// AgentHomeDir returns ~/.fastagent/agents/{agentID}/agent — the FS cache
 // directory the runtime materializes agent identity files into. agents.id
 // is globally unique so no user namespace is needed.
 func AgentHomeDir(agentID string) (string, error) {
@@ -674,7 +674,7 @@ func AgentHomeDir(agentID string) (string, error) {
 }
 
 // AgentWorkspaceDir returns the agent's working directory for user-facing
-// artifacts: ~/.fastclaw/workspaces/<agent_id>/. agents.id is globally
+// artifacts: ~/.fastagent/workspaces/<agent_id>/. agents.id is globally
 // unique so no user namespace is needed; per-session sub-directories are
 // added by the workspace store at write time (see workspace.LocalFS).
 func AgentWorkspaceDir(agentID string) (string, error) {

@@ -34,7 +34,7 @@ type CredentialManager struct {
 }
 
 // NewCredentialManagerForUser creates a credential manager scoped to a specific
-// user. Credentials live at ~/.fastclaw/users/{userID}/credentials.json and
+// user. Credentials live at ~/.fastagent/users/{userID}/credentials.json and
 // are encrypted with a key derived from the user ID, so one user's file
 // cannot be decrypted with another user's key even if moved on disk.
 func NewCredentialManagerForUser(userID, passphrase string) (*CredentialManager, error) {
@@ -263,7 +263,7 @@ func (cm *CredentialManager) load() error {
 func legacyDeriveKey() []byte {
 	hostname, _ := os.Hostname()
 	home, _ := os.UserHomeDir()
-	hash := sha256.Sum256([]byte("fastclaw:" + hostname + ":" + home))
+	hash := sha256.Sum256([]byte("fastagent:" + hostname + ":" + home))
 	return hash[:]
 }
 
@@ -279,11 +279,11 @@ func deriveKeyForUser(userID, passphrase string) []byte {
 	}
 	var seed string
 	if passphrase != "" {
-		seed = "fastclaw:user:" + userID + ":pp:" + passphrase
+		seed = "fastagent:user:" + userID + ":pp:" + passphrase
 	} else {
 		hostname, _ := os.Hostname()
 		home, _ := os.UserHomeDir()
-		seed = "fastclaw:user:" + userID + ":host:" + hostname + ":" + home
+		seed = "fastagent:user:" + userID + ":host:" + hostname + ":" + home
 	}
 	hash := sha256.Sum256([]byte(seed))
 	return hash[:]

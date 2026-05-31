@@ -3,7 +3,7 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 DATE    ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
-# Stamp build identity into both the main package (legacy `fastclaw
+# Stamp build identity into both the main package (legacy `fastagent
 # version` consumer) and internal/buildinfo (the agent runtime + system
 # prompt reader). Keeping both in sync from one VERSION variable means
 # release builds hand the model the same string the CLI reports.
@@ -37,13 +37,13 @@ bundle-skills:
 	@echo "==> bundled skills synced"
 
 build: build-web bundle-skills
-	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o bin/fastclaw ./cmd/fastclaw
+	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o bin/fastagent ./cmd/fastclaw
 
 install: build
 	install -d $(PREFIX)/bin
-	install -m 0755 bin/fastclaw $(PREFIX)/bin/fastclaw
+	install -m 0755 bin/fastagent $(PREFIX)/bin/fastagent
 	@echo
-	@echo "==> installed: $(PREFIX)/bin/fastclaw"
+	@echo "==> installed: $(PREFIX)/bin/fastagent"
 	@case ":$$PATH:" in *":$(PREFIX)/bin:"*) ;; *) \
 	  echo "    NOTE: $(PREFIX)/bin is not on your PATH."; \
 	  echo "    Add to ~/.zshrc:  export PATH=\"$(PREFIX)/bin:\$$PATH\"" ;; \
@@ -62,16 +62,16 @@ clean:
 release-local: build-web bundle-skills
 	@mkdir -p dist
 	@# macOS
-	GOOS=darwin  GOARCH=arm64 CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o dist/fastclaw_darwin_arm64/fastclaw  ./cmd/fastclaw
-	GOOS=darwin  GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o dist/fastclaw_darwin_amd64/fastclaw  ./cmd/fastclaw
+	GOOS=darwin  GOARCH=arm64 CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o dist/fastagent_darwin_arm64/fastagent  ./cmd/fastclaw
+	GOOS=darwin  GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o dist/fastagent_darwin_amd64/fastagent  ./cmd/fastclaw
 	@# Linux
-	GOOS=linux   GOARCH=arm64 CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o dist/fastclaw_linux_arm64/fastclaw   ./cmd/fastclaw
-	GOOS=linux   GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o dist/fastclaw_linux_amd64/fastclaw   ./cmd/fastclaw
+	GOOS=linux   GOARCH=arm64 CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o dist/fastagent_linux_arm64/fastagent   ./cmd/fastclaw
+	GOOS=linux   GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o dist/fastagent_linux_amd64/fastagent   ./cmd/fastclaw
 	@# Windows
-	GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o dist/fastclaw_windows_amd64/fastclaw.exe ./cmd/fastclaw
-	GOOS=windows GOARCH=arm64 CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o dist/fastclaw_windows_arm64/fastclaw.exe ./cmd/fastclaw
+	GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o dist/fastagent_windows_amd64/fastagent.exe ./cmd/fastclaw
+	GOOS=windows GOARCH=arm64 CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o dist/fastagent_windows_arm64/fastagent.exe ./cmd/fastclaw
 	@# Package: tar.gz for unix, zip for windows
-	@cd dist && for d in fastclaw_darwin_* fastclaw_linux_*; do tar -czf "$${d}.tar.gz" -C "$$d" fastclaw; done
-	@cd dist && for d in fastclaw_windows_*; do (cd "$$d" && zip -q "../$${d}.zip" fastclaw.exe); done
+	@cd dist && for d in fastagent_darwin_* fastagent_linux_*; do tar -czf "$${d}.tar.gz" -C "$$d" fastagent; done
+	@cd dist && for d in fastagent_windows_*; do (cd "$$d" && zip -q "../$${d}.zip" fastagent.exe); done
 	@echo "Release artifacts:"
 	@ls -lh dist/*.tar.gz dist/*.zip 2>/dev/null

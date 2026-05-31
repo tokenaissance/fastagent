@@ -46,7 +46,7 @@ func sandboxListCmd() *cobra.Command {
 		Use:   "list",
 		Short: "List running sandbox containers",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			listCmd := exec.Command("docker", "ps", "--filter", "label=fastclaw=sandbox", "--format",
+			listCmd := exec.Command("docker", "ps", "--filter", "label=fastagent=sandbox", "--format",
 				"table {{.ID}}\t{{.Image}}\t{{.Status}}\t{{.Names}}")
 			listCmd.Stdout = os.Stdout
 			listCmd.Stderr = os.Stderr

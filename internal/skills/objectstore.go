@@ -24,7 +24,7 @@ import (
 //	<owner>/skills/<skillName>/<relFile>
 //
 // Owner is the agent ID for per-agent skills, or GlobalSkillOwner for the
-// platform-wide directory (`~/.fastclaw/skills/`).
+// platform-wide directory (`~/.fastagent/skills/`).
 const (
 	// GlobalSkillOwner is the synthetic "agent ID" used as the prefix for
 	// globally-installed skills in the object store. A real agent can
@@ -288,7 +288,7 @@ func HydrateSkillsDown(ctx context.Context, ws workspace.Store, owner, rootDir s
 	// indistinguishable from "OSS misconfigured" or "fresh install with
 	// only filesystem-installed skills". Pruning in that case is
 	// destructive — it deletes every local skill the operator dropped
-	// into FASTCLAW_HOME/skills/ for product agents that don't use OSS
+	// into FASTAGENT_HOME/skills/ for product agents that don't use OSS
 	// at all. Skip pruning entirely unless the remote authoritatively
 	// has at least one skill, which is the only state where "missing
 	// from remote" carries meaning.
