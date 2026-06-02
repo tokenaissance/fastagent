@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/lib/pq"  // PostgreSQL driver
-	_ "modernc.org/sqlite" // SQLite driver (pure Go)
+	_ "github.com/jackc/pgx/v5/stdlib" // PostgreSQL driver
+	_ "modernc.org/sqlite"             // SQLite driver (pure Go)
 )
 
 // DBStore implements Store using a SQL database (PostgreSQL or SQLite).
@@ -60,7 +60,7 @@ func (d *DBStore) Dialect() string { return d.dialect }
 func driverName(dialect string) string {
 	switch dialect {
 	case "postgres":
-		return "postgres"
+		return "pgx"
 	case "sqlite":
 		return "sqlite"
 	default:
