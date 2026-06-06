@@ -449,7 +449,7 @@ function WelcomeStep() {
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
           <PartyPopper className="size-5 text-primary" />
-          Welcome to FastClaw
+          Welcome to FastAgent
         </CardTitle>
         <CardDescription>
           A few quick steps to set up your platform — admin account, first LLM
@@ -882,7 +882,7 @@ function SandboxStep(props: {
                     <Input
                       value={props.boxliteImage}
                       onChange={(e) => props.setBoxliteImage(e.target.value)}
-                      placeholder="fastclaw-sandbox"
+                      placeholder="fastagent-sandbox"
                       className="font-mono text-sm"
                     />
                     <p className="text-xs text-muted-foreground">

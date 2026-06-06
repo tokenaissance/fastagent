@@ -4,7 +4,7 @@
 
 将所有用户可见的 `fastclaw` / `FastClaw` / `FASTCLAW` 品牌引用替换为 `fastagent` / `FastAgent` / `FASTAGENT`。遵循最小改动原则：只改用户能看到的，内部实现保持不变。
 
-**总修改文件**: 130 个
+**总修改文件**: 152 个
 **分支**: `fastagent`
 
 ---
@@ -247,6 +247,135 @@ image: fastclaw:local                  → image: fastagent:local
 
 ---
 
+---
+
+## 17. Web UI — 品牌文本 (14 处, 11 文件) ✅
+
+用户可见的 `FastClaw` 品牌文本 → `FastAgent`：
+
+| 文件 | 行 (rebrand 后) | 内容 | 类型 |
+|------|-----|------|------|
+| `web/src/app/layout.tsx` | 34 | `title: "FastClaw"` → `"FastAgent"` | 页面标题 |
+| `web/src/app/page.tsx` | 76 | `alt="FastClaw"` → `"FastAgent"` | Logo alt |
+| `web/src/app/page.tsx` | 77 | `<h1>FastClaw</h1>` → `<h1>FastAgent</h1>` | 登录页标题 |
+| `web/src/app/signup/page.tsx` | 91 | `"Sign up to start using FastClaw"` → `FastAgent` | 注册页文案 |
+| `web/src/app/onboard/page.tsx` | 452 | `"Welcome to FastClaw"` → `FastAgent` | 引导页标题 |
+| `web/src/app/overview/page.tsx` | 98 | `"Monitor your FastClaw gateway"` → `FastAgent` | 概览页描述 |
+| `web/src/app/settings/about/page.tsx` | 46 | `FastClaw` label → `FastAgent` | 关于页标签 |
+| `web/src/app/settings/about/page.tsx` | 9 | `"fastclaw upgrade"` → `"fastagent upgrade"` | CLI 升级命令 |
+| `web/src/app/plugins/page.tsx` | 94 | `"Extend FastClaw"` → `FastAgent` | 插件页描述 |
+| `web/src/app/channels/page.tsx` | 72 | `"fastclaw.json"` → `"fastagent.json"` | 频道页提示 |
+| `web/src/components/login-screen.tsx` | 107 | `"Sign up to start using FastClaw"` → `FastAgent` | 登录页文案 |
+| `web/src/components/login-screen.tsx` | 171 | `<h1>FastClaw</h1>` → `<h1>FastAgent</h1>` | 登录页标题 |
+| `web/src/components/team-switcher.tsx` | 42 | `alt="FastClaw"` → `"FastAgent"` | Logo alt |
+| `web/src/components/team-switcher.tsx` | 121 | `"FastClaw"` header → `"FastAgent"` | 侧栏标题 |
+
+> 注：`settings/about/page.tsx:11` 的 GitHub 发布链接 URL 按计划保持不变（真实 URL）。
+
+## 18. Web UI — 路径引用 (5 处, 5 文件) ✅
+
+用户可见的 `~/.fastclaw/` 路径 → `~/.fastagent/`：
+
+| 文件 | 行 (rebrand 后) | 内容 |
+|------|-----|------|
+| `web/src/app/skills/page.tsx` | 461 | `~/.fastclaw/skills/` → `~/.fastagent/skills/` |
+| `web/src/app/agents/[id]/skills/page.tsx` | 521 | `~/.fastclaw/agents/{agentId}/skills/` → `~/.fastagent/` |
+| `web/src/app/agents/[id]/plugins/page.tsx` | 105 | `~/.fastclaw/plugins/` → `~/.fastagent/plugins/` |
+| `web/src/app/agents/[id]/context/page.tsx` | 238 | `~/.fastclaw/plugins/fastclaw-plugin-demo` → `~/.fastagent/plugins/fastagent-plugin-demo` |
+| `web/src/components/chat-screen.tsx` | 30 | `~/.fastclaw/workspaces/...` → `~/.fastagent/workspaces/...` (注释) |
+
+## 19. Web UI — localStorage Key (6 处, 3 文件) ✅
+
+| 文件 | 行 (rebrand 后) | 内容 |
+|------|-----|------|
+| `web/src/lib/api.ts` | 273 | `localStorage.setItem("fastclaw_token", ...)` → `"fastagent_token"` |
+| `web/src/lib/api.ts` | 275 | `localStorage.removeItem("fastclaw_token")` → `"fastagent_token"` |
+| `web/src/lib/api.ts` | 281 | `localStorage.getItem("fastclaw_token")` → `"fastagent_token"` |
+| `web/src/components/theme-provider.tsx` | 7 | `STORAGE_KEY = "fastclaw-theme"` → `"fastagent-theme"` |
+| `web/src/app/layout.tsx` | 48 | `localStorage.getItem('fastclaw-theme')` → `'fastagent-theme'` (inline script) |
+
+## 20. Web UI — Custom Event (10 处, 5 文件) ✅
+
+`fastclaw:sessions-changed` → `fastagent:sessions-changed`：
+
+| 文件 | 行 (rebrand 后) | 用法 |
+|------|-----|------|
+| `web/src/components/nav-projects.tsx` | 89 | `new CustomEvent("fastclaw:sessions-changed")` → `"fastagent:"` |
+| `web/src/components/chat-screen.tsx` | 954, 1058, 1669 | 3× dispatch |
+| `web/src/components/app-sidebar.tsx` | 242 | `addEventListener("fastclaw:sessions-changed")` → `"fastagent:"` |
+| `web/src/components/app-sidebar.tsx` | 244 | `removeEventListener("fastclaw:sessions-changed")` → `"fastagent:"` |
+| `web/src/components/app-sidebar.tsx` | 255 | `new CustomEvent("fastclaw:sessions-changed")` → `"fastagent:"` |
+| `web/src/app/agents/[id]/chats/page.tsx` | 110 | `new CustomEvent("fastclaw:sessions-changed")` → `"fastagent:"` |
+| `web/src/components/nav-projects-list.tsx` | 93 | 注释引用 |
+| `web/src/components/app-sidebar.tsx` | 207 | 注释引用 |
+
+## 21. Web UI — MIME Type (1 处) ✅
+
+| 文件 | 行 (rebrand 后) | 内容 |
+|------|-----|------|
+| `web/src/components/nav-projects.tsx` | 20 | `"application/x-fastclaw-chat"` → `"application/x-fastagent-chat"` |
+
+## 22. Web UI — Sandbox 占位符 (1 处变更 + 3 处保持不变) ✅
+
+按计划：只有 BoxLite snapshot placeholder 改 `fastclaw-sandbox` → `fastagent-sandbox`，Docker 默认值 `thinkany/fastclaw-sandbox:latest` 保持不变（已发布镜像名）。
+
+**已变更**:
+| 文件 | 行 (rebrand 后) | 内容 |
+|------|-----|------|
+| `web/src/app/onboard/page.tsx` | 885 | `placeholder="fastclaw-sandbox"` → `"fastagent-sandbox"` |
+| `web/src/app/settings/runtime/page.tsx` | 221 | `placeholder="fastclaw-sandbox"` → `"fastagent-sandbox"` |
+
+**保持不变**:
+| 文件 | 行 | 内容 |
+|------|-----|------|
+| `web/src/app/onboard/page.tsx` | 161 | `useState("thinkany/fastclaw-sandbox:latest")` |
+| `web/src/app/onboard/page.tsx` | 909 | `placeholder="thinkany/fastclaw-sandbox:latest"` |
+| `web/src/app/settings/runtime/page.tsx` | 245 | `placeholder="thinkany/fastclaw-sandbox:latest"` |
+
+## 23. Web UI — Channel 页注释 (6 处, 1 文件) ✅
+
+| 文件 | 行 (rebrand 后) | 内容 |
+|------|-----|------|
+| `web/src/app/agents/[id]/channels/page.tsx` | 928 | `fastclaw verifies inbound` → `fastagent verifies` |
+| `web/src/app/agents/[id]/channels/page.tsx` | 1048 | `fastclaw doesn't surface` → `fastagent doesn't` |
+| `web/src/app/agents/[id]/channels/page.tsx` | 1258 | `fastclaw is now opening a WebSocket` → `fastagent is now` |
+| `web/src/app/agents/[id]/channels/page.tsx` | 1273 | `this fastclaw instance` → `this fastagent instance` |
+| `web/src/app/agents/[id]/channels/page.tsx` | 1297 | `fastclaw opens a WebSocket` → `fastagent opens` |
+| `web/src/app/agents/[id]/channels/page.tsx` | 1341 | `fastclaw rejects webhook payloads` → `fastagent rejects` |
+
+## 24. Web UI — 其他注释 (5 处, 4 文件) ✅
+
+| 文件 | 行 (rebrand 后) | 内容 |
+|------|-----|------|
+| `web/src/app/skills/page.tsx` | 51 | `~/.fastclaw/skills dir` → `~/.fastagent/skills dir` |
+| `web/src/app/agents/[id]/skills/page.tsx` | 495 | `~/.fastclaw/agents/<id>/skills` → `~/.fastagent/` |
+| `web/src/lib/api.ts` | 331 | `// driven by FASTCLAW_DEPLOY` → `// driven by FASTAGENT_DEPLOY` |
+| `web/src/components/team-switcher.tsx` | 23, 84 | `FastClaw logo`, `show "FastClaw"` → `FastAgent` |
+| `web/src/components/app-sidebar.tsx` | — | `falling back to "FastClaw"` → `"FastAgent"` |
+
+## 25. LICENSE — 按计划未修改
+
+全部 ~15 处 `FastClaw` 保持原样。按 scope 约定：LICENSE 文件不在本次 web UI 仅 rebrand 范围内。
+
+## 26. 插件清单 — 按计划未修改 (3 文件)
+
+| 文件 | 内容 | 状态 |
+|------|------|------|
+| `plugins/fastclaw-plugin-demo/plugin.json` | `"id": "fastclaw-plugin-demo"`, `"name": "FastClaw Plugin Demo"` | 保持（外部标识符） |
+| `plugins/openclaw-plugin-demo/plugin.json` | description 含 `"FastClaw"` | 保持 |
+| `tools/openclaw-plugin-bridge/package.json` | `@fastclaw/` npm name, description | 保持 |
+
+## 27. Deploy 文档注释 — 按计划未修改 (4 文件)
+
+| 文件 | 内容 | 状态 |
+|------|------|------|
+| `deploy/docker/sandbox/e2b.toml` | 4 处注释提及 `fastclaw-sandbox` | 保持 |
+| `deploy/docker/sandbox/build.sh` | 注释 `Default: thinkany/fastclaw-sandbox:latest` | 保持 |
+| `deploy/k8s/fastagent.yaml` | 2 处注释 | 保持 |
+| `scripts/apply-rename-to-fastagent-final.sh` | 脚本自身注释 | 保持 |
+
+---
+
 ## ✅ 保持不变
 
 | 类别 | 内容 | 原因 |
@@ -259,21 +388,24 @@ image: fastclaw:local                  → image: fastagent:local
 | E2B 模板 | `fastclaw-sandbox` (e2b.toml) | 外部平台注册的模板名 |
 | JSON tag | `json:"fastclaw"` | 向后兼容 |
 | Go struct field | `FastClaw *OpenClawMeta` | 配合 json tag |
-| 前端代码 | `web/src/` | 管理员前端，不改 |
-| 管理员工具 | `tools/openclaw-plugin-bridge/` | 管理员前端代码 |
-| 插件示例 | `plugins/fastclaw-plugin-demo/` | 管理员前端代码 |
-| 插件示例 | `plugins/openclaw-plugin-demo/` | 管理员前端代码 |
-| README.md | 保持原始 FastClaw 版本 | 与上游 repo 对齐，rebranded 版本见 `FASTAGENT_README.md` |
+| README.md | 保持原始 FastClaw 版本 | 与上游 repo 对齐 |
 
 ---
 
 ## 用户影响
 
+现有 rebrand 已造成的影响:
 - 需要重新登录（cookie 名变更，旧 `fastclaw_session` 失效）
 - 环境变量名变更（运维需更新 `FASTCLAW_*` → `FASTAGENT_*`）
 - API Header 名变更（第三方 API 调用者需更新 `X-Fastclaw-*` → `X-Fastagent-*`）
 - 数据目录变更（本地用户需 `mv ~/.fastclaw ~/.fastagent`）
 - K8s 部署需更新 ConfigMap/Secret 中的环境变量名
+
+Web UI rebrand 的额外影响 (已应用):
+- **需重新登录**: `fastclaw_token` localStorage key 已变更为 `fastagent_token` → 旧 token 无法读取
+- **主题重置**: `fastclaw-theme` localStorage key 已变更为 `fastagent-theme` → 需重新选择主题
+- **Custom event 兼容**: `fastclaw:sessions-changed` → `fastagent:sessions-changed`，所有 dispatch/listener 已同步变更 (10 处, 5 文件)
+- **MIME type**: `application/x-fastclaw-chat` → `application/x-fastagent-chat` (拖拽 dataTransfer)
 
 ## 不影响
 
@@ -281,3 +413,24 @@ image: fastclaw:local                  → image: fastagent:local
 - 对象存储数据（bucket/路径不变）
 - Pod 本地缓存（emptyDir，重启自动重建）
 - 前端功能（cookie 由浏览器自动处理，前端不硬编码 cookie 名）
+
+---
+
+## 汇总统计
+
+| 类别 | 文件数 | 发生处 | 状态 |
+|------|--------|--------|------|
+| 1-16 (已有 rebrand) | ~130 | ~300+ | **已完成** (commit `9265d46`) |
+| 17. Web UI 品牌文本 | 11 | 14 | **已完成** (commit 待定) |
+| 18. Web UI 路径引用 | 5 | 5 | **已完成** |
+| 19. Web UI localStorage | 3 | 6 | **已完成** |
+| 20. Web UI CustomEvent | 5 | 10 | **已完成** |
+| 21. Web UI MIME Type | 1 | 1 | **已完成** |
+| 22. Web UI Sandbox 占位符 | 2 | 2 变更 + 3 保持 | **部分变更** |
+| 23. Web UI Channel 注释 | 1 | 6 | **已完成** |
+| 24. Web UI 其他注释 | 4 | 5 | **已完成** |
+| 25. LICENSE | 1 | ~15 | 按计划未修改 |
+| 26. 插件清单 | 3 | 6 | 按计划未修改 |
+| 27. Deploy 文档注释 | 4 | ~8 | 按计划未修改 |
+| **Web UI 已 rebrand 合计** | **22** | **~49** | **已完成** |
+| **按计划保持不变** | — | ~320+ | — |

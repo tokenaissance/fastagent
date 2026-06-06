@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { getStatus, type StatusResponse } from "@/lib/api";
 
-const UPGRADE_CMD = "fastclaw upgrade";
+const UPGRADE_CMD = "fastagent upgrade";
 
 const RELEASES_URL = "https://github.com/fastclaw-ai/fastclaw/releases";
 
@@ -43,7 +43,7 @@ export default function AboutSettingsPage() {
 
       <div className="rounded-lg border border-border bg-card p-5 space-y-3">
         <div className="flex items-center justify-between">
-          <span className="text-sm text-muted-foreground">FastClaw</span>
+          <span className="text-sm text-muted-foreground">FastAgent</span>
           <code className="text-sm font-mono bg-muted px-2 py-0.5 rounded">
             {version}
           </code>

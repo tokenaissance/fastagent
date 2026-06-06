@@ -218,7 +218,7 @@ export default function RuntimeSettingsPage() {
                     <Input
                       value={sandboxBoxliteImage}
                       onChange={(e) => setSandboxBoxliteImage(e.target.value)}
-                      placeholder="fastclaw-sandbox"
+                      placeholder="fastagent-sandbox"
                       className="font-mono text-sm"
                     />
                     <p className="text-xs text-muted-foreground">
