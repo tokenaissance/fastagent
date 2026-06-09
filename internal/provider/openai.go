@@ -115,9 +115,10 @@ func toAPIMessages(msgs []Message) []json.RawMessage {
 		}
 
 		am := apiMessage{
-			Role:       m.Role,
-			ToolCallID: m.ToolCallID,
-			Name:       m.Name,
+			Role:             m.Role,
+			ToolCallID:       m.ToolCallID,
+			Name:             m.Name,
+			ReasoningContent: m.Thinking, // Preserve reasoning_content for DeepSeek thinking mode
 		}
 		if !orphanAssistant[i] {
 			am.ToolCalls = m.ToolCalls
