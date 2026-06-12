@@ -259,10 +259,30 @@ func New(env *config.EnvConfig) (*Gateway, error) {
 	// same DB the Store opened, so admin reports survive restart. Falls
 	// back to MemMeter if the store doesn't expose a *sql.DB (shouldn't
 	// happen in real installs — only an embedded test double would).
-	var meter usage.Meter = usage.NewMemMeter()
+	var localMeter usage.Meter = usage.NewMemMeter()
 	if dbs, ok := st.(*store.DBStore); ok {
-		meter = usage.NewSQLMeter(dbs.DB(), dbs.Dialect())
+		localMeter = usage.NewSQLMeter(dbs.DB(), dbs.Dialect())
 	}
+
+	// Webhook billing integration: if FASTAGENT_WEBHOOK_URL is set, wrap the
+	// local meter with WebhookMeter to report usage via HTTP POST.
+	var meter usage.Meter = localMeter
+	webhookURL := os.Getenv("FASTAGENT_WEBHOOK_URL")
+	webhookToken := os.Getenv("FASTAGENT_WEBHOOK_TOKEN")
+	if webhookURL != "" && webhookToken != "" {
+		// Create model cost cache
+		costCache := newModelCostCache(st)
+
+		// Wrap local meter with webhook billing
+		meter = usage.NewWebhookMeter(
+			localMeter,
+			webhookURL,
+			webhookToken,
+			costCache.getModelCost,
+		)
+		slog.Info("usage webhook enabled", "url", webhookURL)
+	}
+
 	ws := wsInner
 
 	// holderID is the per-process identifier stamped into
