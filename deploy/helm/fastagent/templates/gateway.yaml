@@ -58,6 +58,13 @@ spec:
               name: {{ include "fastagent.fullname" . }}-secrets
               key: E2B_API_KEY
         {{- end }}
+        {{- if .Values.webhook.token }}
+        - name: FASTAGENT_WEBHOOK_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "fastagent.fullname" . }}-secrets
+              key: FASTAGENT_WEBHOOK_TOKEN
+        {{- end }}
         volumeMounts:
         - name: data
           mountPath: /data/.fastagent

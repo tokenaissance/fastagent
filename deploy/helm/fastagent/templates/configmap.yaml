@@ -40,6 +40,11 @@ data:
   {{- end }}
   {{- end }}
 
+  ## Webhook billing
+  {{- with .Values.webhook.url }}
+  FASTAGENT_WEBHOOK_URL: {{ . | quote }}
+  {{- end }}
+
   {{- with .Values.extraEnv }}
   {{- range $k, $v := . }}
   {{ $k }}: {{ $v | quote }}

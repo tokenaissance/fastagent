@@ -55,6 +55,9 @@ stringData:
   # in the Deployment below.
   # E2B_API_KEY: "REPLACE_WITH_E2B_KEY"
 
+  # Set when webhook billing is enabled.
+  # FASTAGENT_WEBHOOK_TOKEN: "REPLACE_WITH_WEBHOOK_TOKEN"
+
 ---
 # =================== EDIT HERE (object store provider) ==================
 # Pick ONE provider — uncomment its block and leave the others commented.
@@ -114,6 +117,10 @@ data:
   # Optional: prefix to share one bucket across multiple environments.
   # FASTAGENT_OBJECT_STORE_PREFIX: "prod"
 
+  # ─── Webhook billing (optional) ───
+  # Uncomment and set the webhook URL for usage billing integration.
+  # FASTAGENT_WEBHOOK_URL: "https://tokenaissance.com/api/fastagent/webhooks/usage"
+
   # ─── Sandbox (optional) ───
   # k8s pods don't have a docker daemon, so the only sandbox backend
   # is E2B (remote) — or leave it disabled. To enable: set the
@@ -152,6 +159,7 @@ spec:
             - { name: FASTAGENT_OBJECT_STORE_ACCESSKEY,  valueFrom: { secretKeyRef: { name: fastagent-secrets, key: OBJECT_STORE_ACCESSKEY } } }
             - { name: FASTAGENT_OBJECT_STORE_SECRETKEY,  valueFrom: { secretKeyRef: { name: fastagent-secrets, key: OBJECT_STORE_SECRETKEY } } }
             # - { name: E2B_API_KEY, valueFrom: { secretKeyRef: { name: fastagent-secrets, key: E2B_API_KEY } } }
+            # - { name: FASTAGENT_WEBHOOK_TOKEN, valueFrom: { secretKeyRef: { name: fastagent-secrets, key: FASTAGENT_WEBHOOK_TOKEN } } }
           volumeMounts:
             - { name: data, mountPath: /data/.fastagent }
           # /healthz and /readyz skip the auth middleware so kubelet can probe

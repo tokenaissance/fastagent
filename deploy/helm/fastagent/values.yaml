@@ -96,6 +96,12 @@ ingress:
   ## When using ALB Ingress (alb.ingress.kubernetes.io/*), override this map.
   annotations: {}
 
+## Webhook billing integration
+## When set, every metered LLM call POSTs a usage report to this URL.
+webhook:
+  url: ""                    # e.g. https://tokenaissance.com/api/fastagent/webhooks/usage
+  token: ""                  # Bearer token shared with the webhook receiver
+
 ## Extra FASTAGENT_* env vars passed through to the ConfigMap.
 extraEnv: {}
   # FASTAGENT_LOG_LEVEL: "info"
