@@ -103,7 +103,8 @@ type Agent struct {
 	// meter is the admin-level token meter. Non-nil only when the
 	// gateway wires it in via SetMeter at boot — local-only dev runs
 	// leave it nil and metering becomes a no-op via meterTokens().
-	meter usage.Meter
+	meter     usage.Meter
+	lastUsage provider.Usage // last LLM call's usage; read by HandleChatCompletions for API response
 	// sandboxPool is the per-user (agent + session) sandbox pool. Set
 	// once at boot/hot-reload by attachSandboxToAgents; bindSession
 	// pulls a session-scoped executor from it at the top of every turn
@@ -628,6 +629,7 @@ func (a *Agent) SetMeter(m usage.Meter) { a.meter = m }
 // override is set; we split it so the meter stores provider and model
 // in their own columns rather than mashing them together.
 func (a *Agent) meterTokens(ctx context.Context, sessionKey string, u provider.Usage) {
+	a.lastUsage = u // stash for LastUsage()
 	if a.meter == nil {
 		return
 	}
@@ -643,6 +645,12 @@ func (a *Agent) meterTokens(ctx context.Context, sessionKey string, u provider.U
 		slog.Warn("meter record failed", "agent", a.name, "error", err)
 	}
 }
+
+// LastUsage returns the token usage from the most recent LLM call.
+// Used by HandleChatCompletions to populate the /v1/chat/completions
+// usage field in non-streaming responses. Zero-value until the first
+// turn completes.
+func (a *Agent) LastUsage() provider.Usage { return a.lastUsage }
 
 // streamChatToResponse is a drop-in replacement for provider.Chat that
 // pipes text chunks to the chat-event channel in real time via

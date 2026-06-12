@@ -11,6 +11,7 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/agent"
 	"github.com/fastclaw-ai/fastclaw/internal/auth"
 	"github.com/fastclaw-ai/fastclaw/internal/bus"
+	"github.com/fastclaw-ai/fastclaw/internal/provider"
 )
 
 // chatCompletionRequest mirrors the OpenAI chat completion request.
@@ -314,7 +315,8 @@ func (s *Server) HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	} else {
 		// Get reply from agent
 		reply := ag.HandleMessage(r.Context(), msg)
-		s.fullResponse(w, reply, chatID, model, now)
+		usage := ag.LastUsage()
+		s.fullResponse(w, reply, chatID, model, now, usage)
 	}
 }
 
@@ -379,7 +381,7 @@ func (s *Server) writeSSEChunk(w http.ResponseWriter, id, model string, created 
 	fmt.Fprintf(w, "data: %s\n\n", data)
 }
 
-func (s *Server) fullResponse(w http.ResponseWriter, reply, chatID, model string, created int64) {
+func (s *Server) fullResponse(w http.ResponseWriter, reply, chatID, model string, created int64, usage provider.Usage) {
 	resp := chatCompletionResponse{
 		ID:      chatID,
 		Object:  "chat.completion",
@@ -393,9 +395,9 @@ func (s *Server) fullResponse(w http.ResponseWriter, reply, chatID, model string
 			},
 		},
 		Usage: completionUsage{
-			PromptTokens:     0,
-			CompletionTokens: 0,
-			TotalTokens:      0,
+			PromptTokens:     usage.InputTokens,
+			CompletionTokens: usage.OutputTokens,
+			TotalTokens:      usage.InputTokens + usage.OutputTokens,
 		},
 	}
 	writeJSON(w, http.StatusOK, resp)
