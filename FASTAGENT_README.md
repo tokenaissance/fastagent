@@ -179,6 +179,8 @@ database and is edited through the dashboard or `fastagent agents config`.
 | `FASTAGENT_SANDBOX_IMAGE` | dashboard | Docker image (Docker backend) or template id (E2B). |
 | `FASTAGENT_OBJECT_STORE_*` | unset | S3-compatible blob store for distributed deploys (multi-pod skill / file hydration). |
 | `FASTAGENT_LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error`. |
+| `FASTAGENT_WEBHOOK_URL` | unset | Webhook endpoint for usage billing integration (e.g., `https://cloud.example.com/api/fastagent/webhooks/usage`). |
+| `FASTAGENT_WEBHOOK_TOKEN` | unset | Authentication token for webhook requests (Bearer token). |
 
 Anything not on this list — providers, models, default model, skill
 catalog, channels, plugin config, scheduler — is configured at runtime
