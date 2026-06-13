@@ -29,7 +29,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Brain, Plus, Pencil, Trash2, Check, Cpu, Loader2 } from "lucide-react";
+import { Brain, Plus, Pencil, Trash2, Check, Cpu, Loader2, ChevronDown } from "lucide-react";
 import {
   getAgent,
   getConfig,
@@ -179,6 +179,7 @@ export default function ModelsPage() {
   type ModelTestResult = { status: "idle" | "testing" | "success" | "error"; error?: string };
   const [modelTests, setModelTests] = useState<Record<number, ModelTestResult>>({});
   const [batchTesting, setBatchTesting] = useState(false);
+  const [costExpanded, setCostExpanded] = useState<Record<number, boolean>>({});
 
   // Add/Update is gated on every non-empty model having a green test
   // result. Empty model rows are ignored (they get filtered out at
@@ -437,6 +438,10 @@ export default function ModelsPage() {
       else if (field === "reasoning") m.reasoning = value as boolean;
       else if (field === "contextWindow") m.contextWindow = Number(value) || 0;
       else if (field === "maxTokens") m.maxTokens = Number(value) || 0;
+      else if (field === "costInput") m.cost.input = Number(value) || 0;
+      else if (field === "costOutput") m.cost.output = Number(value) || 0;
+      else if (field === "costCacheRead") m.cost.cacheRead = Number(value) || 0;
+      else if (field === "costCacheWrite") m.cost.cacheWrite = Number(value) || 0;
       updated[index] = m;
       return updated;
     });
@@ -1025,6 +1030,78 @@ export default function ModelsPage() {
                         className="text-xs h-8"
                       />
                     </div>
+                  </div>
+                  {/* Model Cost — collapsible, cents per 1M tokens */}
+                  <div className="pt-1">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setCostExpanded((prev) => ({ ...prev, [idx]: !prev[idx] }))
+                      }
+                      className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                    >
+                      <ChevronDown
+                        className={`size-3 transition-transform ${
+                          costExpanded[idx] ? "rotate-0" : "-rotate-90"
+                        }`}
+                      />
+                      {costExpanded[idx]
+                        ? "Cost (cents / 1M tokens)"
+                        : m.cost.input || m.cost.output || m.cost.cacheRead || m.cost.cacheWrite
+                          ? `Cost: I=${m.cost.input} O=${m.cost.output} CR=${m.cost.cacheRead} CW=${m.cost.cacheWrite}`
+                          : "Set pricing"}
+                    </button>
+                    {costExpanded[idx] && (
+                      <>
+                        <p className="text-[10px] text-muted-foreground/60 mt-2 mb-1.5">cents per 1M tokens, supports decimals (e.g. 0.28)</p>
+                        <div className="grid grid-cols-4 gap-2">
+                        <div className="space-y-1">
+                          <Label className="text-[10px] text-muted-foreground">Input</Label>
+                          <Input
+                            type="number"
+                            min="0"
+                            step="0.01"
+                            value={m.cost.input}
+                            onChange={(e) => handleUpdateModel(idx, "costInput", e.target.value)}
+                            className="font-mono text-xs h-7"
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <Label className="text-[10px] text-muted-foreground">Output</Label>
+                          <Input
+                            type="number"
+                            min="0"
+                            step="0.01"
+                            value={m.cost.output}
+                            onChange={(e) => handleUpdateModel(idx, "costOutput", e.target.value)}
+                            className="font-mono text-xs h-7"
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <Label className="text-[10px] text-muted-foreground">Cache Read</Label>
+                          <Input
+                            type="number"
+                            min="0"
+                            step="0.01"
+                            value={m.cost.cacheRead}
+                            onChange={(e) => handleUpdateModel(idx, "costCacheRead", e.target.value)}
+                            className="font-mono text-xs h-7"
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <Label className="text-[10px] text-muted-foreground">Cache Write</Label>
+                          <Input
+                            type="number"
+                            min="0"
+                            step="0.01"
+                            value={m.cost.cacheWrite}
+                            onChange={(e) => handleUpdateModel(idx, "costCacheWrite", e.target.value)}
+                            className="font-mono text-xs h-7"
+                          />
+                        </div>
+                      </div>
+                    </>
+                    )}
                   </div>
                 </div>
                 );
