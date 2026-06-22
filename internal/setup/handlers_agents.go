@@ -1438,6 +1438,35 @@ func (s *Server) handleAgentFileUpload(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, map[string]any{"ok": true, "files": saved})
 }
 
+func (s *Server) handleAgentFileDelete(w http.ResponseWriter, r *http.Request) {
+	if !s.requireWritable(w, r) {
+		return
+	}
+	id := r.PathValue("id")
+	rel := r.PathValue("path")
+	if rel == "" {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "path required"})
+		return
+	}
+	if s.workspaceStore == nil {
+		jsonResponse(w, http.StatusServiceUnavailable, map[string]any{"error": "no workspace store"})
+		return
+	}
+	if rec := s.requireAgentOwner(w, r, id); rec == nil {
+		return
+	}
+	// Accept optional sessionId/projectId from query params, but the
+	// path already includes them (e.g. "sessions/<sid>/file.txt").
+	// Passing them through is harmless — the store uses path as-is.
+	projectID := r.URL.Query().Get("projectId")
+	sessionID := r.URL.Query().Get("sessionId")
+	if err := s.workspaceStore.Delete(r.Context(), id, projectID, sessionID, rel); err != nil {
+		jsonResponse(w, http.StatusNotFound, map[string]any{"error": err.Error()})
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{"ok": true})
+}
+
 func defaultIfEmpty(v, fallback string) string {
 	if v == "" {
 		return fallback
