@@ -258,6 +258,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("GET /api/agents/{id}/files.zip", auth(s.handleAgentFilesZip))
 	mux.HandleFunc("GET /api/agents/{id}/files/{path...}", auth(s.handleAgentFile))
 	mux.HandleFunc("POST /api/agents/{id}/files", auth(s.handleAgentFileUpload))
+	mux.HandleFunc("DELETE /api/agents/{id}/files/{path...}", auth(s.handleAgentFileDelete))
 	// Self-hosted-only: opens the workspace dir in the operator's
 	// native file browser (Finder/Explorer/xdg-open). Hosted
 	// deployments 403 inside the handler — chatters there don't
