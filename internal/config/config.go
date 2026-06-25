@@ -298,11 +298,14 @@ type Config struct {
 }
 
 // ModelCost holds pricing info for a model.
+// Billing modes are mutually exclusive: if PerCall > 0, a flat per-call fee
+// is charged and token counts are ignored; otherwise token-based pricing applies.
 type ModelCost struct {
 	Input      float64 `json:"input"`
 	Output     float64 `json:"output"`
 	CacheRead  float64 `json:"cacheRead"`
 	CacheWrite float64 `json:"cacheWrite"`
+	PerCall    float64 `json:"perCall"` // flat fee per API call in cents; mutually exclusive with token pricing
 }
 
 type ModelEntry struct {
