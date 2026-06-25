@@ -193,6 +193,7 @@ export interface ModelCost {
   output: number;
   cacheRead: number;
   cacheWrite: number;
+  perCall?: number;
 }
 
 export interface ModelEntry {
