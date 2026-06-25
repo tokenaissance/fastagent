@@ -429,7 +429,10 @@ export default function ModelsPage() {
     setFormModels((prev) => [...prev, emptyModel()]);
   };
 
-  const handleUpdateModel = (index: number, field: string, value: unknown) => {
+  type ModelField = "id" | "name" | "reasoning" | "contextWindow" | "maxTokens"
+    | "costInput" | "costOutput" | "costCacheRead" | "costCacheWrite" | "costPerCall";
+
+  const handleUpdateModel = (index: number, field: ModelField, value: unknown) => {
     setFormModels((prev) => {
       const updated = [...prev];
       const m = { ...updated[index], cost: { ...updated[index].cost }, input: [...updated[index].input] };
@@ -442,6 +445,10 @@ export default function ModelsPage() {
       else if (field === "costOutput") m.cost.output = Number(value) || 0;
       else if (field === "costCacheRead") m.cost.cacheRead = Number(value) || 0;
       else if (field === "costCacheWrite") m.cost.cacheWrite = Number(value) || 0;
+      else if (field === "costPerCall") {
+        const n = parseFloat(value as string);
+        m.cost.perCall = isNaN(n) || n <= 0 ? undefined : n;
+      }
       updated[index] = m;
       return updated;
     });
@@ -480,7 +487,16 @@ export default function ModelsPage() {
   const handleSaveProvider = async () => {
     const name = formName.toLowerCase().trim().replace(/\s+/g, "-");
     if (!name) return;
-    const cleanedModels = formModels.filter((m) => m.id.trim());
+    const cleanedModels = formModels
+      .filter((m) => m.id.trim())
+      .map((m) => {
+        if (m.cost.perCall) {
+          return { ...m, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, perCall: m.cost.perCall } };
+        }
+        const { perCall: _drop, ...tokenCost } = m.cost;
+        void _drop;
+        return { ...m, cost: tokenCost };
+      });
     const editingRow = editingId
       ? providers.find((p) => p.id === editingId)
       : undefined;
@@ -1047,14 +1063,16 @@ export default function ModelsPage() {
                       />
                       {costExpanded[idx]
                         ? "Cost (cents / 1M tokens)"
-                        : m.cost.input || m.cost.output || m.cost.cacheRead || m.cost.cacheWrite
-                          ? `Cost: I=${m.cost.input} O=${m.cost.output} CR=${m.cost.cacheRead} CW=${m.cost.cacheWrite}`
-                          : "Set pricing"}
+                        : m.cost.perCall
+                          ? `Cost: per-call ¢${m.cost.perCall.toFixed(2)}`
+                          : m.cost.input || m.cost.output || m.cost.cacheRead || m.cost.cacheWrite
+                            ? `Cost: I=${m.cost.input} O=${m.cost.output} CR=${m.cost.cacheRead} CW=${m.cost.cacheWrite}`
+                            : "Set pricing"}
                     </button>
                     {costExpanded[idx] && (
                       <>
                         <p className="text-[10px] text-muted-foreground/60 mt-2 mb-1.5">cents per 1M tokens, supports decimals (e.g. 0.28)</p>
-                        <div className="grid grid-cols-4 gap-2">
+                        <div className={`grid grid-cols-4 gap-2 ${m.cost.perCall ? "opacity-40 pointer-events-none" : ""}`}>
                         <div className="space-y-1">
                           <Label className="text-[10px] text-muted-foreground">Input</Label>
                           <Input
@@ -1064,6 +1082,7 @@ export default function ModelsPage() {
                             value={m.cost.input}
                             onChange={(e) => handleUpdateModel(idx, "costInput", e.target.value)}
                             className="font-mono text-xs h-7"
+                            disabled={!!m.cost.perCall}
                           />
                         </div>
                         <div className="space-y-1">
@@ -1075,6 +1094,7 @@ export default function ModelsPage() {
                             value={m.cost.output}
                             onChange={(e) => handleUpdateModel(idx, "costOutput", e.target.value)}
                             className="font-mono text-xs h-7"
+                            disabled={!!m.cost.perCall}
                           />
                         </div>
                         <div className="space-y-1">
@@ -1086,6 +1106,7 @@ export default function ModelsPage() {
                             value={m.cost.cacheRead}
                             onChange={(e) => handleUpdateModel(idx, "costCacheRead", e.target.value)}
                             className="font-mono text-xs h-7"
+                            disabled={!!m.cost.perCall}
                           />
                         </div>
                         <div className="space-y-1">
@@ -1096,6 +1117,22 @@ export default function ModelsPage() {
                             step="0.01"
                             value={m.cost.cacheWrite}
                             onChange={(e) => handleUpdateModel(idx, "costCacheWrite", e.target.value)}
+                            className="font-mono text-xs h-7"
+                            disabled={!!m.cost.perCall}
+                          />
+                        </div>
+                      </div>
+                        <p className="text-[10px] text-muted-foreground/60 mt-2 mb-1.5">Per-call flat fee (cents). If set, overrides token pricing.</p>
+                        <div className="grid grid-cols-4 gap-2">
+                        <div className="space-y-1">
+                          <Label className="text-[10px] text-muted-foreground">Per-Call Fee (optional)</Label>
+                          <Input
+                            type="number"
+                            min="0.01"
+                            step="0.01"
+                            value={m.cost.perCall ?? ""}
+                            onChange={(e) => handleUpdateModel(idx, "costPerCall", e.target.value)}
+                            placeholder="—"
                             className="font-mono text-xs h-7"
                           />
                         </div>
