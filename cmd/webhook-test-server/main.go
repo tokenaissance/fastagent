@@ -95,7 +95,7 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		response := fmt.Sprintf(`{"ok":true,"received":{"userId":"%s","modelId":"%s","rawCostCents":%d}}`,
 			report.UserID, report.ModelID, report.RawCostCents)
-		fmt.Fprintf(w, response)
+		fmt.Fprint(w, response)
 	})
 
 	// Stats endpoint to view received webhooks
