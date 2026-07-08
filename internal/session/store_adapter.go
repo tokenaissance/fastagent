@@ -277,8 +277,8 @@ func (a *StoreAdapter) ListWebSessions(ctx context.Context, agentID string) ([]W
 			if preview == "" {
 				preview = "[image]"
 			}
-			if len(preview) > 100 {
-				preview = preview[:100] + "..."
+			if len([]rune(preview)) > 100 {
+				preview = string([]rune(preview)[:100]) + "..."
 			}
 			thumb = img
 			break

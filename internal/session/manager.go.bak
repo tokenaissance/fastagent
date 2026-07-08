@@ -745,7 +745,7 @@ func (m *Manager) ListWebSessions() []WebSession {
 				preview = "[image]"
 			}
 			if len([]rune(preview)) > 100 {
-				preview = string([]rune(preview)[:100]) + "..."
+				preview = preview[:100] + "..."
 			}
 			thumb = img
 			break

@@ -343,8 +343,8 @@ If nothing worth saving, output: {"memory_facts": [], "user_notes": []}`,
 		// Same Warn upgrade as above — silent skip here was hiding
 		// "Sonnet returned wrapped JSON, parse failed" in the wild.
 		preview := cleaned
-		if len(preview) > 200 {
-			preview = preview[:200] + "…"
+		if len([]rune(preview)) > 200 {
+			preview = string([]rune(preview)[:200]) + "…"
 		}
 		slog.Warn("auto-persist: failed to parse LLM response",
 			"error", err, "model", model, "preview", preview)
