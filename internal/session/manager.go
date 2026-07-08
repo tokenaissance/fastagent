@@ -744,8 +744,8 @@ func (m *Manager) ListWebSessions() []WebSession {
 			if preview == "" {
 				preview = "[image]"
 			}
-			if len(preview) > 100 {
-				preview = preview[:100] + "..."
+			if len([]rune(preview)) > 100 {
+				preview = string([]rune(preview)[:100]) + "..."
 			}
 			thumb = img
 			break
@@ -760,8 +760,8 @@ func (m *Manager) ListWebSessions() []WebSession {
 		title := m.readSessionTitle(sessionId)
 		if title == "" {
 			title = preview
-			if len(title) > 60 {
-				title = title[:60] + "..."
+			if len([]rune(title)) > 60 {
+				title = string([]rune(title)[:60]) + "..."
 			}
 		}
 
