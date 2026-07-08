@@ -345,8 +345,8 @@ func ExtractPreview(msg store.SessionMessage) (preview, thumbnail string) {
 	if preview == "" {
 		preview = "[image]"
 	}
-	if len(preview) > 100 {
-		preview = preview[:100] + "..."
+	if len([]rune(preview)) > 100 {
+		preview = string([]rune(preview)[:100]) + "..."
 	}
 	return preview, img
 }
