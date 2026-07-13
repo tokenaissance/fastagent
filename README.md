@@ -311,24 +311,38 @@ file editor uses. Allowlisted filenames: `SOUL.md`, `IDENTITY.md`,
 cd deploy/docker && ./start.sh
 ```
 
-### Kubernetes
+### Kubernetes (Helm)
 
-```yaml
-env:
-  - name: FASTCLAW_BIND
-    value: "all"
-  - name: FASTCLAW_STORAGE_TYPE
-    value: "postgres"
-  - name: FASTCLAW_STORAGE_DSN
-    valueFrom:
-      secretKeyRef:
-        name: fastclaw-db
-        key: dsn
-  - name: FASTCLAW_OBJECT_STORE_ENDPOINT
-    value: "s3.amazonaws.com"
-  - name: FASTCLAW_OBJECT_STORE_BUCKET
-    value: "fastclaw-skills"
+```bash
+# Install
+helm upgrade fastagent ./deploy/helm/fastagent \
+  --set image.repository=ghcr.io/fastclaw-ai/fastclaw \
+  --set image.tag=latest \
+  --set gateway.port=18953 \
+  --set objectStore.type=s3 \
+  --set objectStore.bucket=fastagent-skills \
+  --set objectStore.region=us-east-1
 ```
+
+See `deploy/helm/fastagent/values.yaml` for all available options.
+
+#### Enable E2B sandbox
+
+```bash
+helm upgrade fastagent ./deploy/helm/fastagent \
+  --set sandbox.enabled=true \
+  --set sandbox.backend=e2b \
+  --set sandbox.image=fastclaw-sandbox \
+  --set sandbox.e2bApiKey="e2b_你的API_KEY"
+```
+
+Prerequisites:
+1. Build the E2B template first: `e2b template build --config deploy/docker/sandbox/e2b.toml`
+2. Get your E2B API key from [e2b.dev/dashboard](https://e2b.dev/dashboard)
+
+> `sandbox.image` expects the **E2B template name** (e.g. `fastclaw-sandbox`), not a Docker image reference. E2B templates are pre-built via `e2b template build` and registered on E2B's side.
+
+#### Raw manifests
 
 No config file is mounted — bootstrap is env-only. See `deploy/k8s/`
 for full manifests.
