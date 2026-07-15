@@ -1415,6 +1415,14 @@ func (s *Server) handleAgentFileUpload(w http.ResponseWriter, r *http.Request) {
 		// Project sessions don't use the per-chat subdir — clear it so
 		// the workspace store routes to projects/<pid>/.
 		sessionID = ""
+	} else if sessionID == "" && sessionKey != "" {
+		// Session row not yet in the DB — this is the first upload before
+		// any message has been sent. Fall back to the raw client token so
+		// files land at sessions/<key>/ rather than the agent root.
+		// Web clients use their freshly-generated UUID as both chatID and
+		// session_key (resolveOrMintKey: channel=="web" → key=chatID), so
+		// this path is identical to the DB-backed path once the row exists.
+		sessionID = sessionKey
 	}
 	saved := make([]map[string]any, 0, len(headers))
 	for _, h := range headers {
