@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // extractSubpath downloads a gzipped tar from url and writes files whose
@@ -158,4 +160,29 @@ func findSkillDirInTarball(client *http.Client, url, skillID string) (string, er
 // defaultHTTPClient is the shared timeout-bounded client for registry calls.
 func defaultHTTPClient() *http.Client {
 	return &http.Client{Timeout: 60 * time.Second}
+}
+
+// readSkillVersionFromDir reads SKILL.md in dir and returns its YAML
+// frontmatter version field. Returns "" when not found or unparseable.
+func readSkillVersionFromDir(dir string) string {
+	data, err := os.ReadFile(filepath.Join(dir, "SKILL.md"))
+	if err != nil {
+		return ""
+	}
+	content := strings.TrimSpace(string(data))
+	if !strings.HasPrefix(content, "---") {
+		return ""
+	}
+	rest := content[3:]
+	endIdx := strings.Index(rest, "\n---")
+	if endIdx < 0 {
+		return ""
+	}
+	var fm struct {
+		Version string `yaml:"version"`
+	}
+	if err := yaml.Unmarshal([]byte(rest[:endIdx]), &fm); err != nil {
+		return ""
+	}
+	return strings.TrimPrefix(fm.Version, "v")
 }

@@ -41,6 +41,7 @@ type Skill struct {
 type SkillFrontmatter struct {
 	Name        string         `yaml:"name"`
 	Description string         `yaml:"description"`
+	Version     string         `yaml:"version"`
 	Homepage    string         `yaml:"homepage"`
 	Env         []SkillEnvSpec `yaml:"env"`
 	Metadata    yaml.Node      `yaml:"metadata"`
