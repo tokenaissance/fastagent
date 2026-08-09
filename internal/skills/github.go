@@ -1,7 +1,10 @@
 package skills
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"fmt"
+	"net/http"
 	"strings"
 )
 
@@ -38,11 +41,21 @@ func InstallFromGitHubRepo(repo, skillName, targetDir string) (*Result, error) {
 				continue
 			}
 			if found == "" {
-				lastErr = fmt.Errorf("skill %q not found in %s/%s@%s", skillName, owner, name, ref)
-				continue
+				// Not found as a subdirectory — the repo itself may
+				// be the skill (SKILL.md at root, common for repos
+				// like tokenaissance/fastagent-meta-skill).
+				if repoIsSkill, _ := repoHasRootSkillMD(client, tarURL); repoIsSkill {
+					installedName = skillName
+					subpath = ""
+					dest = fmt.Sprintf("%s/%s", strings.TrimRight(targetDir, "/"), skillName)
+				} else {
+					lastErr = fmt.Errorf("skill %q not found in %s/%s@%s", skillName, owner, name, ref)
+					continue
+				}
+			} else {
+				subpath = found
+				dest = fmt.Sprintf("%s/%s", strings.TrimRight(targetDir, "/"), skillName)
 			}
-			subpath = found
-			dest = fmt.Sprintf("%s/%s", strings.TrimRight(targetDir, "/"), skillName)
 		}
 
 		n, err := extractSubpath(client, tarURL, subpath, dest)
@@ -54,10 +67,17 @@ func InstallFromGitHubRepo(repo, skillName, targetDir string) (*Result, error) {
 			lastErr = fmt.Errorf("extracted no files from %s", tarURL)
 			continue
 		}
+		version := readSkillVersionFromDir(dest)
+		if version == "" {
+			version = latestGitHubRelease(client, owner, name)
+		}
+		if version == "" {
+			version = ref
+		}
 		return &Result{
 			Source:       "github",
 			Name:         installedName,
-			Version:      ref,
+			Version:      version,
 			InstalledAt:  dest,
 			FilesWritten: n,
 		}, nil
@@ -66,6 +86,41 @@ func InstallFromGitHubRepo(repo, skillName, targetDir string) (*Result, error) {
 		lastErr = fmt.Errorf("no main or master branch on %s", repo)
 	}
 	return nil, lastErr
+}
+
+// repoHasRootSkillMD quickly probes a GitHub tarball to check whether
+// SKILL.md exists at the repo root (after the top-level archive dir). This
+// is the "repo is the skill" pattern (e.g. tokenaissance/fastagent-meta-skill).
+func repoHasRootSkillMD(client *http.Client, tarURL string) (bool, error) {
+	resp, err := client.Get(tarURL)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return false, nil
+	}
+	gz, err := gzip.NewReader(resp.Body)
+	if err != nil {
+		return false, err
+	}
+	defer gz.Close()
+	tr := tar.NewReader(gz)
+	for {
+		hdr, err := tr.Next()
+		if err != nil {
+			break
+		}
+		slash := strings.IndexByte(hdr.Name, '/')
+		if slash < 0 {
+			continue
+		}
+		// After stripping the top-level archive dir, we want exactly "SKILL.md".
+		if hdr.Name[slash+1:] == "SKILL.md" && hdr.Typeflag == tar.TypeReg {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // normalizeGitHubRepo strips common wrapper prefixes/suffixes so callers can

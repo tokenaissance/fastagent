@@ -122,8 +122,10 @@ func scanSkillsDir(dir string) []map[string]any {
 		skillPath := filepath.Join(dir, name, "SKILL.md")
 		desc := ""
 		var envSpec []agent.SkillEnvSpec
+		var fm *agent.SkillFrontmatter
 		if data, readErr := os.ReadFile(skillPath); readErr == nil {
-			fm, body := agent.SplitSkillFrontmatter(data)
+			var body string
+			fm, body = agent.SplitSkillFrontmatter(data)
 			if fm != nil {
 				if fm.Description != "" {
 					desc = fm.Description
@@ -151,6 +153,9 @@ func scanSkillsDir(dir string) []map[string]any {
 			"description": desc,
 			"location":    filepath.Join(dir, name),
 			"type":        "skill",
+		}
+		if fm != nil && fm.Version != "" {
+			entryOut["version"] = strings.TrimPrefix(fm.Version, "v")
 		}
 		if len(envSpec) > 0 {
 			entryOut["envSpec"] = envSpec
