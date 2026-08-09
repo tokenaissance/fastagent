@@ -160,6 +160,84 @@ func TestFilterOut(t *testing.T) {
 	}
 }
 
+func TestStripFrontmatterBody(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{
+			name:    "strips frontmatter and returns body",
+			content: "---\nname: foo\nversion: 1.0.0\n---\n\n# Hello\n\nThis is the body.\n",
+			want:    "# Hello\n\nThis is the body.",
+		},
+		{
+			name:    "no frontmatter - returns trimmed content",
+			content: "# Just a heading\n\nSome text.\n",
+			want:    "# Just a heading\n\nSome text.",
+		},
+		{
+			name:    "frontmatter only - returns raw content unchanged",
+			content: "---\nname: foo\n---\n",
+			want:    "---\nname: foo\n---",
+		},
+		{
+			name:    "unclosed frontmatter - returns raw content",
+			content: "---\nname: foo\nversion: 1.0.0\n",
+			want:    "---\nname: foo\nversion: 1.0.0",
+		},
+		{
+			name:    "empty string",
+			content: "",
+			want:    "",
+		},
+		{
+			name:    "whitespace only",
+			content: "   \n  \n",
+			want:    "",
+		},
+		{
+			name: "multiline body with markdown",
+			content: `---
+name: my-skill
+description: A test skill
+version: 2.0.0
+---
+## Overview
+
+This skill does things.
+
+- Feature 1
+- Feature 2
+
+### Usage
+
+` + "```bash\nnpx skills add foo/bar\n```" + `
+`,
+			want: "## Overview\n\nThis skill does things.\n\n- Feature 1\n- Feature 2\n\n### Usage\n\n```bash\nnpx skills add foo/bar\n```",
+		},
+		{
+			name:    "frontmatter with dashes in body",
+			content: "---\nname: foo\n---\n\n# Title\n\nSome text with --- inside.\n",
+			want:    "# Title\n\nSome text with --- inside.",
+		},
+		{
+			name:    "yaml-like content without frontmatter",
+			content: "key: value\nanother: thing\n",
+			want:    "key: value\nanother: thing",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := stripFrontmatterBody(tt.content)
+			if got != tt.want {
+				t.Errorf("stripFrontmatterBody() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestSortByQueryPrefix(t *testing.T) {
 	results := []SkillsShResult{
 		{SkillID: "channel-economics", Name: "channel-economics", Installs: 283},
