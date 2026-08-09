@@ -3,6 +3,7 @@ package skills
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -372,4 +373,72 @@ func SortByQueryPrefix(results []SkillsShResult, query string) {
 	for i := range entries {
 		results[i] = entries[i].r
 	}
+}
+
+// FetchSkillReadme fetches SKILL.md from a GitHub repo and returns the body
+// without YAML frontmatter for display on skill detail pages. Probes multiple
+// paths: repo root (repo-is-the-skill), skills/{name}/, {name}/.
+func FetchSkillReadme(owner, repo, skillName string) (string, error) {
+	client := defaultHTTPClient()
+	ref := githubDefaultBranch(client, owner, repo)
+	if ref == "" {
+		ref = "main"
+	}
+
+	// Strategy 1: SKILL.md at repo root (repo IS the skill).
+	if content := fetchGitHubFileContent(owner, repo, ref, "SKILL.md"); content != "" {
+		return stripFrontmatterBody(content), nil
+	}
+
+	// Strategy 2: skills/{name}/SKILL.md.
+	path := fmt.Sprintf("skills/%s/SKILL.md", skillName)
+	if content := fetchGitHubFileContent(owner, repo, ref, path); content != "" {
+		return stripFrontmatterBody(content), nil
+	}
+
+	// Strategy 3: {name}/SKILL.md.
+	path = fmt.Sprintf("%s/SKILL.md", skillName)
+	if content := fetchGitHubFileContent(owner, repo, ref, path); content != "" {
+		return stripFrontmatterBody(content), nil
+	}
+
+	return "", nil
+}
+
+// fetchGitHubFileContent fetches a single file from raw.githubusercontent.com.
+// Returns "" on any error (not found, rate limit, etc.).
+func fetchGitHubFileContent(owner, repo, ref, path string) string {
+	u := fmt.Sprintf("https://raw.githubusercontent.com/%s/%s/%s/%s", owner, repo, ref, path)
+	resp, err := defaultHTTPClient().Get(u)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1 MiB cap
+	if err != nil {
+		return ""
+	}
+	return string(body)
+}
+
+// stripFrontmatterBody strips YAML frontmatter (--- ... ---) from SKILL.md
+// content, returning only the body. Returns raw content on parse failure.
+func stripFrontmatterBody(content string) string {
+	s := strings.TrimSpace(content)
+	if !strings.HasPrefix(s, "---") {
+		return s
+	}
+	rest := s[3:]
+	endIdx := strings.Index(rest, "\n---")
+	if endIdx < 0 {
+		return s
+	}
+	body := strings.TrimLeft(rest[endIdx+len("\n---"):], "\n")
+	if body == "" {
+		return s // frontmatter-only: return raw
+	}
+	return body
 }

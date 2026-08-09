@@ -499,3 +499,27 @@ func (s *Server) handleSearchSkills(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "unsupported source"})
 	}
 }
+
+// handleSkillReadme returns the SKILL.md body for a skill, fetched from
+// its GitHub repo. Used by the skill detail / share page so the About
+// section shows real content instead of "Description pending".
+// GET /api/skills/{name}/readme?source=owner/repo
+func (s *Server) handleSkillReadme(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	source := r.URL.Query().Get("source")
+	if source == "" {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "source query param required"})
+		return
+	}
+	owner, repo, ok := skills.SplitOwnerRepo(source)
+	if !ok {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid source, expected owner/repo"})
+		return
+	}
+	content, err := skills.FetchSkillReadme(owner, repo, name)
+	if err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{"ok": true, "content": content})
+}
