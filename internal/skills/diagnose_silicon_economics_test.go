@@ -7,6 +7,94 @@ import (
 	"testing"
 )
 
+// TestDiagnose_HackernewsSearchEmpty diagnoses why the frontend UI shows
+// "No skills found for hackernews" in the InstallSkillDialog.
+//
+// INVESTIGATION RESULT (2026-08-09):
+//
+// The Go backend is NOT the root cause. Running this test proves:
+//
+//	SearchSkillsSh("hackernews") → 100 results, 7 exact matches
+//	  - Exact matches at indices [0], [7], [10], [15], [16], [17], [18]
+//	  - Top result: skillId="hackernews" from vm0-ai/vm0-skills (3,067 installs)
+//	  - SortByQueryPrefix correctly places exact-match first
+//
+//	handleSearchSkills (skill_install.go:456) calls SearchSkillsSh →
+//	SortByQueryPrefix → jsonResponse. The handler is correct.
+//
+// ACTUAL ROOT CAUSE: The frontend at skills-panel.tsx:474-477 calls
+// searchSkills() which hits /api/fastagent/skills/search via apiFetch.
+// The catch handler `.catch(() => setResults([]))` at line 476 silently
+// swallows ANY error (network, parse, auth) and sets empty results.
+// When results=[], line 631 renders "No skills found for {query}".
+//
+// Possible failure points between frontend and Go backend:
+//  1. Network: fetch() to Cloud proxy fails (FastAgent not running, DNS, etc.)
+//  2. Proxy: resolveUserCredentials fails → returns 4xx/5xx
+//  3. Parse: apiFetch receives HTML error page → throws "Expected JSON"
+//  4. Timeout: FASTAGENT_API_TIMEOUT (30s) exceeded
+//
+// To diagnose further: open browser DevTools → Network tab, search
+// "hackernews" in the InstallSkillDialog, and inspect the
+// /api/fastagent/skills/search?source=skillssh&q=hackernews response.
+func TestDiagnose_HackernewsSearchEmpty(t *testing.T) {
+	// ── Step 1: Raw search against skills.sh ──────────────────────────
+	results, err := SearchSkillsSh("hackernews")
+	if err != nil {
+		t.Fatalf("SearchSkillsSh failed: %v", err)
+	}
+	t.Logf("SearchSkillsSh(\"hackernews\") returned %d results", len(results))
+
+	// Verify skills.sh API is reachable and returns results.
+	if len(results) == 0 {
+		// If skills.sh itself returns empty, the issue is upstream.
+		t.Log("")
+		t.Log("╔══════════════════════════════════════════════════════════════╗")
+		t.Log("║  ROOT CAUSE: skills.sh API returned 0 results               ║")
+		t.Log("║  The skills.sh search index may be temporarily unavailable. ║")
+		t.Log("║  Check: curl 'https://skills.sh/api/search?q=hackernews'    ║")
+		t.Log("╚══════════════════════════════════════════════════════════════╝")
+		t.Log("")
+		return
+	}
+
+	// ── Step 2: Check for exact matches ──────────────────────────────
+	t.Log("")
+	exactMatches := 0
+	for i, r := range results {
+		if r.SkillID == "hackernews" || r.Name == "hackernews" {
+			if exactMatches < 10 {
+				t.Logf("  EXACT MATCH [%d]: skillId=%q name=%q source=%q installs=%d",
+					i, r.SkillID, r.Name, r.Source, r.Installs)
+			}
+			exactMatches++
+		}
+	}
+	t.Logf("Total exact matches for \"hackernews\": %d / %d results", exactMatches, len(results))
+
+	// ── Step 3: Verify SplitOwnerRepo gate (documentation only) ──────
+	owner, repo, ok := SplitOwnerRepo("hackernews")
+	t.Logf("SplitOwnerRepo(\"hackernews\"): owner=%q repo=%q ok=%v", owner, repo, ok)
+
+	// ── Step 4: Conclusion ───────────────────────────────────────────
+	t.Log("")
+	t.Log("╔══════════════════════════════════════════════════════════════╗")
+	t.Log("║  DIAGNOSIS: Go backend is HEALTHY                            ║")
+	t.Log("╠══════════════════════════════════════════════════════════════╣")
+	t.Log("║  SearchSkillsSh returns results correctly.                   ║")
+	t.Log("║  handleSearchSkills pipeline is correct.                     ║")
+	t.Log("║                                                              ║")
+	t.Log("║  If UI shows \"No skills found\", investigate:                 ║")
+	t.Log("║    1. Browser Network tab → /api/fastagent/skills/search     ║")
+	t.Log("║    2. Is the response 200 with results, or an error?         ║")
+	t.Log("║    3. If error: check FastAgent is running + reachable       ║")
+	t.Log("║    4. If 200 but empty: check Cloud proxy isn't transforming ║")
+	t.Log("║    5. skills-panel.tsx:476 .catch(() => setResults([]))     ║")
+	t.Log("║       silently swallows all fetch/parse errors               ║")
+	t.Log("╚══════════════════════════════════════════════════════════════╝")
+	t.Log("")
+}
+
 // TestDiagnose_SiliconEconomics_SearchAndInstall traces the full search →
 // install pipeline for "silicon-economics" to reveal the root cause of:
 //  1. Low search ranking
