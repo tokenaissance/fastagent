@@ -155,6 +155,12 @@ func runInstall(source, name, repo, targetDir string) (*skills.Result, error) {
 		}
 		pick := skills.PickSkillsShExact(results, name)
 		if pick == nil || pick.SkillID != name {
+			// Skill not in skills.sh search index — fall back to
+			// direct GitHub install when a repo hint is available
+			// (search may have found it via ProbeGitHubRepo).
+			if repo != "" {
+				return skills.InstallFromGitHubRepo(repo, name, targetDir)
+			}
 			return nil, fmt.Errorf("skill %q not found on skills.sh", name)
 		}
 		return skills.InstallFromSkillsSh(*pick, targetDir)
@@ -461,6 +467,22 @@ func (s *Server) handleSearchSkills(w http.ResponseWriter, r *http.Request) {
 			jsonResponse(w, http.StatusBadGateway, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
+		// When skills.sh search index doesn't include a repo (common for
+		// new or low-install skills), fall back to probing GitHub directly
+		// when the query looks like "owner/repo". The dynamic skills.sh
+		// page for the repo works, but the search API has its own index.
+		if len(results) == 0 {
+			if owner, repo, ok := skills.SplitOwnerRepo(query); ok {
+				if gh, err := skills.ProbeGitHubRepo(owner, repo); err == nil && len(gh) > 0 {
+					results = gh
+				}
+			}
+		}
+		// Re-rank: boost results whose skillId prefix-matches the query.
+		// skills.sh returns order by installs, which buries exact matches
+		// for new/low-install skills (e.g. silicon-economics with 1 install
+		// is ranked below channel-economics with 283 installs).
+		skills.SortByQueryPrefix(results, query)
 		jsonResponse(w, http.StatusOK, map[string]any{"source": "skills.sh", "results": results})
 	case "clawhub":
 		u := fmt.Sprintf("https://clawhub.ai/api/v1/search?q=%s&limit=20", url.QueryEscape(query))
