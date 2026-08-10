@@ -70,6 +70,19 @@ func PickSkillsShExact(results []SkillsShResult, name string) *SkillsShResult {
 	return best
 }
 
+// PickSkillsShBySource returns the result matching both skillId and Source
+// (owner/repo). Returns nil if no match — caller should fall back to
+// PickSkillsShExact or direct GitHub install.
+func PickSkillsShBySource(results []SkillsShResult, skillID, ownerRepo string) *SkillsShResult {
+	for i := range results {
+		r := &results[i]
+		if r.SkillID == skillID && strings.EqualFold(r.Source, ownerRepo) {
+			return r
+		}
+	}
+	return nil
+}
+
 // InstallFromSkillsSh installs skills.sh result r into targetDir/<r.SkillID>/.
 // It fetches the source repo's tarball (trying main then master), finds the
 // in-tarball path of the skill folder (skills may live at arbitrary depth in
@@ -154,8 +167,10 @@ func InstallFromSkillsSh(r SkillsShResult, targetDir string) (*Result, error) {
 		if version == "" {
 			version = ref
 		}
+		writeInstallMetadata(dest, r.Source)
 		return &Result{
 			Source:       "skills.sh",
+			Repo:         r.Source,
 			Name:         r.SkillID,
 			Version:      version,
 			InstalledAt:  dest,

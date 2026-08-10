@@ -16,10 +16,54 @@ import (
 // happened and, if they care, where to find the files.
 type Result struct {
 	Source       string `json:"source"`           // "skills.sh" | "clawhub" | "github"
+	Repo         string `json:"repo,omitempty"`   // GitHub "owner/repo" the content actually came from
 	Name         string `json:"name"`             // final directory name under targetDir
 	Version      string `json:"version,omitempty"`
 	InstalledAt  string `json:"installedAt"`      // filesystem path of the new skill dir
 	FilesWritten int    `json:"filesWritten"`
+}
+
+// installMetadataFile is the sidecar file written alongside SKILL.md to
+// record which GitHub repo the skill was installed from, so the listing
+// API can include a `source` field for disambiguation.
+const installMetadataFile = ".fastagent-install.json"
+
+// installMetadata is the JSON shape of the sidecar file.
+type installMetadata struct {
+	Repo string `json:"repo"`
+}
+
+// writeInstallMetadata persists the repo to a sidecar file inside the
+// skill directory. Best-effort — errors are silently ignored (the skill
+// is already installed; losing the metadata is not fatal).
+func writeInstallMetadata(skillDir, repo string) {
+	if repo == "" {
+		return
+	}
+	m := installMetadata{Repo: repo}
+	data, err := json.Marshal(m)
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(filepath.Join(skillDir, installMetadataFile), data, 0o644)
+}
+
+// ReadInstallRepo reads the repo from the sidecar file.
+// Returns ("", nil) when the file does not exist (no sidecar written yet).
+// Returns ("", err) on read/parse failures — the caller should log.
+func ReadInstallRepo(skillDir string) (string, error) {
+	data, err := os.ReadFile(filepath.Join(skillDir, installMetadataFile))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	var m installMetadata
+	if err := json.Unmarshal(data, &m); err != nil {
+		return "", err
+	}
+	return m.Repo, nil
 }
 
 const clawhubBaseURL = "https://clawhub.ai"
@@ -81,6 +125,7 @@ func InstallFromClawHub(slug, targetDir string) (*Result, error) {
 	}
 	return &Result{
 		Source:       "clawhub",
+		Repo:         "",
 		Name:         slug,
 		Version:      version,
 		InstalledAt:  dest,
