@@ -96,14 +96,18 @@ func (s *Server) handleInstallSkill(w http.ResponseWriter, r *http.Request) {
 	slog.Info("skill installed",
 		"source", result.Source, "name", result.Name,
 		"version", result.Version, "path", result.InstalledAt, "agent", req.Agent)
-	jsonResponse(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"ok":          true,
 		"source":      result.Source,
 		"name":        result.Name,
 		"version":     result.Version,
 		"installedAt": result.InstalledAt,
 		"files":       result.FilesWritten,
-	})
+	}
+	if result.Repo != "" {
+		resp["repo"] = result.Repo
+	}
+	jsonResponse(w, http.StatusOK, resp)
 }
 
 // resolveInstallTarget picks the target directory for an install and enforces
@@ -153,11 +157,16 @@ func runInstall(source, name, repo, targetDir string) (*skills.Result, error) {
 		if err != nil {
 			return nil, err
 		}
+		// When a repo hint is present, match by Source to avoid
+		// name collisions (multiple repos can share the same
+		// skillId; PickSkillsShExact returns the most-installed).
+		if repo != "" {
+			if bySource := skills.PickSkillsShBySource(results, name, repo); bySource != nil {
+				return skills.InstallFromSkillsSh(*bySource, targetDir)
+			}
+		}
 		pick := skills.PickSkillsShExact(results, name)
 		if pick == nil || pick.SkillID != name {
-			// Skill not in skills.sh search index — fall back to
-			// direct GitHub install when a repo hint is available
-			// (search may have found it via ProbeGitHubRepo).
 			if repo != "" {
 				return skills.InstallFromGitHubRepo(repo, name, targetDir)
 			}

@@ -157,6 +157,11 @@ func scanSkillsDir(dir string) []map[string]any {
 		if fm != nil && fm.Version != "" {
 			entryOut["version"] = strings.TrimPrefix(fm.Version, "v")
 		}
+		if repo, err := skills.ReadInstallRepo(filepath.Join(dir, name)); err != nil {
+			slog.Warn("failed to read skill install metadata", "skill", name, "error", err)
+		} else if repo != "" {
+			entryOut["source"] = repo
+		}
 		if len(envSpec) > 0 {
 			entryOut["envSpec"] = envSpec
 		}

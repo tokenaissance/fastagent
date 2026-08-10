@@ -74,8 +74,10 @@ func InstallFromGitHubRepo(repo, skillName, targetDir string) (*Result, error) {
 		if version == "" {
 			version = ref
 		}
+		writeInstallMetadata(dest, repo)
 		return &Result{
 			Source:       "github",
+			Repo:         repo,
 			Name:         installedName,
 			Version:      version,
 			InstalledAt:  dest,
