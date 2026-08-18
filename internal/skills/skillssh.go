@@ -107,24 +107,35 @@ func InstallFromSkillsSh(r SkillsShResult, targetDir string) (*Result, error) {
 	}
 
 	client := defaultHTTPClient()
-	var lastErr error
-	// Try the repo's actual default branch first, then the common
-	// conventions as fallback. Many skills.sh entries point at repos with
-	// non-standard branches (e.g. `trunk`, `develop`, `dev`) — without the
-	// API probe we'd 404 even though the repo exists and contains the
-	// skill. Dedup so we don't hit the same ref twice when default is
-	// already `main`/`master`.
+
+	// Resolve the canonical repo identity first — one GitHub API call that
+	// (a) follows rename redirects (a repo may have been renamed since
+	// skills.sh indexed its source; codeload does NOT follow renames, so
+	// the tarball URL MUST be built from the canonical name), and (b) also
+	// returns the default branch. On API failure we fall back to the input
+	// owner/repo and the well-known branches without an extra API call.
+	canonicalSource := r.Source
 	refs := []string{"main", "master"}
-	if def := githubDefaultBranch(client, owner, repo); def != "" {
-		if def != "main" && def != "master" {
-			refs = append([]string{def}, refs...)
-		} else {
-			// Move matching ref to front to short-circuit the happy path.
-			refs = append([]string{def}, filterOut(refs, def)...)
+	if co, cr, def, ok := githubRepoIdentity(client, owner, repo); ok {
+		owner, repo = co, cr
+		canonicalSource = fmt.Sprintf("%s/%s", co, cr)
+		// Try the repo's actual default branch first, then the common
+		// conventions as fallback. Many skills.sh entries point at repos
+		// with non-standard branches (e.g. `trunk`, `develop`, `dev`).
+		// Dedup so we don't hit the same ref twice when default is already
+		// `main`/`master`.
+		if def != "" {
+			if def != "main" && def != "master" {
+				refs = append([]string{def}, refs...)
+			} else {
+				// Move matching ref to front to short-circuit the happy path.
+				refs = append([]string{def}, filterOut(refs, def)...)
+			}
 		}
 	}
+	var lastErr error
 	for _, ref := range refs {
-		tarURL := fmt.Sprintf("https://codeload.github.com/%s/%s/tar.gz/refs/heads/%s", owner, repo, ref)
+		tarURL := codeloadTarURL(owner, repo, ref)
 
 		// Probe once to discover the real in-tarball subpath of the skill
 		// folder. This is cheap for small repos and avoids double-downloads
@@ -167,10 +178,10 @@ func InstallFromSkillsSh(r SkillsShResult, targetDir string) (*Result, error) {
 		if version == "" {
 			version = ref
 		}
-		writeInstallMetadata(dest, r.Source)
+		writeInstallMetadata(dest, canonicalSource)
 		return &Result{
 			Source:       "skills.sh",
-			Repo:         r.Source,
+			Repo:         canonicalSource,
 			Name:         r.SkillID,
 			Version:      version,
 			InstalledAt:  dest,
@@ -183,36 +194,55 @@ func InstallFromSkillsSh(r SkillsShResult, targetDir string) (*Result, error) {
 	return nil, lastErr
 }
 
-// githubDefaultBranch asks the GitHub API for the repo's default branch.
-// Returns "" on any error (API rate limit, private repo, etc.) — callers
-// fall back to the well-known conventions. Best-effort only; we never
-// block the install path on this call.
-func githubDefaultBranch(client *http.Client, owner, repo string) string {
+// githubRepoIdentity resolves the canonical owner/repo and default branch of a
+// GitHub repository via the GitHub API. api.github.com returns a 301 that
+// net/http follows transparently when a repo has been renamed, so the
+// response's full_name reflects the CURRENT repo — whereas codeload.github.com
+// does NOT follow renames, so installs that build tarball URLs from a stale
+// name 404 even though the API resolves it. Returns ("", "", "", false) on any
+// error (private repo, rate limit, etc.) so callers fall back to the input
+// owner/repo and the well-known branches. Best-effort only; never blocks.
+func githubRepoIdentity(client *http.Client, owner, repo string) (canonicalOwner, canonicalRepo, defaultBranch string, ok bool) {
 	u := fmt.Sprintf("https://api.github.com/repos/%s/%s", owner, repo)
 	req, err := http.NewRequest(http.MethodGet, u, nil)
 	if err != nil {
-		return ""
+		return "", "", "", false
 	}
 	// Explicit Accept keeps the v3 JSON format stable. No auth header —
 	// unauthenticated requests have a low rate limit (60/h per IP) but
 	// that's enough for interactive installs and we don't want to require
-	// configuring a token just for default-branch lookup.
+	// configuring a token just for repo-identity lookup.
 	req.Header.Set("Accept", "application/vnd.github+json")
 	resp, err := client.Do(req)
 	if err != nil {
-		return ""
+		return "", "", "", false
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return ""
+		return "", "", "", false
 	}
 	var body struct {
+		FullName      string `json:"full_name"`
 		DefaultBranch string `json:"default_branch"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return "", "", "", false
+	}
+	if co, cr, valid := SplitOwnerRepo(body.FullName); valid {
+		return co, cr, body.DefaultBranch, true
+	}
+	return "", "", "", false
+}
+
+// githubDefaultBranch asks the GitHub API for the repo's default branch via
+// githubRepoIdentity (which follows rename redirects). Returns "" on any error
+// — callers fall back to the well-known conventions. Best-effort only.
+func githubDefaultBranch(client *http.Client, owner, repo string) string {
+	_, _, def, ok := githubRepoIdentity(client, owner, repo)
+	if !ok {
 		return ""
 	}
-	return body.DefaultBranch
+	return def
 }
 
 // ProbeGitHubRepo checks whether a public GitHub repo matching owner/repo

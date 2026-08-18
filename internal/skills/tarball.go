@@ -157,6 +157,14 @@ func findSkillDirInTarball(client *http.Client, url, skillID string) (string, er
 	return "", nil
 }
 
+// codeloadTarURL builds the codeload.github.com tarball URL for owner/repo at
+// a branch ref. codeload does NOT follow GitHub rename redirects, so callers
+// must pass the canonical (current) repo name — resolve it via
+// githubRepoIdentity before building the URL.
+func codeloadTarURL(owner, repo, ref string) string {
+	return fmt.Sprintf("https://codeload.github.com/%s/%s/tar.gz/refs/heads/%s", owner, repo, ref)
+}
+
 // defaultHTTPClient is the shared timeout-bounded client for registry calls.
 func defaultHTTPClient() *http.Client {
 	return &http.Client{Timeout: 60 * time.Second}
