@@ -22,9 +22,21 @@ func InstallFromGitHubRepo(repo, skillName, targetDir string) (*Result, error) {
 	owner, name := parts[0], parts[1]
 
 	client := defaultHTTPClient()
+
+	// Resolve the canonical repo identity first. api.github.com follows
+	// rename redirects but codeload.github.com does NOT — a repo renamed
+	// since the caller's repo string was recorded would otherwise 404 on
+	// the tarball download. On API failure we fall back to the input
+	// owner/repo (the main/master loop below is the safety net).
+	canonicalSource := repo
+	if co, cn, _, ok := githubRepoIdentity(client, owner, name); ok {
+		owner, name = co, cn
+		canonicalSource = fmt.Sprintf("%s/%s", co, cn)
+	}
+
 	var lastErr error
 	for _, ref := range []string{"main", "master"} {
-		tarURL := fmt.Sprintf("https://codeload.github.com/%s/%s/tar.gz/refs/heads/%s", owner, name, ref)
+		tarURL := codeloadTarURL(owner, name, ref)
 
 		subpath := ""
 		dest := ""
@@ -74,10 +86,10 @@ func InstallFromGitHubRepo(repo, skillName, targetDir string) (*Result, error) {
 		if version == "" {
 			version = ref
 		}
-		writeInstallMetadata(dest, repo)
+		writeInstallMetadata(dest, canonicalSource)
 		return &Result{
 			Source:       "github",
-			Repo:         repo,
+			Repo:         canonicalSource,
 			Name:         installedName,
 			Version:      version,
 			InstalledAt:  dest,

@@ -27,11 +27,16 @@ func TestRunInstall_GitHub_ReturnsRepoInResult(t *testing.T) {
 	}
 
 	// --- Assertions on the Result struct ---
-
-	if result.Repo != "tokenaissance/clean-architecture-skill" {
-		t.Fatalf("Result.Repo = %q, want %q", result.Repo, "tokenaissance/clean-architecture-skill")
+	//
+	// The input repo (tokenaissance/clean-architecture-skill) has been renamed
+	// to tokenaissance/clean-architecture — api.github.com 301s to it. The
+	// install path resolves the canonical name via githubRepoIdentity before
+	// downloading (codeload does NOT follow renames), so Result.Repo must be
+	// the canonical repo, not the stale input.
+	if result.Repo != "tokenaissance/clean-architecture" {
+		t.Fatalf("Result.Repo = %q, want %q", result.Repo, "tokenaissance/clean-architecture")
 	}
-	t.Logf("Result.Repo = %q ✓", result.Repo)
+	t.Logf("Result.Repo = %q ✓ (canonical after rename resolution)", result.Repo)
 
 	if result.Source != "github" {
 		t.Fatalf("Result.Source = %q, want %q", result.Source, "github")
@@ -70,10 +75,10 @@ func TestRunInstall_GitHub_ReturnsRepoInResult(t *testing.T) {
 	if !strings.Contains(jsonStr, `"repo"`) {
 		t.Fatal(`JSON response missing "repo" field`)
 	}
-	if !strings.Contains(jsonStr, `"repo":"tokenaissance/clean-architecture-skill"`) {
+	if !strings.Contains(jsonStr, `"repo":"tokenaissance/clean-architecture"`) {
 		t.Fatalf(`JSON response has wrong repo: %s`, jsonStr)
 	}
-	t.Logf("JSON contains correct repo ✓")
+	t.Logf("JSON contains correct canonical repo ✓")
 
 	// Verify skills.sh path also records repo (via InstallFromSkillsSh)
 	// We can't call InstallFromSkillsSh without a real skills.sh search,
