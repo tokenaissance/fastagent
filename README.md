@@ -1,6 +1,6 @@
 <div align="center">
 
-# FastClaw
+# FastAgent
 
 A lightweight AI Agent runtime written in Go.
 
@@ -15,24 +15,24 @@ A lightweight AI Agent runtime written in Go.
 ---
 
 <p align="center">
-  <img src="previews/admin.png" alt="FastClaw admin dashboard" width="900">
+  <img src="previews/admin.png" alt="FastAgent admin dashboard" width="900">
   <br>
   <em>Platform admin: agents, models, skills, users, API keys</em>
 </p>
 
 <p align="center">
-  <img src="previews/agent.png" alt="FastClaw agent management" width="900">
+  <img src="previews/agent.png" alt="FastAgent agent management" width="900">
   <br>
   <em>Per-agent management: chat, customize, scoped models / skills / channels / scheduler</em>
 </p>
 
-## What is FastClaw?
+## What is FastAgent?
 
-FastClaw is an **Agent Factory** — it creates, manages, and runs AI agents. Each agent has its own personality (SOUL.md), memory, skills, and tools. FastClaw handles the LLM communication, tool execution, sandbox isolation, and session management.
+FastAgent is an **Agent Factory** — it creates, manages, and runs AI agents. Each agent has its own personality (SOUL.md), memory, skills, and tools. FastAgent handles the LLM communication, tool execution, sandbox isolation, and session management.
 
 ```bash
 # Install (drops the binary into ~/.local/bin and adds it to PATH)
-curl -fsSL https://raw.githubusercontent.com/fastclaw-ai/fastclaw/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/tokenaissance/fastagent/main/install.sh | bash
 ```
 
 ## Quick Start
@@ -40,10 +40,10 @@ curl -fsSL https://raw.githubusercontent.com/fastclaw-ai/fastclaw/main/install.s
 ### 1. First Run
 
 ```bash
-fastclaw
+fastagent
 # Opens setup wizard → configure LLM provider → creates default agent.
-# Foreground mode; ^C to stop. Use `fastclaw daemon start` to run in
-# the background, or `fastclaw daemon install` to register a
+# Foreground mode; ^C to stop. Use `fastagent daemon start` to run in
+# the background, or `fastagent daemon install` to register a
 # launchd / systemd service.
 ```
 
@@ -84,8 +84,8 @@ can access it.
 ## Architecture
 
 ```
-~/.fastclaw/
-  fastclaw.db                # SQLite default — users, agents, sessions,
+~/.fastagent/
+  fastagent.db                # SQLite default — users, agents, sessions,
                              # apikeys, configs, agent_files all live here
   skills/                    # Shared skills (bundled + installed)
   agents/
@@ -93,15 +93,15 @@ can access it.
 ```
 
 The database is the source of truth for everything except skill folders
-on disk. SQLite is the default; point `FASTCLAW_STORAGE_DSN` at Postgres
+on disk. SQLite is the default; point `FASTAGENT_STORAGE_DSN` at Postgres
 for multi-pod deployments.
 
-**There is no `fastclaw.json`.** Bootstrap settings (port, bind, storage
-DSN, sandbox backend) come from `FASTCLAW_*` env vars; everything user-
+**There is no `fastagent.json`.** Bootstrap settings (port, bind, storage
+DSN, sandbox backend) come from `FASTAGENT_*` env vars; everything user-
 facing (providers, channels, settings, defaults) lives in the `configs`
-table and is edited through the dashboard or `fastclaw agents config`.
+table and is edited through the dashboard or `fastagent agents config`.
 
-### What FastClaw Stores
+### What FastAgent Stores
 
 | Data | Belongs to | Backing store |
 |------|-----------|---------------|
@@ -158,87 +158,89 @@ table and is edited through the dashboard or `fastclaw agents config`.
   building block for "user buys a bot" flows. Per-user `agent_quota`
   caps how many agents a non-admin can self-create
   (`-1` = unlimited, `0` = admin-provisioned only).
-- App-user provisioning `POST /v1/users` — third-party apps mint a stable fastclaw user_id per end-user, idempotent on `(api_key, external_id)`. Or pass `user` on `/v1/chat/completions` (or `X-Fastclaw-End-User` header) for lazy mint on first call
+- App-user provisioning `POST /v1/users` — third-party apps mint a stable fastagent user_id per end-user, idempotent on `(api_key, external_id)`. Or pass `user` on `/v1/chat/completions` (or `X-Fastagent-End-User` header) for lazy mint on first call
 
 ## Configuration
 
 Bootstrap is **env-only**. Everything that needs to change at runtime
 (providers, models, channels, defaults, sandbox toggle) lives in the
-database and is edited through the dashboard or `fastclaw agents config`.
+database and is edited through the dashboard or `fastagent agents config`.
 
 | Env var | Default | What it does |
 |---|---|---|
-| `FASTCLAW_HOME` | `~/.fastclaw` | Where the SQLite DB and skill folders live. |
-| `FASTCLAW_PORT` | `18953` | Gateway HTTP port. |
-| `FASTCLAW_BIND` | `loopback` | `loopback` (127.0.0.1) or `all` (0.0.0.0). |
-| `FASTCLAW_STORAGE_TYPE` | `sqlite` | `sqlite` or `postgres`. |
-| `FASTCLAW_STORAGE_DSN` | empty | Postgres DSN, e.g. `postgres://u:p@host:5432/db?sslmode=disable`. Empty = sqlite at `$FASTCLAW_HOME/fastclaw.db`. |
-| `FASTCLAW_STORAGE_AUTO_MIGRATE` | `true` | Apply schema migrations on boot. |
-| `FASTCLAW_SANDBOX_ENABLED` | dashboard | Override the Settings → Runtime toggle. |
-| `FASTCLAW_SANDBOX_BACKEND` | dashboard | `docker` or `e2b`. |
-| `FASTCLAW_SANDBOX_IMAGE` | dashboard | Docker image (Docker backend) or template id (E2B). |
-| `FASTCLAW_OBJECT_STORE_*` | unset | S3-compatible blob store for distributed deploys (multi-pod skill / file hydration). |
-| `FASTCLAW_LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error`. |
+| `FASTAGENT_HOME` | `~/.fastagent` | Where the SQLite DB and skill folders live. |
+| `FASTAGENT_PORT` | `18953` | Gateway HTTP port. |
+| `FASTAGENT_BIND` | `loopback` | `loopback` (127.0.0.1) or `all` (0.0.0.0). |
+| `FASTAGENT_STORAGE_TYPE` | `sqlite` | `sqlite` or `postgres`. |
+| `FASTAGENT_STORAGE_DSN` | empty | Postgres DSN, e.g. `postgres://u:p@host:5432/db?sslmode=disable`. Empty = sqlite at `$FASTAGENT_HOME/fastagent.db`. |
+| `FASTAGENT_STORAGE_AUTO_MIGRATE` | `true` | Apply schema migrations on boot. |
+| `FASTAGENT_SANDBOX_ENABLED` | dashboard | Override the Settings → Runtime toggle. |
+| `FASTAGENT_SANDBOX_BACKEND` | dashboard | `docker` or `e2b`. |
+| `FASTAGENT_SANDBOX_IMAGE` | dashboard | Docker image (Docker backend) or template id (E2B). |
+| `FASTAGENT_OBJECT_STORE_*` | unset | S3-compatible blob store for distributed deploys (multi-pod skill / file hydration). |
+| `FASTAGENT_LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error`. |
+| `FASTAGENT_WEBHOOK_URL` | unset | Webhook endpoint for usage billing integration (e.g., `https://cloud.example.com/api/fastagent/webhooks/usage`). |
+| `FASTAGENT_WEBHOOK_TOKEN` | unset | Authentication token for webhook requests (Bearer token). |
 
 Anything not on this list — providers, models, default model, skill
 catalog, channels, plugin config, scheduler — is configured at runtime
-through the web UI (`http://localhost:18953`) or the CLI (`fastclaw
-agents config`, `fastclaw provider`, `fastclaw skill`).
+through the web UI (`http://localhost:18953`) or the CLI (`fastagent
+agents config`, `fastagent provider`, `fastagent skill`).
 
 ## Deployment
 
 ### Local
 
 ```bash
-fastclaw                    # foreground (^C to stop)
-fastclaw daemon start       # background (logs at ~/.fastclaw/daemon.log)
-fastclaw daemon status
-fastclaw daemon stop
-fastclaw daemon install     # register as a launchd / systemd service
+fastagent                    # foreground (^C to stop)
+fastagent daemon start       # background (logs at ~/.fastagent/daemon.log)
+fastagent daemon status
+fastagent daemon stop
+fastagent daemon install     # register as a launchd / systemd service
 ```
 
-### Manage agents from the CLI (`fastclaw agents …`)
+### Manage agents from the CLI (`fastagent agents …`)
 
-The `fastclaw agents` subcommand is a thin convenience wrapper around the
+The `fastagent agents` subcommand is a thin convenience wrapper around the
 same store the dashboard uses. Agents you create here show up in the web
-UI and vice-versa — there's only ever one fastclaw deployment per
-`FASTCLAW_HOME`.
+UI and vice-versa — there's only ever one fastagent deployment per
+`FASTAGENT_HOME`.
 
 ```bash
 # Zero to a chattable agent in one command. On a fresh install this
 # creates an `admin` user (random password printed once) and starts
 # the gateway daemon if it isn't already running.
-fastclaw agents init alpha \
+fastagent agents init alpha \
   --provider openai \
   --model openai/gpt-4o-mini \
   --api-key-env OPENAI_API_KEY
 
 # Set per-agent overrides (model, temperature, sandbox, …).
-fastclaw agents config alpha set temperature 0.7
-fastclaw agents config alpha set sandbox.enabled true
+fastagent agents config alpha set temperature 0.7
+fastagent agents config alpha set sandbox.enabled true
 
 # Upload the agent's identity files.
-fastclaw agents files put alpha SOUL.md ./SOUL.md
-fastclaw agents files put alpha IDENTITY.md ./IDENTITY.md
+fastagent agents files put alpha SOUL.md ./SOUL.md
+fastagent agents files put alpha IDENTITY.md ./IDENTITY.md
 
 # Inspect.
-fastclaw agents ls
-fastclaw agents config alpha get
-fastclaw agents files ls alpha
+fastagent agents ls
+fastagent agents config alpha get
+fastagent agents files ls alpha
 
 # Tear down.
-fastclaw agents rm alpha
+fastagent agents rm alpha
 ```
 
 The CLI opens the operator's store directly (sqlite at
-`~/.fastclaw/fastclaw.db`, or whatever `FASTCLAW_STORAGE_DSN` points at)
+`~/.fastagent/fastagent.db`, or whatever `FASTAGENT_STORAGE_DSN` points at)
 and writes through the same code paths the gateway uses. It does not
 require the gateway to be running — but `agents init` will spin one up
 in the background so a fresh agent is immediately reachable at
 `http://localhost:18953`. Subsequent CLI writes (`config set`,
 `files put`, `rm`, `init` re-runs) send `SIGHUP` to the running gateway
 so it hot-reloads without restart. Windows lacks `SIGHUP` delivery, so
-the CLI falls back to a hint asking you to run `fastclaw daemon restart`.
+the CLI falls back to a hint asking you to run `fastagent daemon restart`.
 
 The default owner is the `admin` user. On an empty database
 `agents init` creates that account with a generated password (printed
@@ -249,8 +251,8 @@ once); on a populated database it expects `admin` to exist or
 
 CLI commands accept either a display name or an `agt_…` id:
 
-- `fastclaw agents config alpha get` — by display name (must be unique)
-- `fastclaw agents config agt_d3c4a5… get` — by id
+- `fastagent agents config alpha get` — by display name (must be unique)
+- `fastagent agents config agt_d3c4a5… get` — by id
 
 If the same text matches one agent's id and a different agent's display
 name, the CLI reports an ambiguity instead of guessing.
@@ -260,7 +262,7 @@ display name and the id is auto-generated. To update an agent that was
 created via the dashboard, pass its id explicitly:
 
 ```bash
-fastclaw agents init "Cool Agent" --id agt_d3c4a5...
+fastagent agents init "Cool Agent" --id agt_d3c4a5...
 ```
 
 #### Configuration keys
@@ -281,10 +283,10 @@ Provider configs live in `scope=system` and are addressed as
 `provider.<name>.<field>`:
 
 ```bash
-fastclaw agents config alpha set provider.openai.apiKeyEnv OPENAI_API_KEY
-fastclaw agents config alpha set provider.openrouter.apiBase https://openrouter.ai/api/v1
-fastclaw agents config alpha set provider.openai.model gpt-4o      # adds; idempotent
-fastclaw agents config alpha set provider.openai.models '[]'        # explicit clear
+fastagent agents config alpha set provider.openai.apiKeyEnv OPENAI_API_KEY
+fastagent agents config alpha set provider.openrouter.apiBase https://openrouter.ai/api/v1
+fastagent agents config alpha set provider.openai.model gpt-4o      # adds; idempotent
+fastagent agents config alpha set provider.openai.models '[]'        # explicit clear
 ```
 
 Provider presets ship for `openai`, `openrouter`, `anthropic`, `ollama`,
@@ -350,7 +352,7 @@ for full manifests.
 ## Building
 
 ```bash
-make build                  # builds the web bundle and the Go binary → bin/fastclaw
+make build                  # builds the web bundle and the Go binary → bin/fastagent
 make install                # installs to $HOME/.local/bin (override with PREFIX=)
 make release-local          # cross-compile darwin / linux / windows into dist/
 ```
@@ -360,15 +362,15 @@ via `-ldflags`. CI uses these targets too — see `.github/workflows/`.
 
 ## License
 
-FastClaw is **source-available** under the [FastClaw Community License](LICENSE),
+FastAgent is **source-available** under the [FastAgent Community License](LICENSE),
 based on Apache License 2.0 with additional conditions.
 
 **TL;DR:**
 - ✅ Use it commercially as a backend for your own product
 - ✅ Internal deployment within your organization
-- ❌ Hosting FastClaw as a multi-tenant SaaS for unrelated organizations
+- ❌ Hosting FastAgent as a multi-tenant SaaS for unrelated organizations
   (without a commercial license)
-- ❌ Removing or modifying the FastClaw branding in the dashboard UI
+- ❌ Removing or modifying the FastAgent branding in the dashboard UI
 
 The full Apache 2.0 text is reproduced inside the [LICENSE](LICENSE) file
 under the addendum. For commercial licensing inquiries: support@thinkany.ai.
