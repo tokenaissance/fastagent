@@ -241,7 +241,7 @@ image: fastclaw:local                  → image: fastagent:local
 
 ## 16. 文档
 
-- `FASTAGENT_README.md`: rebranded 版本的 README（`README.md` 保持原始版本与上游对齐）
+- `README.md`: rebranded 版本（2026-08-20 起，原 `FASTAGENT_README.md` 的 rebrand 内容合入并删除该临时文件）
 - `deploy/multi-pod/README.md`: 部署说明
 - `internal/agent/bundled_skills/README.md`: Skills 说明
 
@@ -388,7 +388,7 @@ image: fastclaw:local                  → image: fastagent:local
 | E2B 模板 | `fastclaw-sandbox` (e2b.toml) | 外部平台注册的模板名 |
 | JSON tag | `json:"fastclaw"` | 向后兼容 |
 | Go struct field | `FastClaw *OpenClawMeta` | 配合 json tag |
-| README.md | 保持原始 FastClaw 版本 | 与上游 repo 对齐 |
+| README.md | **已 rebrand 为 FastAgent**（2026-08-20） | 见 §16；原「与上游对齐」决定被用户指示覆盖 |
 
 ---
 
