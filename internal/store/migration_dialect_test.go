@@ -19,8 +19,8 @@ func TestMigrationSQLDialectCompatibility(t *testing.T) {
 	sqliteSQL := joinStatements(migrationSQLForDialect("sqlite"))
 
 	for name, got := range map[string]string{"postgres": pgSQL, "sqlite": sqliteSQL} {
-		if !containsAll(got, "mcp_oauth_tokens", "mcp_oauth_pending", "mcp_oauth_clients", "configs_kv", "agent_mcp_servers") {
-			t.Fatalf("%s migration missing oauth/configs_kv/agent_mcp_servers DDL", name)
+		if !containsAll(got, "mcp_oauth_tokens", "mcp_oauth_pending", "mcp_oauth_clients", "configs_kv", "agent_mcp_servers", "sandbox_leases") {
+			t.Fatalf("%s migration missing oauth/configs_kv/agent_mcp_servers/sandbox_leases DDL", name)
 		}
 		if strings.Contains(got, "agent_reload_epochs") {
 			t.Fatalf("%s migration still emits the retired agent_reload_epochs table", name)

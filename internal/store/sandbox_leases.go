@@ -1,0 +1,122 @@
+package store
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/fastclaw-ai/fastclaw/internal/sandbox"
+)
+
+// The DBStore implements sandbox.SandboxLeaseStore so the gateway can hand
+// the same Postgres (or sqlite) handle to the e2b pool on every replica.
+// The row format is intentionally dialect-neutral: epoch seconds for
+// expires_at/updated_at work on both sqlite and Postgres.
+
+// GetSandboxLease implements sandbox.SandboxLeaseStore.
+func (d *DBStore) GetSandboxLease(ctx context.Context, scopeKey string) (*sandbox.SandboxLeaseRecord, error) {
+	if scopeKey == "" {
+		return nil, nil
+	}
+	now := time.Now().Unix()
+	row := d.db.QueryRowContext(ctx,
+		fmt.Sprintf(`SELECT sandbox_id, envd_token, template, expires_at
+			FROM sandbox_leases
+			WHERE scope_key = %s AND expires_at > %s`, d.ph(1), d.ph(2)),
+		scopeKey, now)
+	var rec sandbox.SandboxLeaseRecord
+	if err := row.Scan(&rec.SandboxID, &rec.EnvdToken, &rec.Template, &rec.ExpiresAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &rec, nil
+}
+
+// AcquireSandboxLease implements sandbox.SandboxLeaseStore.
+func (d *DBStore) AcquireSandboxLease(
+	ctx context.Context,
+	scopeKey, owner, sandboxID, envdToken, template string,
+	ttl time.Duration,
+) (*sandbox.SandboxLeaseRecord, bool, error) {
+	if scopeKey == "" || owner == "" || sandboxID == "" {
+		return nil, false, fmt.Errorf("store: sandbox lease requires scopeKey/owner/sandboxID")
+	}
+	now := time.Now().Unix()
+	expires := now + int64(ttl/time.Second)
+	if expires <= now {
+		expires = now + 1
+	}
+
+	// 1. If the row exists but is expired, claim it first so a concurrent
+	//    acquirer racing us sees an unexpired row and adopts instead.
+	if _, err := d.db.ExecContext(ctx,
+		fmt.Sprintf(`UPDATE sandbox_leases
+			SET owner = %s, sandbox_id = %s, envd_token = %s, template = %s,
+			    expires_at = %s, updated_at = %s
+			WHERE scope_key = %s AND expires_at <= %s`,
+			d.ph(1), d.ph(2), d.ph(3), d.ph(4), d.ph(5), d.ph(6), d.ph(7), d.ph(8)),
+		owner, sandboxID, envdToken, template, expires, now, scopeKey, now); err != nil {
+		return nil, false, err
+	}
+	// 2. Insert when absent; a concurrent winner's insert wins and ours no-ops.
+	if _, err := d.db.ExecContext(ctx,
+		fmt.Sprintf(`INSERT INTO sandbox_leases
+			(scope_key, owner, sandbox_id, envd_token, template, expires_at, updated_at)
+			VALUES (%s, %s, %s, %s, %s, %s, %s)
+			ON CONFLICT (scope_key) DO NOTHING`,
+			d.ph(1), d.ph(2), d.ph(3), d.ph(4), d.ph(5), d.ph(6), d.ph(7)),
+		scopeKey, owner, sandboxID, envdToken, template, expires, now); err != nil {
+		return nil, false, err
+	}
+	// 3. Read back the authoritative row.
+	rec, err := d.GetSandboxLease(ctx, scopeKey)
+	if err != nil {
+		return nil, false, err
+	}
+	if rec == nil {
+		// Extremely unlikely (expired between steps); treat as lost so the
+		// caller retries from scratch.
+		return nil, false, nil
+	}
+	acquired := rec.SandboxID == sandboxID && rec.EnvdToken == envdToken
+	return rec, acquired, nil
+}
+
+// RenewSandboxLease implements sandbox.SandboxLeaseStore. Ownership moves to
+// the renewing pod (adoption), so an evicting previous owner can no longer
+// destroy the sandbox out from under us.
+func (d *DBStore) RenewSandboxLease(ctx context.Context, scopeKey, owner string, ttl time.Duration) error {
+	if scopeKey == "" || owner == "" {
+		return nil
+	}
+	now := time.Now().Unix()
+	expires := now + int64(ttl/time.Second)
+	if expires <= now {
+		expires = now + 1
+	}
+	_, err := d.db.ExecContext(ctx,
+		fmt.Sprintf(`UPDATE sandbox_leases
+			SET owner = %s, expires_at = %s, updated_at = %s
+			WHERE scope_key = %s`, d.ph(1), d.ph(2), d.ph(3), d.ph(4)),
+		owner, expires, now, scopeKey)
+	return err
+}
+
+// ReleaseSandboxLease implements sandbox.SandboxLeaseStore.
+func (d *DBStore) ReleaseSandboxLease(ctx context.Context, scopeKey, owner string) (bool, error) {
+	if scopeKey == "" || owner == "" {
+		return false, nil
+	}
+	res, err := d.db.ExecContext(ctx,
+		fmt.Sprintf(`DELETE FROM sandbox_leases WHERE scope_key = %s AND owner = %s`, d.ph(1), d.ph(2)),
+		scopeKey, owner)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}

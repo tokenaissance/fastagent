@@ -426,7 +426,8 @@ func New(env *config.EnvConfig) (*Gateway, error) {
 	// its own) need this — without a system-level pool, the per-user
 	// builder produced nil for those spaces and the agent's exec tool
 	// refused to run with "sandbox required but no executor available".
-	systemSandboxPool := buildSystemSandboxPool(readSystemSandboxCfg(st), ws)
+	systemSandboxPool := buildSystemSandboxPool(
+		readSystemSandboxCfg(st), ws, sandboxLeaseStoreFrom(st), sandboxPoolOwnerID())
 
 	// Accounts service is used by the inbound routing loop to lazy-mint
 	// per-(channel, IM-sender) app_user rows so each chatter on an IM
