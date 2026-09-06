@@ -39,6 +39,10 @@ type E2BExecutor struct {
 	client      *http.Client
 	template    string        // remembered for recreate() so the new sandbox uses the same template
 	timeout     time.Duration // remembered for recreate()
+	// closeFn overrides the HTTP DELETE used by Close(). Test-only seam so
+	// pool unit tests can assert an evicted/adopted-away sandbox was closed
+	// without calling the real e2b API. Nil keeps the production behavior.
+	closeFn func() error
 	// hydrate sources — set by the pool after creation so recreate()
 	// can rebuild /skills + /workspace without reaching back into the
 	// pool. Workspace store is optional; skill dirs may be empty.
@@ -897,6 +901,9 @@ func verifyWorkspaceWritable(ctx context.Context, ex *E2BExecutor) error {
 }
 
 func (e *E2BExecutor) Close() error {
+	if e.closeFn != nil {
+		return e.closeFn()
+	}
 	req, _ := http.NewRequest("DELETE",
 		fmt.Sprintf("%s/sandboxes/%s", e2bBaseURL, e.sandboxID), nil)
 	req.Header.Set("X-API-Key", e.apiKey)
@@ -1015,10 +1022,12 @@ func (p *E2BExecutorPool) Get(ctx context.Context, agentID, projectID, sessionID
 	key := poolKey(agentID, projectID, sessionID)
 	if ex, ok := p.executors[key]; ok {
 		if p.leaseStore != nil {
-			// Keep the shared lease fresh + owned by this pod on every use.
-			if err := p.leaseStore.RenewSandboxLease(ctx, key, p.ownerID, p.leaseTTL); err != nil {
-				slog.Warn("e2b lease renew failed", "scopeKey", key, "owner", p.ownerID, "error", err)
-			}
+			// A cached executor may be stale: its lease can expire while we
+			// were idle and another pod can take over the scope with a
+			// different sandbox. Reconcile against the shared lease before
+			// blindly renewing (blind renewal would steal ownership of the
+			// wrong sandbox and orphan the real one on eviction).
+			return p.reconcileLocalLeaseLocked(ctx, key, ex, agentID, projectID, sessionID)
 		}
 		return ex, nil
 	}
@@ -1026,13 +1035,7 @@ func (p *E2BExecutorPool) Get(ctx context.Context, agentID, projectID, sessionID
 		if rec, err := p.leaseStore.GetSandboxLease(ctx, key); err != nil {
 			slog.Warn("e2b lease lookup failed (falling back to local create)", "scopeKey", key, "error", err)
 		} else if rec != nil {
-			ex := newAdoptedE2BExecutor(rec.SandboxID, rec.EnvdToken, rec.Template, p.timeout)
-			if rec.Template == "" {
-				ex.template = p.template
-			}
-			ex.SetHydrationSources(skillDirsForAgent(p.home, agentID), p.workspace, agentID, projectID, sessionID)
-			_ = p.leaseStore.RenewSandboxLease(ctx, key, p.ownerID, p.leaseTTL)
-			p.executors[key] = ex
+			ex := p.adoptFromLeaseLocked(ctx, key, rec, agentID, projectID, sessionID)
 			slog.Info("e2b sandbox adopted from shared lease",
 				"sandboxID", rec.SandboxID, "scopeKey", key, "owner", p.ownerID)
 			return ex, nil
@@ -1068,17 +1071,96 @@ func (p *E2BExecutorPool) Get(ctx context.Context, agentID, projectID, sessionID
 		} else if !acquired && rec != nil {
 			// Another replica won the race for this scope; use its sandbox.
 			_ = ex.Close()
-			ex = newAdoptedE2BExecutor(rec.SandboxID, rec.EnvdToken, rec.Template, p.timeout)
-			if rec.Template == "" {
-				ex.template = p.template
-			}
-			ex.SetHydrationSources(skillDirsForAgent(p.home, agentID), p.workspace, agentID, projectID, sessionID)
+			ex = p.adoptFromLeaseLocked(ctx, key, rec, agentID, projectID, sessionID)
 			slog.Info("e2b sandbox adopted after lease race",
 				"sandboxID", rec.SandboxID, "scopeKey", key, "owner", p.ownerID)
 		}
 	}
 	p.executors[key] = ex
 	return ex, nil
+}
+
+// adoptFromLeaseLocked builds an executor for an existing lease record,
+// extends the lease under this pod's ownership, and caches it. Callers hold
+// p.mu. Hydration is not replayed: the creating pod hydrated the same scope;
+// changes apply on the next recreate (same as single-pod behavior).
+func (p *E2BExecutorPool) adoptFromLeaseLocked(
+	ctx context.Context,
+	key string,
+	rec *SandboxLeaseRecord,
+	agentID, projectID, sessionID string,
+) *E2BExecutor {
+	ex := newAdoptedE2BExecutor(rec.SandboxID, rec.EnvdToken, rec.Template, p.timeout)
+	if rec.Template == "" {
+		ex.template = p.template
+	}
+	ex.SetHydrationSources(skillDirsForAgent(p.home, agentID), p.workspace, agentID, projectID, sessionID)
+	if err := p.leaseStore.RenewSandboxLease(ctx, key, p.ownerID, p.leaseTTL); err != nil {
+		slog.Warn("e2b lease renew after adopt failed", "scopeKey", key, "owner", p.ownerID, "error", err)
+	}
+	p.executors[key] = ex
+	return ex
+}
+
+// reconcileLocalLeaseLocked checks the shared lease against a locally cached
+// executor before every use:
+//
+//   - same sandbox → renew (owner = this pod) and keep the local executor;
+//   - no valid lease → re-claim with our local sandbox; on a lost race adopt
+//     the winner;
+//   - different sandbox owns the scope → close our stale local instance and
+//     adopt the current one.
+//
+// Without the sandboxID check a long-idle pod would renew ownership of a
+// lease that now points at another pod's sandbox, then "own" the wrong row
+// and orphan the live sandbox when it later evicts.
+func (p *E2BExecutorPool) reconcileLocalLeaseLocked(
+	ctx context.Context,
+	key string,
+	ex *E2BExecutor,
+	agentID, projectID, sessionID string,
+) (Executor, error) {
+	rec, err := p.leaseStore.GetSandboxLease(ctx, key)
+	if err != nil {
+		// Registry unavailable: fail open on the local executor.
+		slog.Warn("e2b lease lookup failed (keeping local executor)", "scopeKey", key, "error", err)
+		return ex, nil
+	}
+	if rec == nil {
+		// Our lease expired while idle. Try to reclaim with the sandbox we
+		// still hold; if another pod won in the meantime, adopt theirs.
+		got, acquired, aerr := p.leaseStore.AcquireSandboxLease(
+			ctx, key, p.ownerID, ex.sandboxID, ex.accessToken, ex.template, p.leaseTTL)
+		if aerr != nil {
+			slog.Warn("e2b lease reclaim failed (keeping local executor)", "scopeKey", key, "error", aerr)
+			return ex, nil
+		}
+		if acquired {
+			return ex, nil
+		}
+		if got != nil {
+			_ = ex.Close()
+			adopted := p.adoptFromLeaseLocked(ctx, key, got, agentID, projectID, sessionID)
+			slog.Info("e2b sandbox adopted after lease expiry race",
+				"sandboxID", got.SandboxID, "scopeKey", key, "owner", p.ownerID)
+			return adopted, nil
+		}
+		return ex, nil
+	}
+	if rec.SandboxID == ex.sandboxID {
+		if err := p.leaseStore.RenewSandboxLease(ctx, key, p.ownerID, p.leaseTTL); err != nil {
+			slog.Warn("e2b lease renew failed", "scopeKey", key, "owner", p.ownerID, "error", err)
+		}
+		return ex, nil
+	}
+	// Scope was taken over by a different sandbox. Our cached instance is
+	// stale; close it locally (do NOT touch the lease row — it belongs to
+	// the current sandbox) and adopt the current one.
+	_ = ex.Close()
+	adopted := p.adoptFromLeaseLocked(ctx, key, rec, agentID, projectID, sessionID)
+	slog.Info("e2b sandbox adopted (local cache stale)",
+		"sandboxID", rec.SandboxID, "scopeKey", key, "owner", p.ownerID)
+	return adopted, nil
 }
 
 // warmupCamoufoxDaemon spawns the camoufox-cli background daemon as part
