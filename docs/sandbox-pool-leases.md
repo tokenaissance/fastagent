@@ -34,8 +34,9 @@ updated_at     unix seconds
   winner's sandbox.
 - Every tool use on a locally cached executor renews the lease (owner = this
   pod, TTL default 15 min).
-- Release/eviction deletes the lease only `WHERE owner = this pod`; if
-  another pod adopted in between, the evicting pod drops its local reference
+- Release/eviction deletes the lease only when `owner = this pod` **and** the
+  `epoch` this pod last received still matches (fenced delete). If another
+  pod adopted in between, the evicting pod drops its local reference
   **without** destroying the shared sandbox. Registry errors fail open: the
   sandbox is left alive.
 - Adoption does not replay hydration (creator hydrated the same scope);
@@ -106,3 +107,8 @@ sensitive.
   until e2b's own 30-min timeout.
 - Adoption races are benign for correctness of destruction (owner check), but
   two pods briefly sharing one sandbox is expected during takeover windows.
+- In the rare double-race where a creator loses `Acquire` and the subsequent
+  CAS adoption also misses, the pool keeps its own unregistered sandbox until
+  the next reconcile; because no epoch was recorded, its later release will
+  not destroy it and it lives until the e2b timeout. Logged as a warning;
+  accepted for v1.

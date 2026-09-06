@@ -37,6 +37,15 @@ func (d *DBStore) GetSandboxLease(ctx context.Context, scopeKey string) (*sandbo
 }
 
 // AcquireSandboxLease implements sandbox.SandboxLeaseStore.
+//
+// Concurrency safety (why the three statements are enough, without an
+// advisory lock): the UPDATE only claims an already-expired row and stamps a
+// future expiry, so a concurrent acquirer that starts later re-evaluates the
+// WHERE clause against the updated row and sees no match (Postgres
+// EvalPlanQual; sqlite serializes writes). The INSERT then only wins when no
+// row exists, and the final SELECT returns whichever row won — the loser
+// gets acquired=false and adopts the winner. Both supported dialects
+// (sqlite/postgres) behave this way for these statements.
 func (d *DBStore) AcquireSandboxLease(
 	ctx context.Context,
 	scopeKey, owner, sandboxID, envdToken, template string,

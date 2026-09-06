@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -128,6 +130,56 @@ func TestSandboxLeaseStaleEpochCannotRelease(t *testing.T) {
 	deleted, err = st.ReleaseSandboxLease(ctx, scope, "pod-a", newEpoch)
 	if err != nil || !deleted {
 		t.Fatalf("current-epoch release: deleted=%v err=%v", deleted, err)
+	}
+}
+
+func TestSandboxLeaseConcurrentAcquireSingleWinner(t *testing.T) {
+	ctx := context.Background()
+	db := newTestSandboxLeaseDB(t)
+	var st sandbox.SandboxLeaseStore = db
+
+	const scope = "agt_4:s:sess_4"
+	const racers = 6
+	start := make(chan struct{})
+	type result struct {
+		acquired bool
+		err      error
+	}
+	results := make(chan result, racers)
+	var wg sync.WaitGroup
+	for i := 0; i < racers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			_, acquired, err := st.AcquireSandboxLease(
+				ctx, scope, fmt.Sprintf("pod-%d", i), fmt.Sprintf("sb-%d", i),
+				fmt.Sprintf("tok-%d", i), "tpl", time.Minute)
+			results <- result{acquired: acquired, err: err}
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	winners := 0
+	for r := range results {
+		if r.err != nil {
+			t.Fatalf("acquire error: %v", r.err)
+		}
+		if r.acquired {
+			winners++
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("winners = %d, want exactly 1", winners)
+	}
+	rec, err := st.GetSandboxLease(ctx, scope)
+	if err != nil || rec == nil {
+		t.Fatalf("final lease missing: rec=%+v err=%v", rec, err)
+	}
+	if rec.Epoch != 1 {
+		t.Fatalf("winner epoch = %d, want 1", rec.Epoch)
 	}
 }
 

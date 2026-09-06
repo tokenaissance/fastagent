@@ -946,6 +946,14 @@ type E2BExecutorPool struct {
 	leaseStore SandboxLeaseStore
 	ownerID    string
 	leaseTTL   time.Duration
+
+	// Test seams: production defaults call the real e2b API; unit tests
+	// override them so the create/adopt/reconcile decision paths can be
+	// exercised without network access.
+	newSandboxExecutor func(ctx context.Context, apiKey, template string, timeout time.Duration) (*E2BExecutor, error)
+	hydrateSandbox     func(ctx context.Context, ex *E2BExecutor) error
+	verifySandbox      func(ctx context.Context, ex *E2BExecutor) error
+	warmupSandbox      func(ctx context.Context, ex *E2BExecutor)
 }
 
 // E2BLeaseOptions configures cross-pod sandbox sharing for the E2B pool.
@@ -997,12 +1005,18 @@ func newAdoptedE2BExecutor(sandboxID, accessToken, template string, timeout time
 // skill dirs to push into each fresh sandbox.
 func NewE2BExecutorPool(apiKey, template, home string, timeout time.Duration, opts ...func(*E2BExecutorPool)) *E2BExecutorPool {
 	p := &E2BExecutorPool{
-		executors:   make(map[string]*E2BExecutor),
-		leaseEpochs: make(map[string]int64),
-		apiKey:      apiKey,
-		template:    template,
-		timeout:     timeout,
-		home:        home,
+		executors:          make(map[string]*E2BExecutor),
+		leaseEpochs:        make(map[string]int64),
+		apiKey:             apiKey,
+		template:           template,
+		timeout:            timeout,
+		home:               home,
+		newSandboxExecutor: newE2BExecutor,
+		hydrateSandbox: func(ctx context.Context, ex *E2BExecutor) error {
+			return ex.Hydrate(ctx)
+		},
+		verifySandbox: verifyWorkspaceWritable,
+		warmupSandbox: warmupCamoufoxDaemon,
 	}
 	for _, opt := range opts {
 		opt(p)
@@ -1049,12 +1063,12 @@ func (p *E2BExecutorPool) Get(ctx context.Context, agentID, projectID, sessionID
 				"scopeKey", key, "owner", p.ownerID)
 		}
 	}
-	ex, err := newE2BExecutor(ctx, p.apiKey, p.template, p.timeout)
+	ex, err := p.newSandboxExecutor(ctx, p.apiKey, p.template, p.timeout)
 	if err != nil {
 		return nil, err
 	}
 	ex.SetHydrationSources(skillDirsForAgent(p.home, agentID), p.workspace, agentID, projectID, sessionID)
-	if err := ex.Hydrate(ctx); err != nil {
+	if err := p.hydrateSandbox(ctx, ex); err != nil {
 		// Hydrate is what chowns /workspace to the non-root `user`
 		// account exec runs as; without it every agent write to
 		// /workspace gets Permission denied silently — see the
@@ -1066,11 +1080,11 @@ func (p *E2BExecutorPool) Get(ctx context.Context, agentID, projectID, sessionID
 		_ = ex.Close()
 		return nil, fmt.Errorf("e2b hydrate: %w", err)
 	}
-	if err := verifyWorkspaceWritable(ctx, ex); err != nil {
+	if err := p.verifySandbox(ctx, ex); err != nil {
 		_ = ex.Close()
 		return nil, fmt.Errorf("e2b sandbox unusable: %w", err)
 	}
-	warmupCamoufoxDaemon(ctx, ex)
+	p.warmupSandbox(ctx, ex)
 	if p.leaseStore != nil {
 		rec, acquired, lerr := p.leaseStore.AcquireSandboxLease(
 			ctx, key, p.ownerID, ex.sandboxID, ex.accessToken, p.template, p.leaseTTL)

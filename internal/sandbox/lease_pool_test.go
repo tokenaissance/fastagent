@@ -229,3 +229,38 @@ func TestE2BPoolReleaseUsesFencingEpoch(t *testing.T) {
 		t.Fatalf("owner release should close sandbox once, closed=%v", ids)
 	}
 }
+
+func TestE2BPoolCreateLostRaceAdoptsWinner(t *testing.T) {
+	ctx := context.Background()
+	store := &fakeLeaseStore{
+		getRec:     nil, // no lease yet → this pod creates
+		acquireRec: &SandboxLeaseRecord{SandboxID: "sb-2", EnvdToken: "tok-2", Template: "tpl", Epoch: 4},
+		acquired:   false, // another replica won the claim while we created
+	}
+	pool := newLeasePool(t, store, "pod-a")
+	created := &leaseCloseRecorder{}
+	pool.newSandboxExecutor = func(_ context.Context, _, _ string, _ time.Duration) (*E2BExecutor, error) {
+		return testExecutor(created, "sb-1", "tok-1"), nil
+	}
+	pool.hydrateSandbox = func(context.Context, *E2BExecutor) error { return nil }
+	pool.verifySandbox = func(context.Context, *E2BExecutor) error { return nil }
+	pool.warmupSandbox = func(context.Context, *E2BExecutor) {}
+
+	got, err := pool.Get(ctx, "agt_1", "", "chat_1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	gotEx := got.(*E2BExecutor)
+	if gotEx.sandboxID != "sb-2" {
+		t.Fatalf("expected adopted sb-2, got %s", gotEx.sandboxID)
+	}
+	if ids := created.ids(); len(ids) != 1 || ids[0] != "sb-1" {
+		t.Fatalf("locally created sb-1 must be closed exactly once after losing the race, closed=%v", ids)
+	}
+	if store.renewCount() != 1 {
+		t.Fatalf("adoption should CAS-renew once, renews=%d", store.renewCount())
+	}
+	if epoch := pool.leaseEpochs["agt_1:s:chat_1"]; epoch != store.renewEpoch {
+		t.Fatalf("cached epoch = %d, want %d", epoch, store.renewEpoch)
+	}
+}
