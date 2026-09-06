@@ -22,6 +22,9 @@ func TestMigrationSQLDialectCompatibility(t *testing.T) {
 		if !containsAll(got, "mcp_oauth_tokens", "mcp_oauth_pending", "mcp_oauth_clients", "configs_kv", "agent_mcp_servers", "sandbox_leases") {
 			t.Fatalf("%s migration missing oauth/configs_kv/agent_mcp_servers/sandbox_leases DDL", name)
 		}
+		if !strings.Contains(got, "epoch BIGINT NOT NULL DEFAULT 0") {
+			t.Fatalf("%s migration sandbox_leases must include the epoch fencing column", name)
+		}
 		if strings.Contains(got, "agent_reload_epochs") {
 			t.Fatalf("%s migration still emits the retired agent_reload_epochs table", name)
 		}
