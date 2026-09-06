@@ -1464,6 +1464,7 @@ func migrationSQLForDialect(dialect string) []string {
 			envd_token TEXT NOT NULL,
 			template TEXT NOT NULL DEFAULT '',
 			expires_at BIGINT NOT NULL,
+			epoch BIGINT NOT NULL DEFAULT 0,
 			updated_at BIGINT NOT NULL
 		)`,
 		// channel / account_id / chat_id together identify the

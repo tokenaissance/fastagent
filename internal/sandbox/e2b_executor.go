@@ -928,11 +928,15 @@ func (p *E2BExecutorPool) Backend() string { return "e2b" }
 type E2BExecutorPool struct {
 	mu        sync.Mutex
 	executors map[string]*E2BExecutor
-	apiKey    string
-	template  string
-	timeout   time.Duration
-	home      string          // workspace root used to resolve per-agent skill dirs
-	workspace workspace.Store // optional — when set, /workspace is hydrated alongside /skills
+	// leaseEpochs mirrors executors: the fencing epoch this pod last
+	// received for the scope. Destroy passes it to ReleaseSandboxLease so a
+	// stale eviction can never win against a newer renew/adopt.
+	leaseEpochs map[string]int64
+	apiKey      string
+	template    string
+	timeout     time.Duration
+	home        string          // workspace root used to resolve per-agent skill dirs
+	workspace   workspace.Store // optional — when set, /workspace is hydrated alongside /skills
 
 	// Cross-pod lease coordination. When set, Get() first consults the
 	// shared store and adopts an existing sandbox for the scope instead of
@@ -993,11 +997,12 @@ func newAdoptedE2BExecutor(sandboxID, accessToken, template string, timeout time
 // skill dirs to push into each fresh sandbox.
 func NewE2BExecutorPool(apiKey, template, home string, timeout time.Duration, opts ...func(*E2BExecutorPool)) *E2BExecutorPool {
 	p := &E2BExecutorPool{
-		executors: make(map[string]*E2BExecutor),
-		apiKey:    apiKey,
-		template:  template,
-		timeout:   timeout,
-		home:      home,
+		executors:   make(map[string]*E2BExecutor),
+		leaseEpochs: make(map[string]int64),
+		apiKey:      apiKey,
+		template:    template,
+		timeout:     timeout,
+		home:        home,
 	}
 	for _, opt := range opts {
 		opt(p)
@@ -1035,10 +1040,13 @@ func (p *E2BExecutorPool) Get(ctx context.Context, agentID, projectID, sessionID
 		if rec, err := p.leaseStore.GetSandboxLease(ctx, key); err != nil {
 			slog.Warn("e2b lease lookup failed (falling back to local create)", "scopeKey", key, "error", err)
 		} else if rec != nil {
-			ex := p.adoptFromLeaseLocked(ctx, key, rec, agentID, projectID, sessionID)
-			slog.Info("e2b sandbox adopted from shared lease",
-				"sandboxID", rec.SandboxID, "scopeKey", key, "owner", p.ownerID)
-			return ex, nil
+			if ex, ok := p.adoptFromLeaseLocked(ctx, key, rec, agentID, projectID, sessionID); ok {
+				slog.Info("e2b sandbox adopted from shared lease",
+					"sandboxID", rec.SandboxID, "scopeKey", key, "owner", p.ownerID)
+				return ex, nil
+			}
+			slog.Warn("e2b lease changed during adoption (falling back to local create)",
+				"scopeKey", key, "owner", p.ownerID)
 		}
 	}
 	ex, err := newE2BExecutor(ctx, p.apiKey, p.template, p.timeout)
@@ -1068,38 +1076,56 @@ func (p *E2BExecutorPool) Get(ctx context.Context, agentID, projectID, sessionID
 			ctx, key, p.ownerID, ex.sandboxID, ex.accessToken, p.template, p.leaseTTL)
 		if lerr != nil {
 			slog.Warn("e2b lease acquire failed (keeping local sandbox)", "scopeKey", key, "error", lerr)
+		} else if acquired && rec != nil {
+			p.leaseEpochs[key] = rec.Epoch
 		} else if !acquired && rec != nil {
-			// Another replica won the race for this scope; use its sandbox.
-			_ = ex.Close()
-			ex = p.adoptFromLeaseLocked(ctx, key, rec, agentID, projectID, sessionID)
-			slog.Info("e2b sandbox adopted after lease race",
-				"sandboxID", rec.SandboxID, "scopeKey", key, "owner", p.ownerID)
+			// Another replica won the race for this scope; use its sandbox
+			// when the CAS adoption succeeds, otherwise keep our own.
+			if adopted, ok := p.adoptFromLeaseLocked(ctx, key, rec, agentID, projectID, sessionID); ok {
+				_ = ex.Close()
+				ex = adopted
+				slog.Info("e2b sandbox adopted after lease race",
+					"sandboxID", rec.SandboxID, "scopeKey", key, "owner", p.ownerID)
+			} else {
+				slog.Warn("e2b adoption after race failed; keeping local sandbox unregistered",
+					"scopeKey", key, "owner", p.ownerID)
+			}
 		}
 	}
 	p.executors[key] = ex
 	return ex, nil
 }
 
-// adoptFromLeaseLocked builds an executor for an existing lease record,
-// extends the lease under this pod's ownership, and caches it. Callers hold
-// p.mu. Hydration is not replayed: the creating pod hydrated the same scope;
-// changes apply on the next recreate (same as single-pod behavior).
+// adoptFromLeaseLocked builds an executor for an existing lease record and
+// CAS-renews it under this pod's ownership (fencing epoch bumped). Returns
+// ok=false when the row changed between lookup and renew — callers must not
+// adopt in that case. On a registry error the executor is returned without a
+// recorded epoch (fail-open; release will not destroy the sandbox).
+// Hydration is not replayed: the creating pod hydrated the same scope.
 func (p *E2BExecutorPool) adoptFromLeaseLocked(
 	ctx context.Context,
 	key string,
 	rec *SandboxLeaseRecord,
 	agentID, projectID, sessionID string,
-) *E2BExecutor {
+) (*E2BExecutor, bool) {
 	ex := newAdoptedE2BExecutor(rec.SandboxID, rec.EnvdToken, rec.Template, p.timeout)
 	if rec.Template == "" {
 		ex.template = p.template
 	}
 	ex.SetHydrationSources(skillDirsForAgent(p.home, agentID), p.workspace, agentID, projectID, sessionID)
-	if err := p.leaseStore.RenewSandboxLease(ctx, key, p.ownerID, p.leaseTTL); err != nil {
-		slog.Warn("e2b lease renew after adopt failed", "scopeKey", key, "owner", p.ownerID, "error", err)
+	epoch, err := p.leaseStore.RenewSandboxLease(ctx, key, p.ownerID, rec.SandboxID, p.leaseTTL)
+	if err != nil {
+		slog.Warn("e2b lease renew after adopt failed; adopting without epoch",
+			"scopeKey", key, "owner", p.ownerID, "error", err)
+		p.executors[key] = ex
+		return ex, true
 	}
+	if epoch == 0 {
+		return nil, false
+	}
+	p.leaseEpochs[key] = epoch
 	p.executors[key] = ex
-	return ex
+	return ex, true
 }
 
 // reconcileLocalLeaseLocked checks the shared lease against a locally cached
@@ -1136,31 +1162,44 @@ func (p *E2BExecutorPool) reconcileLocalLeaseLocked(
 			return ex, nil
 		}
 		if acquired {
+			if got != nil {
+				p.leaseEpochs[key] = got.Epoch
+			}
 			return ex, nil
 		}
 		if got != nil {
-			_ = ex.Close()
-			adopted := p.adoptFromLeaseLocked(ctx, key, got, agentID, projectID, sessionID)
-			slog.Info("e2b sandbox adopted after lease expiry race",
-				"sandboxID", got.SandboxID, "scopeKey", key, "owner", p.ownerID)
-			return adopted, nil
+			if adopted, ok := p.adoptFromLeaseLocked(ctx, key, got, agentID, projectID, sessionID); ok {
+				_ = ex.Close()
+				slog.Info("e2b sandbox adopted after lease expiry race",
+					"sandboxID", got.SandboxID, "scopeKey", key, "owner", p.ownerID)
+				return adopted, nil
+			}
+			slog.Warn("e2b adoption after expiry race failed; keeping local executor",
+				"scopeKey", key, "owner", p.ownerID)
+			return ex, nil
 		}
 		return ex, nil
 	}
 	if rec.SandboxID == ex.sandboxID {
-		if err := p.leaseStore.RenewSandboxLease(ctx, key, p.ownerID, p.leaseTTL); err != nil {
+		epoch, err := p.leaseStore.RenewSandboxLease(ctx, key, p.ownerID, ex.sandboxID, p.leaseTTL)
+		if err != nil {
 			slog.Warn("e2b lease renew failed", "scopeKey", key, "owner", p.ownerID, "error", err)
+		} else if epoch > 0 {
+			p.leaseEpochs[key] = epoch
 		}
 		return ex, nil
 	}
 	// Scope was taken over by a different sandbox. Our cached instance is
-	// stale; close it locally (do NOT touch the lease row — it belongs to
-	// the current sandbox) and adopt the current one.
-	_ = ex.Close()
-	adopted := p.adoptFromLeaseLocked(ctx, key, rec, agentID, projectID, sessionID)
-	slog.Info("e2b sandbox adopted (local cache stale)",
-		"sandboxID", rec.SandboxID, "scopeKey", key, "owner", p.ownerID)
-	return adopted, nil
+	// stale; adopt the current one and only then close our local instance.
+	if adopted, ok := p.adoptFromLeaseLocked(ctx, key, rec, agentID, projectID, sessionID); ok {
+		_ = ex.Close()
+		slog.Info("e2b sandbox adopted (local cache stale)",
+			"sandboxID", rec.SandboxID, "scopeKey", key, "owner", p.ownerID)
+		return adopted, nil
+	}
+	slog.Warn("e2b adoption of current lease failed; keeping stale local executor",
+		"scopeKey", key, "owner", p.ownerID)
+	return ex, nil
 }
 
 // warmupCamoufoxDaemon spawns the camoufox-cli background daemon as part
@@ -1198,10 +1237,12 @@ func (p *E2BExecutorPool) Release(agentID, projectID, sessionID string) error {
 	p.mu.Lock()
 	key := poolKey(agentID, projectID, sessionID)
 	ex, ok := p.executors[key]
+	epoch := p.leaseEpochs[key]
 	delete(p.executors, key)
+	delete(p.leaseEpochs, key)
 	p.mu.Unlock()
 	if ok {
-		return p.releaseExecutor(key, ex)
+		return p.releaseExecutor(key, ex, epoch)
 	}
 	return nil
 }
@@ -1209,19 +1250,22 @@ func (p *E2BExecutorPool) Release(agentID, projectID, sessionID string) error {
 func (p *E2BExecutorPool) CloseAll() {
 	p.mu.Lock()
 	execs := make([]struct {
-		key string
-		ex  *E2BExecutor
+		key   string
+		ex    *E2BExecutor
+		epoch int64
 	}, 0, len(p.executors))
 	for key, ex := range p.executors {
 		execs = append(execs, struct {
-			key string
-			ex  *E2BExecutor
-		}{key: key, ex: ex})
+			key   string
+			ex    *E2BExecutor
+			epoch int64
+		}{key: key, ex: ex, epoch: p.leaseEpochs[key]})
 	}
 	p.executors = make(map[string]*E2BExecutor)
+	p.leaseEpochs = make(map[string]int64)
 	p.mu.Unlock()
 	for _, e := range execs {
-		_ = p.releaseExecutor(e.key, e.ex)
+		_ = p.releaseExecutor(e.key, e.ex, e.epoch)
 	}
 }
 
@@ -1229,13 +1273,13 @@ func (p *E2BExecutorPool) CloseAll() {
 // only destroys the sandbox when the lease deletion succeeded (or no lease
 // store is configured). If another pod adopted the scope, we drop our local
 // reference without closing the sandbox out from under it.
-func (p *E2BExecutorPool) releaseExecutor(key string, ex *E2BExecutor) error {
+func (p *E2BExecutorPool) releaseExecutor(key string, ex *E2BExecutor, epoch int64) error {
 	if p.leaseStore == nil {
 		return ex.Close()
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	deleted, err := p.leaseStore.ReleaseSandboxLease(ctx, key, p.ownerID)
+	deleted, err := p.leaseStore.ReleaseSandboxLease(ctx, key, p.ownerID, epoch)
 	if err != nil {
 		// Registry unavailable: keep the sandbox alive (fail open) rather
 		// than risk destroying an instance another pod just adopted.

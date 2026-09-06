@@ -16,6 +16,11 @@ type SandboxLeaseRecord struct {
 	// ExpiresAt is a unix timestamp (seconds). An expired lease is dead:
 	// the next acquirer may replace it.
 	ExpiresAt int64
+	// Epoch is the fencing version. It is bumped on every successful
+	// renew/adopt; destroy must present the exact epoch the caller last
+	// received, so a stale/delayed destroy can never win against a newer
+	// ownership.
+	Epoch int64
 }
 
 // SandboxLeaseStore is the persistence port the E2B pool uses to make
@@ -34,13 +39,20 @@ type SandboxLeaseStore interface {
 		scopeKey, owner, sandboxID, envdToken, template string,
 		ttl time.Duration,
 	) (record *SandboxLeaseRecord, acquired bool, err error)
-	// RenewSandboxLease extends the lease and moves ownership to this pod.
-	// Used whenever a pod already holds/adopts the sandbox and keeps using it.
-	RenewSandboxLease(ctx context.Context, scopeKey, owner string, ttl time.Duration) error
+	// RenewSandboxLease extends the lease and moves ownership to this pod,
+	// but only when the row still points at sandboxID and has not expired
+	// (CAS). Returns the new epoch, or 0 when the CAS missed (lease gone or
+	// replaced) — the caller must not treat 0 as ownership.
+	RenewSandboxLease(
+		ctx context.Context,
+		scopeKey, owner, sandboxID string,
+		ttl time.Duration,
+	) (epoch int64, err error)
 	// ReleaseSandboxLease deletes the lease only when this pod is still the
-	// owner. Returns true when the row was deleted (i.e. this pod may destroy
-	// the sandbox); false when another pod adopted it in the meantime.
-	ReleaseSandboxLease(ctx context.Context, scopeKey, owner string) (bool, error)
+	// owner AND the stored epoch matches the one the caller last received.
+	// Returns true when the row was deleted (i.e. this pod may destroy the
+	// sandbox); false when ownership moved or the epoch is stale.
+	ReleaseSandboxLease(ctx context.Context, scopeKey, owner string, epoch int64) (bool, error)
 }
 
 // Lease TTL used by the pool when no explicit value is configured. Must be
