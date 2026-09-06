@@ -78,6 +78,35 @@ func globalSkillsDirPath() (string, error) {
 	return filepath.Join(home, "skills"), nil
 }
 
+var (
+	sandboxPoolOwnerOnce  sync.Once
+	sandboxPoolOwnerValue string
+)
+
+// sandboxPoolOwnerID returns a per-pod identifier used as the lease owner in
+// the shared sandbox_leases table. Distinct across replicas so an evicting
+// pod can never destroy a sandbox another pod adopted.
+func sandboxPoolOwnerID() string {
+	sandboxPoolOwnerOnce.Do(func() {
+		host, _ := os.Hostname()
+		sandboxPoolOwnerValue = fmt.Sprintf("%s:%d", host, os.Getpid())
+	})
+	return sandboxPoolOwnerValue
+}
+
+// sandboxLeaseStoreFrom extracts the shared lease store from the relational
+// store when it implements sandbox.SandboxLeaseStore (DBStore does). Nil
+// keeps the per-pod behavior (no cross-pod sharing).
+func sandboxLeaseStoreFrom(st store.Store) sandbox.SandboxLeaseStore {
+	if st == nil {
+		return nil
+	}
+	if l, ok := st.(sandbox.SandboxLeaseStore); ok {
+		return l
+	}
+	return nil
+}
+
 // buildSystemSandboxPool constructs the gateway-wide sandbox pool from
 // the system-scope sandbox config. Returns nil when sandbox is not
 // enabled at system scope (each user space then attaches no pool, and
@@ -93,7 +122,12 @@ func globalSkillsDirPath() (string, error) {
 // with sandbox Enabled but no executor and surfaced "sandbox required
 // but no executor available" to the user. Pulling the pool up to
 // gateway scope makes the borrow path the default for every UserSpace.
-func buildSystemSandboxPool(cfg config.SandboxCfg, ws workspace.Store) sandbox.ExecutorPool {
+func buildSystemSandboxPool(
+	cfg config.SandboxCfg,
+	ws workspace.Store,
+	leases sandbox.SandboxLeaseStore,
+	ownerID string,
+) sandbox.ExecutorPool {
 	if !cfg.Enabled {
 		return nil
 	}
@@ -115,9 +149,15 @@ func buildSystemSandboxPool(cfg config.SandboxCfg, ws workspace.Store) sandbox.E
 		if template == "" {
 			template = "base"
 		}
-		inner = sandbox.NewE2BExecutorPool(apiKey, template, home, 30*time.Minute)
+		var opts []func(*sandbox.E2BExecutorPool)
+		if leases != nil && ownerID != "" {
+			opts = append(opts, sandbox.WithSandboxLeases(sandbox.E2BLeaseOptions{
+				Store: leases, Owner: ownerID,
+			}))
+		}
+		inner = sandbox.NewE2BExecutorPool(apiKey, template, home, 30*time.Minute, opts...)
 		slog.Info("system sandbox executor pool created",
-			"backend", "e2b", "template", template)
+			"backend", "e2b", "template", template, "sharedLeases", leases != nil && ownerID != "")
 	case "boxlite":
 		secret := cfg.BoxliteKey
 		if secret == "" {
@@ -320,7 +360,7 @@ type UserSpace struct {
 	mu sync.Mutex
 }
 
-// readUserScopeAgentDefaults reads the (user=X, agent='') agents.defaults
+// readUserScopeAgentDefaults reads the (user=X, agent=”) agents.defaults
 // row raw — distinct from assembleConfig, which merges system + user and
 // can't tell apart "user explicitly chose the system value" from "no
 // user-scope row at all". EnsureAgent uses this to detect a chatter's
@@ -1095,7 +1135,7 @@ func (r *userSpaceRegistry) startEvictor(ctx context.Context) {
 // per Account.
 //
 // Pulls rows from three ownership corners this user can route:
-//   - (user_id='', agent_id=Y): the agent's "official" rows for any
+//   - (user_id=”, agent_id=Y): the agent's "official" rows for any
 //     agent Y the user owns (legacy / pre-refactor data)
 //   - (user_id=userID, agent_id=Y) where user owns Y: this user's
 //     bindings on their own agent (the normal post-refactor pattern)

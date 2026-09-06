@@ -926,19 +926,76 @@ type E2BExecutorPool struct {
 	timeout   time.Duration
 	home      string          // workspace root used to resolve per-agent skill dirs
 	workspace workspace.Store // optional — when set, /workspace is hydrated alongside /skills
+
+	// Cross-pod lease coordination. When set, Get() first consults the
+	// shared store and adopts an existing sandbox for the scope instead of
+	// creating a duplicate per pod; Release() only destroys a sandbox it
+	// still owns. Nil keeps the historical per-pod behavior (local mode,
+	// docker, or registry disabled).
+	leaseStore SandboxLeaseStore
+	ownerID    string
+	leaseTTL   time.Duration
+}
+
+// E2BLeaseOptions configures cross-pod sandbox sharing for the E2B pool.
+type E2BLeaseOptions struct {
+	Store    SandboxLeaseStore
+	Owner    string
+	LeaseTTL time.Duration
+}
+
+// WithSandboxLeases attaches a shared lease store. Requires non-empty Owner
+// (unique per pod); TTL zero falls back to DefaultSandboxLeaseTTL.
+func WithSandboxLeases(o E2BLeaseOptions) func(*E2BExecutorPool) {
+	return func(p *E2BExecutorPool) {
+		if o.Store == nil || o.Owner == "" {
+			return
+		}
+		p.leaseStore = o.Store
+		p.ownerID = o.Owner
+		p.leaseTTL = o.LeaseTTL
+		if p.leaseTTL <= 0 {
+			p.leaseTTL = DefaultSandboxLeaseTTL
+		}
+	}
+}
+
+// newAdoptedE2BExecutor wraps an existing e2b sandbox (created by another
+// pod) without calling the create API. Hydration is skipped on adoption —
+// the sandbox was hydrated by its creator with the same (user, agent,
+// session) skills/workspace; skill or workspace changes take effect on the
+// next recreate, matching single-pod behavior.
+func newAdoptedE2BExecutor(sandboxID, accessToken, template string, timeout time.Duration) *E2BExecutor {
+	if template == "" {
+		template = "base"
+	}
+	if timeout <= 0 {
+		timeout = 30 * time.Minute
+	}
+	return &E2BExecutor{
+		sandboxID:   sandboxID,
+		accessToken: accessToken,
+		client:      &http.Client{},
+		template:    template,
+		timeout:     timeout,
+	}
 }
 
 // NewE2BExecutorPool — `home` is the FASTAGENT_HOME the docker backend
 // would have used for `-v` mounts; the pool uses it to resolve which
 // skill dirs to push into each fresh sandbox.
-func NewE2BExecutorPool(apiKey, template, home string, timeout time.Duration) *E2BExecutorPool {
-	return &E2BExecutorPool{
+func NewE2BExecutorPool(apiKey, template, home string, timeout time.Duration, opts ...func(*E2BExecutorPool)) *E2BExecutorPool {
+	p := &E2BExecutorPool{
 		executors: make(map[string]*E2BExecutor),
 		apiKey:    apiKey,
 		template:  template,
 		timeout:   timeout,
 		home:      home,
 	}
+	for _, opt := range opts {
+		opt(p)
+	}
+	return p
 }
 
 // SetWorkspace plugs in the workspace.Store whose contents should be
@@ -957,7 +1014,29 @@ func (p *E2BExecutorPool) Get(ctx context.Context, agentID, projectID, sessionID
 	defer p.mu.Unlock()
 	key := poolKey(agentID, projectID, sessionID)
 	if ex, ok := p.executors[key]; ok {
+		if p.leaseStore != nil {
+			// Keep the shared lease fresh + owned by this pod on every use.
+			if err := p.leaseStore.RenewSandboxLease(ctx, key, p.ownerID, p.leaseTTL); err != nil {
+				slog.Warn("e2b lease renew failed", "scopeKey", key, "owner", p.ownerID, "error", err)
+			}
+		}
 		return ex, nil
+	}
+	if p.leaseStore != nil {
+		if rec, err := p.leaseStore.GetSandboxLease(ctx, key); err != nil {
+			slog.Warn("e2b lease lookup failed (falling back to local create)", "scopeKey", key, "error", err)
+		} else if rec != nil {
+			ex := newAdoptedE2BExecutor(rec.SandboxID, rec.EnvdToken, rec.Template, p.timeout)
+			if rec.Template == "" {
+				ex.template = p.template
+			}
+			ex.SetHydrationSources(skillDirsForAgent(p.home, agentID), p.workspace, agentID, projectID, sessionID)
+			_ = p.leaseStore.RenewSandboxLease(ctx, key, p.ownerID, p.leaseTTL)
+			p.executors[key] = ex
+			slog.Info("e2b sandbox adopted from shared lease",
+				"sandboxID", rec.SandboxID, "scopeKey", key, "owner", p.ownerID)
+			return ex, nil
+		}
 	}
 	ex, err := newE2BExecutor(ctx, p.apiKey, p.template, p.timeout)
 	if err != nil {
@@ -981,6 +1060,23 @@ func (p *E2BExecutorPool) Get(ctx context.Context, agentID, projectID, sessionID
 		return nil, fmt.Errorf("e2b sandbox unusable: %w", err)
 	}
 	warmupCamoufoxDaemon(ctx, ex)
+	if p.leaseStore != nil {
+		rec, acquired, lerr := p.leaseStore.AcquireSandboxLease(
+			ctx, key, p.ownerID, ex.sandboxID, ex.accessToken, p.template, p.leaseTTL)
+		if lerr != nil {
+			slog.Warn("e2b lease acquire failed (keeping local sandbox)", "scopeKey", key, "error", lerr)
+		} else if !acquired && rec != nil {
+			// Another replica won the race for this scope; use its sandbox.
+			_ = ex.Close()
+			ex = newAdoptedE2BExecutor(rec.SandboxID, rec.EnvdToken, rec.Template, p.timeout)
+			if rec.Template == "" {
+				ex.template = p.template
+			}
+			ex.SetHydrationSources(skillDirsForAgent(p.home, agentID), p.workspace, agentID, projectID, sessionID)
+			slog.Info("e2b sandbox adopted after lease race",
+				"sandboxID", rec.SandboxID, "scopeKey", key, "owner", p.ownerID)
+		}
+	}
 	p.executors[key] = ex
 	return ex, nil
 }
@@ -1023,18 +1119,51 @@ func (p *E2BExecutorPool) Release(agentID, projectID, sessionID string) error {
 	delete(p.executors, key)
 	p.mu.Unlock()
 	if ok {
-		return ex.Close()
+		return p.releaseExecutor(key, ex)
 	}
 	return nil
 }
 
 func (p *E2BExecutorPool) CloseAll() {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	for _, ex := range p.executors {
-		ex.Close()
+	execs := make([]struct {
+		key string
+		ex  *E2BExecutor
+	}, 0, len(p.executors))
+	for key, ex := range p.executors {
+		execs = append(execs, struct {
+			key string
+			ex  *E2BExecutor
+		}{key: key, ex: ex})
 	}
 	p.executors = make(map[string]*E2BExecutor)
+	p.mu.Unlock()
+	for _, e := range execs {
+		_ = p.releaseExecutor(e.key, e.ex)
+	}
+}
+
+// releaseExecutor drops the shared lease when this pod still owns it, and
+// only destroys the sandbox when the lease deletion succeeded (or no lease
+// store is configured). If another pod adopted the scope, we drop our local
+// reference without closing the sandbox out from under it.
+func (p *E2BExecutorPool) releaseExecutor(key string, ex *E2BExecutor) error {
+	if p.leaseStore == nil {
+		return ex.Close()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	deleted, err := p.leaseStore.ReleaseSandboxLease(ctx, key, p.ownerID)
+	if err != nil {
+		// Registry unavailable: keep the sandbox alive (fail open) rather
+		// than risk destroying an instance another pod just adopted.
+		slog.Warn("e2b lease release failed; leaving sandbox alive", "scopeKey", key, "error", err)
+		return nil
+	}
+	if !deleted {
+		return nil // another owner holds the lease — do not close shared sandbox
+	}
+	return ex.Close()
 }
 
 var (
