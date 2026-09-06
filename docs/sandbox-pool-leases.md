@@ -70,10 +70,7 @@ The version column makes any stale destroy request fail closed.
 | 1 | lease table + adopt/acquire/release + gateway wiring | done (`e359bf0`) |
 | 1b | per-use reconcile: cached executor vs lease sandbox_id | done (`091c579`) |
 | 2 | CAS + epoch on renew/adopt/release + race unit tests | done (`86fcac1`) |
-| 3 | heartbeat + periodic reconciliation loop (merged) | planned |
-| 4 | DB-outage degraded/fail-open state machine | planned |
-| 5 | uniform scope/owner/sandbox logs + counters + summary | planned |
-| 6 | liveness probe + orphan GC | deferred until observed |
+| 3–6 | heartbeat/reconciliation loop, degraded state machine, metrics, liveness GC | **not in scope** — decision: CAS + epoch is sufficient for the current release; revisit only if prod observations justify them |
 
 ## Files
 
