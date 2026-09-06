@@ -22,7 +22,7 @@ func TestSandboxLeasesAcquireAdoptRenewRelease(t *testing.T) {
 	if err != nil {
 		t.Fatalf("acquire: %v", err)
 	}
-	if !acquired || rec == nil || rec.SandboxID != "sb-a" {
+	if !acquired || rec == nil || rec.SandboxID != "sb-a" || rec.Epoch != 1 {
 		t.Fatalf("first acquire: acquired=%v rec=%+v", acquired, rec)
 	}
 
@@ -37,13 +37,17 @@ func TestSandboxLeasesAcquireAdoptRenewRelease(t *testing.T) {
 	}
 
 	// Pod B renews (adopts ownership) while continuing to use A's instance.
-	if err := st.RenewSandboxLease(ctx, scope, "pod-b", ttl); err != nil {
+	epoch, err := st.RenewSandboxLease(ctx, scope, "pod-b", "sb-a", ttl)
+	if err != nil {
 		t.Fatalf("renew: %v", err)
+	}
+	if epoch <= rec.Epoch {
+		t.Fatalf("renew epoch = %d, want > %d", epoch, rec.Epoch)
 	}
 
 	// A's release must NOT delete the lease (B owns it now) → A must not
 	// destroy the shared sandbox.
-	deleted, err := st.ReleaseSandboxLease(ctx, scope, "pod-a")
+	deleted, err := st.ReleaseSandboxLease(ctx, scope, "pod-a", rec.Epoch)
 	if err != nil {
 		t.Fatalf("release pod-a: %v", err)
 	}
@@ -52,7 +56,7 @@ func TestSandboxLeasesAcquireAdoptRenewRelease(t *testing.T) {
 	}
 
 	// B's release deletes the lease → B may destroy the sandbox.
-	deleted, err = st.ReleaseSandboxLease(ctx, scope, "pod-b")
+	deleted, err = st.ReleaseSandboxLease(ctx, scope, "pod-b", epoch)
 	if err != nil {
 		t.Fatalf("release pod-b: %v", err)
 	}
@@ -91,6 +95,39 @@ func TestSandboxLeaseExpiryAllowsTakeover(t *testing.T) {
 	}
 	if !acquired || rec == nil || rec.SandboxID != "sb-new" {
 		t.Fatalf("takeover failed: acquired=%v rec=%+v", acquired, rec)
+	}
+}
+
+func TestSandboxLeaseStaleEpochCannotRelease(t *testing.T) {
+	ctx := context.Background()
+	db := newTestSandboxLeaseDB(t)
+	var st sandbox.SandboxLeaseStore = db
+
+	const scope = "agt_3:s:sess_3"
+	rec, acquired, err := st.AcquireSandboxLease(ctx, scope, "pod-a", "sb-a", "tok-a", "tpl", time.Minute)
+	if err != nil || !acquired {
+		t.Fatalf("acquire: %v acquired=%v", err, acquired)
+	}
+	// A renews (bumps epoch) and then a delayed eviction from its older
+	// snapshot tries to release with the stale epoch.
+	newEpoch, err := st.RenewSandboxLease(ctx, scope, "pod-a", "sb-a", time.Minute)
+	if err != nil {
+		t.Fatalf("renew: %v", err)
+	}
+	if newEpoch <= rec.Epoch {
+		t.Fatalf("epoch did not advance: old=%d new=%d", rec.Epoch, newEpoch)
+	}
+	deleted, err := st.ReleaseSandboxLease(ctx, scope, "pod-a", rec.Epoch)
+	if err != nil {
+		t.Fatalf("stale release: %v", err)
+	}
+	if deleted {
+		t.Fatal("stale epoch release deleted a renewed lease")
+	}
+	// The current epoch can still release.
+	deleted, err = st.ReleaseSandboxLease(ctx, scope, "pod-a", newEpoch)
+	if err != nil || !deleted {
+		t.Fatalf("current-epoch release: deleted=%v err=%v", deleted, err)
 	}
 }
 

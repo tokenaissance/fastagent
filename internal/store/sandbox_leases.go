@@ -22,12 +22,12 @@ func (d *DBStore) GetSandboxLease(ctx context.Context, scopeKey string) (*sandbo
 	}
 	now := time.Now().Unix()
 	row := d.db.QueryRowContext(ctx,
-		fmt.Sprintf(`SELECT sandbox_id, envd_token, template, expires_at
+		fmt.Sprintf(`SELECT sandbox_id, envd_token, template, expires_at, epoch
 			FROM sandbox_leases
 			WHERE scope_key = %s AND expires_at > %s`, d.ph(1), d.ph(2)),
 		scopeKey, now)
 	var rec sandbox.SandboxLeaseRecord
-	if err := row.Scan(&rec.SandboxID, &rec.EnvdToken, &rec.Template, &rec.ExpiresAt); err != nil {
+	if err := row.Scan(&rec.SandboxID, &rec.EnvdToken, &rec.Template, &rec.ExpiresAt, &rec.Epoch); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -56,7 +56,7 @@ func (d *DBStore) AcquireSandboxLease(
 	if _, err := d.db.ExecContext(ctx,
 		fmt.Sprintf(`UPDATE sandbox_leases
 			SET owner = %s, sandbox_id = %s, envd_token = %s, template = %s,
-			    expires_at = %s, updated_at = %s
+			    expires_at = %s, epoch = 1, updated_at = %s
 			WHERE scope_key = %s AND expires_at <= %s`,
 			d.ph(1), d.ph(2), d.ph(3), d.ph(4), d.ph(5), d.ph(6), d.ph(7), d.ph(8)),
 		owner, sandboxID, envdToken, template, expires, now, scopeKey, now); err != nil {
@@ -65,8 +65,8 @@ func (d *DBStore) AcquireSandboxLease(
 	// 2. Insert when absent; a concurrent winner's insert wins and ours no-ops.
 	if _, err := d.db.ExecContext(ctx,
 		fmt.Sprintf(`INSERT INTO sandbox_leases
-			(scope_key, owner, sandbox_id, envd_token, template, expires_at, updated_at)
-			VALUES (%s, %s, %s, %s, %s, %s, %s)
+			(scope_key, owner, sandbox_id, envd_token, template, expires_at, epoch, updated_at)
+			VALUES (%s, %s, %s, %s, %s, %s, 1, %s)
 			ON CONFLICT (scope_key) DO NOTHING`,
 			d.ph(1), d.ph(2), d.ph(3), d.ph(4), d.ph(5), d.ph(6), d.ph(7)),
 		scopeKey, owner, sandboxID, envdToken, template, expires, now); err != nil {
@@ -87,33 +87,43 @@ func (d *DBStore) AcquireSandboxLease(
 }
 
 // RenewSandboxLease implements sandbox.SandboxLeaseStore. Ownership moves to
-// the renewing pod (adoption), so an evicting previous owner can no longer
-// destroy the sandbox out from under us.
-func (d *DBStore) RenewSandboxLease(ctx context.Context, scopeKey, owner string, ttl time.Duration) error {
-	if scopeKey == "" || owner == "" {
-		return nil
+// the renewing pod only when the row still points at sandboxID and has not
+// expired (CAS). Returns the new fencing epoch, or 0 when the CAS missed.
+func (d *DBStore) RenewSandboxLease(
+	ctx context.Context,
+	scopeKey, owner, sandboxID string,
+	ttl time.Duration,
+) (int64, error) {
+	if scopeKey == "" || owner == "" || sandboxID == "" {
+		return 0, nil
 	}
 	now := time.Now().Unix()
 	expires := now + int64(ttl/time.Second)
 	if expires <= now {
 		expires = now + 1
 	}
-	_, err := d.db.ExecContext(ctx,
+	var epoch int64
+	err := d.db.QueryRowContext(ctx,
 		fmt.Sprintf(`UPDATE sandbox_leases
-			SET owner = %s, expires_at = %s, updated_at = %s
-			WHERE scope_key = %s`, d.ph(1), d.ph(2), d.ph(3), d.ph(4)),
-		owner, expires, now, scopeKey)
-	return err
+			SET owner = %s, expires_at = %s, epoch = epoch + 1, updated_at = %s
+			WHERE scope_key = %s AND sandbox_id = %s AND expires_at > %s
+			RETURNING epoch`, d.ph(1), d.ph(2), d.ph(3), d.ph(4), d.ph(5), d.ph(6)),
+		owner, expires, now, scopeKey, sandboxID, now).Scan(&epoch)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	return epoch, err
 }
 
 // ReleaseSandboxLease implements sandbox.SandboxLeaseStore.
-func (d *DBStore) ReleaseSandboxLease(ctx context.Context, scopeKey, owner string) (bool, error) {
+func (d *DBStore) ReleaseSandboxLease(ctx context.Context, scopeKey, owner string, epoch int64) (bool, error) {
 	if scopeKey == "" || owner == "" {
 		return false, nil
 	}
 	res, err := d.db.ExecContext(ctx,
-		fmt.Sprintf(`DELETE FROM sandbox_leases WHERE scope_key = %s AND owner = %s`, d.ph(1), d.ph(2)),
-		scopeKey, owner)
+		fmt.Sprintf(`DELETE FROM sandbox_leases WHERE scope_key = %s AND owner = %s AND epoch = %s`,
+			d.ph(1), d.ph(2), d.ph(3)),
+		scopeKey, owner, epoch)
 	if err != nil {
 		return false, err
 	}

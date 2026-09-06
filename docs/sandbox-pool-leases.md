@@ -1,6 +1,7 @@
 # Cross-pod E2B sandbox lease registry
 
-Status: implemented (v1) · Storage: Postgres (`sandbox_leases`), sqlite in tests
+Status: implemented (v1 base + cache-reconcile fix) · Storage: Postgres
+(`sandbox_leases`), sqlite in tests · Hardening: CAS + epoch (in progress)
 
 ## Problem
 
@@ -20,6 +21,7 @@ sandbox_id     e2b instance id
 envd_token     short-lived e2b access token (shared so other pods can adopt)
 template       e2b template used at creation
 expires_at     unix seconds; expired ⇒ dead, next acquirer may replace
+epoch          monotonic fencing version; bumped on every renew/adopt
 updated_at     unix seconds
 ```
 
@@ -39,6 +41,39 @@ updated_at     unix seconds
 - Adoption does not replay hydration (creator hydrated the same scope);
   skill/workspace changes apply on next recreate, same as single-pod behavior.
 
+## Hardening: CAS + epoch (stage 2)
+
+Cross-pod correctness needs the ownership transfer itself to be a
+compare-and-set, not a read-then-write:
+
+- Every successful renew/adopt increments `epoch` and only matches
+  `scope_key + sandbox_id + expires_at > now`. A stale renew (row deleted or
+  pointing at another sandbox) returns no row and must not be treated as
+  ownership.
+- Destroy is only allowed after
+  `DELETE … WHERE scope_key=? AND owner=? AND epoch=?` returns one row. The
+  evicting pod carries the epoch it last received, so a delayed/duplicated
+  eviction from an older snapshot can never delete a lease that was renewed
+  or adopted in the meantime.
+- `Acquire` claims a fresh/expired row and stamps `epoch = 1`.
+
+Why epoch on top of owner: owner changes cover most takeovers, but not
+same-owner request reordering (an old release racing a newer renew from the
+same pod) or a delete formulated before another pod's adoption completed.
+The version column makes any stale destroy request fail closed.
+
+### Staged hardening plan
+
+| Stage | Scope | Status |
+|---|---|---|
+| 1 | lease table + adopt/acquire/release + gateway wiring | done (`e359bf0`) |
+| 1b | per-use reconcile: cached executor vs lease sandbox_id | done (`091c579`) |
+| 2 | CAS + epoch on renew/adopt/release + race unit tests | in progress |
+| 3 | heartbeat + periodic reconciliation loop (merged) | planned |
+| 4 | DB-outage degraded/fail-open state machine | planned |
+| 5 | uniform scope/owner/sandbox logs + counters + summary | planned |
+| 6 | liveness probe + orphan GC | deferred until observed |
+
 ## Files
 
 - `internal/sandbox/lease.go` — port + lease record + default TTL
@@ -48,8 +83,13 @@ updated_at     unix seconds
 
 ## Rollout
 
-- No manual migration needed: boot `Migrate()` runs
-  `CREATE TABLE IF NOT EXISTS sandbox_leases (...)` on both dialects.
+- No manual migration needed on a fresh install: boot `Migrate()` runs
+  `CREATE TABLE IF NOT EXISTS sandbox_leases (...)` (including `epoch`) on
+  both dialects.
+- Upgrade note: if an earlier v1 image (pre-epoch) already created the table
+  in Postgres, run once before rolling out this build:
+  `ALTER TABLE sandbox_leases ADD COLUMN IF NOT EXISTS epoch BIGINT NOT NULL
+  DEFAULT 0;`
 - Verify after rollout: gateway log
   `system sandbox executor pool created backend=e2b ... sharedLeases=true`;
   one session should produce one `e2b sandbox created` even when requests hit
