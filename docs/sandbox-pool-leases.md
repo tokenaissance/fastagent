@@ -1,7 +1,7 @@
 # Cross-pod E2B sandbox lease registry
 
-Status: implemented (v1 base + cache-reconcile fix) · Storage: Postgres
-(`sandbox_leases`), sqlite in tests · Hardening: CAS + epoch (in progress)
+Status: implemented (v1 base + cache-reconcile fix + CAS/epoch) · Storage:
+Postgres (`sandbox_leases`), sqlite in tests
 
 ## Problem
 
@@ -68,7 +68,7 @@ The version column makes any stale destroy request fail closed.
 |---|---|---|
 | 1 | lease table + adopt/acquire/release + gateway wiring | done (`e359bf0`) |
 | 1b | per-use reconcile: cached executor vs lease sandbox_id | done (`091c579`) |
-| 2 | CAS + epoch on renew/adopt/release + race unit tests | in progress |
+| 2 | CAS + epoch on renew/adopt/release + race unit tests | done (`86fcac1`) |
 | 3 | heartbeat + periodic reconciliation loop (merged) | planned |
 | 4 | DB-outage degraded/fail-open state machine | planned |
 | 5 | uniform scope/owner/sandbox logs + counters + summary | planned |
@@ -83,13 +83,10 @@ The version column makes any stale destroy request fail closed.
 
 ## Rollout
 
-- No manual migration needed on a fresh install: boot `Migrate()` runs
+- No manual migration needed: boot `Migrate()` runs
   `CREATE TABLE IF NOT EXISTS sandbox_leases (...)` (including `epoch`) on
-  both dialects.
-- Upgrade note: if an earlier v1 image (pre-epoch) already created the table
-  in Postgres, run once before rolling out this build:
-  `ALTER TABLE sandbox_leases ADD COLUMN IF NOT EXISTS epoch BIGINT NOT NULL
-  DEFAULT 0;`
+  both dialects. The table ships only with this feature branch — nothing has
+  been released, so there is no pre-epoch table to upgrade.
 - Verify after rollout: gateway log
   `system sandbox executor pool created backend=e2b ... sharedLeases=true`;
   one session should produce one `e2b sandbox created` even when requests hit
