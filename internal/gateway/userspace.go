@@ -107,6 +107,18 @@ func sandboxLeaseStoreFrom(st store.Store) sandbox.SandboxLeaseStore {
 	return nil
 }
 
+// sandboxLeaseOpts returns the shared-lease option for an E2B pool when
+// both a lease store and a per-pod owner are available. Nil keeps the
+// per-pod behavior (each replica creates its own sandbox). Extracted from
+// buildSystemSandboxPool so the wiring decision is unit-testable without
+// constructing a pool.
+func sandboxLeaseOpts(leases sandbox.SandboxLeaseStore, ownerID string) *sandbox.E2BLeaseOptions {
+	if leases == nil || ownerID == "" {
+		return nil
+	}
+	return &sandbox.E2BLeaseOptions{Store: leases, Owner: ownerID}
+}
+
 // buildSystemSandboxPool constructs the gateway-wide sandbox pool from
 // the system-scope sandbox config. Returns nil when sandbox is not
 // enabled at system scope (each user space then attaches no pool, and
@@ -150,14 +162,13 @@ func buildSystemSandboxPool(
 			template = "base"
 		}
 		var opts []func(*sandbox.E2BExecutorPool)
-		if leases != nil && ownerID != "" {
-			opts = append(opts, sandbox.WithSandboxLeases(sandbox.E2BLeaseOptions{
-				Store: leases, Owner: ownerID,
-			}))
+		sharedLeases := sandboxLeaseOpts(leases, ownerID)
+		if sharedLeases != nil {
+			opts = append(opts, sandbox.WithSandboxLeases(*sharedLeases))
 		}
 		inner = sandbox.NewE2BExecutorPool(apiKey, template, home, 30*time.Minute, opts...)
 		slog.Info("system sandbox executor pool created",
-			"backend", "e2b", "template", template, "sharedLeases", leases != nil && ownerID != "")
+			"backend", "e2b", "template", template, "sharedLeases", sharedLeases != nil)
 	case "boxlite":
 		secret := cfg.BoxliteKey
 		if secret == "" {

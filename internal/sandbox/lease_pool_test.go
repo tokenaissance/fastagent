@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -46,9 +47,13 @@ type fakeLeaseStore struct {
 	acquired   bool
 	acquireErr error
 
-	renewCalls int
-	renewEpoch int64
-	releaseOK  bool
+	renewCalls   int
+	renewEpoch   int64
+	renewErr     error
+	renewMiss    bool
+	releaseOK    bool
+	releaseErr   error
+	releaseCalls int
 }
 
 func (f *fakeLeaseStore) GetSandboxLease(_ context.Context, _ string) (*SandboxLeaseRecord, error) {
@@ -64,7 +69,10 @@ func (f *fakeLeaseStore) AcquireSandboxLease(
 ) (*SandboxLeaseRecord, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.acquireRec, f.acquired, f.acquireErr
+	if f.acquireErr != nil {
+		return nil, false, f.acquireErr
+	}
+	return f.acquireRec, f.acquired, nil
 }
 
 func (f *fakeLeaseStore) RenewSandboxLease(
@@ -75,6 +83,12 @@ func (f *fakeLeaseStore) RenewSandboxLease(
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.renewCalls++
+	if f.renewErr != nil {
+		return 0, f.renewErr
+	}
+	if f.renewMiss {
+		return 0, nil
+	}
 	if f.renewEpoch == 0 {
 		f.renewEpoch = 2
 	}
@@ -82,13 +96,22 @@ func (f *fakeLeaseStore) RenewSandboxLease(
 }
 
 func (f *fakeLeaseStore) ReleaseSandboxLease(_ context.Context, _, _ string, _ int64) (bool, error) {
-	return f.releaseOK, nil
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.releaseCalls++
+	return f.releaseOK, f.releaseErr
 }
 
 func (f *fakeLeaseStore) renewCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.renewCalls
+}
+
+func (f *fakeLeaseStore) releaseCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.releaseCalls
 }
 
 func newLeasePool(t *testing.T, store SandboxLeaseStore, owner string) *E2BExecutorPool {
@@ -263,4 +286,240 @@ func TestE2BPoolCreateLostRaceAdoptsWinner(t *testing.T) {
 	if epoch := pool.leaseEpochs["agt_1:s:chat_1"]; epoch != store.renewEpoch {
 		t.Fatalf("cached epoch = %d, want %d", epoch, store.renewEpoch)
 	}
+}
+
+// Fail-open contract (design doc: "Registry errors fail open: the sandbox is
+// left alive"): a lease-lookup error on a fresh scope must still create and
+// register a local sandbox, and an acquire error must keep it usable but
+// unregistered so a later release can never destroy it.
+func TestE2BPoolFreshGetLeaseErrorsFailOpen(t *testing.T) {
+	t.Run("lookup error falls back to local create and registers", func(t *testing.T) {
+		ctx := context.Background()
+		store := &fakeLeaseStore{
+			getErr:     errors.New("lease db down"),
+			acquireRec: &SandboxLeaseRecord{SandboxID: "sb-1", EnvdToken: "tok-1", Template: "tpl", Epoch: 1},
+			acquired:   true,
+		}
+		pool := newLeasePool(t, store, "pod-a")
+		rec := &leaseCloseRecorder{}
+		pool.newSandboxExecutor = func(_ context.Context, _, _ string, _ time.Duration) (*E2BExecutor, error) {
+			return testExecutor(rec, "sb-1", "tok-1"), nil
+		}
+		pool.hydrateSandbox = func(context.Context, *E2BExecutor) error { return nil }
+		pool.verifySandbox = func(context.Context, *E2BExecutor) error { return nil }
+		pool.warmupSandbox = func(context.Context, *E2BExecutor) {}
+
+		ex, err := pool.Get(ctx, "agt_1", "", "chat_1")
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		if got, ok := ex.(*E2BExecutor); !ok || got.sandboxID != "sb-1" {
+			t.Fatalf("executor = %v, want local sb-1", ex)
+		}
+		if epoch, ok := pool.leaseEpochs["agt_1:s:chat_1"]; !ok || epoch != 1 {
+			t.Fatalf("cached epoch = %d ok=%v, want 1", epoch, ok)
+		}
+		if len(rec.ids()) != 0 {
+			t.Fatalf("local sandbox closed unexpectedly: %v", rec.ids())
+		}
+	})
+
+	t.Run("acquire error keeps local sandbox unregistered", func(t *testing.T) {
+		ctx := context.Background()
+		store := &fakeLeaseStore{acquireErr: errors.New("lease write failed")}
+		pool := newLeasePool(t, store, "pod-a")
+		rec := &leaseCloseRecorder{}
+		pool.newSandboxExecutor = func(_ context.Context, _, _ string, _ time.Duration) (*E2BExecutor, error) {
+			return testExecutor(rec, "sb-1", "tok-1"), nil
+		}
+		pool.hydrateSandbox = func(context.Context, *E2BExecutor) error { return nil }
+		pool.verifySandbox = func(context.Context, *E2BExecutor) error { return nil }
+		pool.warmupSandbox = func(context.Context, *E2BExecutor) {}
+
+		ex, err := pool.Get(ctx, "agt_1", "", "chat_1")
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		if got, ok := ex.(*E2BExecutor); !ok || got.sandboxID != "sb-1" {
+			t.Fatalf("executor = %v, want local sb-1", ex)
+		}
+		if _, ok := pool.leaseEpochs["agt_1:s:chat_1"]; ok {
+			t.Fatal("unregistered sandbox must not carry a lease epoch")
+		}
+		// Release with no epoch must not destroy the sandbox (fail open).
+		if err := pool.Release("agt_1", "", "chat_1"); err != nil {
+			t.Fatalf("Release: %v", err)
+		}
+		if len(rec.ids()) != 0 {
+			t.Fatalf("unregistered sandbox was destroyed: %v", rec.ids())
+		}
+	})
+}
+
+// Adopt renew error must still hand back the adopted executor, but with no
+// recorded epoch, so a later release cannot destroy a sandbox the pod never
+// owned in the registry.
+func TestE2BPoolAdoptRenewErrorKeepsExecutorWithoutEpoch(t *testing.T) {
+	ctx := context.Background()
+	store := &fakeLeaseStore{
+		getRec:   &SandboxLeaseRecord{SandboxID: "sb-2", EnvdToken: "tok-2", Template: "tpl", Epoch: 7},
+		renewErr: errors.New("renew failed"),
+	}
+	pool := newLeasePool(t, store, "pod-a")
+	rec := &leaseCloseRecorder{}
+
+	ex, err := pool.Get(ctx, "agt_1", "", "chat_1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	gotEx, ok := ex.(*E2BExecutor)
+	if !ok || gotEx.sandboxID != "sb-2" {
+		t.Fatalf("executor = %v, want adopted sb-2", ex)
+	}
+	if _, ok := pool.leaseEpochs["agt_1:s:chat_1"]; ok {
+		t.Fatal("adopt with renew error must not record an epoch")
+	}
+	if store.renewCount() != 1 {
+		t.Fatalf("renew calls = %d, want 1", store.renewCount())
+	}
+	if len(rec.ids()) != 0 {
+		t.Fatalf("nothing was closed: %v", rec.ids())
+	}
+}
+
+// Reconcile failure modes on a cached executor all keep the local sandbox
+// alive (never close it, never adopt blindly).
+func TestE2BPoolReconcileRegistryErrorsKeepLocal(t *testing.T) {
+	t.Run("lookup error", func(t *testing.T) {
+		ctx := context.Background()
+		store := &fakeLeaseStore{getErr: errors.New("lease db down")}
+		pool := newLeasePool(t, store, "pod-a")
+		rec := &leaseCloseRecorder{}
+		ex := testExecutor(rec, "sb-1", "tok-1")
+		pool.executors["agt_1:s:chat_1"] = ex
+
+		got, err := pool.Get(ctx, "agt_1", "", "chat_1")
+		if err != nil || got != ex {
+			t.Fatalf("Get = %v err=%v, want cached executor", got, err)
+		}
+		if store.renewCount() != 0 || len(rec.ids()) != 0 {
+			t.Fatalf("lookup error must not renew/close: renews=%d closed=%v", store.renewCount(), rec.ids())
+		}
+	})
+
+	t.Run("reclaim acquire error", func(t *testing.T) {
+		ctx := context.Background()
+		store := &fakeLeaseStore{acquireErr: errors.New("lease write failed")}
+		pool := newLeasePool(t, store, "pod-a")
+		rec := &leaseCloseRecorder{}
+		ex := testExecutor(rec, "sb-1", "tok-1")
+		pool.executors["agt_1:s:chat_1"] = ex
+
+		got, err := pool.Get(ctx, "agt_1", "", "chat_1")
+		if err != nil || got != ex {
+			t.Fatalf("Get = %v err=%v, want cached executor", got, err)
+		}
+		if _, ok := pool.leaseEpochs["agt_1:s:chat_1"]; ok {
+			t.Fatal("failed reclaim must not record an epoch")
+		}
+		if len(rec.ids()) != 0 {
+			t.Fatalf("reclaim error must not close local: %v", rec.ids())
+		}
+	})
+}
+
+// Double race (design doc "Known tradeoffs"): creator loses Acquire and the
+// follow-up CAS adoption also misses — the pool keeps its own sandbox until
+// the next reconcile, unregistered, and must not destroy anything.
+func TestE2BPoolCreateLostRaceAdoptMissKeepsLocalUnregistered(t *testing.T) {
+	ctx := context.Background()
+	store := &fakeLeaseStore{
+		getRec:     nil,
+		acquireRec: &SandboxLeaseRecord{SandboxID: "sb-2", EnvdToken: "tok-2", Template: "tpl", Epoch: 4},
+		acquired:   false,
+		renewMiss:  true,
+	}
+	pool := newLeasePool(t, store, "pod-a")
+	rec := &leaseCloseRecorder{}
+	pool.newSandboxExecutor = func(_ context.Context, _, _ string, _ time.Duration) (*E2BExecutor, error) {
+		return testExecutor(rec, "sb-1", "tok-1"), nil
+	}
+	pool.hydrateSandbox = func(context.Context, *E2BExecutor) error { return nil }
+	pool.verifySandbox = func(context.Context, *E2BExecutor) error { return nil }
+	pool.warmupSandbox = func(context.Context, *E2BExecutor) {}
+
+	ex, err := pool.Get(ctx, "agt_1", "", "chat_1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	gotEx := ex.(*E2BExecutor)
+	if gotEx.sandboxID != "sb-1" {
+		t.Fatalf("expected to keep local sb-1 after double race, got %s", gotEx.sandboxID)
+	}
+	if _, ok := pool.leaseEpochs["agt_1:s:chat_1"]; ok {
+		t.Fatal("double-race local sandbox must not carry an epoch")
+	}
+	if len(rec.ids()) != 0 {
+		t.Fatalf("local sandbox closed after double race: %v", rec.ids())
+	}
+}
+
+// Release/CloseAll registry failures must leave the sandbox alive (fail
+// open), even though the pool drops its local reference.
+func TestE2BPoolReleaseRegistryErrorLeavesSandboxAlive(t *testing.T) {
+	const key = "agt_1:s:chat_1"
+	store := &fakeLeaseStore{releaseErr: errors.New("lease db down")}
+	pool := newLeasePool(t, store, "pod-a")
+	rec := &leaseCloseRecorder{}
+	pool.executors[key] = testExecutor(rec, "sb-1", "tok-1")
+	pool.leaseEpochs[key] = 5
+
+	if err := pool.Release("agt_1", "", "chat_1"); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+	if len(rec.ids()) != 0 {
+		t.Fatalf("registry error must not destroy sandbox, closed=%v", rec.ids())
+	}
+	if store.releaseCount() != 1 {
+		t.Fatalf("release calls = %d, want 1", store.releaseCount())
+	}
+}
+
+func TestE2BPoolCloseAllHonorsLeaseStore(t *testing.T) {
+	const key1 = "agt_1:s:chat_1"
+	const key2 = "agt_2:s:chat_2"
+
+	t.Run("no lease store closes all", func(t *testing.T) {
+		pool := NewE2BExecutorPool("api-key", "tpl", "", 5*time.Minute)
+		rec := &leaseCloseRecorder{}
+		pool.executors[key1] = testExecutor(rec, "sb-1", "tok-1")
+		pool.executors[key2] = testExecutor(rec, "sb-2", "tok-2")
+		pool.CloseAll()
+		if ids := rec.ids(); len(ids) != 2 {
+			t.Fatalf("CloseAll closed %v, want both sandboxes", ids)
+		}
+		if len(pool.executors) != 0 || len(pool.leaseEpochs) != 0 {
+			t.Fatal("CloseAll left stale maps")
+		}
+	})
+
+	t.Run("registry declines deletion, sandboxes survive", func(t *testing.T) {
+		store := &fakeLeaseStore{releaseOK: false}
+		pool := newLeasePool(t, store, "pod-a")
+		rec := &leaseCloseRecorder{}
+		pool.executors[key1] = testExecutor(rec, "sb-1", "tok-1")
+		pool.leaseEpochs[key1] = 3
+		pool.executors[key2] = testExecutor(rec, "sb-2", "tok-2")
+		pool.leaseEpochs[key2] = 4
+		pool.CloseAll()
+		if len(rec.ids()) != 0 {
+			t.Fatalf("CloseAll destroyed shared sandboxes: %v", rec.ids())
+		}
+		if store.releaseCount() != 2 {
+			t.Fatalf("release calls = %d, want 2", store.releaseCount())
+		}
+		if len(pool.executors) != 0 || len(pool.leaseEpochs) != 0 {
+			t.Fatal("CloseAll left stale maps")
+		}
+	})
 }
