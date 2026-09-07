@@ -19,7 +19,13 @@ func TestE2BPoolCrossPodAdoption(t *testing.T) {
 	apiKey := os.Getenv("E2B_API_KEY")
 	template := os.Getenv("E2B_TEMPLATE")
 	if apiKey == "" || template == "" {
-		t.Skip("set E2B_API_KEY and E2B_TEMPLATE env vars")
+		// In CI this test must never pass silently: a green run without
+		// credentials would be read as "cross-pod adoption verified".
+		// Locally it stays skippable for contributor ergonomics.
+		if os.Getenv("CI") != "" {
+			t.Fatal("TestE2BPoolCrossPodAdoption requires E2B_API_KEY and E2B_TEMPLATE in CI")
+		}
+		t.Skip("set E2B_API_KEY and E2B_TEMPLATE env vars to run the live cross-pod adoption test")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
@@ -80,5 +86,22 @@ func TestE2BPoolCrossPodAdoption(t *testing.T) {
 	}
 	if _, err := exB.Exec(ctx, "echo replica-b-ok", 30*time.Second); err != nil {
 		t.Fatalf("pool B exec on adopted sandbox: %v", err)
+	}
+
+	// Eviction fencing across pods: pool A still holds its original epoch,
+	// which B's renew bumped. A's Release must therefore NOT delete the
+	// lease or destroy the sandbox B is actively using.
+	if err := poolA.Release("agt-e2e", "", "sess-e2e"); err != nil {
+		t.Fatalf("pool A release: %v", err)
+	}
+	rec3, err := db.GetSandboxLease(ctx, "agt-e2e:s:sess-e2e")
+	if err != nil || rec3 == nil {
+		t.Fatalf("lease missing after stale pod-A release: rec=%+v err=%v", rec3, err)
+	}
+	if rec3.SandboxID != rec1.SandboxID {
+		t.Fatalf("lease sandbox changed after stale release: %s -> %s", rec1.SandboxID, rec3.SandboxID)
+	}
+	if _, err := exB.Exec(ctx, "echo replica-b-still-ok", 30*time.Second); err != nil {
+		t.Fatalf("pool B exec after pod-A stale release: %v", err)
 	}
 }
