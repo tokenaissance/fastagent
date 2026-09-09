@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"time"
@@ -138,4 +139,93 @@ func (d *DBStore) ReleaseSandboxLease(ctx context.Context, scopeKey, owner strin
 	}
 	n, err := res.RowsAffected()
 	return n > 0, err
+}
+
+// TokenCipher is the minimal credential-encryption surface used by
+// EncryptedSandboxLeaseStore. adapter.AESGCMCryptor (keyed by
+// FASTAGENT_OAUTH_SECRET) satisfies it structurally; keeping the interface
+// here avoids a store→oauth dependency.
+type TokenCipher interface {
+	Encrypt(ctx context.Context, plaintext []byte) ([]byte, error)
+	Decrypt(ctx context.Context, ciphertext []byte) ([]byte, error)
+}
+
+// EncryptedSandboxLeaseStore wraps a lease store so envd_token is encrypted
+// before it crosses to the database and decrypted on read. Renew and Release
+// pass through untouched (they never touch the token). It is assembled at
+// the gateway composition root, never inside DBStore, so the SQL adapter
+// stays key-agnostic and unit tests can exercise plaintext behavior.
+type EncryptedSandboxLeaseStore struct {
+	Inner sandbox.SandboxLeaseStore
+	Crypt TokenCipher
+}
+
+func (e *EncryptedSandboxLeaseStore) GetSandboxLease(ctx context.Context, scopeKey string) (*sandbox.SandboxLeaseRecord, error) {
+	rec, err := e.Inner.GetSandboxLease(ctx, scopeKey)
+	if err != nil || rec == nil {
+		return rec, err
+	}
+	plain, err := e.decryptToken(ctx, rec.EnvdToken)
+	if err != nil {
+		return nil, fmt.Errorf("store: decrypt sandbox lease token: %w", err)
+	}
+	rec.EnvdToken = plain
+	return rec, nil
+}
+
+func (e *EncryptedSandboxLeaseStore) AcquireSandboxLease(
+	ctx context.Context,
+	scopeKey, owner, sandboxID, envdToken, template string,
+	ttl time.Duration,
+) (*sandbox.SandboxLeaseRecord, bool, error) {
+	enc, err := e.encryptToken(ctx, envdToken)
+	if err != nil {
+		return nil, false, fmt.Errorf("store: encrypt sandbox lease token: %w", err)
+	}
+	rec, acquired, err := e.Inner.AcquireSandboxLease(
+		ctx, scopeKey, owner, sandboxID, enc, template, ttl)
+	if err != nil || rec == nil {
+		return rec, acquired, err
+	}
+	plain, derr := e.decryptToken(ctx, rec.EnvdToken)
+	if derr != nil {
+		return nil, acquired, fmt.Errorf("store: decrypt sandbox lease token after acquire: %w", derr)
+	}
+	rec.EnvdToken = plain
+	return rec, acquired, nil
+}
+
+func (e *EncryptedSandboxLeaseStore) RenewSandboxLease(
+	ctx context.Context,
+	scopeKey, owner, sandboxID string,
+	ttl time.Duration,
+) (int64, error) {
+	return e.Inner.RenewSandboxLease(ctx, scopeKey, owner, sandboxID, ttl)
+}
+
+func (e *EncryptedSandboxLeaseStore) ReleaseSandboxLease(ctx context.Context, scopeKey, owner string, epoch int64) (bool, error) {
+	return e.Inner.ReleaseSandboxLease(ctx, scopeKey, owner, epoch)
+}
+
+// encryptToken returns the AES-GCM ciphertext as base64 so the stored value
+// stays a plain TEXT column that is identical on every dialect (sqlite and
+// Postgres). No BLOB/BYTEA, no dialect branching.
+func (e *EncryptedSandboxLeaseStore) encryptToken(ctx context.Context, plain string) (string, error) {
+	enc, err := e.Crypt.Encrypt(ctx, []byte(plain))
+	if err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(enc), nil
+}
+
+func (e *EncryptedSandboxLeaseStore) decryptToken(ctx context.Context, stored string) (string, error) {
+	enc, err := base64.StdEncoding.DecodeString(stored)
+	if err != nil {
+		return "", err
+	}
+	plain, err := e.Crypt.Decrypt(ctx, enc)
+	if err != nil {
+		return "", err
+	}
+	return string(plain), nil
 }

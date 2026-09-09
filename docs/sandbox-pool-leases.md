@@ -1,7 +1,16 @@
 # Cross-pod E2B sandbox lease registry
 
-Status: implemented (v1 base + cache-reconcile fix + CAS/epoch) · Storage:
-Postgres (`sandbox_leases`), sqlite in tests
+> **Status**: implemented, **unreleased** (feature branch
+> `feat/e2b-sandbox-leases`)
+> **Storage**: Postgres (`sandbox_leases`) in production; sqlite in tests
+> **Last updated**: 2026-09-09
+> **Decision owner**: TBD — platform team
+> **Reviewed by**: TBD
+> **Commits**: stage 1 `e359bf0` · cache-reconcile `091c579` · CAS/epoch
+> `86fcac1` · strict tests `d8f984b` · e2e hardening `cef7d9a` · test-topology
+> docs `446c281` · token at-rest encryption · this revision
+> **Open follow-ups**: secret-rotation runbook for `FASTAGENT_OAUTH_SECRET`
+> (existing lease rows become unreadable until expiry — see Security note).
 
 ## Problem
 
@@ -25,6 +34,22 @@ epoch          monotonic fencing version; bumped on every renew/adopt
 updated_at     unix seconds
 ```
 
+## Alternatives considered
+
+- **No sharing (status quo)** — each pod creates its own E2B instance per
+  scope. Rejected: this is the problem (N pods → N instances, observed with
+  10 replicas), and retries/crash recovery only make it worse.
+- **Sticky/affinity routing** — pin a session to one pod so only that pod
+  creates its sandbox. Rejected: load imbalance, pod loss still strands or
+  duplicates instances, and it requires router changes that do not fix the
+  underlying correctness question (who may destroy an instance).
+- **Redis lease/lock** — rejected: Postgres is already the shared source of
+  truth in this deployment; adding a second coordination system buys nothing
+  here, and the sandbox row must live next to other per-agent state.
+- **Reuse the workspace blob store** — rejected: it is an artifact store
+  without transactional compare-and-set; lease ownership needs CAS semantics,
+  which the relational table provides.
+
 ## Semantics (v1, deliberately small)
 
 - A pod handling a scope first looks up a valid lease → **adopts** the
@@ -32,8 +57,9 @@ updated_at     unix seconds
 - No valid lease → create + hydrate locally, then `AcquireSandboxLease`.
   A lost race (another replica just won) closes the local copy and adopts the
   winner's sandbox.
-- Every tool use on a locally cached executor renews the lease (owner = this
-  pod, TTL default 15 min).
+- Before every use of a cached executor the pool reconciles against the
+  shared lease and renews under this pod's ownership (TTL default 15 min)
+  when the sandbox is unchanged.
 - Release/eviction deletes the lease only when `owner = this pod` **and** the
   `epoch` this pod last received still matches (fenced delete). If another
   pod adopted in between, the evicting pod drops its local reference
@@ -41,6 +67,20 @@ updated_at     unix seconds
   sandbox is left alive.
 - Adoption does not replay hydration (creator hydrated the same scope);
   skill/workspace changes apply on next recreate, same as single-pod behavior.
+
+### Failure semantics (registry errors fail open)
+
+Fail-open means "the sandbox is left alive", but each operation degrades
+differently. This table is the contract; each row maps to its test.
+
+| Registry condition | Pool behavior | Test |
+|---|---|---|
+| Lookup error before local create | Still creates + registers locally; an acquire error keeps it unregistered | `TestE2BPoolFreshGetLeaseErrorsFailOpen` |
+| Adopt renew error | Uses the adopted executor but records **no epoch**, so release can never destroy it | `TestE2BPoolAdoptRenewErrorKeepsExecutorWithoutEpoch` |
+| Reconcile lookup error (cached) | Keeps the cached executor; no renew, no close | `TestE2BPoolReconcileRegistryErrorsKeepLocal` |
+| Reconcile reclaim acquire error | Keeps the cached executor, unregistered | `TestE2BPoolReconcileRegistryErrorsKeepLocal` |
+| Double race (Acquire lost + adoption CAS miss) | Keeps the local sandbox unregistered until the next reconcile | `TestE2BPoolCreateLostRaceAdoptMissKeepsLocalUnregistered` |
+| Release / CloseAll registry error or declined delete | Drops the local reference; the sandbox stays alive | `TestE2BPoolReleaseRegistryErrorLeavesSandboxAlive`, `TestE2BPoolCloseAllHonorsLeaseStore` |
 
 ## Hardening: CAS + epoch (stage 2)
 
@@ -89,13 +129,29 @@ The version column makes any stale destroy request fail closed.
   `system sandbox executor pool created backend=e2b ... sharedLeases=true`;
   one session should produce one `e2b sandbox created` even when requests hit
   several pods (later hits log `e2b sandbox adopted from shared lease`).
+- CI coverage: `.github/workflows/go-test.yml` runs the sandbox/store/gateway
+  suites against a Postgres service on every push/PR; the live E2B job runs
+  only when `E2B_API_KEY`/`E2B_TEMPLATE` secrets exist.
 
 ## Security note (v1)
 
-`envd_token` is stored in plaintext in `sandbox_leases`. It is short-lived
-(bounded by the e2b sandbox lifetime) and rows expire/are deleted on release.
-Encrypting the token at rest is a possible follow-up if this table is deemed
-sensitive.
+`envd_token` is encrypted at rest with AES-256-GCM, using the same master
+secret as MCP OAuth tokens (`FASTAGENT_OAUTH_SECRET`, derived to a 32-byte
+key via SHA-256; see `internal/mcp/oauth/adapter/cryptor.go`). The ciphertext
+is **base64-encoded into a universal `TEXT` column** — no `BLOB`/`BYTEA`, no
+dialect branching, identical schema on sqlite and Postgres (the same
+dialect-neutral approach used elsewhere in this repository). Encryption is
+applied by `store.EncryptedSandboxLeaseStore`, assembled at the gateway
+composition root; `DBStore` itself stays key-agnostic.
+
+- Shared leases require `FASTAGENT_OAUTH_SECRET` to be set. Without it the
+  gateway logs a warning and keeps per-pod sandboxes — plaintext `envd_token`
+  rows are never written.
+- Rotating the secret makes existing rows undecryptable. Reads fail closed at
+  the wrapper, the pool treats it as a registry lookup error and falls back
+  to a local create (fail-open), and the stale row is reclaimed on expiry or
+  takeover. Rotation is therefore safe but leaves orphaned sandboxes until
+  their E2B timeout — see the open follow-up in the header.
 
 ## Known tradeoffs (accepted)
 
@@ -115,6 +171,11 @@ sensitive.
 Test layers mirror the production dependency direction (policy → port →
 adapter → composition root), so each seam is exercised without pulling
 outer layers inward:
+
+Why this shape: policy tests must never need a database or network, adapter
+tests must exercise real SQL (not mocks), composition-root tests only assert
+wiring decisions, and the live e2e is the single place that pays for real
+external dependencies.
 
 - **Policy (sandbox package)** — `lease_pool_test.go` drives the pool with a
   `fakeLeaseStore` that implements `SandboxLeaseStore` and can inject errors
@@ -147,3 +208,18 @@ outer layers inward:
 - **CI** — `.github/workflows/go-test.yml` runs the sandbox/store/gateway
   suites against a Postgres service; a second job runs the live E2B e2e only
   when `E2B_API_KEY`/`E2B_TEMPLATE` secrets exist.
+
+### How to run
+
+```bash
+# Unit + adapter + gateway (no external deps)
+go test ./internal/sandbox/ ./internal/store/ ./internal/gateway/ -count=1
+
+# Postgres semantics (start any local PG first)
+FASTAGENT_TEST_PG_DSN='postgres://postgres@localhost:5432/postgres?sslmode=disable' \
+  go test ./internal/store/ -run Postgres -count=1 -v
+
+# Live E2B cross-pod adoption (requires credentials)
+E2B_API_KEY='...' E2B_TEMPLATE='...' \
+  go test ./internal/sandbox/ -run '^TestE2BPoolCrossPodAdoption$' -count=1 -v
+```
