@@ -14,6 +14,7 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/agent"
 	"github.com/fastclaw-ai/fastclaw/internal/bus"
 	"github.com/fastclaw-ai/fastclaw/internal/config"
+	"github.com/fastclaw-ai/fastclaw/internal/mcp/oauth/adapter"
 	"github.com/fastclaw-ai/fastclaw/internal/plugin"
 	"github.com/fastclaw-ai/fastclaw/internal/provider"
 	coderuntime "github.com/fastclaw-ai/fastclaw/internal/runtime"
@@ -101,10 +102,25 @@ func sandboxLeaseStoreFrom(st store.Store) sandbox.SandboxLeaseStore {
 	if st == nil {
 		return nil
 	}
-	if l, ok := st.(sandbox.SandboxLeaseStore); ok {
-		return l
+	inner, ok := st.(sandbox.SandboxLeaseStore)
+	if !ok {
+		return nil
 	}
-	return nil
+	// envd_token is encrypted at rest with the same master secret used for
+	// MCP OAuth tokens (FASTAGENT_OAUTH_SECRET). Without the secret we must
+	// not persist plaintext sandbox tokens, so shared leases stay off and
+	// each pod keeps its own sandbox (pre-lease behavior).
+	secret := config.LoadEnv().OAuth.Secret
+	if secret == "" {
+		slog.Warn("shared sandbox leases disabled: FASTAGENT_OAUTH_SECRET is not set (envd_token would be stored in plaintext)")
+		return nil
+	}
+	crypt, err := adapter.NewAESGCMCryptor(secret)
+	if err != nil {
+		slog.Warn("shared sandbox leases disabled: cannot build token cryptor", "error", err)
+		return nil
+	}
+	return &store.EncryptedSandboxLeaseStore{Inner: inner, Crypt: crypt}
 }
 
 // sandboxLeaseOpts returns the shared-lease option for an E2B pool when

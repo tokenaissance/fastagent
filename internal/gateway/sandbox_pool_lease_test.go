@@ -80,8 +80,20 @@ func TestSandboxLeaseStoreFrom(t *testing.T) {
 		t.Fatalf("NewDBStore: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	if got := sandboxLeaseStoreFrom(db); got == nil {
-		t.Fatal("DBStore does not expose SandboxLeaseStore")
+
+	// Without the encryption secret shared leases must stay off: persisting
+	// envd_token in plaintext is not allowed.
+	if got := sandboxLeaseStoreFrom(db); got != nil {
+		t.Fatalf("lease store enabled without FASTAGENT_OAUTH_SECRET: %+v", got)
+	}
+
+	t.Setenv("FASTAGENT_OAUTH_SECRET", "gateway-test-secret")
+	got := sandboxLeaseStoreFrom(db)
+	if got == nil {
+		t.Fatal("DBStore with secret should produce an encrypted lease store")
+	}
+	if _, ok := got.(*store.EncryptedSandboxLeaseStore); !ok {
+		t.Fatalf("expected *store.EncryptedSandboxLeaseStore, got %T", got)
 	}
 }
 
