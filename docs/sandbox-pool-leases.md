@@ -84,6 +84,8 @@ sandbox, even if that means leaking one until TTL/expiry.
 | Registry condition | Pool behavior | Test |
 |---|---|---|
 | No registry failure (baseline) | Acquire/renew/adopt succeed with a fresh epoch; Release with the matching epoch deletes the row and closes the sandbox exactly once | `TestSandboxLeaseAcquireAdoptRenewRelease`, `TestE2BPoolReleaseUsesFencingEpoch` |
+| Token decrypt failure on read (rotated / mismatched key) | Read fails closed → pool treats it as a lookup error and creates locally; an unexpired row blocks registration until TTL | `TestEncryptedSandboxLeaseStoreRotation` |
+| Token encrypt failure before write | Refuses to persist (never writes plaintext); the error propagates to the pool's acquire-error path, which keeps the local sandbox unregistered | pool acquire-error path: `TestE2BPoolFreshGetLeaseErrorsFailOpen` |
 | Lookup error before local create | Still creates + registers locally; an acquire error keeps it unregistered | `TestE2BPoolFreshGetLeaseErrorsFailOpen` |
 | Adopt renew error | Uses the adopted executor but records **no epoch**, so release can never destroy it | `TestE2BPoolAdoptRenewErrorKeepsExecutorWithoutEpoch` |
 | Reconcile lookup error (cached) | Keeps the cached executor; no renew, no close | `TestE2BPoolReconcileRegistryErrorsKeepLocal` |
@@ -134,6 +136,9 @@ The version column makes any stale destroy request fail closed.
 
 ## Rollout
 
+- **Prerequisite**: `FASTAGENT_OAUTH_SECRET` must be configured. Without it
+  the gateway disables shared leases and falls back to per-pod sandboxes —
+  plaintext `envd_token` rows are never written.
 - No manual migration needed: boot `Migrate()` runs
   `CREATE TABLE IF NOT EXISTS sandbox_leases (...)` (including `epoch`) on
   both dialects. The table ships only with this feature branch — nothing has
@@ -236,6 +241,10 @@ go test ./internal/sandbox/ ./internal/store/ ./internal/gateway/ -count=1
 # Postgres semantics (start any local PG first)
 FASTAGENT_TEST_PG_DSN='postgres://postgres@localhost:5432/postgres?sslmode=disable' \
   go test ./internal/store/ -run Postgres -count=1 -v
+
+# Encryption decorator + rotation on Postgres (same env gate)
+FASTAGENT_TEST_PG_DSN='postgres://postgres@localhost:5432/postgres?sslmode=disable' \
+  go test ./internal/store/ -run '^TestEncryptedSandboxLeaseStorePostgres$' -count=1 -v
 
 # Live E2B cross-pod adoption (requires credentials)
 E2B_API_KEY='...' E2B_TEMPLATE='...' \
