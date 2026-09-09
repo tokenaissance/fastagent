@@ -43,9 +43,12 @@ updated_at     unix seconds
   creates its sandbox. Rejected: load imbalance, pod loss still strands or
   duplicates instances, and it requires router changes that do not fix the
   underlying correctness question (who may destroy an instance).
-- **Redis lease/lock** — rejected: Postgres is already the shared source of
-  truth in this deployment; adding a second coordination system buys nothing
-  here, and the sandbox row must live next to other per-agent state.
+- **Redis lease/lock** — rejected: Redis is an optional dependency in this
+  codebase (refresh locks, pub/sub), so making leases require it would break
+  single-node/sqlite deployments; and a Redis lock would still need
+  hand-rolled fencing (a versioned token) to match the CAS guarantees the
+  relational table provides. The lease row also belongs next to the rest of
+  the per-agent state in the same store.
 - **Reuse the workspace blob store** — rejected: it is an artifact store
   without transactional compare-and-set; lease ownership needs CAS semantics,
   which the relational table provides.
