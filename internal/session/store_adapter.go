@@ -260,15 +260,84 @@ func (a *StoreAdapter) ListWebSessions(ctx context.Context, agentID string) ([]W
 	if err != nil {
 		return nil, err
 	}
+	if len(metas) == 0 {
+		return nil, nil
+	}
+
+	// Batch: 1 query per distinct session owner for all first user messages
+	// instead of N per-session queries. Owners come from the rows themselves
+	// because fastagent supports cross-owner listings (parent sees its
+	// child-owned sessions under the same agent). Legacy rows without an
+	// append-only archive fall back to BuildWebSession below, so blob-only
+	// sessions keep resolving previews (fastagent-specific adaptation of the
+	// upstream 2-query optimization).
+	owners := map[string]bool{a.userID: true}
+	for _, m := range metas {
+		if m.UserID != "" {
+			owners[m.UserID] = true
+		}
+	}
+	firstMsgs := map[string]store.SessionMessage{}
+	for owner := range owners {
+		batch, err := a.st.BatchSessionPreviews(ctx, owner, agentID)
+		if err != nil {
+			continue
+		}
+		for k, v := range batch {
+			firstMsgs[k] = v
+		}
+	}
+
 	var sessions []WebSession
 	for _, m := range metas {
 		if m.AgentID == "" {
 			m.AgentID = agentID
 		}
-		ws := a.BuildWebSession(ctx, m)
-		if ws != nil {
-			sessions = append(sessions, *ws)
+		channel := m.Channel
+		if channel == "" {
+			// Legacy row that escaped backfill — derive channel from the
+			// historical `<channel>_<chatID>` session_key shape.
+			if i := strings.Index(m.Key, "_"); i > 0 {
+				channel = m.Key[:i]
+			}
 		}
+
+		// Extract preview from batch-fetched first user message.
+		msg, hasMsg := firstMsgs[m.Key]
+		if !hasMsg {
+			// No append-only archive row for this session (legacy/blob-only
+			// rows) — fall back to the per-session path so previews still
+			// resolve from the stored session blob.
+			if ws := a.BuildWebSession(ctx, m); ws != nil {
+				sessions = append(sessions, *ws)
+			}
+			continue
+		}
+		preview, thumb := ExtractPreview(msg)
+		if preview == "" {
+			continue
+		}
+
+		// Custom title (set via rename) takes precedence over the
+		// auto-derived preview; fall back to preview so every session has
+		// a sensible display label.
+		title := m.Title
+		if title == "" {
+			title = preview
+		}
+		sessions = append(sessions, WebSession{
+			ID:            m.Key,
+			Channel:       channel,
+			AccountID:     m.AccountID,
+			ChatID:        m.ChatID,
+			ProjectID:     m.ProjectID,
+			Title:         title,
+			Preview:       preview,
+			ThumbnailURL:  thumb,
+			CreatedAt:     m.UpdatedAt.UnixMilli(),
+			UpdatedAt:     m.UpdatedAt.UnixMilli(),
+			ChatterUserID: m.ChatterUserID,
+		})
 	}
 	return sessions, nil
 }
