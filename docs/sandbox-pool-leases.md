@@ -9,8 +9,8 @@
 > **Commits**: stage 1 `e359bf0` · cache-reconcile `091c579` · CAS/epoch
 > `86fcac1` · strict tests `d8f984b` · e2e hardening `cef7d9a` · test-topology
 > docs `446c281` · token at-rest encryption · this revision
-> **Open follow-ups**: secret-rotation runbook for `FASTAGENT_OAUTH_SECRET`
-> (existing lease rows become unreadable until expiry — see Security note).
+> **Open follow-ups**: none — rotation runbook:
+> [sandbox-secret-rotation.md](./sandbox-secret-rotation.md).
 
 ## Problem
 
@@ -159,7 +159,8 @@ composition root; `DBStore` itself stays key-agnostic.
   the wrapper, the pool treats it as a registry lookup error and falls back
   to a local create (fail-open), and the stale row is reclaimed on expiry or
   takeover. Rotation is therefore safe but leaves orphaned sandboxes until
-  their E2B timeout — see the open follow-up in the header.
+  their E2B timeout — follow
+  [sandbox-secret-rotation.md](./sandbox-secret-rotation.md).
 
 ## Known tradeoffs (accepted)
 
