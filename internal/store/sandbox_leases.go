@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/fastclaw-ai/fastclaw/internal/cryptoutil"
 	"github.com/fastclaw-ai/fastclaw/internal/sandbox"
 )
 
@@ -141,23 +142,16 @@ func (d *DBStore) ReleaseSandboxLease(ctx context.Context, scopeKey, owner strin
 	return n > 0, err
 }
 
-// TokenCipher is the minimal credential-encryption surface used by
-// EncryptedSandboxLeaseStore. adapter.AESGCMCryptor (keyed by
-// FASTAGENT_OAUTH_SECRET) satisfies it structurally; keeping the interface
-// here avoids a store→oauth dependency.
-type TokenCipher interface {
-	Encrypt(ctx context.Context, plaintext []byte) ([]byte, error)
-	Decrypt(ctx context.Context, ciphertext []byte) ([]byte, error)
-}
-
 // EncryptedSandboxLeaseStore wraps a lease store so envd_token is encrypted
 // before it crosses to the database and decrypted on read. Renew and Release
 // pass through untouched (they never touch the token). It is assembled at
 // the gateway composition root, never inside DBStore, so the SQL adapter
-// stays key-agnostic and unit tests can exercise plaintext behavior.
+// stays key-agnostic and unit tests can exercise plaintext behavior. The
+// cipher contract lives in cryptoutil so OAuth and sandbox adapters share
+// one definition.
 type EncryptedSandboxLeaseStore struct {
 	Inner sandbox.SandboxLeaseStore
-	Crypt TokenCipher
+	Crypt cryptoutil.Cipher
 }
 
 func (e *EncryptedSandboxLeaseStore) GetSandboxLease(ctx context.Context, scopeKey string) (*sandbox.SandboxLeaseRecord, error) {

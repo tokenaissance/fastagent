@@ -8,6 +8,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/fastclaw-ai/fastclaw/internal/cryptoutil"
 	"github.com/fastclaw-ai/fastclaw/internal/mcp/oauth/domain"
 )
 
@@ -78,11 +79,10 @@ type CallbackReceiver interface {
 	Listen(ctx context.Context) (<-chan domain.CallbackParams, error)
 }
 
-// Cryptor encrypts/decrypts stored credentials.
-type Cryptor interface {
-	Encrypt(ctx context.Context, plaintext []byte) ([]byte, error)
-	Decrypt(ctx context.Context, ciphertext []byte) ([]byte, error)
-}
+// Cryptor encrypts/decrypts stored credentials. Aliased to the neutral
+// at-rest cipher contract so adapters outside OAuth (e.g. sandbox lease
+// tokens) can share the same implementations without importing this package.
+type Cryptor = cryptoutil.Cipher
 
 // DistributedLocker is an optional cross-instance mutex for refresh
 // rotation. When unavailable (nil / Redis down) the process-level lock
