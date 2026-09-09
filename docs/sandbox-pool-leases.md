@@ -109,3 +109,41 @@ sensitive.
   the next reconcile; because no epoch was recorded, its later release will
   not destroy it and it lives until the e2b timeout. Logged as a warning;
   accepted for v1.
+
+## Test topology (2026-09-09)
+
+Test layers mirror the production dependency direction (policy → port →
+adapter → composition root), so each seam is exercised without pulling
+outer layers inward:
+
+- **Policy (sandbox package)** — `lease_pool_test.go` drives the pool with a
+  `fakeLeaseStore` that implements `SandboxLeaseStore` and can inject errors
+  per operation. Covers every fail-open path: lookup/acquire/adopt-renew/
+  release/CloseAll failures keep sandboxes alive; reconcile registry errors
+  keep the local executor; the double race (Acquire loss + CAS adoption miss)
+  keeps the local sandbox unregistered. No database involved.
+- **Adapter (store package)** — `sandbox_leases_test.go` runs `DBStore`
+  through `sandbox.SandboxLeaseStore` against real sqlite: renew CAS miss,
+  stale/missing release no-ops, monotonic epoch. `sandbox_leases_postgres_test.go`
+  covers the production dialect (concurrent acquire single winner, stale
+  release fencing, idempotent `Migrate`) and is gated by
+  `FASTAGENT_TEST_PG_DSN` — sqlite serializes writes, so cross-connection
+  semantics are only proven on Postgres.
+- **Composition root (gateway package)** — `sandbox_pool_lease_test.go` tests
+  the pure `sandboxLeaseOpts` decision (nil store / missing owner ⇒ no shared
+  lease) and `buildSystemSandboxPool` wiring without network access.
+- **Live e2e (`TestE2BPoolCrossPodAdoption`)** — requires `E2B_API_KEY` and
+  `E2B_TEMPLATE`; in CI a missing credential set fails the test instead of
+  silently skipping. Each "pod" opens its own `DBStore` handle over the same
+  underlying database (Postgres when `FASTAGENT_TEST_PG_DSN` is set,
+  otherwise two sqlite connections to one `?cache=shared` file). Stages:
+  1. Pod A creates a sandbox, registers the lease, and writes a marker into
+     `/workspace`.
+  2. Pod B adopts the same `sandbox_id` (epoch bumped) and must read the
+     marker back — proving it runs on the same E2B instance, not a second
+     sandbox with a copied lease row.
+  3. Pod A releases with its stale epoch: the lease must survive and Pod B
+     must still execute and still read the marker.
+- **CI** — `.github/workflows/go-test.yml` runs the sandbox/store/gateway
+  suites against a Postgres service; a second job runs the live E2B e2e only
+  when `E2B_API_KEY`/`E2B_TEMPLATE` secrets exist.
