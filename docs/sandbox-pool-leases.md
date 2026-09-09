@@ -4,12 +4,10 @@
 > `feat/e2b-sandbox-leases`)
 > **Storage**: Postgres (`sandbox_leases`) in production; sqlite in tests
 > **Last updated**: 2026-09-09
-> **Decision owner**: TBD — platform team
-> **Reviewed by**: TBD
-> **Commits**: stage 1 `e359bf0` · cache-reconcile `091c579` · CAS/epoch
-> `86fcac1` · strict tests `d8f984b` · e2e hardening `cef7d9a` · test-topology
-> docs `446c281` · at-rest encryption `edee727` · doc hardening
-> `ad1c5bd`/`c90f2b0` · shared cipher + rotation `d52c2b4`
+> **Decision owner**: mengmengmengqiang@gmail.com
+> **Reviewed by**: mengmengmengqiang@gmail.com (2026-09-09)
+> **Commits**: see `feat/e2b-sandbox-leases` git log; latest doc revision
+> `85b17fa`
 > **Open follow-ups**: none — rotation runbook:
 > [sandbox-secret-rotation.md](./sandbox-secret-rotation.md).
 
@@ -146,7 +144,9 @@ The version column makes any stale destroy request fail closed.
 - Verify after rollout: gateway log
   `system sandbox executor pool created backend=e2b ... sharedLeases=true`;
   one session should produce one `e2b sandbox created` even when requests hit
-  several pods (later hits log `e2b sandbox adopted from shared lease`).
+  several pods (later hits log `e2b sandbox adopted from shared lease`). If
+  the log shows `sharedLeases=false`, re-check that `FASTAGENT_OAUTH_SECRET`
+  is configured before debugging further.
 - CI coverage: `.github/workflows/go-test.yml` runs the sandbox/store/gateway
   suites against a Postgres service on every push/PR; the live E2B job runs
   only when `E2B_API_KEY`/`E2B_TEMPLATE` secrets exist.
@@ -185,7 +185,9 @@ composition root; `DBStore` itself stays key-agnostic.
   not destroy it and it lives until the e2b timeout. Logged as a warning;
   accepted for v1.
 
-## Test topology (2026-09-09)
+## Test topology
+
+**Last reviewed**: 2026-09-09
 
 Test layers mirror the production dependency direction (policy → port →
 adapter → composition root), so each seam is exercised without pulling
