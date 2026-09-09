@@ -116,6 +116,11 @@ type Store interface {
 	// map key is "userID\x00agentID\x00sessionKey". Used by the admin
 	// Chats page to extract previews in 1 query instead of per-session.
 	BatchFirstUserMessages(ctx context.Context) (map[string]SessionMessage, error)
+	// BatchSessionPreviews returns the first role='user' message for each
+	// session belonging to (userID, agentID). Map key is session_key.
+	// Scoped version of BatchFirstUserMessages for the per-user
+	// ListWebSessions path.
+	BatchSessionPreviews(ctx context.Context, userID, agentID string) (map[string]SessionMessage, error)
 	// ListSessionOwnerPairsByAgents is like ListSessionOwnerPairs but
 	// restricted to the given agent IDs. Used by the scoped /api/chats
 	// endpoint so user/agent API keys see only their authorized agents.
@@ -644,9 +649,9 @@ const (
 //   - kind says which family this row belongs to
 //   - (user_id, agent_id) says who owns it; the empty-string defaults
 //     give us four natural ownership levels:
-//     ('', '')   = system / global
-//     (X, '')    = user X's private config
-//     ('', Y)    = agent Y's "official" config (anyone using Y inherits)
+//     (”, ”)   = system / global
+//     (X, ”)    = user X's private config
+//     (”, Y)    = agent Y's "official" config (anyone using Y inherits)
 //     (X, Y)     = user X's per-agent override on agent Y (multi-tenant)
 //   - name is the lookup handle inside that family (provider key,
 //     channel type, or setting namespace)

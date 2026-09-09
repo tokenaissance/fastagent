@@ -175,3 +175,83 @@ func TestBatchFirstUserMessages_OnlyAssistantMessages(t *testing.T) {
 		t.Error("should not have entry for session with no user messages")
 	}
 }
+
+func TestBatchSessionPreviews(t *testing.T) {
+	db := setupBatchTestStore(t)
+	ctx := context.Background()
+
+	// Create sessions for user u1, agent a1
+	for _, key := range []string{"s1", "s2", "s3"} {
+		if err := db.SaveSession(ctx, "u1", "a1", key, &SessionRecord{
+			Channel: "web", Messages: []SessionMessage{},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Also create a session for a different user (should not appear)
+	if err := db.SaveSession(ctx, "u2", "a1", "s4", &SessionRecord{
+		Channel: "web", Messages: []SessionMessage{},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Append messages
+	msgs := []struct {
+		userID, agentID, key string
+		msg                  SessionMessage
+	}{
+		{"u1", "a1", "s1", SessionMessage{Role: "assistant", Content: "welcome"}},
+		{"u1", "a1", "s1", SessionMessage{Role: "user", Content: "hello from s1"}},
+		{"u1", "a1", "s1", SessionMessage{Role: "user", Content: "follow up"}},
+		{"u1", "a1", "s2", SessionMessage{Role: "user", Content: "hello from s2"}},
+		{"u1", "a1", "s3", SessionMessage{Role: "assistant", Content: "only assistant"}},
+		{"u2", "a1", "s4", SessionMessage{Role: "user", Content: "other user msg"}},
+	}
+	for _, m := range msgs {
+		if err := db.AppendSessionMessage(ctx, m.userID, m.agentID, m.key, m.msg); err != nil {
+			t.Fatalf("AppendSessionMessage: %v", err)
+		}
+	}
+
+	result, err := db.BatchSessionPreviews(ctx, "u1", "a1")
+	if err != nil {
+		t.Fatalf("BatchSessionPreviews: %v", err)
+	}
+
+	// s1: first user message is "hello from s1" (assistant skipped)
+	if msg, ok := result["s1"]; !ok {
+		t.Error("missing s1")
+	} else if msg.Content != "hello from s1" {
+		t.Errorf("s1 content = %q, want %q", msg.Content, "hello from s1")
+	}
+
+	// s2: first user message is "hello from s2"
+	if msg, ok := result["s2"]; !ok {
+		t.Error("missing s2")
+	} else if msg.Content != "hello from s2" {
+		t.Errorf("s2 content = %q, want %q", msg.Content, "hello from s2")
+	}
+
+	// s3: no user messages, should not appear
+	if _, ok := result["s3"]; ok {
+		t.Error("s3 should not appear (no user messages)")
+	}
+
+	// s4: different user, should not appear
+	if _, ok := result["s4"]; ok {
+		t.Error("s4 should not appear (different user)")
+	}
+}
+
+func TestBatchSessionPreviews_Empty(t *testing.T) {
+	db := setupBatchTestStore(t)
+	ctx := context.Background()
+
+	result, err := db.BatchSessionPreviews(ctx, "nonexistent", "a1")
+	if err != nil {
+		t.Fatalf("BatchSessionPreviews: %v", err)
+	}
+	if len(result) != 0 {
+		t.Errorf("got %d results, want 0", len(result))
+	}
+}

@@ -2729,6 +2729,44 @@ func (d *DBStore) BatchFirstUserMessages(ctx context.Context) (map[string]Sessio
 	return out, rows.Err()
 }
 
+// BatchSessionPreviews returns the first role='user' message for each
+// session belonging to (userID, agentID). Map key is session_key. Scoped
+// version of BatchFirstUserMessages for the per-user ListWebSessions path.
+func (d *DBStore) BatchSessionPreviews(ctx context.Context, userID, agentID string) (map[string]SessionMessage, error) {
+	rows, err := d.db.QueryContext(ctx,
+		fmt.Sprintf(`SELECT session_key, content, content_parts, origin
+		FROM (
+			SELECT session_key, content, content_parts, origin,
+				ROW_NUMBER() OVER (PARTITION BY session_key ORDER BY seq ASC) as rn
+			FROM session_messages
+			WHERE user_id = %s AND agent_id = %s AND role = 'user'
+		) sub
+		WHERE rn = 1`, d.ph(1), d.ph(2)),
+		userID, agentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]SessionMessage)
+	for rows.Next() {
+		var sessionKey string
+		var msg SessionMessage
+		var contentParts string
+		if err := rows.Scan(&sessionKey, &msg.Content, &contentParts, &msg.Origin); err != nil {
+			return nil, err
+		}
+		msg.Role = "user"
+		if contentParts != "" && contentParts != "null" {
+			var v interface{}
+			if json.Unmarshal([]byte(contentParts), &v) == nil {
+				msg.ContentParts = v
+			}
+		}
+		out[sessionKey] = msg
+	}
+	return out, rows.Err()
+}
+
 func (d *DBStore) ListSessionsPaginated(ctx context.Context, agentIDs []string, offset, limit int) ([]SessionMeta, int, error) {
 	var where string
 	var args []any
