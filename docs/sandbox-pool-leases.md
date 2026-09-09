@@ -151,6 +151,63 @@ The version column makes any stale destroy request fail closed.
   suites against a Postgres service on every push/PR; the live E2B job runs
   only when `E2B_API_KEY`/`E2B_TEMPLATE` secrets exist.
 
+## Fallback ladder (兜底方案)
+
+Degradation is deliberate and ordered — never a hard failure of the sandbox
+path:
+
+1. **Full shared leases** — lease store + `FASTAGENT_OAUTH_SECRET`
+   configured; one sandbox per scope across replicas.
+2. **Registry degraded (runtime errors)** — every read/write failure fails
+   open to the local path (see the failure-semantics table): the pool keeps
+   or creates its own sandbox, records no epoch when it cannot prove
+   ownership, and never destroys anything it may not own. Duplicates are
+   transient and cleaned by TTL/timeout.
+3. **Encryption key missing** — shared leases are disabled at gateway
+   startup (log warning); behavior is identical to the pre-lease per-pod
+   pool. Plaintext tokens are never written.
+4. **Sandbox feature disabled** (`cfg.Sandbox.Enabled=false`) — no pool;
+   file tools fall back to path-only mode, unchanged behavior.
+
+## Fault tolerance (容错方案)
+
+- **Lease store down** (Postgres unreachable, sqlite error): lookup/renew/
+  release failures follow the failure table — the local sandbox stays
+  usable and nothing shared is destroyed.
+- **Pod crash**: its lease expires within TTL (default 15 min) and another
+  pod reclaims the scope; the orphaned E2B instance lives until the provider
+  timeout and is never destroyed by the registry.
+- **E2B provider failure during create/adopt**: create/hydrate/verify
+  failures tear the new sandbox down so callers retry loudly; adopt-renew
+  errors keep the adopted executor usable but unregistered; warmup errors
+  are best-effort.
+- **Race conditions**: concurrent acquire yields exactly one winner; losers
+  adopt the winner; the double race (Acquire loss + CAS adoption miss) keeps
+  the local unregistered sandbox until the next reconcile.
+- **Registry state corruption** (undecryptable or wrong-key row): reads fail
+  closed → local create; the stale row is reclaimed at expiry and can never
+  cause a destroy.
+
+## Compatibility & upgrade considerations
+
+- **Schema**: new table only (`CREATE TABLE IF NOT EXISTS`), identical on
+  sqlite/Postgres; no existing table changes, so single-node and multi-pod
+  installs share one code path.
+- **Behavior default**: without the secret (or without a lease store) shared
+  leases are off — existing deployments observe no change.
+- **API compatibility**: `SandboxLeaseStore` is additive; the gateway pool
+  wiring gains optional lease/owner inputs and old call sites keep working
+  with the per-pod path.
+- **Rolling upgrade**: replicas without the secret run per-pod while
+  replicas with it share leases; both are safe (no plaintext, no
+  cross-destroy), but the mixed window may briefly create duplicate
+  sandboxes for the same scope. Completing the rollout converges them.
+- **Key rotation**: rows written under the old key become unreadable
+  (fail-open local create) and are reclaimed at TTL; rotation never destroys
+  sandboxes but orphans instances until the provider timeout — see
+  [sandbox-secret-rotation.md](./sandbox-secret-rotation.md).
+- **Logging**: new log fields are additive; tokens are never logged.
+
 ## Security note (v1)
 
 `envd_token` is encrypted at rest with AES-256-GCM, using the same master
@@ -171,6 +228,19 @@ composition root; `DBStore` itself stays key-agnostic.
   takeover. Rotation is therefore safe but leaves orphaned sandboxes until
   their E2B timeout — follow
   [sandbox-secret-rotation.md](./sandbox-secret-rotation.md).
+
+Threat model and controls:
+
+- **DB dump / backup leak** → AES-256-GCM at rest; the key is never in the
+  DB, ConfigMap, or logs.
+- **Cross-pod impersonation** → `sandbox_id` + `envd_token` grant access to
+  one short-lived E2B instance only; the account-level API key never touches
+  the database.
+- **Stale/delayed destroy** → destruction requires `owner + epoch`; any
+  stale release fails closed and leaves the sandbox alive.
+- **Wrong-key reads after rotation** → decryption failure is treated as a
+  registry read error (fail-open local create); ciphertext is never returned
+  as if it were a token.
 
 ## Known tradeoffs (accepted)
 
@@ -233,6 +303,12 @@ external dependencies.
 - **CI** — `.github/workflows/go-test.yml` runs the sandbox/store/gateway
   suites against a Postgres service; a second job runs the live E2B e2e only
   when `E2B_API_KEY`/`E2B_TEMPLATE` secrets exist.
+- **Fallback / compatibility** — `TestSandboxLeaseStoreFrom` asserts shared
+  leases are disabled without `FASTAGENT_OAUTH_SECRET` (never plaintext);
+  `TestBuildSystemSandboxPoolWiring` covers disabled config → nil pool and
+  e2b → pool; `TestE2BPoolCloseAllHonorsLeaseStore` covers nil-store
+  per-pod close-all; `TestSandboxLeaseMigrateIdempotentPostgres` proves
+  double `Migrate()` on Postgres is a no-op.
 
 ### How to run
 
