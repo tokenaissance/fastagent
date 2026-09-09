@@ -76,8 +76,13 @@ updated_at     unix seconds
 Fail-open means "the sandbox is left alive", but each operation degrades
 differently. This table is the contract; each row maps to its test.
 
+Guiding principle: **availability first, destruction right strictly gated**
+— without proof of ownership (a matching epoch) a pod must never close a
+sandbox, even if that means leaking one until TTL/expiry.
+
 | Registry condition | Pool behavior | Test |
 |---|---|---|
+| No registry failure (baseline) | Acquire/renew/adopt succeed with a fresh epoch; Release with the matching epoch deletes the row and closes the sandbox exactly once | `TestSandboxLeaseAcquireAdoptRenewRelease`, `TestE2BPoolReleaseUsesFencingEpoch` |
 | Lookup error before local create | Still creates + registers locally; an acquire error keeps it unregistered | `TestE2BPoolFreshGetLeaseErrorsFailOpen` |
 | Adopt renew error | Uses the adopted executor but records **no epoch**, so release can never destroy it | `TestE2BPoolAdoptRenewErrorKeepsExecutorWithoutEpoch` |
 | Reconcile lookup error (cached) | Keeps the cached executor; no renew, no close | `TestE2BPoolReconcileRegistryErrorsKeepLocal` |
