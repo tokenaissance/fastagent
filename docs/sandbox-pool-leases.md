@@ -8,7 +8,8 @@
 > **Reviewed by**: TBD
 > **Commits**: stage 1 `e359bf0` · cache-reconcile `091c579` · CAS/epoch
 > `86fcac1` · strict tests `d8f984b` · e2e hardening `cef7d9a` · test-topology
-> docs `446c281` · token at-rest encryption · this revision
+> docs `446c281` · at-rest encryption `edee727` · doc hardening
+> `ad1c5bd`/`c90f2b0` · shared cipher + rotation `d52c2b4`
 > **Open follow-ups**: none — rotation runbook:
 > [sandbox-secret-rotation.md](./sandbox-secret-rotation.md).
 
@@ -123,9 +124,13 @@ The version column makes any stale destroy request fail closed.
 ## Files
 
 - `internal/sandbox/lease.go` — port + lease record + default TTL
-- `internal/store/sandbox_leases.go` — Postgres/sqlite adapter (DBStore)
+- `internal/store/sandbox_leases.go` — Postgres/sqlite adapter (DBStore) +
+  `EncryptedSandboxLeaseStore` (at-rest token encryption decorator)
+- `internal/cryptoutil/cipher.go` — neutral at-rest credential cipher
+  contract shared with MCP OAuth (`port.Cryptor` aliases it)
 - `internal/sandbox/e2b_executor.go` — pool adopt/acquire/release integration
 - `internal/gateway/userspace.go` — pool wiring: per-pod owner id + lease store
+- `docs/sandbox-secret-rotation.md` — key rotation runbook
 
 ## Rollout
 
@@ -198,7 +203,11 @@ external dependencies.
   covers the production dialect (concurrent acquire single winner, stale
   release fencing, idempotent `Migrate`) and is gated by
   `FASTAGENT_TEST_PG_DSN` — sqlite serializes writes, so cross-connection
-  semantics are only proven on Postgres.
+  semantics are only proven on Postgres. `sandbox_leases_crypto_test.go`
+  covers the encryption decorator: round-trip with no plaintext in the raw
+  row, wrong-key fail-closed, and rotation (old-key rows unreadable → new
+  key reclaims after TTL) on sqlite, with a Postgres variant gated by
+  `FASTAGENT_TEST_PG_DSN`.
 - **Composition root (gateway package)** — `sandbox_pool_lease_test.go` tests
   the pure `sandboxLeaseOpts` decision (nil store / missing owner ⇒ no shared
   lease) and `buildSystemSandboxPool` wiring without network access.
