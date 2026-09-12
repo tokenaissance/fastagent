@@ -130,13 +130,15 @@ func TestBatchGetConfigsByAgentIDs_DifferentName(t *testing.T) {
 	st := setupBatchTestStore(t)
 	ctx := context.Background()
 
-	// Save a row with name "plugins.enabled", not "agents.defaults"
+	// Save a row with a different dotted name than the one queried below.
+	// (The name is arbitrary — this exercises the (kind, name, agent_id)
+	// filter, not any particular namespace.)
 	cfg := &ConfigRecord{
 		ID:      "cfg_plugins",
 		Kind:    KindSetting,
 		UserID:  "",
 		AgentID: "agt_plug",
-		Name:    "plugins.enabled",
+		Name:    "example.namespace",
 		Enabled: true,
 		Data:    map[string]interface{}{"web_search": true},
 	}
@@ -153,10 +155,10 @@ func TestBatchGetConfigsByAgentIDs_DifferentName(t *testing.T) {
 		t.Errorf("got %d results, want 0 (wrong name should be excluded)", len(results))
 	}
 
-	// Query for "plugins.enabled" should return it
-	results, err = st.BatchGetConfigsByAgentIDs(ctx, KindSetting, "plugins.enabled", []string{"agt_plug"})
+	// Query for "example.namespace" should return it
+	results, err = st.BatchGetConfigsByAgentIDs(ctx, KindSetting, "example.namespace", []string{"agt_plug"})
 	if err != nil {
-		t.Fatalf("BatchGetConfigsByAgentIDs plugins: %v", err)
+		t.Fatalf("BatchGetConfigsByAgentIDs example.namespace: %v", err)
 	}
 	if len(results) != 1 {
 		t.Errorf("got %d results, want 1", len(results))

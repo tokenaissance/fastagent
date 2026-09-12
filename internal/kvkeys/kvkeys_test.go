@@ -26,6 +26,9 @@ func TestIsDataKey(t *testing.T) {
 		{"plugin config container", []string{"plugins", "entries", "my_plugin", "config"}, false},
 		{"provider option container", []string{"tools", "providers", "my_vendor", "options"}, false},
 		{"plugin field", []string{"plugins", "entries", "my_plugin", "enabled"}, false},
+		{"plugin opt-in id", []string{"plugins", "enabled", "browserUse"}, true},
+		{"plugin opt-in id all caps", []string{"plugins", "enabled", "BROWSER_TOOL"}, true},
+		{"plugin opt-in bare key", []string{"plugins", "enabled"}, false},
 		{"team id", []string{"teams", "ops_team"}, true},
 		{"team field", []string{"teams", "ops_team", "default_agent"}, false},
 		{"nested struct field", []string{"memory", "auto_persist"}, false},
@@ -60,6 +63,9 @@ func TestSegmentRoundTrip(t *testing.T) {
 		{"plugins", "entries", "my_plugin", "config", "headers", "X_API_Key"},
 		{"plugins", "entries", "my_plugin", "config", "mcpServers", "my_server", "env", "API_KEY"},
 		{"plugins", "entries", "my-plugin", "config", "retry_count", "nested_key"},
+		{"plugins", "enabled", "browserUse"},
+		{"plugins", "enabled", "BROWSER_TOOL"},
+		{"plugins", "enabled", "mem0"},
 		{"teams", "ops_team", "defaultAgent"},
 		{"memory", "autoPersist", "enabled"},
 		{"privacy", "piiScrubbing", "enabled"},
@@ -102,6 +108,11 @@ func TestStoredSegmentShapes(t *testing.T) {
 		{[]string{"tools", "categories"}, "web_search", "web_search"},
 		{[]string{"tools", "categories"}, "webSearch", "webSearch"},
 		{[]string{"skills", "entries", "web_search_skill", "env"}, "REPLICATE_API_TOKEN", "REPLICATE_API_TOKEN"},
+		{[]string{"plugins", "enabled"}, "browserUse", "browserUse"},
+		{[]string{"plugins", "enabled"}, "BROWSER_TOOL", "BROWSER_TOOL"},
+		// Negative control: the "plugins" settings namespace itself has no
+		// map below "enabled" — that key is PluginsCfg.Enabled, a scalar.
+		{[]string{"plugins"}, "enabled", "enabled"},
 	}
 	for _, c := range cases {
 		if got := StoredSegment(c.prefix, c.key); got != c.want {

@@ -369,37 +369,180 @@ func assembleConfig(ctx context.Context, st store.Store, userID, agentID string)
 	return cfg, nil
 }
 
-// toolConfigForAgent returns the config view registerAgentToolChains should
-// read for one lazily attached agent: the UserSpace's own merged
-// (system + viewer-user) snapshot, with the agent owner's *user-scope*
-// tools.providers / tools.categories rows layered on top when the caller is a
-// foreign viewer and shareModelConfig allows it.
-//
-// Only the owner's user-scope rows are pulled — never the owner's full merged
-// view — so re-applying system rows can't clobber a viewer-scope override
-// (same rule as the UserScopeProviders overlay above).
-//
-// Returns base unchanged when there is nothing to overlay, so the common
-// same-user call allocates nothing.
-func toolConfigForAgent(ctx context.Context, st store.Store, base *config.Config, ownerUserID string, overlayOwner bool) *config.Config {
-	if !overlayOwner || st == nil || base == nil || ownerUserID == "" {
+// toolScopeRows is the tools.* view at exactly ONE (userID, agentID) scope —
+// no layer merge. It is the unit every tool overlay is built from.
+type toolScopeRows struct {
+	categories map[string]config.ToolCategoryCfg
+	providers  map[string]config.ToolProviderCfg
+}
+
+func (r toolScopeRows) empty() bool {
+	return len(r.categories) == 0 && len(r.providers) == 0
+}
+
+// loadToolScopeRows reads tools.categories / tools.providers at exactly one
+// (userID, agentID) scope, blob first with the mirror as fallback (same
+// contract as scope.ExactSetting, which this wraps). Read errors are logged
+// and treated as "no override": a broken tool row must not take down the
+// UserSpace that the agent is being attached to.
+func loadToolScopeRows(ctx context.Context, st store.Store, userID, agentID string) toolScopeRows {
+	var out toolScopeRows
+	if st == nil || (userID == "" && agentID == "") {
+		return out
+	}
+	if err := scope.ExactSetting(ctx, st, NSToolCategories, userID, agentID, &out.categories); err != nil {
+		slog.Warn("tool categories read failed", "user", userID, "agent", agentID, "error", err)
+	}
+	if err := scope.ExactSetting(ctx, st, NSToolProviders, userID, agentID, &out.providers); err != nil {
+		slog.Warn("tool providers read failed", "user", userID, "agent", agentID, "error", err)
+	}
+	return out
+}
+
+// applyToolOverlay layers cats/provs on top of base and returns a copy.
+// Copy-on-write: base is the UserSpace's shared snapshot and must never be
+// mutated in place. Returns base unchanged (same pointer) when there is
+// nothing to layer, so the common no-override case allocates nothing.
+func applyToolOverlay(base *config.Config, overlays ...toolScopeRows) *config.Config {
+	if base == nil {
 		return base
 	}
-	ownerTools := map[string]config.ToolCategoryCfg{}
-	if err := scope.UserScopeSetting(ctx, st, NSToolCategories, ownerUserID, &ownerTools); err != nil {
-		slog.Warn("owner tool categories overlay failed", "owner", ownerUserID, "error", err)
+	cats := map[string]config.ToolCategoryCfg{}
+	provs := map[string]config.ToolProviderCfg{}
+	for _, o := range overlays {
+		for k, v := range o.categories {
+			cats[k] = v
+		}
+		for k, v := range o.providers {
+			provs[k] = v
+		}
 	}
-	ownerProviders := map[string]config.ToolProviderCfg{}
-	if err := scope.UserScopeSetting(ctx, st, NSToolProviders, ownerUserID, &ownerProviders); err != nil {
-		slog.Warn("owner tool providers overlay failed", "owner", ownerUserID, "error", err)
-	}
-	if len(ownerTools) == 0 && len(ownerProviders) == 0 {
+	if len(cats) == 0 && len(provs) == 0 {
 		return base
 	}
 	merged := *base
-	merged.Tools = mergeStringMap(base.Tools, ownerTools)
-	merged.ToolProviders = mergeStringMap(base.ToolProviders, ownerProviders)
+	merged.Tools = mergeStringMap(base.Tools, cats)
+	merged.ToolProviders = mergeStringMap(base.ToolProviders, provs)
 	return &merged
+}
+
+// toolConfigForAgent returns the config view registerAgentToolChains should
+// read for ONE agent: the UserSpace's own merged (system + caller-user)
+// snapshot, plus every inner layer that the runtime would otherwise never
+// read, in the same precedence scope.Setting uses (outer → inner, inner wins):
+//
+//	base                        system + the caller's own user scope
+//	owner user scope            only when overlayOwner (foreign viewer whose
+//	                            owner opted into shareModelConfig)
+//	agent scope   ("", agentID)
+//	caller+agent  (caller, agentID)
+//
+// Only exact-scope rows are pulled — never the owner's full merged view — so
+// re-applying system rows can't clobber a caller-scope override (same rule as
+// the UserScopeProviders overlay above).
+//
+// The agent layer is why this exists twice: `fastagent tools category set
+// --agent X` writes an agent-scope row, and before this the gateway never
+// read it — the row was accepted, stored, and ignored, which is exactly the
+// silent failure mode that made an agent report "no web_search".
+func toolConfigForAgent(ctx context.Context, st store.Store, base *config.Config, callerUserID, agentID, ownerUserID string, overlayOwner bool) *config.Config {
+	if st == nil || base == nil || agentID == "" {
+		return base
+	}
+	overlays := make([]toolScopeRows, 0, 3)
+	if overlayOwner && ownerUserID != "" && ownerUserID != callerUserID {
+		overlays = append(overlays, loadToolScopeRows(ctx, st, ownerUserID, ""))
+	}
+	overlays = append(overlays, loadToolScopeRows(ctx, st, "", agentID))
+	if callerUserID != "" {
+		overlays = append(overlays, loadToolScopeRows(ctx, st, callerUserID, agentID))
+	}
+	return applyToolOverlay(base, overlays...)
+}
+
+// toolOverlaysForAgents loads the agent-scope and per-(caller,agent) tool
+// rows for many agents in two queries (one per namespace) instead of four
+// point lookups per agent — loadUserSpace runs this for every agent of a
+// user, so the batched form matters.
+//
+// Returned rows are filtered to the two layers the caller can see: the
+// agent's own rows (user_id="") and the caller's own per-agent rows
+// (user_id=callerUserID). Rows authored by anyone else are dropped —
+// BatchGetConfigsByAgentIDs deliberately matches every user_id.
+//
+// The layers are applied in an explicit order (agent scope first, caller
+// layer second) rather than in the order the query returned them: the batch
+// query has no ORDER BY, so on Postgres the row order is storage-dependent
+// and an overlapping key would otherwise resolve nondeterministically —
+// disagreeing with toolConfigForAgent, which walks the layers in order.
+func toolOverlaysForAgents(ctx context.Context, st store.Store, callerUserID string, agentIDs []string) map[string]toolScopeRows {
+	out := make(map[string]toolScopeRows, len(agentIDs))
+	if st == nil || len(agentIDs) == 0 {
+		return out
+	}
+	catRows, err := st.BatchGetConfigsByAgentIDs(ctx, store.KindSetting, NSToolCategories, agentIDs)
+	if err != nil {
+		slog.Warn("batch tool categories read failed", "agents", len(agentIDs), "error", err)
+	}
+	provRows, err := st.BatchGetConfigsByAgentIDs(ctx, store.KindSetting, NSToolProviders, agentIDs)
+	if err != nil {
+		slog.Warn("batch tool providers read failed", "agents", len(agentIDs), "error", err)
+	}
+	// Layer order: the agent's own rows first, then the caller's per-agent
+	// rows (inner scope wins), matching scope.Setting. Iterating layer by
+	// layer — instead of trusting the query's row order — is what makes that
+	// precedence deterministic; see the doc comment above.
+	layerUsers := []string{""}
+	if callerUserID != "" {
+		layerUsers = append(layerUsers, callerUserID)
+	}
+	for _, pass := range []struct {
+		rows []store.ConfigRecord
+		cat  bool
+	}{{catRows, true}, {provRows, false}} {
+		for _, layerUser := range layerUsers {
+			for _, r := range pass.rows {
+				if r.UserID != layerUser {
+					continue
+				}
+				layer := out[r.AgentID]
+				if pass.cat {
+					var m map[string]config.ToolCategoryCfg
+					if jsonIntoConfig(r.Data, &m) == nil && len(m) > 0 {
+						if layer.categories == nil {
+							layer.categories = map[string]config.ToolCategoryCfg{}
+						}
+						for k, v := range m {
+							layer.categories[k] = v
+						}
+					}
+				} else {
+					var m map[string]config.ToolProviderCfg
+					if jsonIntoConfig(r.Data, &m) == nil && len(m) > 0 {
+						if layer.providers == nil {
+							layer.providers = map[string]config.ToolProviderCfg{}
+						}
+						for k, v := range m {
+							layer.providers[k] = v
+						}
+					}
+				}
+				out[r.AgentID] = layer
+			}
+		}
+	}
+	return out
+}
+
+// jsonIntoConfig is the marshal/unmarshal hop these loaders share with
+// scope.jsonInto (which is unexported): configs rows store Data as
+// map[string]interface{}, the runtime wants typed structs.
+func jsonIntoConfig(data map[string]interface{}, dst interface{}) error {
+	blob, err := json.Marshal(data)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(blob, dst)
 }
 
 // mergeStringMap returns base ∪ over with `over` winning, as a fresh map so
@@ -724,8 +867,11 @@ func (sp *UserSpace) EnsureAgent(ctx context.Context, st store.Store, mb *bus.Me
 	// the whole time, just never read into a chain. Owner-scope rows
 	// are layered in under the same isForeign gate as the provider
 	// overlay above (tools follow the owner, like the model does).
+	// The agent's own agent-scope rows and the chatter's per-agent rows
+	// come from the same overlay builder loadUserSpace uses, so the two
+	// attach paths can no longer disagree about which layers count.
 	if ag := sp.Agents.AgentByID(rc.ID); ag != nil {
-		toolCfg := toolConfigForAgent(ctx, st, sp.Config, rec.UserID, isForeign && applyOwnerOverlays)
+		toolCfg := toolConfigForAgent(ctx, st, sp.Config, sp.UserID, rc.ID, rec.UserID, isForeign && applyOwnerOverlays)
 		registerAgentToolChains(toolCfg, []*agent.Agent{ag})
 	}
 	// Wire hook plugins onto the freshly-attached agent. Mirrors what
@@ -915,7 +1061,19 @@ func loadUserSpace(ctx context.Context, userID string, mb *bus.MessageBus, st st
 		return nil, fmt.Errorf("create agent manager for user %q: %w", userID, err)
 	}
 
-	registerAgentToolChains(cfg, agentMgr.All())
+	// Tool chains are resolved per agent, not once for the whole space:
+	// agent-scope rows written by `fastagent tools ... --agent X` are part
+	// of the agent's effective config and were previously stored and then
+	// ignored. Two batched queries cover every agent, and agents with no
+	// overlay reuse `cfg` unchanged.
+	agentIDs := make([]string, 0, len(agentMgr.All()))
+	for _, ag := range agentMgr.All() {
+		agentIDs = append(agentIDs, ag.Name())
+	}
+	agentToolOverlays := toolOverlaysForAgents(ctx, st, userID, agentIDs)
+	for _, ag := range agentMgr.All() {
+		registerAgentToolChains(applyToolOverlay(cfg, agentToolOverlays[ag.Name()]), []*agent.Agent{ag})
+	}
 
 	pool := attachSandboxToAgents(systemSandboxPool, userID, resolved, agentMgr)
 
@@ -997,25 +1155,26 @@ func registerHookPluginsForAgent(ctx context.Context, pluginMgr *plugin.Manager,
 }
 
 // readAgentScopePluginsEnabled reads the per-agent plugin enable
-// overlay from the configs table: scope=agent, name=plugins.enabled,
+// overlay: agent scope, row name "plugins.enabled",
 // data = {"<pluginID>": true|false, ...}. Missing row / missing key
 // means "no override; use system default". Returns nil on lookup
 // error (callers treat nil as "no overrides").
+//
+// The row lives under its own kind (store.KindPluginEnabled) rather than
+// kind="setting": as a settings namespace its mirror keys collided with the
+// "plugins" namespace's own "plugins.enabled" scalar. The read itself (blob
+// first, mirror fallback) lives in scope so the HTTP layer and the runtime
+// can't drift apart again.
 func readAgentScopePluginsEnabled(ctx context.Context, st store.Store, agentID string) map[string]bool {
 	if st == nil || agentID == "" {
 		return nil
 	}
-	rec, err := st.GetConfigByName(ctx, store.KindSetting, "", agentID, "plugins.enabled")
-	if err != nil || rec == nil {
+	overrides, err := scope.AgentPluginEnabled(ctx, st, agentID)
+	if err != nil {
+		slog.Warn("agent plugin opt-in read failed", "agent", agentID, "error", err)
 		return nil
 	}
-	out := make(map[string]bool, len(rec.Data))
-	for k, v := range rec.Data {
-		if b, ok := v.(bool); ok {
-			out[k] = b
-		}
-	}
-	return out
+	return overrides
 }
 
 // newProviderFromConfig picks an LLM provider for the resolved default

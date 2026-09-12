@@ -117,21 +117,23 @@ func (s *Server) applyAgentScopeDefaultsPatch(r *http.Request, agentID string, p
 // is dropped — agent falls back to system-wide plugin enable state.
 func (s *Server) applyAgentScopePluginsPatch(r *http.Request, agentID string, patch map[string]bool, reset bool) error {
 	if reset {
-		return scope.SaveSettingByScope(r.Context(), s.dataStore, scope.Agent, agentID, "plugins.enabled", nil)
+		return scope.SaveAgentPluginEnabled(r.Context(), s.dataStore, agentID, nil)
 	}
 	if len(patch) == 0 {
 		return nil
 	}
-	data := map[string]interface{}{}
-	if rec, err := s.dataStore.GetConfigByName(r.Context(), store.KindSetting, "", agentID, "plugins.enabled"); err == nil && rec != nil {
-		for k, v := range rec.Data {
-			data[k] = v
-		}
+	current, err := scope.AgentPluginEnabled(r.Context(), s.dataStore, agentID)
+	if err != nil {
+		return err
+	}
+	data := make(map[string]bool, len(current)+len(patch))
+	for k, v := range current {
+		data[k] = v
 	}
 	for k, v := range patch {
 		data[k] = v
 	}
-	return scope.SaveSettingByScope(r.Context(), s.dataStore, scope.Agent, agentID, "plugins.enabled", data)
+	return scope.SaveAgentPluginEnabled(r.Context(), s.dataStore, agentID, data)
 }
 
 // agentScopeSplitReplies reads the per-agent multi-bubble override.
@@ -165,19 +167,11 @@ func (s *Server) agentScopePromptMode(r *http.Request, agentID string) string {
 
 // agentScopePlugins reads the per-agent plugin enable overlay. Returns
 // nil when no row exists. Keyed pluginID → bool; missing keys fall
-// through to the system-wide plugin entry's enabled state.
+// through to the system-wide plugin entry's enabled state. Reading through
+// scope keeps this in step with the runtime's copy of the same row.
 func (s *Server) agentScopePlugins(r *http.Request, agentID string) map[string]bool {
-	rec, err := s.dataStore.GetConfigByName(r.Context(), store.KindSetting, "", agentID, "plugins.enabled")
-	if err != nil || rec == nil {
-		return nil
-	}
-	out := make(map[string]bool, len(rec.Data))
-	for k, v := range rec.Data {
-		if b, ok := v.(bool); ok {
-			out[k] = b
-		}
-	}
-	if len(out) == 0 {
+	out, err := scope.AgentPluginEnabled(r.Context(), s.dataStore, agentID)
+	if err != nil {
 		return nil
 	}
 	return out

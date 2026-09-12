@@ -137,7 +137,8 @@ env 变量名），而改写后的 key 静默失配运行时查询 ——
 - 数据 key 段按 `dataPaths` 白名单**两个方向都原样保留**（`*` 匹配一段）：
   `tools.categories.*`、`tools.providers.*`、`tools.providers.*.options.*`、
   `skills.entries.*`、`skills.entries.*.env.*`、`plugins.entries.*`、
-  `plugins.entries.*.config.*`、`teams.*`。
+  `plugins.entries.*.config.*`、`plugins.enabled.*`（每 agent 的插件开关行）、
+  `teams.*`。
 
 白名单需与带 map 字段的 config 结构体同步（`config.Config` /
 `ToolProviderCfg.Options` / `SkillEntryCfg.Env` / `PluginsCfg.Entries` /
@@ -229,6 +230,93 @@ KV 没覆盖到的那些 key。`web_search` 事件正是这条链路的产物。
 改用前缀规则，任意深度都算数据 key；provider 投影不再吞掉
 `json.Unmarshal` 错误，且标量一律按存储字符串还原（`kvFieldMap`）。
 
+## review 第二轮修复：agent 层可写但没人读 / plugins.enabled 形状（本次变更）
+
+上一节把读源翻成 blob 权威之后，又顺着「配置在 DB 里，运行时却说没有」这条线
+做了一轮同类排查，修掉三处同因问题（P1/P2/P3）。
+
+### P1a：`tools.providers` / `tools.categories` 的 agent 层从来没人读
+
+CLI 明确支持 `fastagent tools category set --primary … --agent X`
+（`cmd/fastclaw/cmd_tools.go`），写出的行也是标准的
+`kind=setting, user_id="", agent_id=X, name=tools.categories`。但网关联配配置
+时**从不传 agentID**：`assembleConfig` 只有两处调用（`userspace.go`
+`loadUserSpace` / `EnsureAgent` 里的 owner 回退），都是 `("", "")`；
+`EnsureAgent` 的 overlay 只取 owner 的 **user** scope。于是这行被存下、
+被 CLI 报「Set」、被 `notifyGatewayReload` 触发重载，运行时却全程不看它——
+症状与 `web_search` 事件完全一致（无 chain、无日志）。
+
+现在两条 attach 路径共用同一个 overlay 构造器
+（`gateway.toolConfigForAgent` / `applyToolOverlay`），层序与
+`scope.Setting` 一致（外→内，内层胜）：
+
+```
+base（system + 调用者自己的 user 层） < owner user 层（外部访客 + shareModelConfig）
+  < agent 层（user_id="", agent_id=X） < (调用者, agent) 层
+```
+
+`loadUserSpace` 用 `toolOverlaysForAgents` 批量取（2 条查询覆盖该用户所有
+agent，而不是每 agent 4 次点查），并且只接受 `user_id=""`（agent 层）与
+`user_id=调用者`（自己的 per-agent 层）两种行——`BatchGetConfigsByAgentIDs`
+本身不按 user_id 过滤，别人的 per-agent 行必须显式丢掉。
+
+批量路径**不按查询返回顺序合并**：`BatchGetConfigsByAgentIDs` 没有 `ORDER BY`，
+Postgres 下行的顺序取决于存储，若按返回顺序逐条覆盖，两层都命中同一个
+category key 时谁胜出将不确定，还会与逐层点查的 `toolConfigForAgent`
+（agent 层 → 调用者层）不一致。现在按「先 agent 层、后调用者层」显式分层遍历
+（`layerUsers`），`TestToolOverlaysForAgentsLayerOrderIsDeterministic`
+用一个把 `BatchGetConfigsByAgentIDs` 行序反转的包装 store 钉住这一点。
+
+### P1b：agent 层的 `sandbox` 改为写侧拒绝
+
+`sandbox` 走的是另一条路：executor pool 由 **system 层**的 sandbox 行一次性
+构建（`gateway.buildSystemSandboxPool`）后发给所有 agent，
+`ResolvedAgent.Sandbox` 只会被 system/user 层填充，且 `AgentFileConfig` 里
+没有 Sandbox 字段——agent 层 sandbox 在运行时**结构性不可达**。写进去只会得到
+「agent 认为需要 sandbox、但没有 executor」的 `sandbox required but no
+executor available`。
+
+因此 `scope.SaveSetting` 对 `agentID != "" && namespace == "sandbox"`
+**直接返回错误**（消息里说明 sandbox 是 system/user 层设置），
+`SaveSettingByScope` 走同一个守卫；`agentcli` 里那句「enabled 就顺手补
+backend=docker」的死代码一并删除——它只是让一行没人读的数据看起来更合理。
+
+### P2：`kvkeys.dataPaths` 补 `plugins.enabled.*`
+
+每 agent 的插件开关行 `plugins.enabled` 的 data 是 `{pluginID: bool}`，
+即它的下一段是**数据 key**。旧白名单漏了这一条，于是
+`browserUse` 会按结构体字段被折成 `browser_use`（`BROWSER_TOOL` →
+`browser_tool`）——与 `web_search` 同一个根因、隔壁一个 namespace。
+现已在 `dataPaths` 补 `{"plugins","enabled","*"}`，并在
+`kvkeys_test.go` 加了正/负例（含 `plugins.enabled` 本身仍是标量字段）。
+
+### P3：`plugins.enabled` 独立成 kind
+
+该行原先与 `plugins` setting namespace 共用 `kind=setting`。它的镜像行名是
+`plugins.enabled.<pluginID>`，而 system 的 `plugins` 行镜像里有一个**标量**
+`plugins.enabled`（`PluginsCfg.Enabled`）——同一
+`(kind, scope, scope_id)` 分区内的前缀重叠，fallback 读 `plugins` 时
+`out["enabled"]` 可能是 bool 也可能是 map，**取决于 map 迭代顺序**。
+
+现在该行归 `store.KindPluginEnabled`（`kind="plugin_enabled"`），
+读写都收口到 `scope.SaveAgentPluginEnabled` / `scope.AgentPluginEnabled`
+（blob 优先、镜像兜底，镜像写在自己的 kind 分区），dashboard 与运行时读同一
+份实现。`store.migratePluginEnabledKind` 把存量行（blob 行 + 镜像行）迁到新
+kind，并且刻意不碰 `plugins.enabled` 标量镜像行；语句用
+`NOT EXISTS` 保护 `(kind,user_id,agent_id,name)` 唯一键，SQLite / Postgres
+都可重复执行。
+
+回归测试：
+`gateway` → `TestToolConfigForAgentLayerPrecedence`（层序 + 别人的
+per-agent 行不可见 + base 不被改写）、`TestEnsureAgentHonorsAgentScopeTools`
+（只有 agent 层有 chain 时 lazy-attach 仍能注册 `web_search`）、
+`TestToolOverlaysForAgentsBatch`（批量读与单 agent 读一致）；
+`TestToolOverlaysForAgentsLayerOrderIsDeterministic`（反转行序后调用者层仍胜出）；
+`scope` → `TestSaveSettingRejectsAgentScopeSandbox`、
+`TestAgentToolScopeStillWritable`、`TestAgentPluginEnabledRoundTrip`、
+`TestPluginsNamespaceIgnoresAgentOptIns`（含 KV fallback 路径）；
+`store` → `TestMigratePluginEnabledKind`；`kvkeys` → `plugins.enabled.*` 正负例。
+
 ## 残留风险
 
 1. **`parseKVValue` 仍是启发式的**：`"123"` / `"true"` 这类字符串在 KV 里无法
@@ -241,6 +329,12 @@ KV 没覆盖到的那些 key。`web_search` 事件正是这条链路的产物。
    没有这个 key（读 blob 时正确返回空对象）。
 4. **LIKE 转义只覆盖已发现的位置**：`configs_kv` 的 name/scope_id 前缀匹配都已
    转义；新增按前缀匹配的 SQL 时要记得走 `likePrefixPattern` / `escapeLike`。
+5. **agent 层「写了没人读」只堵住了已知的 sandbox**：`scope.SaveSetting` 是通用
+   入口，理论上仍可写入 agent 层的 `memory` / `privacy` / `hooks` /
+   `objectstore` / `taskqueue` / `heartbeat` / `teams` / `skills.install` /
+   `plugins` 等「仅系统层可读」的 namespace（当前 CLI/HTTP 都不产生这种行）。
+   约定：新增一个 agent 层可写的 namespace 时，必须同时让 runtime 读它，或者
+   像 sandbox 一样在写侧拒绝——两者都没有就是这次的 bug 类。
 
 ## 对上游的 PR 提案
 

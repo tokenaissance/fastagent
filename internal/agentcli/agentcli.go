@@ -418,13 +418,11 @@ func SetConfig(ctx context.Context, st store.Store, agentID, key, rawValue strin
 		return err
 	}
 	setNested(data, path, parseValue(rawValue))
-	if namespace == "sandbox" && len(path) > 0 && path[0] == "enabled" {
-		if enabled, _ := data["enabled"].(bool); enabled {
-			if _, ok := data["backend"].(string); !ok {
-				data["backend"] = "docker"
-			}
-		}
-	}
+	// No sandbox post-processing here: `sandbox` maps to agent scope, and
+	// scope.SaveSetting rejects agent-scope sandbox writes with an explicit
+	// error (the executor pool is built once from the system row, so the row
+	// would never be read). The "enabled implies backend=docker" default used
+	// to live here and only made a row nobody read look plausible.
 	return scope.SaveSetting(ctx, st, uid, aid, namespace, data)
 }
 
@@ -686,7 +684,11 @@ var agentScopeKeys = map[string]string{
 	// Feishu). System-level fallback is gone — false is the default
 	// when the key is absent.
 	"splitReplies": "agents.defaults",
-	"sandbox":      "sandbox",
+	// sandbox is kept mapped to the agent scope so `get` reflects where the
+	// row WOULD live, but agent-scope sandbox writes are refused by
+	// scope.SaveSetting: the executor pool is built once from the system
+	// row, so nothing reads a per-agent sandbox row. Reads return nil.
+	"sandbox": "sandbox",
 }
 
 var systemSettingNamespaces = []string{
@@ -709,7 +711,7 @@ var systemSettingNamespaces = []string{
 // Agent-scope keys cover model/temperature/sandbox; everything else is
 // a system-wide namespace. The bool return is "isAgentScope" — true
 // means the row's agent_id should be set to the active agentID; false
-// means a system row (user_id='', agent_id='').
+// means a system row (user_id=”, agent_id=”).
 func settingKey(key string) (string, []string, bool, error) {
 	if ns, ok := agentScopeKeys[key]; ok {
 		path := []string{key}

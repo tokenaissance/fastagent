@@ -170,7 +170,49 @@ func (d *DBStore) Migrate(ctx context.Context) error {
 	if err := d.migrateConfigsToKV(ctx); err != nil {
 		return fmt.Errorf("migrate configs to kv: %w", err)
 	}
+	if err := d.migratePluginEnabledKind(ctx); err != nil {
+		return fmt.Errorf("migrate plugins.enabled kind: %w", err)
+	}
 	return nil
+}
+
+// migratePluginEnabledKind moves the per-agent plugin opt-in row out of
+// kind="setting" into its own kind (see KindPluginEnabled).
+//
+// Why: the row's mirror rows are named "plugins.enabled.<pluginID>", and
+// kind="setting" also holds the "plugins" settings namespace, whose own
+// configs_kv row is the scalar "plugins.enabled" (PluginsCfg.Enabled). Both
+// lived in the same (kind, scope, scope_id) partition, so a kv-fallback read
+// of namespace "plugins" could merge an agent's plugin ids into that scalar
+// key — and the merge order of a map is nondeterministic. A distinct kind
+// makes the partitions disjoint.
+//
+// Idempotent: rows already under the new kind are left alone (and a legacy
+// row is skipped when a new-kind row with the same natural key already
+// exists, so the UNIQUE (kind, user_id, agent_id, name) constraint can't be
+// violated).
+func (d *DBStore) migratePluginEnabledKind(ctx context.Context) error {
+	if _, err := d.db.ExecContext(ctx,
+		`UPDATE configs SET kind = 'plugin_enabled'
+		  WHERE kind = 'setting' AND name = 'plugins.enabled'
+		    AND NOT EXISTS (
+		      SELECT 1 FROM configs existing
+		       WHERE existing.kind = 'plugin_enabled'
+		         AND existing.name = 'plugins.enabled'
+		         AND existing.user_id = configs.user_id
+		         AND existing.agent_id = configs.agent_id
+		    )`); err != nil {
+		return err
+	}
+	// Mirror rows carrying a plugin id. The pattern is deliberately
+	// "plugins.enabled." + '%' (escaped) rather than "plugins." + '%':
+	// the latter would also capture the system "plugins" namespace's own
+	// scalar "plugins.enabled" row and the rest of its keys.
+	_, err := d.db.ExecContext(ctx,
+		fmt.Sprintf(`UPDATE configs_kv SET kind = 'plugin_enabled'
+		              WHERE kind = 'setting' AND name LIKE %s ESCAPE '\'`,
+			d.ph(1)), escapeLike("plugins.enabled.")+"%")
+	return err
 }
 
 // migrateSessionsAddChatterUserID retrofits a chatter_user_id column
