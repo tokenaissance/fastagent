@@ -109,24 +109,39 @@ func settingAtRaw(ctx context.Context, st store.ConfigReadStore, namespace, user
 // means the mirror is the answer, including the case where it answers "nothing"
 // because the row is switched off.
 func settingFromCertifiedMirror(ctx context.Context, st store.ConfigReadStore, namespace, userID, agentID string) (map[string]interface{}, bool, error) {
+	data, enabled, ok := certifiedSettingLayer(ctx, st, namespace, userID, agentID)
+	if !ok {
+		return nil, false, nil
+	}
+	if !enabled {
+		// The row's veto: nothing here, and the blob must not resurrect it.
+		return nil, true, nil
+	}
+	return data, true, nil
+}
+
+// certifiedSettingLayer is the layer-level form of settingFromCertifiedMirror:
+// it returns one layer's payload and enabled decision from the mirror iff the
+// row's marker certifies the leaves that were read. ok=false is "this layer's
+// mirror does not certify the row", which the merged resolvers read as "fall
+// back to the blob row for this layer". The payload of a disabled row is still
+// returned (the veto is in the bool), so a merged walk can tell "off" from
+// "absent".
+func certifiedSettingLayer(ctx context.Context, st store.ConfigReadStore, namespace, userID, agentID string) (map[string]interface{}, bool, bool) {
 	sc, sid := kvScopeFromOwnership(userID, agentID)
 	m, ok, err := st.GetConfigMirror(ctx, store.KindSetting, sc, sid, namespace)
 	if err != nil || !ok {
-		return nil, false, nil
+		return nil, false, false
 	}
 	kvPrefix := kvPrefixForNamespace(namespace)
 	leaves, err := st.ListConfigValues(ctx, store.KindSetting, sc, sid, kvPrefix)
 	if err != nil {
-		return nil, false, nil
+		return nil, false, false
 	}
 	if !store.MirrorSelfConsistent(m, leaves) {
-		return nil, false, nil
+		return nil, false, false
 	}
-	if m.Enabled != nil && !*m.Enabled {
-		// The row's veto: nothing here, and the blob must not resurrect it.
-		return nil, true, nil
-	}
-	return kvToSettingMap(kvPrefix, leaves), true, nil
+	return kvToSettingMap(kvPrefix, leaves), m.Enabled != nil && *m.Enabled, true
 }
 
 // settingFromBlob is the migration-period order: the legacy blob is
@@ -154,6 +169,33 @@ func settingFromBlob(ctx context.Context, st store.ConfigReadStore, namespace, u
 		return kvToSettingMap(kvPrefix, kvVals), nil
 	}
 	return nil, nil
+}
+
+// settingLayerAt resolves one setting namespace as it is owned by exactly one
+// layer — the per-layer step the merged resolvers (Setting / BatchSettings)
+// walk four times. It honors configsReadAuthority: under mirrorFirst a
+// marker-certified projection answers the layer and the blob row is not
+// consulted, otherwise the blob row does (and, when there is none, the layer
+// owns nothing here — the merged walk's last-resort fallback is where a
+// blob-less, marker-less row is served). present=false is "this layer owns
+// nothing", which is distinct from a present row that is switched off.
+func settingLayerAt(ctx context.Context, st store.ConfigReadStore, namespace, userID, agentID string) (data map[string]interface{}, enabled, present bool, err error) {
+	if configsReadAuthority == mirrorFirst {
+		if d, e, ok := certifiedSettingLayer(ctx, st, namespace, userID, agentID); ok {
+			return d, e, true, nil
+		}
+	}
+	rec, err := st.GetConfigByName(ctx, store.KindSetting, userID, agentID, namespace)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, false, false, nil
+		}
+		return nil, false, false, err
+	}
+	if rec == nil {
+		return nil, false, false, nil
+	}
+	return rec.Data, rec.Enabled, true, nil
 }
 
 // SettingAt returns the effective data for one setting namespace at exactly one

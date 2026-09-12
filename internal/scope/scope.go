@@ -103,67 +103,122 @@ func ScopeFromOwnership(userID, agentID string) (scope, scopeID string) {
 // Providers returns the merged map of LLM provider configs for a given
 // (user, agent). Pass agentID="" to get only the user-level view. Pass
 // both empty to get system-only.
-func Providers(ctx context.Context, st store.ConfigReader, userID, agentID string) (map[string]config.ProviderConfig, error) {
+func Providers(ctx context.Context, st store.ConfigReadStore, userID, agentID string) (map[string]config.ProviderConfig, error) {
 	if st == nil {
 		return nil, errors.New("scope.Providers: store is required")
 	}
 	// The legacy blob is authoritative — it keeps exact JSON types and the
 	// complete key set, while configs_kv is a derived projection that can be
-	// partial or lossy (see Setting). KV is the fallback, per provider name:
-	// a name that any blob row covers (including a disabled one, which is a
-	// decision to drop it) is decided by the blob. Deciding per name instead
-	// of per chain is what keeps a provider that exists only in the mirror
-	// visible next to blob-backed siblings.
+	// partial or lossy (see Setting). Which table each layer is read from is
+	// configsReadAuthority's decision, made per layer by providersLayerAt: under
+	// mirrorFirst a name whose marker certifies its projection is decided by the
+	// mirror, everything else by the blob. Deciding per name instead of per
+	// chain is what keeps a provider that exists only in the mirror visible next
+	// to blob-backed siblings.
 	out := map[string]config.ProviderConfig{}
-	inBlob := map[string]bool{}
-	apply := func(rows []store.ConfigRecord) {
-		for _, r := range rows {
-			inBlob[r.Name] = true
-			if !r.Enabled {
-				delete(out, r.Name)
-				continue
-			}
-			out[r.Name] = providerToConfig(r)
+	decided := map[string]bool{}
+	applyLayer := func(uid, aid string) error {
+		lay, err := providersLayerAt(ctx, st, uid, aid)
+		if err != nil {
+			return err
 		}
+		for name := range lay.vetoed {
+			decided[name] = true
+			delete(out, name)
+		}
+		for name, pc := range lay.set {
+			decided[name] = true
+			out[name] = pc
+		}
+		return nil
 	}
 	// system layer
-	if rows, err := st.ListConfigs(ctx, store.KindProvider, "", ""); err != nil {
+	if err := applyLayer("", ""); err != nil {
 		return nil, err
-	} else {
-		apply(rows)
 	}
 	// user layer
 	if userID != "" {
-		if rows, err := st.ListConfigs(ctx, store.KindProvider, userID, ""); err != nil {
+		if err := applyLayer(userID, ""); err != nil {
 			return nil, err
-		} else {
-			apply(rows)
 		}
 	}
 	// agent layer
 	if agentID != "" {
-		if rows, err := st.ListConfigs(ctx, store.KindProvider, "", agentID); err != nil {
+		if err := applyLayer("", agentID); err != nil {
 			return nil, err
-		} else {
-			apply(rows)
 		}
 	}
 	// per-(user, agent) layer
 	if userID != "" && agentID != "" {
-		if rows, err := st.ListConfigs(ctx, store.KindProvider, userID, agentID); err != nil {
+		if err := applyLayer(userID, agentID); err != nil {
 			return nil, err
-		} else {
-			apply(rows)
 		}
 	}
 	if kvProvs, err := providersFromKV(ctx, st, userID, agentID); err == nil {
 		for name, pc := range kvProvs {
-			if !inBlob[name] {
+			if !decided[name] {
 				out[name] = pc
 			}
 		}
 	}
 	return out, nil
+}
+
+// providerLayer is one ownership layer's provider decisions: the names it
+// offers (set) and the names it switches off (vetoed, which erase the outer
+// entry). A name in either map is one the layer decided, so the merged walk
+// leaves it out of the last-resort fallback.
+type providerLayer struct {
+	set    map[string]config.ProviderConfig
+	vetoed map[string]bool
+}
+
+// providersLayerAt resolves one ownership layer's providers, honoring
+// configsReadAuthority. The blob rows are always read; under mirrorFirst a name
+// whose marker certifies its mirror leaves overrides the blob's decision for
+// that name (payload and veto), and a name the mirror holds without
+// certification is left undecided — the blob answers if it has the name, and
+// otherwise the merged walk's last-resort fallback does.
+func providersLayerAt(ctx context.Context, st store.ConfigReadStore, userID, agentID string) (providerLayer, error) {
+	lay := providerLayer{set: map[string]config.ProviderConfig{}, vetoed: map[string]bool{}}
+	rows, err := st.ListConfigs(ctx, store.KindProvider, userID, agentID)
+	if err != nil {
+		return lay, err
+	}
+	for _, r := range rows {
+		if !r.Enabled {
+			lay.vetoed[r.Name] = true
+			delete(lay.set, r.Name)
+			continue
+		}
+		lay.set[r.Name] = providerToConfig(r)
+	}
+	if configsReadAuthority != mirrorFirst {
+		return lay, nil
+	}
+	sc, sid := kvScopeFromOwnership(userID, agentID)
+	kvVals, err := st.ListConfigValues(ctx, store.KindProvider, sc, sid, "")
+	if err != nil || len(kvVals) == 0 {
+		return lay, nil
+	}
+	for name, leaves := range groupProviderLeaves(kvVals) {
+		m, certified := certifiedMirror(ctx, st, store.KindProvider, sc, sid, name, leaves)
+		if !certified {
+			continue
+		}
+		pc, ok := kvValsToProviders(leaves)[name]
+		if !ok {
+			pc = config.ProviderConfig{}
+		}
+		if m.Enabled != nil && !*m.Enabled {
+			lay.vetoed[name] = true
+			delete(lay.set, name)
+			continue
+		}
+		delete(lay.vetoed, name)
+		lay.set[name] = pc
+	}
+	return lay, nil
 }
 
 // providersFromKV reads all provider KV values with scope merge and
@@ -387,38 +442,43 @@ func Channels(ctx context.Context, st store.ConfigReader, userID, agentID string
 // namespaces that silently lost every key the mirror happened not to carry,
 // and (via parseKVValue) string fields holding number-like values. The mirror
 // is consulted only when the blob has no row at all.
-func Setting(ctx context.Context, st store.ConfigReader, namespace, userID, agentID string) (map[string]interface{}, error) {
+//
+// Which table each layer is read from is configsReadAuthority's decision, made
+// per layer by settingLayerAt: under mirrorFirst a layer whose marker certifies
+// its projection answers from the mirror (and only then — an uncertified row
+// falls back to the blob), so the flip is the same one lever the single-scope
+// resolvers pull. The last-resort walk of GetValues still serves rows that have
+// no blob row and no marker at all (rows written straight into configs_kv),
+// unchanged.
+func Setting(ctx context.Context, st store.ConfigReadStore, namespace, userID, agentID string) (map[string]interface{}, error) {
 	if st == nil {
 		return nil, errors.New("scope.Setting: store is required")
 	}
 
 	out := map[string]interface{}{}
-	// sawRow records that some layer owns this namespace. A row that says
-	// "disabled" is still an owner: it vetoes the outer layers and, like any
-	// other blob row, keeps the mirror out of the answer.
+	// sawRow records that some layer owns this namespace, from whichever table
+	// answered for it. A row that says "disabled" is still an owner: it vetoes
+	// the outer layers.
 	sawRow := false
-	apply := func(rec *store.ConfigRecord) {
+	apply := func(data map[string]interface{}, enabled bool) {
 		sawRow = true
-		if !rec.Enabled {
+		if !enabled {
 			// Veto: whatever the outer layers contributed for this namespace
 			// does not survive. An inner layer can still re-enable it.
 			out = map[string]interface{}{}
 			return
 		}
-		for k, v := range rec.Data {
+		for k, v := range data {
 			out[k] = v
 		}
 	}
 	tryGet := func(uid, aid string) error {
-		rec, err := st.GetConfigByName(ctx, store.KindSetting, uid, aid, namespace)
+		data, enabled, present, err := settingLayerAt(ctx, st, namespace, uid, aid)
 		if err != nil {
-			if errors.Is(err, store.ErrNotFound) {
-				return nil
-			}
 			return err
 		}
-		if rec != nil {
-			apply(rec)
+		if present {
+			apply(data, enabled)
 		}
 		return nil
 	}
@@ -443,8 +503,8 @@ func Setting(ctx context.Context, st store.ConfigReader, namespace, userID, agen
 	if sawRow {
 		return out, nil
 	}
-	// No blob row anywhere in the chain: serve the mirror (rows written
-	// straight into configs_kv have no blob counterpart).
+	// No layer owned the namespace in either table: serve the merged raw mirror
+	// (rows written straight into configs_kv have no blob counterpart).
 	kvPrefix := kvPrefixForNamespace(namespace)
 	if kvVals, err := GetValues(ctx, st, store.KindSetting, kvPrefix, userID, agentID); err == nil && len(kvVals) > 0 {
 		return kvToSettingMap(kvPrefix, kvVals), nil
@@ -527,7 +587,7 @@ func snakeToCamel(s string) string { return kvkeys.SnakeToCamel(s) }
 
 // SettingInto resolves Setting and unmarshals the merged JSON into dst.
 // Convenience for callers that want a typed config block.
-func SettingInto(ctx context.Context, st store.ConfigReader, namespace, userID, agentID string, dst interface{}) error {
+func SettingInto(ctx context.Context, st store.ConfigReadStore, namespace, userID, agentID string, dst interface{}) error {
 	merged, err := Setting(ctx, st, namespace, userID, agentID)
 	if err != nil {
 		return err
@@ -579,12 +639,32 @@ func jsonInto(v interface{}, dst interface{}) error {
 // must not be able to disagree. TestBatchSettings_MatchesSetting pins that.
 func BatchSettings(
 	ctx context.Context,
-	st store.ConfigReader,
+	st store.ConfigReadStore,
 	namespaces []string,
 	userID, agentID string,
 ) (map[string]map[string]interface{}, error) {
 	if st == nil {
 		return nil, errors.New("scope.BatchSettings: store is required")
+	}
+
+	// mirrorFirst judges each row by its own marker, which the one-query-per-
+	// layer batch cannot do (markers are per row, not per layer). Rather than
+	// keep a second, blob-first merge that could disagree with Setting, resolve
+	// each namespace through Setting — the definition of the contract. This
+	// trades the batch's query count for correctness; a batched marker read
+	// would restore it.
+	if configsReadAuthority == mirrorFirst {
+		out := make(map[string]map[string]interface{}, len(namespaces))
+		for _, ns := range namespaces {
+			merged, err := Setting(ctx, st, ns, userID, agentID)
+			if err != nil {
+				return nil, fmt.Errorf("scope.BatchSettings: resolve %q: %w", ns, err)
+			}
+			if len(merged) > 0 {
+				out[ns] = merged
+			}
+		}
+		return out, nil
 	}
 
 	nsSet := make(map[string]struct{}, len(namespaces))
