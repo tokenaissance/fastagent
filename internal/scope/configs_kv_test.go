@@ -111,7 +111,7 @@ func TestSettingLargeIntThroughKVOnlyPath(t *testing.T) {
 	}
 }
 
-// TestProvidersMirrorFallbackKeepsLegacyStructure is the other half of the
+// TestProvidersConfigsKVFallbackKeepsLegacyStructure is the other half of the
 // N2 rule. The provider projection must not guess *scalars* from an untagged
 // row (an all-digit api_key would become a number and vanish), but the
 // pre-tag code did decode *structure* — an object/array row came back as a
@@ -122,7 +122,7 @@ func TestSettingLargeIntThroughKVOnlyPath(t *testing.T) {
 // `[{...}]`, which then failed to unmarshal into []config.ModelEntry and took
 // the whole provider down with it (slog.Warn + skip), even though the row was
 // intact in the mirror.
-func TestProvidersMirrorFallbackKeepsLegacyStructure(t *testing.T) {
+func TestProvidersConfigsKVFallbackKeepsLegacyStructure(t *testing.T) {
 	db := openScopeDB(t)
 	defer db.Close()
 	ctx := context.Background()
@@ -179,10 +179,10 @@ func TestValidateProviderName(t *testing.T) {
 	}
 }
 
-// TestBatchSettingsFallsBackToMirror pins the read-path promise for the one
+// TestBatchSettingsFallsBackToConfigsKV pins the read-path promise for the one
 // reader that did not implement it: a namespace with no blob row anywhere is
 // served from configs_kv, exactly as Setting would.
-func TestBatchSettingsFallsBackToMirror(t *testing.T) {
+func TestBatchSettingsFallsBackToConfigsKV(t *testing.T) {
 	// Its own database, not openScopeDB's: that DSN names the *same* in-memory
 	// database for every test in this package, and this test writes a "prefs"
 	// row that the timezone tests read.
@@ -227,14 +227,14 @@ func TestBatchSettingsFallsBackToMirror(t *testing.T) {
 	}
 }
 
-// TestChannelsAreNotMirroredInKV pins the documented exception instead of
+// TestChannelsHaveNoConfigsKVHalf pins the documented exception instead of
 // leaving it as an unstated asymmetry. configs_kv holds provider, setting and
 // plugin_enabled rows; a channel lives in the configs blob plus the channels
 // table, so Channels() has nothing to fall back to — and that is safe only
 // while no code path writes channel rows into the mirror. If someone adds a
 // partial dual-write, this fails and points at the reader that must learn the
 // fallback first.
-func TestChannelsAreNotMirroredInKV(t *testing.T) {
+func TestChannelsHaveNoConfigsKVHalf(t *testing.T) {
 	db := openScopeDB(t)
 	defer db.Close()
 	ctx := context.Background()
@@ -842,22 +842,22 @@ func TestSettingIntoFallsBackToLegacyBlob(t *testing.T) {
 	if err := db.DeleteConfig(ctx, rec.ID); err != nil {
 		t.Fatalf("DeleteConfig: %v", err)
 	}
-	var mirrorOnly config.ObjectStoreCfg
-	if err := SettingInto(ctx, db, "objectstore", "", "", &mirrorOnly); err != nil {
+	var kvOnly config.ObjectStoreCfg
+	if err := SettingInto(ctx, db, "objectstore", "", "", &kvOnly); err != nil {
 		t.Fatalf("SettingInto from a tagged mirror with no blob row: %v", err)
 	}
-	if mirrorOnly.S3.Bucket != "123" {
-		t.Fatalf("mirror-only bucket = %q, want the literal string 123", mirrorOnly.S3.Bucket)
+	if kvOnly.S3.Bucket != "123" {
+		t.Fatalf("mirror-only bucket = %q, want the literal string 123", kvOnly.S3.Bucket)
 	}
 }
 
-// TestSettingPartialMirrorDoesNotShadowBlob is the F3 regression: a mirror
+// TestSettingPartialConfigsKVDoesNotShadowBlob is the F3 regression: a mirror
 // that is missing keys the blob still has (dualWriteSettingKV deletes the
 // prefix and re-inserts row by row, so a crash in between, a legacy row set,
 // or a hand-written row all leave a subset) must not decide what the runtime
 // sees. Reading KV first returned exactly that subset, so the namespace
 // silently lost every category the mirror happened not to carry.
-func TestSettingPartialMirrorDoesNotShadowBlob(t *testing.T) {
+func TestSettingPartialConfigsKVDoesNotShadowBlob(t *testing.T) {
 	db := openScopeDB(t)
 	defer db.Close()
 	ctx := context.Background()
@@ -933,7 +933,7 @@ func TestDashboardAndRuntimeAgreeOnSettings(t *testing.T) {
 	}
 }
 
-// TestProvidersMirrorFallbackKeepsNumericKey is the N2 regression. With no
+// TestProvidersConfigsKVFallbackKeepsNumericKey is the N2 regression. With no
 // blob row to fall back to the mirror is authoritative, and there the old
 // code let the legacy guesser turn an all-digit apiKey into a number, failed
 // to unmarshal it into a string field, and dropped the field silently.
@@ -943,7 +943,7 @@ func TestDashboardAndRuntimeAgreeOnSettings(t *testing.T) {
 // untagged — the pre-tag shape — and must still keep the digits as text,
 // because that was the N2 fix and untagged rows are exactly the ones it
 // protects.
-func TestProvidersMirrorFallbackKeepsNumericKey(t *testing.T) {
+func TestProvidersConfigsKVFallbackKeepsNumericKey(t *testing.T) {
 	db := openScopeDB(t)
 	defer db.Close()
 	ctx := context.Background()
@@ -1053,7 +1053,7 @@ func jsonEqual(a, b interface{}) bool {
 	return string(as) == string(bs)
 }
 
-// typedProbe is the struct for TestMirrorFallbackRestoresValueTypes: mixed
+// typedProbe is the struct for TestConfigsKVFallbackRestoresValueTypes: mixed
 // JSON types in one namespace, including the two pairs the tag exists to keep
 // apart (the string "123" vs the number 123, and a 19-digit int64).
 type typedProbe struct {
@@ -1065,7 +1065,7 @@ type typedProbe struct {
 	Empty   string  `json:"empty"`
 }
 
-// TestMirrorFallbackRestoresValueTypes is the end-to-end regression for the
+// TestConfigsKVFallbackRestoresValueTypes is the end-to-end regression for the
 // value_kind change. The mirror is read only when the blob has no row, and
 // before the tag that path had to guess every type from the text:
 //
@@ -1076,7 +1076,7 @@ type typedProbe struct {
 //   - Big (math.MaxInt64) did not survive the %g round trip at all.
 //
 // With the tag the writer's types come back exactly as written.
-func TestMirrorFallbackRestoresValueTypes(t *testing.T) {
+func TestConfigsKVFallbackRestoresValueTypes(t *testing.T) {
 	db := openScopeDB(t)
 	defer db.Close()
 	ctx := context.Background()

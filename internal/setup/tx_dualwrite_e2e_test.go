@@ -19,24 +19,24 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/store"
 )
 
-var errMirrorDownE2E = errors.New("configs_kv write failed")
+var errConfigsKVDownE2E = errors.New("configs_kv write failed")
 
-// mirrorFailingStore fails every configs_kv write. It re-wraps the
+// configsKVFailingStore fails every configs_kv write. It re-wraps the
 // transaction handle so the injected failure applies inside the handler's
 // transaction.
-type mirrorFailingStore struct{ *store.DBStore }
+type configsKVFailingStore struct{ *store.DBStore }
 
-func (m *mirrorFailingStore) SetConfigValue(ctx context.Context, kind, scope, scopeID, name string, value store.ConfigValue) error {
-	return errMirrorDownE2E
+func (m *configsKVFailingStore) SetConfigValue(ctx context.Context, kind, scope, scopeID, name string, value store.ConfigValue) error {
+	return errConfigsKVDownE2E
 }
 
-func (m *mirrorFailingStore) WithTx(ctx context.Context, fn func(store.Store) error) error {
+func (m *configsKVFailingStore) WithTx(ctx context.Context, fn func(store.Store) error) error {
 	return m.DBStore.WithTx(ctx, func(tx store.Store) error {
 		inner, ok := tx.(*store.DBStore)
 		if !ok {
 			return fn(tx)
 		}
-		return fn(&mirrorFailingStore{DBStore: inner})
+		return fn(&configsKVFailingStore{DBStore: inner})
 	})
 }
 
@@ -53,10 +53,10 @@ func newTxE2EStore(t *testing.T, name string) *store.DBStore {
 	return db
 }
 
-func TestUpdateConfig_RollsBackNamespaceWhenMirrorWriteFails(t *testing.T) {
+func TestUpdateConfig_RollsBackNamespaceWhenConfigsKVWriteFails(t *testing.T) {
 	const uid = "u_tx_e2e"
 	real := newTxE2EStore(t, "setup_tx_fail")
-	s := &Server{dataStore: &mirrorFailingStore{DBStore: real}}
+	s := &Server{dataStore: &configsKVFailingStore{DBStore: real}}
 
 	rec := httptest.NewRecorder()
 	body := `{"objectstore":{"s3":{"bucket":"tx-bucket"}}}`
@@ -110,10 +110,10 @@ func TestUpdateConfig_RollsBackNamespaceWhenMirrorWriteFails(t *testing.T) {
 
 // The provider path goes through the same transaction, and its response must
 // not claim success when the mirror write failed.
-func TestCreateProvider_ReportsMirrorFailure(t *testing.T) {
+func TestCreateProvider_ReportsConfigsKVFailure(t *testing.T) {
 	const uid = "u_tx_e2e_prov"
 	real := newTxE2EStore(t, "setup_tx_fail_provider")
-	s := &Server{dataStore: &mirrorFailingStore{DBStore: real}}
+	s := &Server{dataStore: &configsKVFailingStore{DBStore: real}}
 
 	req := httptest.NewRequest(http.MethodPost, "/api/providers?scope=user&scopeId="+uid,
 		strings.NewReader(`{"name":"openai","apiKey":"sk-x"}`))

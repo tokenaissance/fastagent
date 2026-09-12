@@ -90,7 +90,7 @@ func TestListProvidersReportsEnabled(t *testing.T) {
 	}
 }
 
-func TestListProvidersDoesNotInventMirrorOnlyRows(t *testing.T) {
+func TestListProvidersDoesNotInventConfigsKVOnlyRows(t *testing.T) {
 	s, uid, _ := setupFileUploadTest(t)
 	ctx := context.Background()
 

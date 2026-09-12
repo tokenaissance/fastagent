@@ -8,17 +8,17 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/store"
 )
 
-// mirrorCertified asserts that the row named name has a completeness marker
+// assertCertifiedMarker asserts that the row named name has a completeness marker
 // which verifies against what is actually stored: the leaves under prefix and
 // the enabled decision on the paired configs row. Reading the decision back out
 // of the row (rather than passing it in) is the point — the marker is only
 // worth something if it agrees with the row it claims to describe.
-func mirrorCertified(t *testing.T, db *store.DBStore, kind, sc, sid, name, prefix string) {
+func assertCertifiedMarker(t *testing.T, db *store.DBStore, kind, sc, sid, name, prefix string) {
 	t.Helper()
 	ctx := context.Background()
-	m, ok, err := db.GetConfigMirror(ctx, kind, sc, sid, name)
+	m, ok, err := db.GetProjectionMarker(ctx, kind, sc, sid, name)
 	if err != nil {
-		t.Fatalf("GetConfigMirror(%s/%s/%s/%s): %v", kind, sc, sid, name, err)
+		t.Fatalf("GetProjectionMarker(%s/%s/%s/%s): %v", kind, sc, sid, name, err)
 	}
 	if !ok {
 		t.Fatalf("no mirror marker for %s/%s/%s/%s", kind, sc, sid, name)
@@ -35,7 +35,7 @@ func mirrorCertified(t *testing.T, db *store.DBStore, kind, sc, sid, name, prefi
 	if err != nil || rec == nil {
 		t.Fatalf("GetConfigByName(%s/%s/%s/%s): rec=%+v err=%v", kind, uid, aid, name, rec, err)
 	}
-	if !store.VerifyConfigMirror(m, rec.Enabled, leaves) {
+	if !store.VerifyProjectionMarker(m, rec.Enabled, leaves) {
 		t.Fatalf("marker for %s/%s/%s/%s does not verify its leaves: %+v",
 			kind, sc, sid, name, m)
 	}
@@ -43,7 +43,7 @@ func mirrorCertified(t *testing.T, db *store.DBStore, kind, sc, sid, name, prefi
 
 // Every dual-write entry point leaves a marker that certifies exactly the rows
 // it wrote; rewriting updates it and clearing removes it.
-func TestDualWriteRecordsConfigMirrorMarker(t *testing.T) {
+func TestDualWriteRecordsProjectionMarker(t *testing.T) {
 	db := openScopeDBNamed(t, "mirror_dual")
 	defer db.Close()
 	ctx := context.Background()
@@ -52,18 +52,18 @@ func TestDualWriteRecordsConfigMirrorMarker(t *testing.T) {
 		map[string]interface{}{"timezone": "Asia/Shanghai"}); err != nil {
 		t.Fatalf("SaveSetting: %v", err)
 	}
-	mirrorCertified(t, db, store.KindSetting, User, "u1", "prefs", "prefs.")
+	assertCertifiedMarker(t, db, store.KindSetting, User, "u1", "prefs", "prefs.")
 
 	if err := SaveProvider(ctx, db, "u1", "", "openai",
 		config.ProviderConfig{APIKey: "sk-1"}); err != nil {
 		t.Fatalf("SaveProvider: %v", err)
 	}
-	mirrorCertified(t, db, store.KindProvider, User, "u1", "openai", "openai.")
+	assertCertifiedMarker(t, db, store.KindProvider, User, "u1", "openai", "openai.")
 
 	if err := SaveAgentPluginEnabled(ctx, db, "a1", map[string]bool{"demo": true}); err != nil {
 		t.Fatalf("SaveAgentPluginEnabled: %v", err)
 	}
-	mirrorCertified(t, db, store.KindPluginEnabled, Agent, "a1",
+	assertCertifiedMarker(t, db, store.KindPluginEnabled, Agent, "a1",
 		PluginEnabledNamespace, PluginEnabledNamespace+".")
 
 	// Rewriting a namespace updates the marker rather than leaving a stale one.
@@ -71,26 +71,26 @@ func TestDualWriteRecordsConfigMirrorMarker(t *testing.T) {
 		map[string]interface{}{"timezone": "UTC"}); err != nil {
 		t.Fatalf("SaveSetting rewrite: %v", err)
 	}
-	mirrorCertified(t, db, store.KindSetting, User, "u1", "prefs", "prefs.")
+	assertCertifiedMarker(t, db, store.KindSetting, User, "u1", "prefs", "prefs.")
 
 	// Emptying a namespace clears its mirror and its marker together.
 	if err := SaveSetting(ctx, db, "u1", "", "prefs", nil); err != nil {
 		t.Fatalf("SaveSetting clear: %v", err)
 	}
-	if _, ok, _ := db.GetConfigMirror(ctx, store.KindSetting, User, "u1", "prefs"); ok {
+	if _, ok, _ := db.GetProjectionMarker(ctx, store.KindSetting, User, "u1", "prefs"); ok {
 		t.Fatal("marker survived an emptied namespace")
 	}
 
 	// Deleting a provider clears its marker too.
 	DualDeleteProviderKV(ctx, db, "u1", "", "openai")
-	if _, ok, _ := db.GetConfigMirror(ctx, store.KindProvider, User, "u1", "openai"); ok {
+	if _, ok, _ := db.GetProjectionMarker(ctx, store.KindProvider, User, "u1", "openai"); ok {
 		t.Fatal("marker survived DualDeleteProviderKV")
 	}
 }
 
 // A mirror row written without the dual-write — a historical row, a hand edit —
 // has no marker, so it reads as uncertified rather than silently trusted.
-func TestMirrorRowsWithoutMarkerAreUncertified(t *testing.T) {
+func TestConfigsKVRowsWithoutMarkerAreUncertified(t *testing.T) {
 	db := openScopeDBNamed(t, "mirror_uncertified")
 	defer db.Close()
 	ctx := context.Background()
@@ -99,14 +99,14 @@ func TestMirrorRowsWithoutMarkerAreUncertified(t *testing.T) {
 		"sandbox.timeout", store.StringValue("5")); err != nil {
 		t.Fatalf("SetConfigValue: %v", err)
 	}
-	if _, ok, err := db.GetConfigMirror(ctx, store.KindSetting, User, "u1", "sandbox"); err != nil || ok {
+	if _, ok, err := db.GetProjectionMarker(ctx, store.KindSetting, User, "u1", "sandbox"); err != nil || ok {
 		t.Fatalf("hand-written mirror reported a marker: ok=%v err=%v", ok, err)
 	}
 }
 
 // The marker also catches a projection that changed underneath it — a manual
 // single-leaf delete, say — which is the second thing it is for.
-func TestMarkerDetectsMirrorTampering(t *testing.T) {
+func TestMarkerDetectsConfigsKVTampering(t *testing.T) {
 	db := openScopeDBNamed(t, "mirror_tamper")
 	defer db.Close()
 	ctx := context.Background()
@@ -118,15 +118,15 @@ func TestMarkerDetectsMirrorTampering(t *testing.T) {
 	if err := db.DeleteConfigValue(ctx, store.KindSetting, User, "u1", "prefs.locale"); err != nil {
 		t.Fatalf("DeleteConfigValue: %v", err)
 	}
-	m, ok, err := db.GetConfigMirror(ctx, store.KindSetting, User, "u1", "prefs")
+	m, ok, err := db.GetProjectionMarker(ctx, store.KindSetting, User, "u1", "prefs")
 	if err != nil || !ok {
-		t.Fatalf("GetConfigMirror: ok=%v err=%v", ok, err)
+		t.Fatalf("GetProjectionMarker: ok=%v err=%v", ok, err)
 	}
 	leaves, err := db.ListConfigValues(ctx, store.KindSetting, User, "u1", "prefs.")
 	if err != nil {
 		t.Fatalf("ListConfigValues: %v", err)
 	}
-	if store.VerifyConfigMirror(m, true, leaves) {
+	if store.VerifyProjectionMarker(m, true, leaves) {
 		t.Fatal("marker verified a projection a manual delete had truncated")
 	}
 }
@@ -144,9 +144,9 @@ func TestMarkerRecordsEnabledDecision(t *testing.T) {
 		config.ProviderConfig{APIKey: "sk-1"}, false); err != nil {
 		t.Fatalf("SaveProviderState(disabled): %v", err)
 	}
-	m, ok, err := db.GetConfigMirror(ctx, store.KindProvider, User, "u1", "openai")
+	m, ok, err := db.GetProjectionMarker(ctx, store.KindProvider, User, "u1", "openai")
 	if err != nil || !ok {
-		t.Fatalf("GetConfigMirror: ok=%v err=%v", ok, err)
+		t.Fatalf("GetProjectionMarker: ok=%v err=%v", ok, err)
 	}
 	if m.Enabled == nil || *m.Enabled {
 		t.Fatalf("marker enabled = %v, want a recorded false", m.Enabled)
@@ -157,10 +157,10 @@ func TestMarkerRecordsEnabledDecision(t *testing.T) {
 	if err != nil || len(leaves) == 0 {
 		t.Fatalf("disabled provider lost its leaves: %d err=%v", len(leaves), err)
 	}
-	if !store.VerifyConfigMirror(m, false, leaves) {
+	if !store.VerifyProjectionMarker(m, false, leaves) {
 		t.Fatalf("disabled marker does not verify: %+v", m)
 	}
-	if store.VerifyConfigMirror(m, true, leaves) {
+	if store.VerifyProjectionMarker(m, true, leaves) {
 		t.Fatal("disabled marker verified an enabled row")
 	}
 	// And the reader honours it: a disabled provider is not served.
@@ -191,21 +191,21 @@ func TestReconcileCertifiesEmptyProjections(t *testing.T) {
 		t.Fatalf("SaveSetting: %v", err)
 	}
 
-	rep, err := db.ReconcileConfigMirrors(ctx, false)
+	rep, err := db.ReconcileConfigProjections(ctx, false)
 	if err != nil {
-		t.Fatalf("ReconcileConfigMirrors: %v", err)
+		t.Fatalf("ReconcileConfigProjections: %v", err)
 	}
 	if len(rep.Gaps) != 0 || rep.Certified != rep.Examined || rep.Examined != 2 {
 		t.Fatalf("reconcile = %+v, want 2/2 certified and no gaps", rep)
 	}
-	m, ok, err := db.GetConfigMirror(ctx, store.KindSetting, User, "u1", "quiet")
+	m, ok, err := db.GetProjectionMarker(ctx, store.KindSetting, User, "u1", "quiet")
 	if err != nil || !ok {
 		t.Fatalf("empty projection was not certified: ok=%v err=%v", ok, err)
 	}
 	if m.KeyCount != 0 || m.Enabled == nil || *m.Enabled {
 		t.Fatalf("empty marker = %+v, want 0 keys and a recorded false", m)
 	}
-	if !store.VerifyConfigMirror(m, false, map[string]store.ConfigValue{}) {
+	if !store.VerifyProjectionMarker(m, false, map[string]store.ConfigValue{}) {
 		t.Fatalf("empty marker does not verify: %+v", m)
 	}
 }

@@ -5,72 +5,72 @@ import (
 	"testing"
 )
 
-func TestConfigMirrorRoundTrip(t *testing.T) {
+func TestProjectionMarkerRoundTrip(t *testing.T) {
 	db := openTestDB(t)
 	defer db.Close()
 	ctx := context.Background()
 
 	leaves := map[string]ConfigValue{"openai.api_key": StringValue("sk-1")}
-	if err := db.SaveConfigMirror(ctx, KindProvider, "user", "u1", "openai",
+	if err := db.SaveProjectionMarker(ctx, KindProvider, "user", "u1", "openai",
 		NewConfigProjectionMarker("openai.", true, leaves)); err != nil {
-		t.Fatalf("SaveConfigMirror: %v", err)
+		t.Fatalf("SaveProjectionMarker: %v", err)
 	}
-	got, ok, err := db.GetConfigMirror(ctx, KindProvider, "user", "u1", "openai")
+	got, ok, err := db.GetProjectionMarker(ctx, KindProvider, "user", "u1", "openai")
 	if err != nil || !ok {
-		t.Fatalf("GetConfigMirror = %+v, ok=%v, err=%v", got, ok, err)
+		t.Fatalf("GetProjectionMarker = %+v, ok=%v, err=%v", got, ok, err)
 	}
-	if !VerifyConfigMirror(got, true, leaves) {
+	if !VerifyProjectionMarker(got, true, leaves) {
 		t.Fatalf("round-tripped marker does not verify: %+v", got)
 	}
 
 	// Upsert replaces the fingerprint: the old leaf set must stop verifying.
 	updated := map[string]ConfigValue{"openai.api_key": StringValue("sk-2")}
-	if err := db.SaveConfigMirror(ctx, KindProvider, "user", "u1", "openai",
+	if err := db.SaveProjectionMarker(ctx, KindProvider, "user", "u1", "openai",
 		NewConfigProjectionMarker("openai.", true, updated)); err != nil {
-		t.Fatalf("SaveConfigMirror upsert: %v", err)
+		t.Fatalf("SaveProjectionMarker upsert: %v", err)
 	}
-	got, _, _ = db.GetConfigMirror(ctx, KindProvider, "user", "u1", "openai")
-	if VerifyConfigMirror(got, true, leaves) {
+	got, _, _ = db.GetProjectionMarker(ctx, KindProvider, "user", "u1", "openai")
+	if VerifyProjectionMarker(got, true, leaves) {
 		t.Fatal("stale marker still verifies after the projection changed")
 	}
-	if !VerifyConfigMirror(got, true, updated) {
+	if !VerifyProjectionMarker(got, true, updated) {
 		t.Fatal("updated marker does not verify the new leaves")
 	}
 
 	// The enabled flag round-trips too, and flipping it invalidates the marker
 	// exactly like a changed leaf does — a decision recorded in the marker is a
 	// decision a later reader compares against, not a label it copies.
-	if err := db.SaveConfigMirror(ctx, KindProvider, "user", "u1", "openai",
+	if err := db.SaveProjectionMarker(ctx, KindProvider, "user", "u1", "openai",
 		NewConfigProjectionMarker("openai.", false, updated)); err != nil {
-		t.Fatalf("SaveConfigMirror disable: %v", err)
+		t.Fatalf("SaveProjectionMarker disable: %v", err)
 	}
-	got, _, _ = db.GetConfigMirror(ctx, KindProvider, "user", "u1", "openai")
+	got, _, _ = db.GetProjectionMarker(ctx, KindProvider, "user", "u1", "openai")
 	if got.Enabled == nil || *got.Enabled {
 		t.Fatalf("marker enabled = %v, want a recorded false", got.Enabled)
 	}
-	if VerifyConfigMirror(got, true, updated) {
+	if VerifyProjectionMarker(got, true, updated) {
 		t.Fatal("a marker recording disabled verified an enabled row")
 	}
-	if !VerifyConfigMirror(got, false, updated) {
+	if !VerifyProjectionMarker(got, false, updated) {
 		t.Fatal("a marker recording disabled did not verify a disabled row")
 	}
 
 	// A row with no marker is reported as absent, not as an error.
-	if _, ok, err := db.GetConfigMirror(ctx, KindProvider, "user", "u1", "nope"); err != nil || ok {
+	if _, ok, err := db.GetProjectionMarker(ctx, KindProvider, "user", "u1", "nope"); err != nil || ok {
 		t.Fatalf("missing marker = ok=%v err=%v, want false/nil", ok, err)
 	}
 
-	if err := db.DeleteConfigMirror(ctx, KindProvider, "user", "u1", "openai"); err != nil {
-		t.Fatalf("DeleteConfigMirror: %v", err)
+	if err := db.DeleteProjectionMarker(ctx, KindProvider, "user", "u1", "openai"); err != nil {
+		t.Fatalf("DeleteProjectionMarker: %v", err)
 	}
-	if _, ok, _ := db.GetConfigMirror(ctx, KindProvider, "user", "u1", "openai"); ok {
-		t.Fatal("marker survived DeleteConfigMirror")
+	if _, ok, _ := db.GetProjectionMarker(ctx, KindProvider, "user", "u1", "openai"); ok {
+		t.Fatal("marker survived DeleteProjectionMarker")
 	}
 }
 
 // The backfill projects a whole blob row, so it certifies its own output: a
 // backfilled row must carry a marker that verifies against the rows it wrote.
-func TestMigrateConfigsToKVWritesMirrorMarkers(t *testing.T) {
+func TestMigrateConfigsToKVWritesProjectionMarkers(t *testing.T) {
 	db, err := NewDBStore("sqlite", "file:mirror_migrate?mode=memory&cache=shared")
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -102,14 +102,14 @@ func TestMigrateConfigsToKVWritesMirrorMarkers(t *testing.T) {
 	if len(leaves) == 0 {
 		t.Fatal("backfill wrote no leaves")
 	}
-	m, ok, err := db.GetConfigMirror(ctx, KindProvider, "user", "u1", "openai")
+	m, ok, err := db.GetProjectionMarker(ctx, KindProvider, "user", "u1", "openai")
 	if err != nil {
-		t.Fatalf("GetConfigMirror: %v", err)
+		t.Fatalf("GetProjectionMarker: %v", err)
 	}
 	if !ok {
 		t.Fatal("backfill did not certify the row it projected")
 	}
-	if !VerifyConfigMirror(m, true, leaves) {
+	if !VerifyProjectionMarker(m, true, leaves) {
 		t.Fatalf("backfill marker does not verify its leaves: %+v", m)
 	}
 }
@@ -118,7 +118,7 @@ func TestMigrateConfigsToKVWritesMirrorMarkers(t *testing.T) {
 // TABLE IF NOT EXISTS leaves an existing table alone) gets the column added,
 // and its existing markers keep NULL — "no decision was recorded" — rather than
 // being handed a default that would read as a decision nobody made.
-func TestMigrateConfigsMirrorEnabledRetrofitsLegacyMarkers(t *testing.T) {
+func TestMigrateProjectionMarkerEnabledRetrofitsLegacyMarkers(t *testing.T) {
 	db := openTestDB(t)
 	defer db.Close()
 	ctx := context.Background()
@@ -144,7 +144,7 @@ func TestMigrateConfigsMirrorEnabledRetrofitsLegacyMarkers(t *testing.T) {
 	if _, err := db.handle().ExecContext(ctx,
 		`INSERT INTO configs_mirror (kind, scope, scope_id, name, prefix, key_count, fingerprint)
 		 VALUES ('provider', 'user', 'u1', 'openai', 'openai.', 1, ?)`,
-		MirrorFingerprint(leaves)); err != nil {
+		ConfigsKVFingerprint(leaves)); err != nil {
 		t.Fatalf("seed legacy marker: %v", err)
 	}
 
@@ -156,7 +156,7 @@ func TestMigrateConfigsMirrorEnabledRetrofitsLegacyMarkers(t *testing.T) {
 		t.Fatalf("enabled column missing after migration: has=%v err=%v", has, err)
 	}
 
-	m, ok, err := db.GetConfigMirror(ctx, KindProvider, "user", "u1", "openai")
+	m, ok, err := db.GetProjectionMarker(ctx, KindProvider, "user", "u1", "openai")
 	if err != nil || !ok {
 		t.Fatalf("legacy marker unreadable: ok=%v err=%v", ok, err)
 	}
@@ -165,57 +165,57 @@ func TestMigrateConfigsMirrorEnabledRetrofitsLegacyMarkers(t *testing.T) {
 	}
 	// An unrecorded decision is not a default: the marker certifies nothing
 	// until a write (or a reconcile pass) records the decision for real.
-	if VerifyConfigMirror(m, true, leaves) || VerifyConfigMirror(m, false, leaves) {
+	if VerifyProjectionMarker(m, true, leaves) || VerifyProjectionMarker(m, false, leaves) {
 		t.Fatal("legacy marker certified a decision it never recorded")
 	}
 }
 
-// ListConfigMirrors is the batched form of GetConfigMirror: every marker at one
+// ListProjectionMarkers is the batched form of GetProjectionMarker: every marker at one
 // (kind, scope, scope_id), keyed by row name, and nothing from other scopes.
-func TestListConfigMirrors(t *testing.T) {
+func TestListProjectionMarkers(t *testing.T) {
 	db := openTestDB(t)
 	defer db.Close()
 	ctx := context.Background()
 
 	openaiLeaves := map[string]ConfigValue{"openai.api_key": StringValue("sk-1")}
 	anthropicLeaves := map[string]ConfigValue{"anthropic.api_key": StringValue("sk-ant")}
-	if err := db.SaveConfigMirror(ctx, KindProvider, "user", "u1", "openai",
+	if err := db.SaveProjectionMarker(ctx, KindProvider, "user", "u1", "openai",
 		NewConfigProjectionMarker("openai.", true, openaiLeaves)); err != nil {
-		t.Fatalf("SaveConfigMirror openai: %v", err)
+		t.Fatalf("SaveProjectionMarker openai: %v", err)
 	}
-	if err := db.SaveConfigMirror(ctx, KindProvider, "user", "u1", "anthropic",
+	if err := db.SaveProjectionMarker(ctx, KindProvider, "user", "u1", "anthropic",
 		NewConfigProjectionMarker("anthropic.", false, anthropicLeaves)); err != nil {
-		t.Fatalf("SaveConfigMirror anthropic: %v", err)
+		t.Fatalf("SaveProjectionMarker anthropic: %v", err)
 	}
 	// A different scope and a different kind must not leak in.
-	if err := db.SaveConfigMirror(ctx, KindProvider, "user", "u2", "openai",
+	if err := db.SaveProjectionMarker(ctx, KindProvider, "user", "u2", "openai",
 		NewConfigProjectionMarker("openai.", true, openaiLeaves)); err != nil {
-		t.Fatalf("SaveConfigMirror other scope: %v", err)
+		t.Fatalf("SaveProjectionMarker other scope: %v", err)
 	}
-	if err := db.SaveConfigMirror(ctx, KindSetting, "user", "u1", "prefs",
+	if err := db.SaveProjectionMarker(ctx, KindSetting, "user", "u1", "prefs",
 		NewConfigProjectionMarker("prefs.", true, map[string]ConfigValue{})); err != nil {
-		t.Fatalf("SaveConfigMirror other kind: %v", err)
+		t.Fatalf("SaveProjectionMarker other kind: %v", err)
 	}
 
-	got, err := db.ListConfigMirrors(ctx, KindProvider, "user", "u1")
+	got, err := db.ListProjectionMarkers(ctx, KindProvider, "user", "u1")
 	if err != nil {
-		t.Fatalf("ListConfigMirrors: %v", err)
+		t.Fatalf("ListProjectionMarkers: %v", err)
 	}
 	if len(got) != 2 {
-		t.Fatalf("ListConfigMirrors returned %d markers, want 2: %#v", len(got), got)
+		t.Fatalf("ListProjectionMarkers returned %d markers, want 2: %#v", len(got), got)
 	}
-	if !VerifyConfigMirror(got["openai"], true, openaiLeaves) {
+	if !VerifyProjectionMarker(got["openai"], true, openaiLeaves) {
 		t.Fatalf("openai marker = %+v, want a certified enabled marker", got["openai"])
 	}
-	if !VerifyConfigMirror(got["anthropic"], false, anthropicLeaves) {
+	if !VerifyProjectionMarker(got["anthropic"], false, anthropicLeaves) {
 		t.Fatalf("anthropic marker = %+v, want a certified disabled marker", got["anthropic"])
 	}
 
-	empty, err := db.ListConfigMirrors(ctx, KindProvider, "user", "nobody")
+	empty, err := db.ListProjectionMarkers(ctx, KindProvider, "user", "nobody")
 	if err != nil {
-		t.Fatalf("ListConfigMirrors(empty): %v", err)
+		t.Fatalf("ListProjectionMarkers(empty): %v", err)
 	}
 	if len(empty) != 0 {
-		t.Fatalf("ListConfigMirrors(empty) = %#v, want empty map", empty)
+		t.Fatalf("ListProjectionMarkers(empty) = %#v, want empty map", empty)
 	}
 }

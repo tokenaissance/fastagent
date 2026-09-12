@@ -140,8 +140,8 @@ func TestPanelReadModelMatchesRuntimeResolver(t *testing.T) {
 		}},
 		{"namespace lives only in the mirror", func(t *testing.T, s *Server, uid string) {
 			seedSystemView(t, s, uid)
-			seedMirrorValue(t, s.dataStore, store.KindSetting, "system", "", "memory.fts.enabled", true)
-			seedMirrorValue(t, s.dataStore, store.KindSetting, "system", "", "memory.fts.db_path", "/tmp/x.db")
+			seedConfigsKVValue(t, s.dataStore, store.KindSetting, "system", "", "memory.fts.enabled", true)
+			seedConfigsKVValue(t, s.dataStore, store.KindSetting, "system", "", "memory.fts.db_path", "/tmp/x.db")
 		}, func(t *testing.T, panel map[string]any) {
 			if got := digPath(t, panel, []string{"memory", "fts", "enabled"}); got != true {
 				t.Errorf("mirror-only namespace not served: memory.fts.enabled = %#v", got)
@@ -151,7 +151,7 @@ func TestPanelReadModelMatchesRuntimeResolver(t *testing.T) {
 			seedSystemView(t, s, uid)
 			// The mirror disagrees with the blob on purpose: the blob is
 			// authoritative, so both paths must answer "enabled".
-			seedMirrorValue(t, s.dataStore, store.KindSetting, "system", "", "sandbox.enabled", false)
+			seedConfigsKVValue(t, s.dataStore, store.KindSetting, "system", "", "sandbox.enabled", false)
 		}, func(t *testing.T, panel map[string]any) {
 			if got := digPath(t, panel, []string{"sandbox", "enabled"}); got != true {
 				t.Errorf("sandbox.enabled = %#v; the stale mirror row overrode the blob", got)
@@ -159,8 +159,8 @@ func TestPanelReadModelMatchesRuntimeResolver(t *testing.T) {
 		}},
 		{"provider lives only in the mirror", func(t *testing.T, s *Server, uid string) {
 			seedSystemView(t, s, uid)
-			seedMirrorValue(t, s.dataStore, store.KindProvider, "user", uid, "mirror_only.api_key", "sk-mirror")
-			seedMirrorValue(t, s.dataStore, store.KindProvider, "user", uid, "mirror_only.api_base", "https://mirror.example")
+			seedConfigsKVValue(t, s.dataStore, store.KindProvider, "user", uid, "mirror_only.api_key", "sk-mirror")
+			seedConfigsKVValue(t, s.dataStore, store.KindProvider, "user", uid, "mirror_only.api_base", "https://mirror.example")
 		}, func(t *testing.T, panel map[string]any) {
 			got, ok := providerNames(t, panel)["mirror_only"]
 			if !ok {
@@ -315,9 +315,9 @@ func namespaceDst(t *testing.T, namespace string) func(*config.Config) interface
 	return nil
 }
 
-// seedMirrorValue writes a single configs_kv row without its blob — the state
+// seedConfigsKVValue writes a single configs_kv row without its blob — the state
 // a mirror-only writer (or a partially migrated row) leaves behind.
-func seedMirrorValue(t *testing.T, st store.Store, kind, scopeName, scopeID, name string, value interface{}) {
+func seedConfigsKVValue(t *testing.T, st store.Store, kind, scopeName, scopeID, name string, value interface{}) {
 	t.Helper()
 	if err := st.SetConfigValue(context.Background(), kind, scopeName, scopeID, name, store.EncodeConfigValue(value)); err != nil {
 		t.Fatalf("seed mirror row %s: %v", name, err)
