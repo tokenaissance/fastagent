@@ -9,7 +9,8 @@
  *   naming a table: SettingAt / SettingNamesAt / ProviderStateAt /
  *   ProvidersAt / RowsAt. ExactSetting is re-expressed on the same single
  *   resolution rule. The table they pick is configsReadAuthority, and the
- *   mirror-first branch certifies each row through certifiedMirror.
+ *   mirror-first branch certifies each row through certifiedMirror (one name)
+ *   or certifiedMirrorIn (a scope's markers read once via ListConfigMirrors).
  * [POS]: scope package's read face. scope.go owns the layer-merge resolvers
  *   (Setting / SettingInto / BatchSettings / Providers); this file owns the
  *   single-scope ones. Together they are the only place in the codebase that
@@ -25,6 +26,7 @@ package scope
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 	"github.com/fastclaw-ai/fastclaw/internal/store"
@@ -76,6 +78,18 @@ func certifiedMirror(ctx context.Context, st store.ConfigReadStore, kind, sc, si
 		return store.ConfigMirror{}, false
 	}
 	if !store.MirrorSelfConsistent(m, leaves) {
+		return store.ConfigMirror{}, false
+	}
+	return m, true
+}
+
+// certifiedMirrorIn is certifiedMirror against a marker map that was already
+// read for the whole scope (ListConfigMirrors), so a reader certifying many
+// names at one scope does not issue one marker query per name. The rule is the
+// same one store.MirrorSelfConsistent applies; only the lookup differs.
+func certifiedMirrorIn(markers map[string]store.ConfigMirror, name string, leaves map[string]store.ConfigValue) (store.ConfigMirror, bool) {
+	m, ok := markers[name]
+	if !ok || !store.MirrorSelfConsistent(m, leaves) {
 		return store.ConfigMirror{}, false
 	}
 	return m, true
@@ -198,6 +212,75 @@ func settingLayerAt(ctx context.Context, st store.ConfigReadStore, namespace, us
 	return rec.Data, rec.Enabled, true, nil
 }
 
+// settingLayerIDs lists the ownership layers a settings read walks, outer→inner
+// — the four layers Setting, BatchSettings and Timezone all agree on. Shared so
+// the merged resolvers cannot drift on which layers exist or their order.
+func settingLayerIDs(userID, agentID string) [][2]string {
+	layers := [][2]string{{"", ""}}
+	if userID != "" {
+		layers = append(layers, [2]string{userID, ""})
+	}
+	if agentID != "" {
+		layers = append(layers, [2]string{"", agentID})
+	}
+	if userID != "" && agentID != "" {
+		layers = append(layers, [2]string{userID, agentID})
+	}
+	return layers
+}
+
+// settingLayerView is one layer's answer for a namespace: its payload, its
+// enabled decision, and whether the layer owns the namespace at all (present).
+// present=false is not the same as enabled=false: the latter is a row that
+// vetoes, the former is a layer with nothing to say.
+type settingLayerView struct {
+	data    map[string]interface{}
+	enabled bool
+	present bool
+}
+
+// mergeSettingLayers applies the Setting merge rule over already-resolved
+// layers, in order: a disabled row vetoes (clears what the outer layers
+// contributed) and an enabled row field-merges its top-level keys. saw reports
+// whether any layer owned the namespace. It is the one definition of the merge,
+// shared by Setting (which resolves each layer on demand) and the batched
+// resolver (which pre-fetches the layers), so the two cannot disagree.
+func mergeSettingLayers(views []settingLayerView) (map[string]interface{}, bool) {
+	out := map[string]interface{}{}
+	saw := false
+	for _, v := range views {
+		if !v.present {
+			continue
+		}
+		saw = true
+		if !v.enabled {
+			out = map[string]interface{}{}
+			continue
+		}
+		for k, val := range v.data {
+			out[k] = val
+		}
+	}
+	return out, saw
+}
+
+// leavesUnderPrefix selects the leaves of one configs_kv name prefix out of a
+// whole scope's leaves (ListConfigValues with an empty prefix). The prefix
+// mapping is injective within a kind (see store.MirrorPrefixFor), so a prefix
+// match is exactly that row's leaves and never a sibling's.
+func leavesUnderPrefix(leaves map[string]store.ConfigValue, prefix string) map[string]store.ConfigValue {
+	var out map[string]store.ConfigValue
+	for k, v := range leaves {
+		if strings.HasPrefix(k, prefix) {
+			if out == nil {
+				out = map[string]store.ConfigValue{}
+			}
+			out[k] = v
+		}
+	}
+	return out
+}
+
 // SettingAt returns the effective data for one setting namespace at exactly one
 // (userID, agentID) scope — no layer merge. It is the map form of ExactSetting,
 // and the entry point for adapters that want "what is this namespace here?"
@@ -285,13 +368,21 @@ func ProvidersAt(ctx context.Context, st store.ConfigReadStore, userID, agentID 
 	if err != nil || len(kvVals) == 0 {
 		return out, nil
 	}
+	// One marker query for the whole scope, not one per name.
+	var markers map[string]store.ConfigMirror
+	if configsReadAuthority == mirrorFirst {
+		markers, err = st.ListConfigMirrors(ctx, store.KindProvider, sc, sid)
+		if err != nil {
+			markers = nil
+		}
+	}
 	for name, leaves := range groupProviderLeaves(kvVals) {
 		pc, ok := kvValsToProviders(leaves)[name]
 		if !ok {
 			continue
 		}
 		if configsReadAuthority == mirrorFirst {
-			if m, certified := certifiedMirror(ctx, st, store.KindProvider, sc, sid, name, leaves); certified {
+			if m, certified := certifiedMirrorIn(markers, name, leaves); certified {
 				// Certified: the mirror decides this name outright — payload
 				// and veto. A mirror-only provider has no row to be switched
 				// off, but a marker can still record the decision.

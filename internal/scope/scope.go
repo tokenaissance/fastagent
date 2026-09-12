@@ -201,8 +201,13 @@ func providersLayerAt(ctx context.Context, st store.ConfigReadStore, userID, age
 	if err != nil || len(kvVals) == 0 {
 		return lay, nil
 	}
+	// One marker query for the whole layer, not one per provider name.
+	markers, err := st.ListConfigMirrors(ctx, store.KindProvider, sc, sid)
+	if err != nil {
+		return lay, nil
+	}
 	for name, leaves := range groupProviderLeaves(kvVals) {
-		m, certified := certifiedMirror(ctx, st, store.KindProvider, sc, sid, name, leaves)
+		m, certified := certifiedMirrorIn(markers, name, leaves)
 		if !certified {
 			continue
 		}
@@ -455,51 +460,19 @@ func Setting(ctx context.Context, st store.ConfigReadStore, namespace, userID, a
 		return nil, errors.New("scope.Setting: store is required")
 	}
 
-	out := map[string]interface{}{}
-	// sawRow records that some layer owns this namespace, from whichever table
-	// answered for it. A row that says "disabled" is still an owner: it vetoes
-	// the outer layers.
-	sawRow := false
-	apply := func(data map[string]interface{}, enabled bool) {
-		sawRow = true
-		if !enabled {
-			// Veto: whatever the outer layers contributed for this namespace
-			// does not survive. An inner layer can still re-enable it.
-			out = map[string]interface{}{}
-			return
-		}
-		for k, v := range data {
-			out[k] = v
-		}
-	}
-	tryGet := func(uid, aid string) error {
-		data, enabled, present, err := settingLayerAt(ctx, st, namespace, uid, aid)
+	// Resolve each layer through the one per-layer rule, then merge. The merge
+	// itself (the veto / field-merge order) lives in mergeSettingLayers, shared
+	// with the batched resolver so the two cannot drift.
+	layers := settingLayerIDs(userID, agentID)
+	views := make([]settingLayerView, len(layers))
+	for i, l := range layers {
+		data, enabled, present, err := settingLayerAt(ctx, st, namespace, l[0], l[1])
 		if err != nil {
-			return err
-		}
-		if present {
-			apply(data, enabled)
-		}
-		return nil
-	}
-	if err := tryGet("", ""); err != nil {
-		return nil, err
-	}
-	if userID != "" {
-		if err := tryGet(userID, ""); err != nil {
 			return nil, err
 		}
+		views[i] = settingLayerView{data: data, enabled: enabled, present: present}
 	}
-	if agentID != "" {
-		if err := tryGet("", agentID); err != nil {
-			return nil, err
-		}
-	}
-	if userID != "" && agentID != "" {
-		if err := tryGet(userID, agentID); err != nil {
-			return nil, err
-		}
-	}
+	out, sawRow := mergeSettingLayers(views)
 	if sawRow {
 		return out, nil
 	}
@@ -647,24 +620,8 @@ func BatchSettings(
 		return nil, errors.New("scope.BatchSettings: store is required")
 	}
 
-	// mirrorFirst judges each row by its own marker, which the one-query-per-
-	// layer batch cannot do (markers are per row, not per layer). Rather than
-	// keep a second, blob-first merge that could disagree with Setting, resolve
-	// each namespace through Setting — the definition of the contract. This
-	// trades the batch's query count for correctness; a batched marker read
-	// would restore it.
 	if configsReadAuthority == mirrorFirst {
-		out := make(map[string]map[string]interface{}, len(namespaces))
-		for _, ns := range namespaces {
-			merged, err := Setting(ctx, st, ns, userID, agentID)
-			if err != nil {
-				return nil, fmt.Errorf("scope.BatchSettings: resolve %q: %w", ns, err)
-			}
-			if len(merged) > 0 {
-				out[ns] = merged
-			}
-		}
-		return out, nil
+		return batchSettingsMirrorFirst(ctx, st, namespaces, userID, agentID)
 	}
 
 	nsSet := make(map[string]struct{}, len(namespaces))
@@ -674,16 +631,7 @@ func BatchSettings(
 
 	// One query per ownership layer, outer→inner — the same four layers
 	// Setting walks, so the two resolvers cannot drift apart again.
-	layers := [][2]string{{"", ""}}
-	if userID != "" {
-		layers = append(layers, [2]string{userID, ""})
-	}
-	if agentID != "" {
-		layers = append(layers, [2]string{"", agentID})
-	}
-	if userID != "" && agentID != "" {
-		layers = append(layers, [2]string{userID, agentID})
-	}
+	layers := settingLayerIDs(userID, agentID)
 
 	merged := make(map[string]map[string]interface{}, len(namespaces))
 	seen := make(map[string]bool, len(namespaces))
@@ -731,6 +679,101 @@ func BatchSettings(
 		}
 		if len(fromMirror) > 0 {
 			out[ns] = fromMirror
+		}
+	}
+	return out, nil
+}
+
+// batchSettingsMirrorFirst is BatchSettings under mirrorFirst. Markers are per
+// row, so the blob-first batch's one-query-per-layer trick cannot certify them;
+// this walks the same four layers but fetches each layer's three sources once —
+// the blob rows, every mirror leaf at the scope, and every marker at the scope
+// (ListConfigMirrors) — and then certifies each requested namespace locally.
+// The per-namespace merge is mergeSettingLayers, the same rule Setting applies,
+// so the two resolvers cannot disagree. Query count is O(layers), not
+// O(namespaces × layers).
+func batchSettingsMirrorFirst(
+	ctx context.Context,
+	st store.ConfigReadStore,
+	namespaces []string,
+	userID, agentID string,
+) (map[string]map[string]interface{}, error) {
+	prefixOf := make(map[string]string, len(namespaces))
+	for _, ns := range namespaces {
+		prefixOf[ns] = kvPrefixForNamespace(ns)
+	}
+
+	layers := settingLayerIDs(userID, agentID)
+	blobAt := make([]map[string]*store.ConfigRecord, len(layers))
+	leavesAt := make([]map[string]map[string]store.ConfigValue, len(layers))
+	markersAt := make([]map[string]store.ConfigMirror, len(layers))
+	for i, l := range layers {
+		uid, aid := l[0], l[1]
+		rows, err := st.ListConfigs(ctx, store.KindSetting, uid, aid)
+		if err != nil {
+			return nil, fmt.Errorf("scope.BatchSettings: load %q/%q configs: %w", uid, aid, err)
+		}
+		sc, sid := kvScopeFromOwnership(uid, aid)
+		allLeaves, err := st.ListConfigValues(ctx, store.KindSetting, sc, sid, "")
+		if err != nil {
+			return nil, fmt.Errorf("scope.BatchSettings: load %q/%q mirror: %w", uid, aid, err)
+		}
+		markers, err := st.ListConfigMirrors(ctx, store.KindSetting, sc, sid)
+		if err != nil {
+			return nil, fmt.Errorf("scope.BatchSettings: load %q/%q markers: %w", uid, aid, err)
+		}
+		blob := make(map[string]*store.ConfigRecord, len(namespaces))
+		for j := range rows {
+			if _, want := prefixOf[rows[j].Name]; want {
+				blob[rows[j].Name] = &rows[j]
+			}
+		}
+		byNS := make(map[string]map[string]store.ConfigValue, len(namespaces))
+		for ns, prefix := range prefixOf {
+			if lv := leavesUnderPrefix(allLeaves, prefix); len(lv) > 0 {
+				byNS[ns] = lv
+			}
+		}
+		blobAt[i], leavesAt[i], markersAt[i] = blob, byNS, markers
+	}
+
+	out := make(map[string]map[string]interface{}, len(namespaces))
+	for _, ns := range namespaces {
+		prefix := prefixOf[ns]
+		views := make([]settingLayerView, len(layers))
+		for i := range layers {
+			// A marker-certified projection answers the layer; otherwise the
+			// blob row does — the same order settingLayerAt applies.
+			if lv := leavesAt[i][ns]; len(lv) > 0 {
+				if m, ok := certifiedMirrorIn(markersAt[i], ns, lv); ok {
+					views[i] = settingLayerView{
+						data:    kvToSettingMap(prefix, lv),
+						enabled: m.Enabled != nil && *m.Enabled,
+						present: true,
+					}
+					continue
+				}
+			}
+			if rec := blobAt[i][ns]; rec != nil {
+				views[i] = settingLayerView{data: rec.Data, enabled: rec.Enabled, present: true}
+			}
+		}
+		merged, saw := mergeSettingLayers(views)
+		if !saw {
+			// No layer owned the namespace in either table: the last resort is
+			// the merged raw mirror, exactly as Setting does.
+			raw := map[string]store.ConfigValue{}
+			for i := range layers {
+				for k, v := range leavesAt[i][ns] {
+					raw[k] = v
+				}
+			}
+			if len(raw) > 0 {
+				merged = kvToSettingMap(prefix, raw)
+			}
+		}
+		if len(merged) > 0 {
+			out[ns] = merged
 		}
 	}
 	return out, nil

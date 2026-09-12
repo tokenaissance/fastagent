@@ -24,9 +24,9 @@ func TestPortMethodSets(t *testing.T) {
 		{(*ConfigReadStore)(nil), []string{
 			"BatchGetConfigsByAgentIDs",
 			"GetConfigByName", "GetConfigMirror",
-			"ListConfigs", "ListConfigValues",
+			"ListConfigMirrors", "ListConfigs", "ListConfigValues",
 		}},
-		{(*MirrorReader)(nil), []string{"GetConfigMirror"}},
+		{(*MirrorReader)(nil), []string{"GetConfigMirror", "ListConfigMirrors"}},
 		{(*ConfigRowWriter)(nil), []string{"SaveConfig"}},
 		{(*ConfigWriter)(nil), []string{
 			"DeleteConfig", "DeleteConfigPrefix", "DeleteConfigValue",
@@ -92,6 +92,7 @@ func TestPortsExcludeOtherDomains(t *testing.T) {
 		"SaveConfig": true, "DeleteConfig": true,
 		"SetConfigValue": true, "DeleteConfigValue": true, "DeleteConfigPrefix": true,
 		"SaveConfigMirror": true, "GetConfigMirror": true, "DeleteConfigMirror": true,
+		"ListConfigMirrors":      true,
 		"ReconcileConfigMirrors": true,
 	}
 	for _, port := range []reflect.Type{

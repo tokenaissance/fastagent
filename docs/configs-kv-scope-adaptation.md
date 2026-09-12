@@ -228,10 +228,15 @@ blob 侧同理走 `store.JSONToMap` / `store.ValueToMap`（`Decoder.UseNumber()`
   证不过回落 blob（`settingAtRaw` / `settingFromCertifiedMirror` / `certifiedMirror`）。
 - **合并**（`Setting` / `SettingInto` / `BatchSettings` / `Providers`）：逐层做认证
   再合并（`settingLayerAt` / `providersLayerAt`），所以层级优先级和 veto 语义不
-  变，变的只是「这一层的值来自哪张表」。`BatchSettings` 在 `mirrorFirst` 下直接
-  按 namespace 走 `Setting`（标记是逐行的，一次一层的批量查不到它）——**批次优化
-  让位于「不能和 Setting 不一致」**，`TestBatchSettingsMatchesSettingUnderMirrorFirst`
-  钉住两者两种序都相等。
+  变，变的只是「这一层的值来自哪张表」。合并逻辑本身抽成 `mergeSettingLayers`，
+  `Setting` 与批量的 `BatchSettings` 共用，两者不会各写一份合并规则。
+
+  批量这一路（`batchSettingsMirrorFirst`）每层只查三次——`ListConfigs`（blob 行）
+  + `ListConfigValues`（该 scope 全部叶子）+ `ListConfigMirrors`（**新增的按 scope
+  批量标记读**，见 `store.MirrorReader`）——然后在本地逐 namespace 认证，查询数是
+  O(层数) 而不是 O(namespace × 层数)。`Setting` 与 `BatchSettings` 在两种序下都
+  必须相等，`TestBatchSettingsMatchesSettingUnderMirrorFirst` 钉住（fixture 覆盖
+  认证行 / blob-only 未认证行 / disabled veto / 仅存在于原始镜像的行四条分支）。
 
 `Channels` / `Timezone` / `SettingNamesAt` / `RowsAt` 刻意不参与翻面（见上表各自
 的「无，且刻意如此」）。
@@ -251,7 +256,7 @@ configs_kv 里（`mcp_undo` / `mcp_oauth_reload` 这类直接写镜像的 namesp
 | `Providers` | 四层，内层整行替换 | 有（`kvValsToProviders`，规则 = `kvFieldMap`） |
 | `AgentScopeProviders` / `UserScopeProviders` | 单层 | 有 |
 | `AgentPluginEnabled` | agent 层单行 | 有 |
-| `BatchSettings` | 仅 system + user 两层 | 有，但只对**没有 blob 行**的 namespace 逐个走 `Setting`（面板专用，N 个 namespace 合并成 2 次查询；补兜底只影响 blob 缺席的 namespace） |
+| `BatchSettings` | 仅 system + user 两层 | 有。`blobFirst`：每层一次 `ListConfigs`，只对**没有 blob 行**的 namespace 逐个走 `Setting`（面板专用，N 个 namespace 合并成 2 次查询）。`mirrorFirst`：每层三次（`ListConfigs` + `ListConfigValues` + `ListConfigMirrors`）后在本地逐 namespace 认证合并（`batchSettingsMirrorFirst`）|
 | `Channels` | 四层，disabled 行擦除外层（同下节的统一规则） | **无，且刻意如此**：channel 行从不进 KV（见「存储面」），`Channels` 没有可回落的镜像。`TestChannelsAreNotMirroredInKV` 钉住这个前提 |
 | `Timezone` | chatter → agent → user → system（反向优先级） | **无 —— 决定不补**（见残留风险 6）：`prefs` 是双写 namespace，但 `Timezone` 只逐层点查 blob。理由是它做的是「按优先级走层」而不是合并/投影，宽化它等于让非权威行去改一个用户可见的时间；生产写入只有 `SaveUserTimezone → SaveSetting`（事务化双写），dev 库镜像独有 prefs 行实测 0 |
 
@@ -391,14 +396,16 @@ reads through scope.Providers」），是 51780fa 之前的化石，已更正。
 
 ### 依赖面：store 的能力端口（`internal/store/ports.go`）
 
-`store.Store` 是 115 个方法的单一接口，而 configs 域实际只用 6 个：读侧
+`store.Store` 是 120 个方法的单一接口，而 configs 域实际只用十来个：读侧
 `GetConfigByName` / `ListConfigs` / `ListConfigValues`（外加批量形的
 `BatchGetConfigsByAgentIDs`，它问的是同一个问题、只是访问形状不同，调用方与这三个
-完全重合），写侧 `SaveConfig` / `DeleteConfig` / `SetConfigValue` /
-`DeleteConfigPrefix`。`scope` 现在按能力声明参数——`ConfigReader` /
-`ConfigRowWriter` / `ConfigWriter` / `ConfigStore` / `KVStore` 全是个位数方法
-——于是一个只读配置的调用方、或一个测试替身，不必再实现 users / agents /
-sessions / cron / MCP。
+完全重合），镜像标记的 `GetConfigMirror` / `ListConfigMirrors`，写侧 `SaveConfig` /
+`DeleteConfig` / `SetConfigValue` / `DeleteConfigPrefix` / `SaveConfigMirror` /
+`DeleteConfigMirror`。`scope` 现在按能力声明参数——`ConfigReader`（四个行读）/
+`ConfigReadStore`（`ConfigReader` + `MirrorReader`，即行读 + 标记读，迁移期的读
+路径取它）/ `MirrorReader`（单点 + 按 scope 批量标记读）/ `ConfigRowWriter` /
+`ConfigWriter` / `ConfigStore` / `KVStore`——全是十位数以下的方法数，于是一个只读
+配置的调用方、或一个测试替身，不必再实现 users / agents / sessions / cron / MCP。
 
 端口是**实现侧**声明（在 store 包内），`ports.go` 末尾用
 `var _ ConfigReader = (Store)(nil)` 这类断言钉住 `Store ⊇ 端口`：改 Store 的签名会在
@@ -409,8 +416,11 @@ ports.go 编译失败，而不是在某个无关调用点爆掉。事务的窄�
 ### 不变式
 
 1. 值类型在写侧确定一次；读侧不猜（未标注行除外，规则见上表）。
-2. blob 是权威、KV 是兜底；任一读入口只有在链条上没有 blob 行时才碰镜像，
-   且兜底粒度按**名字**，不按链条。
+2. 当前阶段 blob 是权威、KV 是兜底：任一读入口只有在链条上没有 blob 行时才碰
+   镜像，且兜底粒度按**名字**，不按链条。翻转（`mirrorFirst`）后这条变成「KV 是
+   权威、blob 是兜底」——但镜像只在这一行的标记认证了刚读到的叶子时才作数（见
+   「读路径」），认证不过仍回落 blob，所以「按名字」和「不完整投影不被当成整份」
+   两条都不变。
 3. 数据 key 段两个方向都不转换，`kvkeys` 是唯一规则来源。
 4. 四层所有权 → (scope, scope_id) 只有 `store.KVScopeFromOwnership` 一处定义。
 5. 新写入的 configs_kv 行必带 `value_kind`（生产路径只经 `EncodeConfigValue`）。
@@ -1039,7 +1049,7 @@ provider 名同时是两样东西：`configs_kv` 的 key 前缀（`<名>.<字段
    **刻意不做**：channel（`channels` 表能从 blob 重建，见「写路径」）。
 5. **provider data-key 回归测试**：见「key 正确性」末段
    （`provider_kv_data_key_test.go`）。
-6. **Store 115 方法 → 能力端口**：见「依赖面」（`store/ports.go`、`ports_test.go`）。
+6. **Store 120 方法 → 能力端口**：见「依赖面」（`store/ports.go`、`ports_test.go`）。
 7. **文档同构**：本节与「现状」同一次改动更新，不再出现「代码已改、文档还写着
    非事务」这种状态。
 8. **读写模型一致性测试**：

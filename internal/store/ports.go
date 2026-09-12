@@ -1,6 +1,6 @@
 // Capability ports for the configs / configs_kv domain.
 //
-// Store is one 115-method interface. A consumer that needs "read a config
+// Store is one 120-method interface. A consumer that needs "read a config
 // row" declares no such need — it takes Store, and with it a dependency on
 // users, agents, sessions, cron, MCP and the rest. The ports below split out
 // the slice of Store that the configs domain actually uses, so a caller can
@@ -17,7 +17,7 @@
 //
 //	ConfigReader    -> configs + configs_kv reads
 //	ConfigReadStore -> configs + configs_kv reads + the mirror's marker
-//	MirrorReader    -> the marker read alone
+//	MirrorReader    -> the marker reads alone (point + per-scope list)
 //	ConfigWriter    -> configs + configs_kv writes
 //	ConfigStore     -> both (the whole configs domain)
 //	KVStore         -> configs_kv only (the legacy blob stays untouched)
@@ -43,12 +43,17 @@ type ConfigReader interface {
 }
 
 // MirrorReader is the read half of ConfigMirrorStore: reading a row's
-// completeness marker. It is split out because a resolver that must certify a
-// projection only ever reads the marker — the dual-write and the reconciler are
-// the only things that write one — so a read view can take this without also
-// depending on marker writes.
+// completeness marker, singly or (ListConfigMirrors) for a whole scope at once.
+// It is split out because a resolver that must certify a projection only ever
+// reads the marker — the dual-write and the reconciler are the only things that
+// write one — so a read view can take this without also depending on marker
+// writes.
 type MirrorReader interface {
 	GetConfigMirror(ctx context.Context, kind, scope, scopeID, name string) (ConfigMirror, bool, error)
+	// ListConfigMirrors is the batched form: every marker at one scope, keyed by
+	// row name, so a reader that certifies many rows issues one query instead of
+	// one per row (see providersLayerAt, BatchSettings).
+	ListConfigMirrors(ctx context.Context, kind, scope, scopeID string) (map[string]ConfigMirror, error)
 }
 
 // ConfigReadStore is the view a resolver needs once it must decide whether a
