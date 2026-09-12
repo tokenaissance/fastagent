@@ -179,6 +179,7 @@ func (s *Server) handleListProviders(w http.ResponseWriter, r *http.Request) {
 			"scope":     r.LegacyScope(),
 			"scopeId":   r.LegacyScopeID(),
 			"name":      r.Name,
+			"enabled":   r.Enabled,
 			"apiBase":   pc.APIBase,
 			"apiKey":    maskAPIKey(pc.APIKey),
 			"apiType":   pc.APIType,
