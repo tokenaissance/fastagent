@@ -42,9 +42,9 @@ var blobRowReads = map[string]bool{
 	"BatchGetConfigsByAgentIDs": true,
 }
 
-// projectedKinds are the kinds that have a configs_kv projection, so a read of
+// mirroredKinds are the kinds that have a configs_kv mirror, so a read of
 // them is a read the layer must route.
-var projectedKinds = map[string]bool{
+var mirroredKinds = map[string]bool{
 	"KindSetting":       true,
 	"KindProvider":      true,
 	"KindPluginEnabled": true,
@@ -98,7 +98,7 @@ func TestConfigsKVReadsGoThroughTheScopeLayer(t *testing.T) {
 			}
 			for _, arg := range call.Args {
 				kind, ok := kindLiteral(arg)
-				if ok && projectedKinds[kind] {
+				if ok && mirroredKinds[kind] {
 					offenders = append(offenders, fmt.Sprintf(
 						"%s:%d: %s(…, store.%s, …) — a %s read must go through the scope read model (SettingAt / ExactSetting / ProvidersAt / SettingNamesAt / AgentScopeRows / RowsAt)",
 						rel, fset.Position(call.Pos()).Line, method.Sel.Name, kind, strings.TrimPrefix(kind, "Kind")))

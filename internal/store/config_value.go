@@ -220,8 +220,8 @@ func (v ConfigValue) Decode() interface{} {
 // There is nothing to guess about structure — the text starts with { or [ and
 // either parses as JSON or does not — while guessing a scalar is exactly what
 // loses data (an all-digit api_key became a number and vanished on
-// projection). Decode's legacy branch guesses scalars too, and that is the
-// rule the settings projection has always used; the two are separate
+// mirror). Decode's legacy branch guesses scalars too, and that is the
+// rule the settings mirror has always used; the two are separate
 // operations because the two readers made opposite choices before value_kind
 // existed, and untagged rows have to keep the reading they were written for.
 func (v ConfigValue) DecodeLegacyStructure() interface{} {

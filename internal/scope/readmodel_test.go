@@ -46,7 +46,7 @@ func TestSettingAtServesConfigsKVOnlyRows(t *testing.T) {
 
 // A disabled row is this layer's decision that the namespace has no value: it
 // resolves to nothing and it keeps the mirror out, rather than letting a
-// projection resurrect what the row switched off.
+// mirror resurrect what the row switched off.
 func TestSettingAtHonoursTheDisabledVeto(t *testing.T) {
 	db := openScopeDBNamed(t, "readmodel_veto")
 	defer db.Close()

@@ -108,10 +108,10 @@ func Providers(ctx context.Context, st store.ConfigReadStore, userID, agentID st
 		return nil, errors.New("scope.Providers: store is required")
 	}
 	// The legacy blob is authoritative — it keeps exact JSON types and the
-	// complete key set, while configs_kv is a derived projection that can be
+	// complete key set, while configs_kv is a derived mirror that can be
 	// partial or lossy (see Setting). Which table each layer is read from is
 	// configsReadAuthority's decision, made per layer by providersLayerAt: under
-	// configsKVFirst a name whose marker certifies its projection is decided by the
+	// configsKVFirst a name whose marker certifies its mirror is decided by the
 	// mirror, everything else by the blob. Deciding per name instead of per
 	// chain is what keeps a provider that exists only in the mirror visible next
 	// to blob-backed siblings.
@@ -202,12 +202,12 @@ func providersLayerAt(ctx context.Context, st store.ConfigReadStore, userID, age
 		return lay, nil
 	}
 	// One marker query for the whole layer, not one per provider name.
-	markers, err := st.ListProjectionMarkers(ctx, store.KindProvider, sc, sid)
+	markers, err := st.ListConfigMirrors(ctx, store.KindProvider, sc, sid)
 	if err != nil {
 		return lay, nil
 	}
 	for name, leaves := range groupProviderLeaves(kvVals) {
-		m, certified := certifiedMarkerIn(markers, name, leaves)
+		m, certified := certifiedMirrorIn(markers, name, leaves)
 		if !certified {
 			continue
 		}
@@ -251,12 +251,12 @@ func kvValsToProviders(kvVals map[string]store.ConfigValue) map[string]config.Pr
 		m := kvFieldMap(fields)
 		blob, _ := json.Marshal(m)
 		var pc config.ProviderConfig
-		// Never swallow the projection error: a tagged row that still fails
+		// Never swallow the mirror error: a tagged row that still fails
 		// here (or an untagged row the legacy guesser re-typed — "123456" →
 		// number) used to lose the field without a trace, so an all-digit
 		// apiKey read back empty.
 		if err := json.Unmarshal(blob, &pc); err != nil {
-			slog.Warn("configs_kv provider projection failed; provider skipped",
+			slog.Warn("configs_kv provider mirror failed; provider skipped",
 				"provider", provName, "error", err)
 			continue
 		}
@@ -293,7 +293,7 @@ func groupProviderLeaves(kvVals map[string]store.ConfigValue) map[string]map[str
 // conservative rule this reader has always used: object/array text is decoded
 // (a "models" row came back as a slice) and every scalar passes through as the
 // raw text, because a stored "123" is indistinguishable from the string "123"
-// and guessing wrong dropped the field on projection — an all-digit api_key
+// and guessing wrong dropped the field when mirroring — an all-digit api_key
 // read back empty. Tagged rows do not need the workaround: the writer said
 // what the value was.
 func kvFieldMap(fields map[string]store.ConfigValue) map[string]interface{} {
@@ -364,8 +364,8 @@ func ExactSetting(ctx context.Context, st store.ConfigReadStore, namespace, user
 		return errors.New("scope.ExactSetting: store is required")
 	}
 	// One resolution rule for every single-scope settings read: settingAtRaw
-	// owns blob-first / veto / mirror-fallback, and the typed form is a
-	// projection of it rather than a second implementation of the same rule.
+	// owns blob-first / veto / mirror-fallback, and the typed form mirrors it
+	// rather than being a second implementation of the same rule.
 	m, err := settingAtRaw(ctx, st, namespace, userID, agentID)
 	if err != nil {
 		return err
@@ -440,7 +440,7 @@ func Channels(ctx context.Context, st store.ConfigReader, userID, agentID string
 // namespaces yield an empty map without erroring — callers Unmarshal
 // into typed structs and rely on zero-valued fields.
 //
-// The legacy configs blob is the authority and configs_kv is its projection:
+// The legacy configs blob is the authority and configs_kv mirrors it:
 // the blob keeps exact JSON types and the complete key set, while the mirror
 // is written row-by-row (non-transactionally) and re-types values on read. A
 // partial or lossy mirror therefore must not shadow the blob — that produced
@@ -450,7 +450,7 @@ func Channels(ctx context.Context, st store.ConfigReader, userID, agentID string
 //
 // Which table each layer is read from is configsReadAuthority's decision, made
 // per layer by settingLayerAt: under configsKVFirst a layer whose marker certifies
-// its projection answers from the mirror (and only then — an uncertified row
+// its mirror answers (and only then — an uncertified row
 // falls back to the blob), so the flip is the same one lever the single-scope
 // resolvers pull. The last-resort walk of GetValues still serves rows that have
 // no blob row and no marker at all (rows written straight into configs_kv),
@@ -575,7 +575,7 @@ func SettingInto(ctx context.Context, st store.ConfigReadStore, namespace, userI
 		// string/bool field and takes the whole namespace down — in the
 		// gateway that means the caller's UserSpace never loads. The legacy
 		// configs blob keeps exact JSON types, so retry there before giving
-		// up. Re-project into a fresh value: a failed Unmarshal may have left
+		// up. Rebuild into a fresh value: a failed Unmarshal may have left
 		// dst partially populated.
 		kvErr := err
 		if st != nil && dst != nil {
@@ -583,7 +583,7 @@ func SettingInto(ctx context.Context, st store.ConfigReadStore, namespace, userI
 				fresh := reflect.New(reflect.TypeOf(dst).Elem()).Interface()
 				if berr := jsonInto(rec.Data, fresh); berr == nil {
 					reflect.ValueOf(dst).Elem().Set(reflect.ValueOf(fresh).Elem())
-					slog.Warn("configs_kv projection failed; served from the legacy blob",
+					slog.Warn("configs_kv mirror failed; served from the legacy blob",
 						"namespace", namespace, "user", userID, "agent", agentID, "error", kvErr)
 					return nil
 				}
@@ -594,7 +594,7 @@ func SettingInto(ctx context.Context, st store.ConfigReadStore, namespace, userI
 	return nil
 }
 
-// jsonInto projects a rebuilt settings map onto a typed config struct — the
+// jsonInto maps a rebuilt settings map onto a typed config struct — the
 // same marshal/unmarshal hop SettingInto has always used, shared with
 // UserScopeSetting so both paths agree on the codec.
 func jsonInto(v interface{}, dst interface{}) error {
@@ -673,12 +673,12 @@ func BatchSettings(
 		// No blob row anywhere: serve the mirror (rows written straight into
 		// configs_kv have no blob counterpart). Setting is the definition of
 		// this contract, so reuse it rather than re-deriving the rule.
-		fromKV, err := Setting(ctx, st, ns, userID, agentID)
+		fromMirror, err := Setting(ctx, st, ns, userID, agentID)
 		if err != nil {
 			return nil, fmt.Errorf("scope.BatchSettings: resolve %q: %w", ns, err)
 		}
-		if len(fromKV) > 0 {
-			out[ns] = fromKV
+		if len(fromMirror) > 0 {
+			out[ns] = fromMirror
 		}
 	}
 	return out, nil
@@ -688,7 +688,7 @@ func BatchSettings(
 // row, so the blob-first batch's one-query-per-layer trick cannot certify them;
 // this walks the same four layers but fetches each layer's three sources once —
 // the blob rows, every mirror leaf at the scope, and every marker at the scope
-// (ListProjectionMarkers) — and then certifies each requested namespace locally.
+// (ListConfigMirrors) — and then certifies each requested namespace locally.
 // The per-namespace merge is mergeSettingLayers, the same rule Setting applies,
 // so the two resolvers cannot disagree. Query count is O(layers), not
 // O(namespaces × layers).
@@ -706,7 +706,7 @@ func batchSettingsConfigsKVFirst(
 	layers := settingLayerIDs(userID, agentID)
 	blobAt := make([]map[string]*store.ConfigRecord, len(layers))
 	leavesAt := make([]map[string]map[string]store.ConfigValue, len(layers))
-	markersAt := make([]map[string]store.ConfigProjectionMarker, len(layers))
+	markersAt := make([]map[string]store.ConfigMirror, len(layers))
 	for i, l := range layers {
 		uid, aid := l[0], l[1]
 		rows, err := st.ListConfigs(ctx, store.KindSetting, uid, aid)
@@ -718,7 +718,7 @@ func batchSettingsConfigsKVFirst(
 		if err != nil {
 			return nil, fmt.Errorf("scope.BatchSettings: load %q/%q mirror: %w", uid, aid, err)
 		}
-		markers, err := st.ListProjectionMarkers(ctx, store.KindSetting, sc, sid)
+		markers, err := st.ListConfigMirrors(ctx, store.KindSetting, sc, sid)
 		if err != nil {
 			return nil, fmt.Errorf("scope.BatchSettings: load %q/%q markers: %w", uid, aid, err)
 		}
@@ -742,10 +742,10 @@ func batchSettingsConfigsKVFirst(
 		prefix := prefixOf[ns]
 		views := make([]settingLayerView, len(layers))
 		for i := range layers {
-			// A marker-certified projection answers the layer; otherwise the
+			// A marker-certified mirror answers the layer; otherwise the
 			// blob row does — the same order settingLayerAt applies.
 			if lv := leavesAt[i][ns]; len(lv) > 0 {
-				if m, ok := certifiedMarkerIn(markersAt[i], ns, lv); ok {
+				if m, ok := certifiedMirrorIn(markersAt[i], ns, lv); ok {
 					views[i] = settingLayerView{
 						data:    kvToSettingMap(prefix, lv),
 						enabled: m.Enabled != nil && *m.Enabled,
@@ -845,8 +845,8 @@ func SaveSetting(ctx context.Context, st store.ConfigStore, userID, agentID, nam
 	if err := rejectUnreadableAgentScope(namespace, userID, agentID); err != nil {
 		return err
 	}
-	// One transaction for both tables: the mirror is a projection of the
-	// blob, and a half-applied pair is exactly the state the readers then
+	// One transaction for both tables: configs_kv mirrors the blob, and a
+	// half-applied pair is exactly the state the readers then
 	// have to defend against (blob authoritative, mirror fallback). Failing
 	// loudly here is what keeps "both or neither" true.
 	return store.WithConfigTx(ctx, st, func(tx store.ConfigStore) error {
@@ -894,13 +894,13 @@ func AgentPluginEnabled(ctx context.Context, st store.ConfigReadStore, agentID s
 	if agentID == "" {
 		return nil, nil
 	}
-	// Mirror-first: a marker-certified projection answers the row outright,
+	// configs_kv-first: a marker-certified mirror answers the row outright,
 	// including the "no overrides" veto. An uncertified row falls through to
 	// the blob below — same guard as every other mirrored kind.
 	if configsReadAuthority == configsKVFirst {
 		kvPrefix := store.ConfigsKVPrefixFor(store.KindPluginEnabled, PluginEnabledNamespace)
 		if leaves, err := st.ListConfigValues(ctx, store.KindPluginEnabled, Agent, agentID, kvPrefix); err == nil && len(leaves) > 0 {
-			if m, ok := certifiedMarker(ctx, st, store.KindPluginEnabled, Agent, agentID, PluginEnabledNamespace, leaves); ok {
+			if m, ok := certifiedMirror(ctx, st, store.KindPluginEnabled, Agent, agentID, PluginEnabledNamespace, leaves); ok {
 				if m.Enabled != nil && !*m.Enabled {
 					return nil, nil
 				}
@@ -976,7 +976,7 @@ func SaveAgentPluginEnabled(ctx context.Context, st store.ConfigStore, agentID s
 	})
 }
 
-// boolMapFromData projects {"<id>": true|false, ...} onto map[string]bool,
+// boolMapFromData maps {"<id>": true|false, ...} onto map[string]bool,
 // dropping values that aren't booleans (a hand-edited row can't crash a
 // caller).
 func boolMapFromData(data map[string]interface{}) map[string]bool {
@@ -1001,7 +1001,7 @@ func dualWritePluginEnabledKV(ctx context.Context, st store.KVStore, agentID str
 		return fmt.Errorf("scope: clear configs_kv prefix %q: %w", kvPrefix, err)
 	}
 	if len(data) == 0 {
-		return st.DeleteProjectionMarker(ctx, store.KindPluginEnabled, Agent, agentID, PluginEnabledNamespace)
+		return st.DeleteConfigMirror(ctx, store.KindPluginEnabled, Agent, agentID, PluginEnabledNamespace)
 	}
 	flat := map[string]store.ConfigValue{}
 	flattenJSONToKV(kvPrefix, data, flat)
@@ -1010,7 +1010,7 @@ func dualWritePluginEnabledKV(ctx context.Context, st store.KVStore, agentID str
 			return fmt.Errorf("scope: mirror plugin opt-in %q: %w", name, err)
 		}
 	}
-	return saveProjectionMarker(ctx, st, store.KindPluginEnabled, Agent, agentID, PluginEnabledNamespace, kvPrefix, true, flat)
+	return saveMirror(ctx, st, store.KindPluginEnabled, Agent, agentID, PluginEnabledNamespace, kvPrefix, true, flat)
 }
 
 // providerNamePattern is the charset a provider name may use.
@@ -1019,7 +1019,7 @@ func dualWritePluginEnabledKV(ctx context.Context, st store.KVStore, agentID str
 // ("<name>.<field>") and the left half of a "provider/model" reference. A
 // '.' inside it is ambiguous — the mirror reader can only split at the first
 // dot, so "my.provider.api_key" is read as provider "my" with field
-// "provider.api_key", which projects to an empty ProviderConfig; a '/' would
+// "provider.api_key", which maps to an empty ProviderConfig; a '/' would
 // collide with the model reference separator. Both used to be accepted
 // (handleCreateProvider checked only for non-empty) and produced a provider
 // that reads back empty whenever the blob row is absent.
@@ -1193,8 +1193,8 @@ func flattenJSONToKV(prefix string, data map[string]interface{}, out map[string]
 		// map[string]string, a map[string]SomeCfg or a plain struct is a JSON
 		// object too. Asserting `v.(map[string]interface{})` let those become
 		// one object-valued leaf — the collapse that shows up as a reconcile
-		// gap (`tools.providers.searxng` where the projection says
-		// `tools.providers.searxng.endpoint`). The projection side
+		// gap (`tools.providers.searxng` where the mirror says
+		// `tools.providers.searxng.endpoint`). The configs_kv side
 		// (store.flattenJSON) uses the same check, so the two agree on the
 		// leaf boundary.
 		if nested, ok := store.JSONObjectOf(v); ok {
@@ -1220,8 +1220,8 @@ func dualWriteSettingKV(ctx context.Context, st store.KVStore, userID, agentID, 
 	}
 	if len(data) == 0 {
 		// No leaves left: drop the marker too, so a stale one can never
-		// certify the empty (or a later, different) projection.
-		return st.DeleteProjectionMarker(ctx, store.KindSetting, sc, sid, namespace)
+		// certify the empty (or a later, different) mirror.
+		return st.DeleteConfigMirror(ctx, store.KindSetting, sc, sid, namespace)
 	}
 	flat := map[string]store.ConfigValue{}
 	flattenJSONToKV(kvPrefix, data, flat)
@@ -1233,16 +1233,16 @@ func dualWriteSettingKV(ctx context.Context, st store.KVStore, userID, agentID, 
 	// A row written through SaveSetting is "use this value", so its enabled
 	// decision is true — the marker records it so a mirror-first reader can
 	// answer the veto question without the blob.
-	return saveProjectionMarker(ctx, st, store.KindSetting, sc, sid, namespace, kvPrefix, true, flat)
+	return saveMirror(ctx, st, store.KindSetting, sc, sid, namespace, kvPrefix, true, flat)
 }
 
-// saveProjectionMarker records the completeness marker for a projection that was just
+// saveMirror records the completeness marker for a mirror that was just
 // written. flat is the exact leaf set that went into configs_kv, so the marker
 // fingerprints what is on disk rather than what was intended; enabled is the
 // decision the paired blob row carries, so the marker records the row's whole
 // read state (leaves + on/off) and not just its payload.
-func saveProjectionMarker(ctx context.Context, st store.ProjectionMarkerStore, kind, sc, sid, name, prefix string, enabled bool, flat map[string]store.ConfigValue) error {
-	if err := st.SaveProjectionMarker(ctx, kind, sc, sid, name, store.NewConfigProjectionMarker(prefix, enabled, flat)); err != nil {
+func saveMirror(ctx context.Context, st store.ConfigMirrorStore, kind, sc, sid, name, prefix string, enabled bool, flat map[string]store.ConfigValue) error {
+	if err := st.SaveConfigMirror(ctx, kind, sc, sid, name, store.NewConfigMirror(prefix, enabled, flat)); err != nil {
 		return fmt.Errorf("scope: mirror marker for %q: %w", name, err)
 	}
 	return nil
@@ -1253,7 +1253,7 @@ func saveProjectionMarker(ctx context.Context, st store.ProjectionMarkerStore, k
 // The leaves are written whether or not the row is enabled: disabling a
 // provider is a row decision (it erases the outer entries, it does not erase
 // the payload), and the paired blob write records that decision. The marker
-// therefore has to carry it too — see ConfigProjectionMarker.Enabled.
+// therefore has to carry it too — see ConfigMirror.Enabled.
 func dualWriteProviderKV(ctx context.Context, st store.KVStore, userID, agentID, providerName string, p config.ProviderConfig, enabled bool) error {
 	sc, sid := kvScopeFromOwnership(userID, agentID)
 	kvPrefix := store.ConfigsKVPrefixFor(store.KindProvider, providerName)
@@ -1268,12 +1268,12 @@ func dualWriteProviderKV(ctx context.Context, st store.KVStore, userID, agentID,
 			return fmt.Errorf("scope: mirror provider %q: %w", name, err)
 		}
 	}
-	return saveProjectionMarker(ctx, st, store.KindProvider, sc, sid, providerName, kvPrefix, enabled, flat)
+	return saveMirror(ctx, st, store.KindProvider, sc, sid, providerName, kvPrefix, enabled, flat)
 }
 
 // DualDeleteProviderKV removes all KV entries for a provider.
 func DualDeleteProviderKV(ctx context.Context, st store.KVStore, userID, agentID, providerName string) {
 	sc, sid := kvScopeFromOwnership(userID, agentID)
 	_ = st.DeleteConfigPrefix(ctx, store.KindProvider, sc, sid, store.ConfigsKVPrefixFor(store.KindProvider, providerName))
-	_ = st.DeleteProjectionMarker(ctx, store.KindProvider, sc, sid, providerName)
+	_ = st.DeleteConfigMirror(ctx, store.KindProvider, sc, sid, providerName)
 }

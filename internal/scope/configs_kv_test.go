@@ -112,7 +112,7 @@ func TestSettingLargeIntThroughKVOnlyPath(t *testing.T) {
 }
 
 // TestProvidersConfigsKVFallbackKeepsLegacyStructure is the other half of the
-// N2 rule. The provider projection must not guess *scalars* from an untagged
+// N2 rule. The provider mirror must not guess *scalars* from an untagged
 // row (an all-digit api_key would become a number and vanish), but the
 // pre-tag code did decode *structure* — an object/array row came back as a
 // map/slice, because there is nothing to guess: the text starts with { or [
@@ -145,7 +145,7 @@ func TestProvidersConfigsKVFallbackKeepsLegacyStructure(t *testing.T) {
 	}
 	got, ok := provs["legacy"]
 	if !ok {
-		t.Fatalf("legacy provider missing from the mirror projection: %#v", provs)
+		t.Fatalf("legacy provider missing from the mirror mirror: %#v", provs)
 	}
 	if got.APIKey != "sk-legacy" {
 		t.Fatalf("APIKey = %q, want sk-legacy", got.APIKey)
@@ -363,9 +363,9 @@ func TestProviderPerUserAgentIsolation(t *testing.T) {
 
 // TestProvidersDualWriteReadsFromBlob pins the read precedence: the legacy
 // configs row is authoritative (exact JSON types, complete key set) and
-// configs_kv is a projection of it. Reading KV first is what produced the
-// web_search incident — the projection re-typed and re-cased values, and a
-// partial projection silently hid every key it did not carry. The mirror is
+// configs_kv is a mirror of it. Reading KV first is what produced the
+// web_search incident — the mirror re-typed and re-cased values, and a
+// partial mirror silently hid every key it did not carry. The mirror is
 // still consulted, but only for rows that have no blob counterpart.
 func TestProvidersDualWriteReadsFromBlob(t *testing.T) {
 	db := openScopeDB(t)
@@ -784,14 +784,14 @@ func TestSettingAllCapsEnvKeyRoundTrip(t *testing.T) {
 
 // TestSettingIntoFallsBackToLegacyBlob pins the number-looking-string
 // guarantee from both sides. A bucket genuinely named "123" used to be a
-// landmine: the mirror re-typed it to a number, the typed projection failed,
+// landmine: the mirror re-typed it to a number, the typed read failed,
 // and in the gateway that error aborted the caller's whole UserSpace load.
 //
 // Behind a blob row (the always-available safety net), an untagged mirror row
 // must still not take the caller down — Setting serves the blob.
 //
 // With no blob row (mirror-only namespaces, and anything written after the
-// tag), the tag is what carries the type, so the projection succeeds on its
+// tag), the tag is what carries the type, so the read succeeds on its
 // own instead of relying on the safety net.
 func TestSettingIntoFallsBackToLegacyBlob(t *testing.T) {
 	db := openScopeDB(t)
@@ -824,7 +824,7 @@ func TestSettingIntoFallsBackToLegacyBlob(t *testing.T) {
 	}
 
 	// Re-save to restore tagged mirror rows, then drop the blob row: now the
-	// tag is the only thing carrying the type, and the projection must still
+	// tag is the only thing carrying the type, and the mirror must still
 	// land the string.
 	if err := SaveSetting(ctx, db, "", "", "objectstore", map[string]interface{}{
 		"s3": map[string]interface{}{"bucket": "123", "region": "us-east-1"},
@@ -842,12 +842,12 @@ func TestSettingIntoFallsBackToLegacyBlob(t *testing.T) {
 	if err := db.DeleteConfig(ctx, rec.ID); err != nil {
 		t.Fatalf("DeleteConfig: %v", err)
 	}
-	var kvOnly config.ObjectStoreCfg
-	if err := SettingInto(ctx, db, "objectstore", "", "", &kvOnly); err != nil {
+	var mirrorOnly config.ObjectStoreCfg
+	if err := SettingInto(ctx, db, "objectstore", "", "", &mirrorOnly); err != nil {
 		t.Fatalf("SettingInto from a tagged mirror with no blob row: %v", err)
 	}
-	if kvOnly.S3.Bucket != "123" {
-		t.Fatalf("mirror-only bucket = %q, want the literal string 123", kvOnly.S3.Bucket)
+	if mirrorOnly.S3.Bucket != "123" {
+		t.Fatalf("mirror-only bucket = %q, want the literal string 123", mirrorOnly.S3.Bucket)
 	}
 }
 
@@ -1138,7 +1138,7 @@ func TestConfigsKVFallbackRestoresValueTypes(t *testing.T) {
 // picks the leaf boundary by structure, not by concrete Go type. An earlier
 // version tested `v.(map[string]interface{})`, so a nested map[string]string,
 // a map[string]SomeCfg or a plain struct was stored as one object-valued leaf
-// — `tools.providers.searxng` where the projection (flattenJSON) expects
+// — `tools.providers.searxng` where the mirror (flattenJSON) expects
 // `tools.providers.searxng.endpoint`. That is the row reconcile reported as a
 // gap on dev, and the same shape prod has as
 // `skills.entries.<id>.env.app_i_d` for AppID.

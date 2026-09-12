@@ -64,7 +64,7 @@ func TestProviderKVRoundTripThroughConfigsKV(t *testing.T) {
 	}
 
 	// Drop the authoritative blob row: the mirror is now the only source,
-	// so a re-casing bug in the projection cannot be masked by the blob.
+	// so a re-casing bug in the mirror cannot be masked by the blob.
 	rec, err := db.GetConfigByName(ctx, store.KindProvider, "user-a", "", name)
 	if err != nil {
 		t.Fatalf("GetConfigByName: %v", err)
@@ -78,10 +78,10 @@ func TestProviderKVRoundTripThroughConfigsKV(t *testing.T) {
 		t.Fatalf("Providers: %v", err)
 	}
 	if _, ok := provs[name]; !ok {
-		t.Fatalf("provider %q missing from the projection: %#v", name, provs)
+		t.Fatalf("provider %q missing from the mirror: %#v", name, provs)
 	}
 	if !reflect.DeepEqual(provs[name], want) {
-		t.Fatalf("mirror projection = %#v, want %#v", provs[name], want)
+		t.Fatalf("mirror mirror = %#v, want %#v", provs[name], want)
 	}
 }
 
