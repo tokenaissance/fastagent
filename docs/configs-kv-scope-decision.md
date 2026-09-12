@@ -15,8 +15,7 @@ scope 设计**全部保留**。如需后续再评估再提。
 2026-09-12/13 把「删掉 `configs_kv`」重新摆上台面复核了一遍（问题：删表会不会
 丢数据、影响面多大）。结论是**不删**，而且方向从「维持现状」升级为「继续演进」：
 
-- **数据侧无损**：当前不变式是「blob 权威、`configs_kv` 是 KV 镜像、对 blob 的
-  忠实投影（术语见 `configs-kv-scope-adaptation.md` 开头）」——
+- **数据侧无损**：当前不变式是「blob 权威、`configs_kv` 忠实镜像 blob（术语见 `configs-kv-scope-adaptation.md` 开头）」——
   provider / setting / plugin_enabled 行在 blob 里都有本体，写/删成对、读路径
   blob 优先、dev reconcile 146/146 认证。删表对这三类**不丢任何东西**。
 - **唯一的损失面**是两个**只写在 `configs_kv`、blob 没有**的命名空间：
@@ -24,7 +23,7 @@ scope 设计**全部保留**。如需后续再评估再提。
   reload epoch）。两者都是可再生的协调态，不是业务数据——最坏是「一次 undo 失效
   + 每个用户强制全量 reload 一次」。
 - **代码侧成本高**：要拆掉 9 个 store 方法、3 个能力端口、3 个迁移、`kvkeys` /
-  `value_kind` / `configs_mirror` / reconciler / `reconcile-kv` CLI，以及
+  `value_kind` / `configs_mirror` / reconciler / `reconcile-mirror` CLI，以及
   29 个测试文件（约 142 个测试函数）；还得先给上面两个 kv-only 命名空间找新家。
 - **方向侧是决定性的**：删表**等于放弃阶段 3–4**（翻转权威 → 下掉 blob）。既然
   目标形态就是 `configs_kv`，删掉它等于把阶段 0–2 已经建好的迁移基础设施一并拆掉。

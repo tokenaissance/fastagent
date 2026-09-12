@@ -4,7 +4,7 @@ package scope
 // guard that make the configs -> configs_kv flip a one-name change instead of a
 // rewrite of every reader. The migration stays on the blob until the reconcile
 // gate is green, so the lever defaults to blobFirst; turning it to configsKVFirst
-// must (a) let a certified projection win, and (b) never serve a projection the
+// must (a) let a certified mirror win, and (b) never serve a mirror the
 // marker does not certify — the web_search shape.
 
 import (
@@ -26,7 +26,7 @@ func withReadAuthority(t *testing.T, a readAuthority) {
 }
 
 // The default must stay blobFirst: the flip is gated on
-// `reconcile-kv --strict`, and a build that silently shipped configsKVFirst
+// `reconcile-mirror --strict`, and a build that silently shipped configsKVFirst
 // would be the outage this whole mechanism exists to prevent.
 func TestReadAuthorityDefaultsToBlobFirst(t *testing.T) {
 	if configsReadAuthority != blobFirst {
@@ -34,14 +34,14 @@ func TestReadAuthorityDefaultsToBlobFirst(t *testing.T) {
 	}
 }
 
-// A certified projection answers the read under configsKVFirst, and the blob's
+// A certified mirror answers the read under configsKVFirst, and the blob's
 // value is what answers it under blobFirst — the same row, two orders.
 func TestSettingAtConfigsKVFirstTrustsCertifiedRowsOverBlob(t *testing.T) {
 	db := openScopeDBNamed(t, "readauth_settling")
 	defer db.Close()
 	ctx := context.Background()
 
-	// One dual-write: blob + mirror + a marker that certifies the projection.
+	// One dual-write: blob + mirror + a marker that certifies the mirror.
 	if err := SaveSetting(ctx, db, "", "agt1", "agents.defaults",
 		map[string]interface{}{"model": "mirror-model"}); err != nil {
 		t.Fatalf("SaveSetting: %v", err)
@@ -104,7 +104,7 @@ func TestSettingAtConfigsKVFirstFallsBackOnUncertifiedRow(t *testing.T) {
 	}
 }
 
-// The guard's real job: a projection that was complete when the marker was
+// The guard's real job: a mirror that was complete when the marker was
 // written, then lost a leaf. The marker no longer covers the leaves, so
 // configsKVFirst falls back to the blob and the dropped key comes back — this is
 // the web_search regression, pinned.
@@ -201,7 +201,7 @@ func TestProviderStateAtConfigsKVFirstReportsPayloadAndVeto(t *testing.T) {
 }
 
 // The plugin-enabled row is the third mirrored kind and follows the same rule:
-// a certified projection answers it under configsKVFirst.
+// a certified mirror answers it under configsKVFirst.
 func TestAgentPluginEnabledConfigsKVFirstServesCertifiedRows(t *testing.T) {
 	db := openScopeDBNamed(t, "readauth_plugin")
 	defer db.Close()

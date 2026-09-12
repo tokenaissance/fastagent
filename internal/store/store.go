@@ -298,21 +298,21 @@ type Store interface {
 	ListConfigValues(ctx context.Context, kind, scope, scopeID, namePrefix string) (map[string]ConfigValue, error)
 	// DeleteConfigPrefix deletes all values matching a name prefix.
 	DeleteConfigPrefix(ctx context.Context, kind, scope, scopeID, namePrefix string) error
-	// SaveProjectionMarker / GetProjectionMarker / ListProjectionMarkers / DeleteProjectionMarker
+	// SaveConfigMirror / GetConfigMirror / ListConfigMirrors / DeleteConfigMirror
 	// maintain the completeness marker for one configs row's slice of the mirror
-	// (see ConfigProjectionMarker). The dual-write writes the marker in the same
-	// transaction as the rows it certifies; ListProjectionMarkers is the batched
+	// (see ConfigMirror). The dual-write writes the marker in the same
+	// transaction as the rows it certifies; ListConfigMirrors is the batched
 	// form a mirror-first reader uses to certify a whole scope at once.
-	SaveProjectionMarker(ctx context.Context, kind, scope, scopeID, name string, m ConfigProjectionMarker) error
-	GetProjectionMarker(ctx context.Context, kind, scope, scopeID, name string) (ConfigProjectionMarker, bool, error)
-	ListProjectionMarkers(ctx context.Context, kind, scope, scopeID string) (map[string]ConfigProjectionMarker, error)
-	DeleteProjectionMarker(ctx context.Context, kind, scope, scopeID, name string) error
-	// ReconcileConfigProjections re-projects every configs row and certifies the
+	SaveConfigMirror(ctx context.Context, kind, scope, scopeID, name string, m ConfigMirror) error
+	GetConfigMirror(ctx context.Context, kind, scope, scopeID, name string) (ConfigMirror, bool, error)
+	ListConfigMirrors(ctx context.Context, kind, scope, scopeID string) (map[string]ConfigMirror, error)
+	DeleteConfigMirror(ctx context.Context, kind, scope, scopeID, name string) error
+	// ReconcileConfigMirrors re-projects every configs row and certifies the
 	// ones whose mirror matches the blob, reporting the rest (see
-	// DBStore.ReconcileConfigProjections). With repair set it re-projects the
+	// DBStore.ReconcileConfigMirrors). With repair set it re-projects the
 	// diverged rows from the blob instead of only reporting them. It is the
 	// pre-flip acceptance pass.
-	ReconcileConfigProjections(ctx context.Context, repair bool) (ConfigProjectionReconcile, error)
+	ReconcileConfigMirrors(ctx context.Context, repair bool) (ConfigMirrorReconcile, error)
 
 	// --- Channels (IM bot bindings) ---
 	ListChannels(ctx context.Context, userID, agentID string) ([]ChannelRecord, error)

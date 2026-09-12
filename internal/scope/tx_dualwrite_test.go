@@ -14,7 +14,7 @@ import (
 // the state that used to be reachable, and the reason the readers carry a
 // fallback at all.
 
-var errConfigsKVDown = errors.New("configs_kv is down")
+var errMirrorDown = errors.New("configs_kv is down")
 
 // failingKVStore fails the mirror write. WithTx re-wraps the transaction
 // handle so the injected failure applies to the store the writer actually
@@ -28,7 +28,7 @@ type failingKVStore struct {
 func (f *failingKVStore) SetConfigValue(ctx context.Context, kind, scope, scopeID, name string, value store.ConfigValue) error {
 	f.calls++
 	if f.calls >= f.failFrom {
-		return errConfigsKVDown
+		return errMirrorDown
 	}
 	return f.DBStore.SetConfigValue(ctx, kind, scope, scopeID, name, value)
 }
@@ -76,7 +76,7 @@ func TestSaveSettingRollsBackBlobWhenConfigsKVFailsMidway(t *testing.T) {
 	err := SaveSetting(ctx, failing, "u1", "", "objectstore", map[string]interface{}{
 		"provider": "s3", "bucket": "b", "region": "us-east-1",
 	})
-	if !errors.Is(err, errConfigsKVDown) {
+	if !errors.Is(err, errMirrorDown) {
 		t.Fatalf("SaveSetting = %v, want the mirror error", err)
 	}
 	noBlob(t, db, store.KindSetting, "u1", "", "objectstore")
@@ -106,7 +106,7 @@ func TestSaveProviderRollsBackBlobWhenConfigsKVFails(t *testing.T) {
 
 	err := SaveProviderState(ctx, failing, "u1", "", "openai",
 		config.ProviderConfig{APIKey: "sk-x"}, true)
-	if !errors.Is(err, errConfigsKVDown) {
+	if !errors.Is(err, errMirrorDown) {
 		t.Fatalf("SaveProviderState = %v, want the mirror error", err)
 	}
 	noBlob(t, db, store.KindProvider, "u1", "", "openai")
@@ -120,7 +120,7 @@ func TestSaveAgentPluginEnabledRollsBackBlobWhenConfigsKVFails(t *testing.T) {
 	failing := &failingKVStore{DBStore: db, failFrom: 1}
 
 	err := SaveAgentPluginEnabled(ctx, failing, "a1", map[string]bool{"webSearch": true})
-	if !errors.Is(err, errConfigsKVDown) {
+	if !errors.Is(err, errMirrorDown) {
 		t.Fatalf("SaveAgentPluginEnabled = %v, want the mirror error", err)
 	}
 	noBlob(t, db, store.KindPluginEnabled, "", "a1", PluginEnabledNamespace)

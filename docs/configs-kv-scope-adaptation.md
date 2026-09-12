@@ -7,27 +7,25 @@
 >
 > **决策（2026-09-12）：`configs_kv` 是目标形态，`configs` 正在向它演进。**
 > 方向是 blob 逐键拆进 `configs_kv`、最终由 `configs_kv` 承担权威读源、blob 表
-> 退场——**不是两表长期并存**。所以当前「blob 权威 + configs_kv 必须是 blob 的忠实
-> 投影」是**迁移期的临时不变式**，不是终点契约；它有明确的退出条件（见「现状 ·
+> 退场——**不是两表长期并存**。所以当前「blob 权威 + KV 镜像必须忠实于 blob」
+> 是**迁移期的临时不变式**，不是终点契约；它有明确的退出条件（见「现状 ·
 > 目标形态与迁移阶段」）：typed encoding → 事务化双写 → 完整性标记 → 翻转权威 →
-> 下掉 blob。不会发生的是「删掉 configs_kv」——configs_kv 就是终点；会发生的是删掉 blob 表。
+> 下掉 blob。不会发生的是「删掉镜像」——镜像就是终点；会发生的是删掉 blob 表。
 >
 > **决策（2026-09-13）：保留 `configs_kv`，不回退到上游的 JSON blob + `scope_id`
 > 单列。** 「删掉 configs_kv / 全盘对齐上游」这条路线被明确否决（影响面与理由见
-> `configs-kv-scope-decision.md`）：当前不变式是 blob 权威、configs_kv 是可验证投影，删表
+> `configs-kv-scope-decision.md`）：当前不变式是 blob 权威、configs_kv 忠实镜像 blob，删表
 > 本身安全，但代价是拆掉阶段 0–2 的全部基础设施、并放弃阶段 3–4，所以不删。沿
 > 「演进到 `configs_kv`」的路线继续：阶段 3 = 翻转权威，阶段 4 = 下掉 blob。
 > 同一条决策钉下**用户模型分层**：第 4 层 scope 的 `user` 是**发起人**
 > （principal），不是固定的 owner —— 见「现状 · 用户模型分层」。
 >
-> **术语（2026-09-13）：`configs`（名词）→ mirror（谓词）→ `configs_kv`（名词）。**
-> `configs` 是 blob 表、`configs_kv` 是 KV 表，两者都是**名词**，而且只有「这一读
-> 这一写落在哪张表」真是问题时才拿它们区分——代码里对应 `Config*` 与
-> `ConfigsKV*`（例：`ConfigsKVPrefixFor`、`configsKVFirst`）。**mirror 是谓词**
-> （configs_kv mirrors configs），所以它不给任何**实体**命名，只留在描述这层关系
-> 的句子里（「configs_kv 镜像 configs」这么说对，「那个镜像」就不对）。
-> 记录「这一行被完整镜像过」的实体是**标记**：类型
-> `store.ConfigProjectionMarker`、表 `configs_mirror`——那是体检报告，不是数据。
+> **术语（2026-09-13）：两个名词 + 一个谓词。** 名词是两张表——`configs`（blob 表）
+> 与 `configs_kv`（KV 表，每行一个叶子）；谓词是 **mirror**：configs_kv mirrors
+> configs（双写把一行 blob 摊成一行行 configs_kv 叶子）。所以「哪张表」这类判断用
+> 名词（代码里 `ConfigsKVPrefixFor`、`configsKVFirst`），而记录「这一行被完整镜像
+> 过」的那个实体叫**标记**：类型 `store.ConfigMirror`、表 `configs_mirror`——那是
+> 体检报告，不是数据。
 
 ## 现状：实现对照（权威）
 
@@ -36,8 +34,8 @@
 | 层 | 本仓库的落点 | 谁依赖它 |
 |---|---|---|
 | Entities | `internal/config` 的 typed 结构体（`Config` / `ProviderConfig` / `ChannelConfig` / `AgentDefaults` …）与四层所有权语义 | 被所有层依赖，自己不依赖任何 IO |
-| Use Cases | `internal/scope`：解析与合并（`Setting` / `ExactSetting` / `Providers` / `Channels` / `GetValues` / `SettingInto`，逐层走 `settingLayerAt` / `providersLayerAt`）+ 单层读模型（`readmodel.go` 的 `SettingAt` / `SettingNamesAt` / `ProviderStateAt` / `ProvidersAt` / `AgentScopeRows` / `RowsAt`）+ 读权威开关（`readmodel.go` 的 `configsReadAuthority`：`blobFirst` / `configsKVFirst` 与逐行 `certifiedMarker` 认证）——「哪一层的行胜出、值怎么投影、这次读去哪张表」 | `setup` / `gateway` / `agentcli` |
-| Interface Adapters | `internal/kvkeys`（键形状编解码）、`store.ConfigValue`（value + value_kind 编解码）、`store.ConfigProjectionMarker` / `store.ProjectionMarkerSelfConsistent`（configs_kv 完整性标记：prefix + key_count + fingerprint + enabled）、`store.JSONToMap`（blob 解码）、`scope.Save*` 的双写编排、`setup` 的 `scope` 字符串 ↔ `(user_id, agent_id)` 转换 | `scope` / `setup` |
+| Use Cases | `internal/scope`：解析与合并（`Setting` / `ExactSetting` / `Providers` / `Channels` / `GetValues` / `SettingInto`，逐层走 `settingLayerAt` / `providersLayerAt`）+ 单层读模型（`readmodel.go` 的 `SettingAt` / `SettingNamesAt` / `ProviderStateAt` / `ProvidersAt` / `AgentScopeRows` / `RowsAt`）+ 读权威开关（`readmodel.go` 的 `configsReadAuthority`：`blobFirst` / `configsKVFirst` 与逐行 `certifiedMirror` 认证）——「哪一层的行胜出、值怎么镜像、这次读去哪张表」 | `setup` / `gateway` / `agentcli` |
+| Interface Adapters | `internal/kvkeys`（键形状编解码）、`store.ConfigValue`（value + value_kind 编解码）、`store.ConfigMirror` / `store.MirrorSelfConsistent`（镜像完整性标记：prefix + key_count + fingerprint + enabled）、`store.JSONToMap`（blob 解码）、`scope.Save*` 的双写编排、`setup` 的 `scope` 字符串 ↔ `(user_id, agent_id)` 转换 | `scope` / `setup` |
 | Frameworks & Drivers | `internal/store/database.go` 的 SQLite / PostgreSQL、表结构、迁移；HTTP / CLI 入口 | 最外层，随时可换 |
 
 依赖方向只有向内一条：`setup → scope → store → database/sql`，`config` 在最里
@@ -45,7 +43,7 @@
 scope」这条映射规则放在 store（`store.KVScopeFromOwnership`），由 scope 复用。
 这条依赖方向现在有测试兜底：`internal/scope/read_routing_test.go` 扫源码，
 任何 `internal/scope` / `internal/store` 之外的包用 `GetConfigByName` /
-`ListConfigs` / `ListConfigsByUser` / `BatchGetConfigsByAgentIDs` 读**带 configs_kv 的
+`ListConfigs` / `ListConfigsByUser` / `BatchGetConfigsByAgentIDs` 读**带镜像的
 kind**（setting / provider / plugin_enabled）即失败。
 
 ### 用户模型分层：第 4 层 scope 的 `user` 是发起人
@@ -101,18 +99,18 @@ configs_mirror      kind, scope, scope_id, name, prefix, key_count, fingerprint,
 - **谁进 configs_kv**：`provider`、`setting`、`plugin_enabled` 双写；
   **`channel` 不进**（它有自己的 `channels` 表，`migrateChannelsFromConfigs`
   负责搬迁）。迁移 `migrateConfigsToKV` 只回填 `provider` + `setting`。
-- **configs_mirror 是 configs_kv 的完整性标记**：每个 `configs` 行一条，记录这一行的投影
+- **configs_mirror 是镜像的完整性标记**：每个 `configs` 行一条，记录这一行的镜像
   覆盖哪个 KV 前缀、有多少个叶子（`key_count`）、这些叶子的指纹
   （`fingerprint`，`store.ConfigsKVFingerprint`）。双写在与叶子**同一个事务**里写它；
   有标记 = 某个双写把这一行的每个叶子都写下去了。它单独一张表而不是 configs_kv
-  里的一行，因为它是**关于投影的元数据**，不能出现在投影自身的前缀扫描里。
+  里的一行，因为它是**关于镜像的元数据**，不能出现在镜像自身的前缀扫描里。
 - **标记同时记 `enabled`**：一个 configs 行的读状态有两半——叶子集合（payload）
-  和 `enabled` 决策（disabled 行否决外层同名条目、并挡住 configs_kv 兜底）。只记前者，
+  和 `enabled` 决策（disabled 行否决外层同名条目、并挡住镜像兜底）。只记前者，
   标记就没法让翻转后的读侧回答「这个 scope 到底有没有提供它」；而一个
   **没有叶子的 disabled 行**在标记里完全没有表示。列可空，`NULL` 的含义是
   「这行标记写于该列存在之前，没有记录任何决策」——既不是 true 也不是 false。
-  `store.VerifyProjectionMarker(m, enabled, leaves)` 遇到 NULL 直接判否，于是旧标记
-  不会替一个没人写下的决策背书（`migrateProjectionMarkerEnabled` 刻意不回填：
+  `store.VerifyConfigMirror(m, enabled, leaves)` 遇到 NULL 直接判否，于是旧标记
+  不会替一个没人写下的决策背书（`migrateConfigsMirrorEnabled` 刻意不回填：
   答案可以从 `configs.enabled` 读出来，但标记是「写者记录了什么」的陈述，
   补写等于把缺失的记录变成断言）。
 
@@ -120,24 +118,24 @@ configs_mirror      kind, scope, scope_id, name, prefix, key_count, fingerprint,
 
 目标是 **`configs_kv` 单一权威表**：blob 逐键拆进 KV，读路径最终改成 KV 优先
 （乃至只读 KV），`configs` 表的 blob 列退场。当前所处的阶段是「blob 仍是权威读源、
-KV 是 configs_kv」，这是**迁移期的临时不变式**，不是终点。翻转权威不能靠改优先级硬来，
-必须先补齐下面这些前提——顺序反了就会重演 `web_search` 那段历史（投影还没保真就
+KV 是镜像」，这是**迁移期的临时不变式**，不是终点。翻转权威不能靠改优先级硬来，
+必须先补齐下面这些前提——顺序反了就会重演 `web_search` 那段历史（镜像还没保真就
 把 KV 当权威，缺陷被放大成线上故障）：
 
 | 阶段 | 前提 | 状态 |
 |---|---|---|
 | 0 | typed encoding：值域能表达「这是 string / number / bool…」，不靠读侧猜 | **已做**：`configs_kv.value_kind`（数字保字面量，`json.Number`） |
-| 1 | 事务化双写：blob 与 configs_kv 不会「写一半」 | **已做**：`store.WithConfigTx`（`9dbccd9`） |
-| 2 | 完整性标记：能判定「configs_kv = blob 的完整投影」，而不只是抽样一致 | **已做**：`configs_mirror` 表 + `store.ConfigProjectionMarker`（prefix / key_count / fingerprint / enabled）；双写与回填写标记，`store.VerifyProjectionMarker` 判定；存量行由 `store.ReconcileConfigProjections`（CLI `fastagent configs reconcile-kv [--strict] [--repair]`）做 blob↔configs_kv 核对、回填标记，`--repair` 时按 blob 重投影 diverged 行 |
-| 3 | 翻转权威：读路径改 KV 优先、blob 变兜底 | **未做（机制已就位，默认仍 blob 优先）**：读路径的权威选择收敛成 `scope` 的一个开关（`readmodel.go` 的 `configsReadAuthority`），单层与合并两类入口都接上，`configsKVFirst` 分支逐行要求 `store.ProjectionMarkerSelfConsistent` 认证——只有标记覆盖了刚读到的叶子，configs_kv 才作数，否则回落 blob。翻转因此是改这一个名字，不是改每一个调用方；准入仍是下面那条 `--strict` 验收 |
+| 1 | 事务化双写：blob 与镜像不会「写一半」 | **已做**：`store.WithConfigTx`（`9dbccd9`） |
+| 2 | 完整性标记：能判定「configs_kv 是 blob 的完整镜像」，而不只是抽样一致 | **已做**：`configs_mirror` 表 + `store.ConfigMirror`（prefix / key_count / fingerprint / enabled）；双写与回填写标记，`store.VerifyConfigMirror` 判定；存量行由 `store.ReconcileConfigMirrors`（CLI `fastagent configs reconcile-mirror [--strict] [--repair]`）做 blob↔镜像核对、回填标记，`--repair` 时按 blob 重建 diverged 行 |
+| 3 | 翻转权威：读路径改 KV 优先、blob 变兜底 | **未做（机制已就位，默认仍 blob 优先）**：读路径的权威选择收敛成 `scope` 的一个开关（`readmodel.go` 的 `configsReadAuthority`），单层与合并两类入口都接上，`configsKVFirst` 分支逐行要求 `store.MirrorSelfConsistent` 认证——只有标记覆盖了刚读到的叶子，镜像才作数，否则回落 blob。翻转因此是改这一个名字，不是改每一个调用方；准入仍是下面那条 `--strict` 验收 |
 | 4 | 下掉 blob：迁移完成后删除 `configs` 的 blob 列与相关读代码 | **未做** |
 
-在阶段 3 到来之前，**blob 权威**；configs_kv 必须是对 blob 的忠实投影，这不是终点契约，
+在阶段 3 到来之前，**blob 权威**；镜像必须忠实于 blob，这不是终点契约，
 而是「让阶段 3 安全着陆」的前置条件。阶段 2 的标记机制已经就位，阶段 3 的准入
-条件因此收窄成一条可执行的验收：**跑一次 `fastagent configs reconcile-kv
+条件因此收窄成一条可执行的验收：**跑一次 `fastagent configs reconcile-mirror
 --strict`，gap 归零且每一行都认证**（`--strict` 同时看 `Certified == Examined`，
 所以「有行没标记」本身就会红，不是一个 gap 之外的隐性缺口）。新写入与回填自动
-认证；存量行由这次核对认证（重新投影每一行、与实际 configs_kv 逐叶子比对）。比对分三种
+认证；存量行由这次核对认证（按 blob 重建每一行、与实际镜像逐叶子比对）。比对分三种
 结果：
 
 - **exact**（名字、值、`value_kind` 全同）→ 写标记，认证；
@@ -145,23 +143,23 @@ KV 是 configs_kv」，这是**迁移期的临时不变式**，不是终点。�
   再认证。这是刻意的例外：类型由权威的 blob 明确给出，补的是「已知的事实」而不是
   猜一个值，`value` 一个字节都不动；
 - **diverged**（缺叶子 / 多叶子 / 名字被改写 / 值不同 / 存的类型与 blob 矛盾）→
-  默认只报告 gap，并确保没有标记为它背书；加 `--repair` 则**按 blob 重投影该
-  namespace**（删掉它的全部 configs_kv 叶子 → 写投影 → 认证）。
-- **空投影**（这一行没有叶子）→ 也认证：它是合法的读状态（一个没有 payload 的
+  默认只报告 gap，并确保没有标记为它背书；加 `--repair` 则**按 blob 重建该
+  namespace**（删掉它的全部 configs_kv 叶子 → 从 blob 写入 → 认证）。
+- **空镜像**（这一行没有叶子）→ 也认证：它是合法的读状态（一个没有 payload 的
   disabled 行），标记里有 `enabled` 恰好能表示它。此前这一支会把标记删掉并
   `continue`，结果是「examined 里有它、certified 里没有、gap 也没有」——
-  一行 configs_kv 翻转后必须服务的行，没有任何东西为它背书。
+  一行镜像翻转后必须服务的行，没有任何东西为它背书。
 
 所以闸门是**「gap 归零 + 全量认证」**，untyped 允许存在但会被补掉。没有这一步，
-翻转权威等于把「configs_kv 可能不全」从潜伏变成正式语义。
+翻转权威等于把「镜像可能不全」从潜伏变成正式语义。
 
 核对被设计成**可重跑**的：默认那次只做「认证 + 报告 + 补标注」，**绝不改 diverged
 行的值**（不一致是需要人决策的数据，不是一个函数该替你选的值），所以重复跑结果
 稳定（第二次 untyped=0），适合放进发布前检查。
 
 `--repair` 是那个「人已经决策过」的动作，方向是**唯一的**：blob 权威，所以 diverged
-行按 blob 重投影，而不是反过来把 blob 改成 configs_kv 的样子。它修的是**旧构建写出来的
-形态**，不是「blob 与 configs_kv 谁对」的争议——两个已知来源：
+行按 blob 重建，而不是反过来把 blob 改成镜像的样子。它修的是**旧构建写出来的
+形态**，不是「blob 与镜像谁对」的争议——两个已知来源：
 
 - **塌陷**：更早的 flattener 只对**恰好** `map[string]interface{}` 下钻，于是
   `map[string]string`、`map[string]SomeCfg`、struct 都被当成一个 object 叶子写下去
@@ -180,19 +178,19 @@ SaveSetting / SaveProviderState / SaveAgentPluginEnabled   ← 唯一写入口
        ├─ KV 侧：DeleteConfigPrefix（含标记）
        │            → flattenJSONToKV → store.EncodeConfigValue(leaf)
        │            → SetConfigValue × n
-       │            → SaveProjectionMarker（ConfigProjectionMarker = prefix + key_count + fingerprint）
+       │            → SetConfigMirror（ConfigMirror = prefix + key_count + fingerprint）
        └─ blob 侧：ConfigRecord{Data map[string]interface{}} → SaveConfig → configs.data
 ```
 
 两张表在**同一个事务**里写（`9dbccd9`）；完整性标记也在这个事务里，所以「标记存在」
-等价于「这一行的每个叶子都写下去了」。configs_kv 现在是 blob 的投影，所以「写了一半」
+等价于「这一行的每个叶子都写下去了」。configs_kv 现在镜像 blob，所以「写了一半」
 不再是正常状态：任一语句失败就整体回滚，读侧不必再为半写状态兜底。
 `store.WithTx` / `store.WithConfigTx` 对没有事务能力的 store 退化成顺序执行——
 那是给测试替身和别的后端留的口子，不是生产路径的退路。
 
 **例外：channel 行只写 blob，无事务。** channel 有自己的 `channels` 表，
 `migrateChannelsFromConfigs` 能从 blob 重建那张索引，所以它没有需要与 blob 配对的
-configs_kv（见「存储面」），`SaveChannel` 因此只要求 `store.ConfigRowWriter`。
+镜像（见「存储面」），`SaveChannel` 因此只要求 `store.ConfigRowWriter`。
 
 值的类型在**写侧唯一确定一次**（`EncodeConfigValue`），此后读侧不再推断：
 
@@ -215,16 +213,16 @@ blob 侧同理走 `store.JSONToMap` / `store.ValueToMap`（`Decoder.UseNumber()`
 ### 读路径
 
 **优先级（当前阶段）：blob 权威，KV 兜底。** 只有当链路上四层都没有 blob 行时，
-才去读 configs_kv（configs_kv 可能被直接写过、也可能是历史行）。这是**迁移期**的读序：目标
+才去读镜像（镜像可能被直接写过、也可能是历史行）。这是**迁移期**的读序：目标
 形态是 KV 权威、blob 退场（见「目标形态与迁移阶段」），届时这张表的 KV 兜底列
 会整体翻面。
 
 **这个翻面已经收敛成一个开关，且带逐行认证，单层与合并两类读入口都接上了。**
 `readmodel.go` 持一个包级策略 `configsReadAuthority`：`blobFirst`（今天）就是
-上表；`configsKVFirst`（目标）让读先看 configs_kv，但**只在这一行的完整性标记认证了刚读
-到的叶子时才作数**（`store.ProjectionMarkerSelfConsistent`：指纹与 key 数都对得上、且标
+上表；`configsKVFirst`（目标）让读先看镜像，但**只在这一行的完整性标记认证了刚读
+到的叶子时才作数**（`store.MirrorSelfConsistent`：指纹与 key 数都对得上、且标
 记记录了 enabled 决策）。两者都不满足就走 blob——没有标记的历史行、被手工改过
-而漂移的行、标记早于 `enabled` 列的行，全都落回 blob，所以一个**不完整的投影永
+而漂移的行、标记早于 `enabled` 列的行，全都落回 blob，所以一个**不完整的镜像永
 远不会被当成整份**服务（这正是 `web_search` 事件的形状）。翻转 = 把这一个名字
 改成 `configsKVFirst`，前置是下面那条 `--strict` 验收；回归测试在
 `internal/scope/read_authority_test.go`（`blobFirst` 与 `configsKVFirst` 两种序都
@@ -233,27 +231,27 @@ blob 侧同理走 `store.JSONToMap` / `store.ValueToMap`（`Decoder.UseNumber()`
 两类读入口都走这一个开关：
 
 - **单层**（`SettingAt` / `ExactSetting` / `UserScopeSetting` / `ProvidersAt` /
-  `ProviderStateAt` / `AgentPluginEnabled`）：`configsKVFirst` 下先按行认证 configs_kv，认
-  证不过回落 blob（`settingAtRaw` / `settingFromCertifiedConfigsKV` / `certifiedMarker`）。
+  `ProviderStateAt` / `AgentPluginEnabled`）：`configsKVFirst` 下先按行认证镜像，认
+  证不过回落 blob（`settingAtRaw` / `settingFromCertifiedMirror` / `certifiedMirror`）。
 - **合并**（`Setting` / `SettingInto` / `BatchSettings` / `Providers`）：逐层做认证
   再合并（`settingLayerAt` / `providersLayerAt`），所以层级优先级和 veto 语义不
   变，变的只是「这一层的值来自哪张表」。合并逻辑本身抽成 `mergeSettingLayers`，
   `Setting` 与批量的 `BatchSettings` 共用，两者不会各写一份合并规则。
 
   批量这一路（`batchSettingsConfigsKVFirst`）每层只查三次——`ListConfigs`（blob 行）
-  + `ListConfigValues`（该 scope 全部叶子）+ `ListProjectionMarkers`（**新增的按 scope
-  批量标记读**，见 `store.ProjectionMarkerReader`）——然后在本地逐 namespace 认证，查询数是
+  + `ListConfigValues`（该 scope 全部叶子）+ `ListConfigMirrors`（**新增的按 scope
+  批量标记读**，见 `store.MirrorReader`）——然后在本地逐 namespace 认证，查询数是
   O(层数) 而不是 O(namespace × 层数)。`Setting` 与 `BatchSettings` 在两种序下都
   必须相等，`TestBatchSettingsMatchesSettingUnderConfigsKVFirst` 钉住（fixture 覆盖
-  认证行 / blob-only 未认证行 / disabled veto / 仅存在于原始 configs_kv 的行四条分支）。
+  认证行 / blob-only 未认证行 / disabled veto / 仅存在于原始镜像的行四条分支）。
 
 `Channels` / `Timezone` / `SettingNamesAt` / `RowsAt` 刻意不参与翻面（见上表各自
 的「无，且刻意如此」）。
 
-一个刻意的例外：**「哪张表都没有这一行」的最后一跳仍然直接读合并后的 configs_kv，不
+一个刻意的例外：**「哪张表都没有这一行」的最后一跳仍然直接读合并后的镜像，不
 做认证**。`configsKVFirst` 的认证只在「blob 本来能回答这一行」时才有意义——认证失
-败就回落 blob；而当整条链上既没有认证过的 configs_kv、也没有 blob 行时，行只存在于
-configs_kv 里（`mcp_undo` / `mcp_oauth_reload` 这类直接写 configs_kv 的 namespace），
+败就回落 blob；而当整条链上既没有认证过的镜像、也没有 blob 行时，行只存在于
+configs_kv 里（`mcp_undo` / `mcp_oauth_reload` 这类直接写镜像的 namespace），
 没有第二个来源可回落，所以照旧原样服务。这一跳在 `settingAtRaw`（经
 `settingFromBlob`）与 `Setting`（`GetValues`）里都在，`blobFirst` 与 `configsKVFirst`
 行为一致。
@@ -265,24 +263,24 @@ configs_kv 里（`mcp_undo` / `mcp_oauth_reload` 这类直接写 configs_kv 的 
 | `Providers` | 四层，内层整行替换 | 有（`kvValsToProviders`，规则 = `kvFieldMap`） |
 | `AgentScopeProviders` / `UserScopeProviders` | 单层 | 有 |
 | `AgentPluginEnabled` | agent 层单行 | 有 |
-| `BatchSettings` | 仅 system + user 两层 | 有。`blobFirst`：每层一次 `ListConfigs`，只对**没有 blob 行**的 namespace 逐个走 `Setting`（面板专用，N 个 namespace 合并成 2 次查询）。`configsKVFirst`：每层三次（`ListConfigs` + `ListConfigValues` + `ListProjectionMarkers`）后在本地逐 namespace 认证合并（`batchSettingsConfigsKVFirst`）|
-| `Channels` | 四层，disabled 行擦除外层（同下节的统一规则） | **无，且刻意如此**：channel 行从不进 KV（见「存储面」），`Channels` 没有可回落的 configs_kv。`TestChannelsHaveNoConfigsKVHalf` 钉住这个前提 |
-| `Timezone` | chatter → agent → user → system（反向优先级） | **无 —— 决定不补**（见残留风险 6）：`prefs` 是双写 namespace，但 `Timezone` 只逐层点查 blob。理由是它做的是「按优先级走层」而不是合并/投影，宽化它等于让非权威行去改一个用户可见的时间；生产写入只有 `SaveUserTimezone → SaveSetting`（事务化双写），dev 库 configs_kv 独有 prefs 行实测 0 |
+| `BatchSettings` | 仅 system + user 两层 | 有。`blobFirst`：每层一次 `ListConfigs`，只对**没有 blob 行**的 namespace 逐个走 `Setting`（面板专用，N 个 namespace 合并成 2 次查询）。`configsKVFirst`：每层三次（`ListConfigs` + `ListConfigValues` + `ListConfigMirrors`）后在本地逐 namespace 认证合并（`batchSettingsConfigsKVFirst`）|
+| `Channels` | 四层，disabled 行擦除外层（同下节的统一规则） | **无，且刻意如此**：channel 行从不进 KV（见「存储面」），`Channels` 没有可回落的镜像。`TestChannelsHaveNoConfigsKVHalf` 钉住这个前提 |
+| `Timezone` | chatter → agent → user → system（反向优先级） | **无 —— 决定不补**（见残留风险 6）：`prefs` 是双写 namespace，但 `Timezone` 只逐层点查 blob。理由是它做的是「按优先级走层」而不是合并/镜像，宽化它等于让非权威行去改一个用户可见的时间；生产写入只有 `SaveUserTimezone → SaveSetting`（事务化双写），dev 库镜像独有 prefs 行实测 0 |
 
 单层读模型（`readmodel.go`）是同一份规则的另一种形状，给「只要这一层」的调用方用：
 
 | 入口 | 解决的问题 | KV 兜底 |
 |---|---|---|
 | `SettingAt` | 一个 namespace 在一个 scope 上解析成 map（`ExactSetting` 的 map 形式）；返回浅拷贝，供读-改-写 | 有（与 `ExactSetting` 共用 `settingAtRaw`，即同一条规则，不是第二份实现） |
-| `ExactSetting` / `UserScopeSetting` | 同上，投影到 typed dst | 有 |
+| `ExactSetting` / `UserScopeSetting` | 同上，解码进 typed dst | 有 |
 | `ProvidersAt` / `ProviderStateAt` | 一个 scope 上的全部 / 单个 provider，`AgentScopeProviders` 与 `UserScopeProviders` 现在是它的两个薄壳。单数形式返回 `(payload, present, enabled)`：读-改-写要 `present`（被禁用的行仍有 payload，不能重置成 preset），运行时「这个 scope 用哪个 provider」要 `enabled` | 有，按名字 |
 | `SettingNamesAt` | 一个 scope **有行**的 namespace 集合（配置 dump、按 namespace 复制） | **无，且刻意如此**：从 KV 前缀反推 namespace 名需要 `ConfigsKVPrefixFor` 的逆映射，而这个布局里有改名，逆映射不存在。与 `Channels` / `Timezone` 同一取舍 |
 | `AgentScopeRows` | 一个 namespace 在 agent 层的**批量**行读（`tools.categories` / `tools.providers` / `skills.entries` / `agents.defaults` 的逐 agent 覆盖） | **暂无**：批量的意义就是一次查询，而这四个 namespace 都只经双写落盘。翻转时兜底加在这里，而不是它的四个调用方 |
-| `RowsAt` | 一个 scope 的原始行（面板 CRUD 编辑器要的是「这一层有哪些行」，用 id / updatedAt 寻址） | **无，且刻意如此**：configs_kv 独有的名字没有 id，列出来调用方也寻址不了。合并视图是 `Providers` / `Setting` / `BatchSettings` |
+| `RowsAt` | 一个 scope 的原始行（面板 CRUD 编辑器要的是「这一层有哪些行」，用 id / updatedAt 寻址） | **无，且刻意如此**：镜像独有的名字没有 id，列出来调用方也寻址不了。合并视图是 `Providers` / `Setting` / `BatchSettings` |
 
 **收敛本身是可执行的**：`internal/scope/read_routing_test.go` 扫
 `internal/` + `cmd/` 的生产代码，`scope` / `store` 之外任何一处用整行读方法读
-带 configs_kv 的 kind 就红。写侧同理收在唯一入口（`SaveSetting` /
+带镜像的 kind 就红。写侧同理收在唯一入口（`SaveSetting` /
 `SaveProviderState` / `SaveAgentPluginEnabled`），所以「哪张表」这个决定在两张表
 上都只有一处。
 
@@ -296,7 +294,7 @@ plugin_enabled 一视同仁：
 | 读入口 | disabled 行的后果 |
 |---|---|
 | `Channels` / `Providers` / `AgentScopeProviders` / `UserScopeProviders` | 从结果里删掉该名字，并挡住更外层同名条目 |
-| `Setting` / `SettingInto` / `BatchSettings` / `ExactSetting` | 该 namespace 解析为空，且**不回落 configs_kv**——行本身已经表达了决定 |
+| `Setting` / `SettingInto` / `BatchSettings` / `ExactSetting` | 该 namespace 解析为空，且**不回落镜像**——行本身已经表达了决定 |
 | `AgentPluginEnabled` | 视为「没有这个覆盖」 |
 | `Timezone` | 返回 `""`，不再问更外层（否则会捡回内层刚刚否掉的值） |
 
@@ -308,10 +306,10 @@ plugin_enabled 一视同仁：
 
 #### 兜底粒度：按名字，不按链条（`23736ee`）
 
-provider 的 configs_kv 兜底原来以「链」为单位：只要链路上任一层的 blob 行覆盖过这种
-kind，configs_kv 就整个不读。于是「blob 里有一个 provider、configs_kv 里另有一个只由 KV 写入的
+provider 的镜像兜底原来以「链」为单位：只要链路上任一层的 blob 行覆盖过这种
+kind，镜像就整个不读。于是「blob 里有一个 provider、镜像里另有一个只由 KV 写入的
 provider」时，后者会凭空消失。现在按**名字**判定——blob 决定过的名字由 blob 负责，
-其余名字继续去 configs_kv 取。
+其余名字继续去镜像取。
 
 未标注行（`value_kind = ''`，即 value_kind 之前写下的历史行）在两条读路径上
 的规则**不同**，这是历史行为，不是遗漏：
@@ -361,7 +359,7 @@ provider 行的形状还有一条隐含前提：前缀 `<名字>.` 之后**每�
 所以它们能被安全地 snake↔camel 转换。名字本身是数据段，但它由写入方拼进前缀、
 从不经过 `kvkeys` 的转换器（写侧另有 charset 白名单挡住无法表示的名字）。
 `internal/scope/provider_kv_data_key_test.go` 从两端钉住这条前提：一次真实的
-configs_kv 往返，加一个反射守卫——`config.ProviderConfig` 里一旦出现 map / interface
+镜像往返，加一个反射守卫——`config.ProviderConfig` 里一旦出现 map / interface
 字段（会被折叠器递归进去改 key 大小写），测试立刻红。
 
 ### 面板读写（`/api/config`，`7f72934`）
@@ -387,7 +385,7 @@ configs_kv 往返，加一个反射守卫——`config.ProviderConfig` 里一旦
 **这条「面板与 runtime 同构」只覆盖 `/api/config`。** 另一组面板端点——按
 (scope, scopeId) 组织的 CRUD（`GET/POST/PUT/DELETE /api/providers`、
 `/api/channels`）——走的是 `listConfigsByScope`（`setup/handlers_scoped.go`）
-→ `scope.RowsAt`，读的是**某一个 scope 的行**，不合并、不回落 configs_kv。
+→ `scope.RowsAt`，读的是**某一个 scope 的行**，不合并、不回落镜像。
 对一个编辑器来说这是刻意的（它要列出「这一层有哪些行」而不是「解析结果是什么」）。
 两个后果分别做了取舍（测试：`setup/providers_scope_list_test.go`）：
 
@@ -395,9 +393,9 @@ configs_kv 往返，加一个反射守卫——`config.ProviderConfig` 里一旦
   `:346`）。既然 enabled 对 provider 是有语义的（disabled 行删掉该 provider 并
   否决外层同名条目），编辑器就必须能表示这个状态，否则它会展示一条 runtime 根本
   不用的行、却看起来一切正常。
-- **不合并 configs_kv，刻意不对齐**：列表只报本 scope 的 blob 行，看不到只存在于 configs_kv 的
+- **不合并镜像，刻意不对齐**：列表只报本 scope 的 blob 行，看不到只存在于镜像的
   provider。这个端点是一张按 `id` 增删改的 CRUD 表，而 `id` / `updatedAt` 都是
-  blob 行的属性——列出 configs_kv 行等于给调用方一个无法寻址的条目。解析后的合并视图是
+  blob 行的属性——列出镜像行等于给调用方一个无法寻址的条目。解析后的合并视图是
   `/api/config`（以及 runtime 的 `Providers`）的职责。
 
 另：`configs_kv_e2e_test.go` 里曾有一条陈旧注释（原写「handleListProviders
@@ -408,11 +406,11 @@ reads through scope.Providers」），是 51780fa 之前的化石，已更正。
 `store.Store` 是 120 个方法的单一接口，而 configs 域实际只用十来个：读侧
 `GetConfigByName` / `ListConfigs` / `ListConfigValues`（外加批量形的
 `BatchGetConfigsByAgentIDs`，它问的是同一个问题、只是访问形状不同，调用方与这三个
-完全重合），configs_kv 标记的 `GetProjectionMarker` / `ListProjectionMarkers`，写侧 `SaveConfig` /
-`DeleteConfig` / `SetConfigValue` / `DeleteConfigPrefix` / `SaveProjectionMarker` /
-`DeleteProjectionMarker`。`scope` 现在按能力声明参数——`ConfigReader`（四个行读）/
-`ConfigReadStore`（`ConfigReader` + `ProjectionMarkerReader`，即行读 + 标记读，迁移期的读
-路径取它）/ `ProjectionMarkerReader`（单点 + 按 scope 批量标记读）/ `ConfigRowWriter` /
+完全重合），镜像标记的 `GetConfigMirror` / `ListConfigMirrors`，写侧 `SaveConfig` /
+`DeleteConfig` / `SetConfigValue` / `DeleteConfigPrefix` / `SaveConfigMirror` /
+`DeleteConfigMirror`。`scope` 现在按能力声明参数——`ConfigReader`（四个行读）/
+`ConfigReadStore`（`ConfigReader` + `MirrorReader`，即行读 + 标记读，迁移期的读
+路径取它）/ `MirrorReader`（单点 + 按 scope 批量标记读）/ `ConfigRowWriter` /
 `ConfigWriter` / `ConfigStore` / `KVStore`——全是十位数以下的方法数，于是一个只读
 配置的调用方、或一个测试替身，不必再实现 users / agents / sessions / cron / MCP。
 
@@ -426,18 +424,18 @@ ports.go 编译失败，而不是在某个无关调用点爆掉。事务的窄�
 
 1. 值类型在写侧确定一次；读侧不猜（未标注行除外，规则见上表）。
 2. 当前阶段 blob 是权威、KV 是兜底：任一读入口只有在链条上没有 blob 行时才碰
-   configs_kv，且兜底粒度按**名字**，不按链条。翻转（`configsKVFirst`）后这条变成「KV 是
-   权威、blob 是兜底」——但 configs_kv 只在这一行的标记认证了刚读到的叶子时才作数（见
-   「读路径」），认证不过仍回落 blob，所以「按名字」和「不完整投影不被当成整份」
+   镜像，且兜底粒度按**名字**，不按链条。翻转（`configsKVFirst`）后这条变成「KV 是
+   权威、blob 是兜底」——但镜像只在这一行的标记认证了刚读到的叶子时才作数（见
+   「读路径」），认证不过仍回落 blob，所以「按名字」和「不完整镜像不被当成整份」
    两条都不变。
 3. 数据 key 段两个方向都不转换，`kvkeys` 是唯一规则来源。
 4. 四层所有权 → (scope, scope_id) 只有 `store.KVScopeFromOwnership` 一处定义。
 5. 新写入的 configs_kv 行必带 `value_kind`（生产路径只经 `EncodeConfigValue`）。
-6. 双写在一个事务里；channel 例外，它没有 configs_kv 可配对。
-7. enabled 全入口一条语义：disabled 行否决外层同名条目，且该 namespace 不回落 configs_kv。
+6. 双写在一个事务里；channel 例外，它没有镜像可配对。
+7. enabled 全入口一条语义：disabled 行否决外层同名条目，且该 namespace 不回落镜像。
 8. 面板与 runtime 共用同一组解析器；面板写侧只写请求提到的 namespace。
 9. 「读哪张表」只在 `internal/scope` 里决定：adapter 只用读模型，不出现整行读
-   方法 + 带 configs_kv kind 的组合（`read_routing_test.go` 扫源码钉住）。
+   方法 + 带镜像 kind 的组合（`read_routing_test.go` 扫源码钉住）。
 10. `configs_mirror` 的标记描述一个行的**完整读状态**：叶子集合 + `enabled` 决策。
 11. 第 4 层 scope 的 `user` 是**发起人**：overlay 用调用方账号（`UserSpace.UserID`），
     `prefs` 用消息发起人（`chatterUID`）。`UserSpace` 的 key 是调用方账号，两者
@@ -445,10 +443,10 @@ ports.go 编译失败，而不是在某个无关调用点爆掉。事务的窄�
 
 违反 1 的症状是「值变形/丢字段」，违反 2 的症状是「面板正常、运行时不生效」，
 违反 3 的症状是「配置写进去了但运行时查不到」（`web_search` 事件），
-违反 4 的症状是「另一个 agent 读到了别人的 key」，违反 6 的症状是「configs_kv 与 blob
+违反 4 的症状是「另一个 agent 读到了别人的 key」，违反 6 的症状是「镜像与 blob
 互相矛盾且说不清是谁写的」，违反 8 的症状是「面板看着对、跑起来不对」。每类都
 有一组回归测试。违反 9 的症状是「翻转权威时要改 N 个调用点、漏一个就静默不生效」，
-违反 10 的症状是「翻转后 disabled 行复活」（一条被禁用的 provider/channel 在 configs_kv
+违反 10 的症状是「翻转后 disabled 行复活」（一条被禁用的 provider/channel 在镜像
 读路径上重新出现）。违反 11 的症状是「两把 key 被当成一把」——群聊成员的个人偏好
 写进/读成 owner 的行（或反过来，owner 的行被当成某个成员的）。
 
@@ -644,13 +642,13 @@ web_search，模型只能回 “Unknown tool: web_search”，而 owner 自己�
 `web_search`；未配置的 `tts` 不注册）、`TestToolConfigForAgentOwnerOverlay`
 （owner user 行覆盖、system 行保留、调用方快照不被改写）。
 
-## review 补充修复：bindings 信封 / 投影回退 / LIKE 前缀
+## review 补充修复：bindings 信封 / 镜像回退 / LIKE 前缀
 
 同一轮 review 又找出三处「KV 影子表与 legacy blob 形状不一致」的爆点，已修：
 
 1. **bindings 行形状 vs 运行时字段**。`bindings` namespace 存的是
    `{"list":[…]}`（`settingNamespaces.collect`），而 `config.Config.Bindings`
-   是扁平切片。把整行 map 直接投影到 `&cfg.Bindings` 会报
+   是扁平切片。把整行 map 直接解码到 `&cfg.Bindings` 会报
    `cannot unmarshal object into Go value of type []config.Binding`：
    `assembleConfig` 直接返回错误 → **该用户整个 UserSpace 加载失败**
    （dashboard 侧 `loadUserConfig` 因为 `_ =` 吞掉错误，表现为 bindings 静默丢失）。
@@ -658,13 +656,13 @@ web_search，模型只能回 “Unknown tool: web_search”，而 owner 自己�
    调用方已有的 bindings。dev 库目前没有 bindings 行，属于潜伏问题。
    回归测试：`internal/gateway/bindings_row_test.go`。
 
-2. **`parseKVValue` 的类型再推断会打断投影**（这一整类问题已由后面的
+2. **`parseKVValue` 的类型再推断会打断镜像解码**（这一整类问题已由后面的
    `value_kind` 根治，此条保留作为历史记录）。KV 里存的是字符串，读回时
    `"123"` → number、`"true"` → bool、`"{…}"`/`"[…]"` → object/array。
    于是 `objectstore.s3.bucket = "123"` 这类「字符串字段装了数字样的值」会在
    `json.Unmarshal` 处失败并带走整个 namespace。`SettingInto` 现在在这种
-   投影失败时退回 legacy blob（blob 保留精确 JSON 类型）并打
-   `slog.Warn("configs_kv projection failed; served from the legacy blob")`。
+   镜像解码失败时退回 legacy blob（blob 保留精确 JSON 类型）并打
+   `slog.Warn("configs_kv mirror failed; served from the legacy blob")`。
    回归测试：`internal/scope/configs_kv_test.go` →
    `TestSettingIntoFallsBackToLegacyBlob`。
 
@@ -677,15 +675,15 @@ web_search，模型只能回 “Unknown tool: web_search”，而 owner 自己�
 
 ## 读源优先级：blob 权威，configs_kv 兜底（51780fa）
 
-原来的读路径是 **configs_kv 优先、blob 兜底**，这条规则把所有投影缺陷都
-放大成了线上故障：投影会重新推断类型（`"123"` → number）、会改写嵌套数据 key、
+原来的读路径是 **configs_kv 优先、blob 兜底**，这条规则把所有镜像缺陷都
+放大成了线上故障：镜像读会重新推断类型（`"123"` → number）、会改写嵌套数据 key、
 无法表示空 map，而且 `dualWriteSettingKV` 是「先删前缀、再逐行写」的过程
 （当时无事务；现已由 `9dbccd9` 收进一个事务，见「写路径」）——只要 KV 有任意一行，
 `Setting` 就完全无视 blob，于是 namespace 静默丢掉 KV 没覆盖到的那些 key。
 `web_search` 事件正是这条链路的产物。
 
 现在反过来：**legacy blob 是权威读源**（精确 JSON 类型、完整 key 集合，dashboard
-本来就读它），configs_kv 只在 blob 没有对应行时兜底（直接写进 configs_kv 的行）。
+本来就读它），configs_kv 只在 blob 没有对应行时兜底（直接写进镜像的行）。
 查询次数不变（两侧都是每层一次点查/前缀扫），但运行时与面板现在看的是同一份
 数据——「面板显示正常、运行时不生效」这一整类问题从读路径上消失。
 
@@ -695,12 +693,12 @@ web_search，模型只能回 “Unknown tool: web_search”，而 owner 自己�
 重写为 `TestProvidersDualWriteReadsFromBlob`。生产代码里没有任何「只写 KV」的
 业务路径：`SetConfigValue` 的调用点只有双写本身（setting / provider /
 plugin_enabled 三处）、`migrateConfigsToKV` 的回填，以及 mcp undo 游标。
-（**更正**：后来 `store.ReconcileConfigProjections` 也走它——untyped 行的补标注、
-以及 `--repair` 的重投影，见「目标形态与迁移阶段」。写入方仍是那几处，变的只是
+（**更正**：后来 `store.ReconcileConfigMirrors` 也走它——untyped 行的补标注、
+以及 `--repair` 的重建，见「目标形态与迁移阶段」。写入方仍是那几处，变的只是
 它们属于「双写」还是「认证」。）
 
-投影侧同时补了两处：`kvkeys` 对「自由 map 容器」（`options` / `env` / `config`）
-改用前缀规则，任意深度都算数据 key；provider 投影不再吞掉 `json.Unmarshal`
+镜像侧同时补了两处：`kvkeys` 对「自由 map 容器」（`options` / `env` / `config`）
+改用前缀规则，任意深度都算数据 key；provider 镜像不再吞掉 `json.Unmarshal`
 错误，且未标注的行走保守规则（`kvFieldMap`）：结构照解，标量按存储字符串还原。
 带 `value_kind` 的行不走这条保守规则——写侧已经说明了类型，读侧直接采信
 （见下文「值保真」与「现状」的未标注行对照表）。这里的「结构照解」在当时被
@@ -773,17 +771,17 @@ backend=docker」的死代码一并删除——它只是让一行没人读的数
 
 ### P3：`plugins.enabled` 独立成 kind
 
-该行原先与 `plugins` setting namespace 共用 `kind=setting`。它的 configs_kv 行名是
-`plugins.enabled.<pluginID>`，而 system 的 `plugins` 行 configs_kv 里有一个**标量**
+该行原先与 `plugins` setting namespace 共用 `kind=setting`。它的镜像行名是
+`plugins.enabled.<pluginID>`，而 system 的 `plugins` 行镜像里有一个**标量**
 `plugins.enabled`（`PluginsCfg.Enabled`）——同一
 `(kind, scope, scope_id)` 分区内的前缀重叠，fallback 读 `plugins` 时
 `out["enabled"]` 可能是 bool 也可能是 map，**取决于 map 迭代顺序**。
 
 现在该行归 `store.KindPluginEnabled`（`kind="plugin_enabled"`），
 读写都收口到 `scope.SaveAgentPluginEnabled` / `scope.AgentPluginEnabled`
-（blob 优先、configs_kv 兜底，configs_kv 写在自己的 kind 分区），dashboard 与运行时读同一
-份实现。`store.migratePluginEnabledKind` 把存量行（blob 行 + configs_kv 行）迁到新
-kind，并且刻意不碰 `plugins.enabled` 标量 configs_kv 行；语句用
+（blob 优先、镜像兜底，镜像写在自己的 kind 分区），dashboard 与运行时读同一
+份实现。`store.migratePluginEnabledKind` 把存量行（blob 行 + 镜像行）迁到新
+kind，并且刻意不碰 `plugins.enabled` 标量镜像行；语句用
 `NOT EXISTS` 保护 `(kind,user_id,agent_id,name)` 唯一键，SQLite / Postgres
 都可重复执行。
 
@@ -812,7 +810,7 @@ per-agent 行不可见 + base 不被改写）、`TestEnsureAgentHonorsAgentScope
 - `%g` 往返把 `9223372036854775807` 变成 `9.223372036854776e+18`，
   与原串不等 → 旧代码判定「不是数字」→ 19 位 id 以**字符串**回来，
   再 unmarshal 进 `int64` 字段就报错；
-- `nil` 直接跳过不写行，于是 `{"a":null}` 与 `{}` 在 configs_kv 里长得一样。
+- `nil` 直接跳过不写行，于是 `{"a":null}` 与 `{}` 在镜像里长得一样。
 
 这是量变到质变：靠读侧校验补不回来，因为信息在**写入时**就已经不在了。
 
@@ -887,7 +885,7 @@ tag 补不回来（`TestConfigValueNumberFloat64Boundary` 钉住这条边界）�
 
 - `strconv.FormatFloat(t, 'g', -1, 64)` 在 **1e6** 就切指数记法（`"1e+06"`），
   而 `encoding/json` 要到 1e21 才切。`"1e+06"` 是合法 JSON 数字，但不是整数字面量，
-  `jsonInto` 把 `contextWindow: 1000000` 投影回 `int` 字段时报
+  `jsonInto` 把 `contextWindow: 1000000` 解码回 `int` 字段时报
   `cannot unmarshal number 1e+06 into Go value of type int64`——而这个 float64
   是**每个**设置写入的常态（`setup.toMap` 的结构体 → `map[string]interface{}`
   一跳就把 int 变成 float64）。现在 float 分支直接输出 `json.Marshal` 的字节
@@ -898,7 +896,7 @@ tag 补不回来（`TestConfigValueNumberFloat64Boundary` 钉住这条边界）�
 
 `TestConfigValueIntegralFloatKeepsJSONIntForm` / `TestConfigValueNestedNumbersKeepTheirDigits`
 与 `scope` 侧的 `TestSettingLargeIntThroughKVOnlyPath`（`maxTokens: 2000000`
-经 `toMap` 落库再从 configs_kv 投影回 `AgentDefaults`）钉住这两条。
+经 `toMap` 落库再从镜像解码回 `AgentDefaults`）钉住这两条。
 
 ### 回归测试
 
@@ -912,8 +910,8 @@ tag 补不回来（`TestConfigValueNumberFloat64Boundary` 钉住这条边界）�
 `TestDecodeConfigValueMalformedObjectKeepsText`、`TestDecodeLegacyValue`
 （旧启发式逐例保留）、`TestConfigsKvValueKindRoundTrip`（tag 落库并读回）、
 `TestMigrateConfigsKvValueKindRetrofitsLegacyTable`（老表补列 + 幂等 + 老行仍可读）；
-`scope` → `TestMirrorFallbackRestoresValueTypes`（**端到端**：删掉 blob 行后从 configs_kv
-投影出 `int64` / `string "123"` / `bool` / 空串，未加 tag 时该测试失败）、
+`scope` → `TestMirrorFallbackRestoresValueTypes`（**端到端**：删掉 blob 行后从镜像
+解出 `int64` / `string "123"` / `bool` / 空串，未加 tag 时该测试失败）、
 `TestGetValuesScopePrecedence`（内层同时替换值与 tag）、
 `TestProvidersMirrorFallbackKeepsNumericKey`（标注行与未标注行各一例）、
 `TestProvidersConfigsKVFallbackKeepsLegacyStructure`（未标注的 `models` 数组行必须
@@ -959,7 +957,7 @@ func ValueToMap(v interface{}) map[string]interface{}         // Marshal + JSONT
 不变式：**任何 `interface{}` 里承载的 config 数字都是 `json.Number` 字面量**，
 `float64` 只在调用方显式转换时出现（和 `ConfigValue.Decode` 对 `number` 的约定
 一致）。`json.Number` marshal 时原样输出，所以它在每一跳都不变形：
-`SaveConfig` 写列、`flattenJSONToKV` 写 configs_kv、HTTP 响应体、CLI 打印。
+`SaveConfig` 写列、`flattenJSONToKV` 写镜像、HTTP 响应体、CLI 打印。
 
 覆盖：`store` 的六处 JSON 文本列解码（`configs.data` / `channels.data` /
 `agents.config`）、`scope.providerToData` / `channelToData`、
@@ -968,7 +966,7 @@ masked 响应、`gateway` 的 channel 更新、CLI 的 `structMap` /
 `channelConfigData`。typed 目标（`json.Unmarshal(blob, &cfg)` 到结构体）不需要
 改：解码器本来就是按字段类型解析字面量的。
 
-**代价**：字面量被原样保留，所以客户端写 `2e6` 存下的就是 `2e6`，投影到 `int`
+**代价**：字面量被原样保留，所以客户端写 `2e6` 存下的就是 `2e6`，解码到 `int`
 字段会报错（旧行为是 `float64` 把它规范化成 `2000000` 才存）。JS 的
 `JSON.stringify` 对 <1e21 的整数不会产出指数形式，实际很难撞上；真要容忍
 指数写法，正确的位置是**读侧的 typed 归一化**（按目标字段解析字面量），
@@ -994,10 +992,10 @@ plugin / skills manifest 的解码。它们不参与 config 往返，需要时�
 
 provider 名同时是两样东西：`configs_kv` 的 key 前缀（`<名>.<字段>`，而
 `kvValsToProviders` 只能按**第一个点**切）和 `provider/model` 引用的左半边。
-名字里带 `.` 时 configs_kv 投影会把 `my.provider.api_key` 切成 provider `my` + 字段
-`provider.api_key`，投影出一个空 `ProviderConfig`；带 `/` 则与 model 引用
+名字里带 `.` 时镜像读会把 `my.provider.api_key` 切成 provider `my` + 字段
+`provider.api_key`，解出一个空 `ProviderConfig`；带 `/` 则与 model 引用
 的分隔符撞车。写侧原来只校验非空，于是这种名字能建出来，只在「blob 行缺席、
-读 configs_kv」时才暴露。
+读镜像」时才暴露。
 
 现在 `scope.ValidateProviderName` 是唯一规则：`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`。
 `SaveProvider` 在入口调用它（HTTP 建/改、admin API、onboarding、CLI 都走这里，
@@ -1005,15 +1003,15 @@ provider 名同时是两样东西：`configs_kv` 的 key 前缀（`<名>.<字段
 500。回归测试：`scope` → `TestValidateProviderName`（含 `SaveProvider` 这条
 写入路径）、`setup` → `TestCreateProvider_RejectsAmbiguousName`。
 
-**兼容性**：存量行不动。已存在的非法名 blob 行照常读（blob 权威），它们的 configs_kv
+**兼容性**：存量行不动。已存在的非法名 blob 行照常读（blob 权威），它们的镜像
 行本来就是坏的（历史写入时已经按小写化存过 `my.provider.api_key`），没有可回填
 的东西。没有改名接口，这类行要么删除重建，要么保持只读；`PUT /api/providers`
 现在也会回 400 而不是让 SaveProvider 抛 500。
 
 ### 2. `BatchSettings` 补上 KV 兜底（`Channels` 明确不补）
 
-除 `BatchSettings` 外每个读入口都会在「链路上没有 blob 行」时回落到 configs_kv，
-只有它直接返回 `mergeByNamespace` 的结果。于是「只写在 configs_kv 里的 namespace」在
+除 `BatchSettings` 外每个读入口都会在「链路上没有 blob 行」时回落到镜像，
+只有它直接返回 `mergeByNamespace` 的结果。于是「只写在镜像里的 namespace」在
 面板上看不到，而运行时能解析出来——正是 `web_search` 事件的反向形态。
 
 现在对**没有 blob 行**的那几个 namespace 逐个调用 `Setting`（契约的定义者，
@@ -1021,12 +1019,12 @@ provider 名同时是两样东西：`configs_kv` 的 key 前缀（`<名>.<字段
 优化），有 blob 行的 namespace 不付额外查询，面板的 2 次查询快路径在常见情况下
 不变。「有没有 blob 行」看的是**行**，不是合并结果：`Enabled: false` 的行是
 「关掉这个 namespace」的决定，`mergeByNamespace` 已经把它排除，若按合并结果
-判断就会把它的值从 configs_kv 里复活。回归测试：`TestBatchSettingsFallsBackToMirror`
-（blob namespace 取 blob、configs_kv 独有 namespace 取 configs_kv、没人写过的 namespace 仍然
+判断就会把它的值从镜像里复活。回归测试：`TestBatchSettingsFallsBackToMirror`
+（blob namespace 取 blob、镜像独有 namespace 取镜像、没人写过的 namespace 仍然
 缺席）与既有的 `TestBatchSettings_DisabledRowIgnored`。
 
 `Channels` 仍然没有兜底，这是**刻意的**：channel 行从不进 `configs_kv`（它有自己的
-`channels` 表），没有可回落的 configs_kv。这个前提现在由
+`channels` 表），没有可回落的镜像。这个前提现在由
 `TestChannelsHaveNoConfigsKVHalf` 钉住——哪天有人加了 channel 的半套双写，这条
 会先红，指向 `Channels` 必须先学会兜底。
 
@@ -1039,7 +1037,7 @@ provider 名同时是两样东西：`configs_kv` 的 key 前缀（`<名>.<字段
 这一轮不是「又发现一个漏读」，而是把前三轮反复出现的同一类问题从**根上**收口：
 同一个概念在多处各有一份实现或每处各有一套语义。八件事，按依赖顺序：
 
-1. **兜底粒度对齐**（`23736ee`）：configs_kv 兜底按名字而不是按链条，见「兜底粒度」。
+1. **兜底粒度对齐**（`23736ee`）：镜像兜底按名字而不是按链条，见「兜底粒度」。
    症状与此前的 `web_search` 同源——「明明写了，读的人看不到」，只是这次消失在
    provider 的合并层。
 2. **enabled 语义对齐**（`23736ee`）：「行存在即决定、disabled 否决外层」从 channel
@@ -1050,11 +1048,11 @@ provider 名同时是两样东西：`configs_kv` 的 key 前缀（`<名>.<字段
    真的否决外层」——那正是这条语义要来管的事。
 3. **面板读写改增量、读模型与 runtime 同构**（`7f72934`）：设计落在 Go 侧
    （`settingNamespace.jsonPath` + `namespacesInBody`），前端只渲染。
-4. **双写事务化**（`9dbccd9`）：`WithTx` / `WithConfigTx` 把 blob 与 configs_kv 包进一个
+4. **双写事务化**（`9dbccd9`）：`WithTx` / `WithConfigTx` 把 blob 与镜像包进一个
    事务。UT 三层——`store/tx_test.go`（提交 / 回调回滚 / 语句失败 / 嵌套加入 /
    无事务退化的 `WithTx` 路径）、`scope/tx_dualwrite_test.go`（半途失败的
    provider / plugin / 成对删除）、`setup/tx_dualwrite_e2e_test.go`（真 handler +
-   注入失败的 configs_kv store → 500 且两张表都没动，另有健康对照组）。
+   注入失败的镜像 store → 500 且两张表都没动，另有健康对照组）。
    **刻意不做**：channel（`channels` 表能从 blob 重建，见「写路径」）。
 5. **provider data-key 回归测试**：见「key 正确性」末段
    （`provider_kv_data_key_test.go`）。
@@ -1066,8 +1064,8 @@ provider 名同时是两样东西：`configs_kv` 的 key 前缀（`<名>.<字段
    `TestPanelReadModelMatchesRuntimeResolver` 是表驱动的双路径对照——面板 handler
    是路径 A，用单 namespace 解析器（`scope.Setting`，不是 handler 用的
    `BatchSettings`）独立拼一份是路径 B，两边的 namespace / providers / channels
-   必须逐字一致；每个 case 另有独立断言（veto 不能复活、configs_kv 兜底要生效、stale
-   configs_kv 不能盖过 blob、禁用的 provider/channel 不能出现）。把 handler 的 user
+   必须逐字一致；每个 case 另有独立断言（veto 不能复活、镜像兜底要生效、stale
+   镜像不能盖过 blob、禁用的 provider/channel 不能出现）。把 handler 的 user
    scope 改错就能看到它红，所以它钉的是行为，不是实现的自证。
 
 ## 残留风险
@@ -1077,24 +1075,24 @@ provider 名同时是两样东西：`configs_kv` 的 key 前缀（`<名>.<字段
    `decodeLegacyValue` 猜标量，providers 只解结构、标量保持文本）——`"123"` 与
    数字 `123` 在列里本就不可分。这些行只在被重新写入时获得 tag。回填被刻意
    排除：那是把猜测写成事实。排查这类行可用 `SELECT ... WHERE value_kind = ''`。
-2. **configs_kv 仍可能不完整（且它就是翻转权威的准入条件）**：生产写入已事务化，但
-   历史行与直接写 configs_kv 的路径仍会留下子集（迁移回填、手工 SQL、以后可能出现的
-   KV-only writer）。现在只表现为「configs_kv 与 blob 不一致」，不影响读取，因为 blob
+2. **KV 镜像仍可能不完整（且它就是翻转权威的准入条件）**：生产写入已事务化，但
+   历史行与直接写镜像的路径仍会留下子集（迁移回填、手工 SQL、以后可能出现的
+   KV-only writer）。现在只表现为「镜像与 blob 不一致」，不影响读取，因为 blob
    仍是权威。方向是 `configs` 演进成 `configs_kv`（见「目标形态与迁移阶段」），
    **2026-09-13 复核确认保留 `configs_kv` 并沿这条路线继续**（见
    `configs-kv-scope-decision.md`「追加决策」）；
-   configs_kv 必须是对 blob 的忠实投影——但这是**迁移期的临时不变式**，服务于阶段 3 的
+   镜像必须忠实于 blob——但这是**迁移期的临时不变式**，服务于阶段 3 的
    翻转，不是终点契约。**这个风险现在可判定了**：`configs_mirror` 的标记让
-   「这一行被完整投影过」成为记录下来的事实，`store.VerifyProjectionMarker` 同时挡住
+   「这一行被完整镜像过」成为记录下来的事实，`store.VerifyConfigMirror` 同时挡住
    「标记之后行又被改过」（手工 SQL 删一个叶子就会被抓到）。因此翻转之前剩下的
-   只有一步——**跑 `fastagent configs reconcile-kv --strict`，gap 归零且
+   只有一步——**跑 `fastagent configs reconcile-mirror --strict`，gap 归零且
    `Certified == Examined`**（存量行没有标记 = 未认证 = 翻转后必须回落 blob；
    核对一致才回填标记，不一致的行留作待决策）。
    在那之前，新增写入路径要么双写（收在同一个 `Save*` 入口里，自动带标记），要么
    明确登记为 KV-only 并同时补上读侧与编辑器的可见性。
    **`enabled` 已进标记**（2026-09-13）：旧构建写下的标记没有 `enabled` 列，
    迁移只加列不回填，所以它们一律判为「未记录」，由这次核对重新认证。
-3. **空 map 只在读侧恢复**：`flattenJSONToKV` 仍然不为 `{}` 产出行，所以 configs_kv 里
+3. **空 map 只在读侧恢复**：`flattenJSONToKV` 仍然不为 `{}` 产出行，所以镜像里
    没有这个 key（读 blob 时正确返回空对象）。
 4. **LIKE 转义只覆盖已发现的位置**：`configs_kv` 的 name/scope_id 前缀匹配都已
    转义；新增按前缀匹配的 SQL 时要记得走 `likePrefixPattern` / `escapeLike`。
@@ -1104,12 +1102,12 @@ provider 名同时是两样东西：`configs_kv` 的 key 前缀（`<名>.<字段
   `plugins` 等「仅系统层可读」的 namespace（当前 CLI/HTTP 都不产生这种行）。
   约定：新增一个 agent 层可写的 namespace 时，必须同时让 runtime 读它，或者
   像 sandbox 一样在写侧拒绝——两者都没有就是这次的 bug 类。
-6. **`Timezone` 是唯一没有 configs_kv 兜底的读入口——决定：不补**（2026-09-12）。它的
+6. **`Timezone` 是唯一没有镜像兜底的读入口——决定：不补**（2026-09-12）。它的
    形状与修复前的 `Providers` 相同，但结论相反，理由是它做的事不同：`Timezone`
-   是按优先级**走层**（chatter → agent → user → system），不是合并也不是投影；
+   是按优先级**走层**（chatter → agent → user → system），不是合并也不是镜像；
    给它加兜底等于让一个非权威行去决定用户可见的时间，而这恰好是「blob 权威」这
    条规则要挡住的方向。生产写入只有 `SaveUserTimezone → SaveSetting`（事务化双写，
-   必然留下 blob 行），dev 库 configs_kv 独有 prefs 行实测为 0，所以没有需要服务的行。
+   必然留下 blob 行），dev 库镜像独有 prefs 行实测为 0，所以没有需要服务的行。
    若将来出现 KV-only 的 prefs 写入方，**由那条写入路径负责补 blob 行**，而不是
    宽化这个读循环。`timezone.go` 的函数注释里记了同一条，避免下一次 review 又把它
    当遗漏重新提出来。翻转权威（阶段 3）时它会**整体**从 blob 优先改成 KV 优先，
@@ -1117,7 +1115,7 @@ provider 名同时是两样东西：`configs_kv` 的 key 前缀（`<名>.<字段
 
 ## review 第五轮：标记补 enabled / 读模型收敛（2026-09-13）
 
-第四轮之后重新走了一遍「翻转权威」的准入条件，发现前四轮修的是**投影是否正确**，
+第四轮之后重新走了一遍「翻转权威」的准入条件，发现前四轮修的是**镜像是否正确**，
 而漏掉了**读状态是否完整**和**读点是否收敛**这两件事。三处改动：
 
 ### 1. `configs_mirror` 加 `enabled`
@@ -1127,18 +1125,18 @@ provider 名同时是两样东西：`configs_kv` 的 key 前缀（`<名>.<字段
 
 - **翻转当天 disabled 行复活**：`scope.Providers` 对 `!Enabled` 的行做
   `delete(out, name)`，`Setting` 用它做 veto；而双写**无论 enabled 与否都把叶子
-  写进 configs_kv**（`dualWriteProviderKV` 不带分支）。于是「configs_kv + 标记」这一侧无法
-  表达「这一行说了不要它」，翻转后 configs_kv 会把它复活。dev 库现在 0 条 disabled 行，
+  写进镜像**（`dualWriteProviderKV` 不带分支）。于是「镜像 + 标记」这一侧无法
+  表达「这一行说了不要它」，翻转后镜像会把它复活。dev 库现在 0 条 disabled 行，
   所以这个洞今天是隐形的——这正是它危险的地方。
 - **没有叶子的 disabled 行没有表示**：`len(want)==0 && len(got)==0` 那一支原本
   删标记并 `continue`，于是 `Examined` 里有它、`Certified` 里没有、`Gaps` 里也
-  没有——`--strict` 的「gap 归零」在有一行无人背书的情况下依然通过。现在空投影
+  没有——`--strict` 的「gap 归零」在有一行无人背书的情况下依然通过。现在空镜像
   走同一条 switch（它本来就判为 exact），标记写下 `enabled` + 0 个叶子。
 
 列**可空**，`NULL` = 「写于该列存在之前，没记录任何决策」。与 `value_kind` 的
 取舍一致（不把猜测写成事实）：那里是信息在写入时已被销毁，这里是信息还在
 `configs.enabled` 但**标记的语义是写者的记录**，回填等于伪造一条记录。代价是
-旧标记一律判为未认证，由一次 `reconcile-kv --strict` 重新认证——而那次运行
+旧标记一律判为未认证，由一次 `reconcile-mirror --strict` 重新认证——而那次运行
 本来就是翻转前的准入条件。
 
 配套：`--strict` 从「无 gap」升级为「无 gap 且 `Certified == Examined`」。
@@ -1156,12 +1154,12 @@ provider 名同时是两样东西：`configs_kv` 的 key 前缀（`<名>.<字段
 
 - `SettingAt` / `SettingNamesAt` / `ProviderStateAt` / `ProvidersAt` /
   `AgentScopeRows` / `RowsAt` 六个入口覆盖了全部调用形状；
-- `ExactSetting` 改写成 `settingAtRaw` 的一层投影，`AgentScopeProviders` /
+- `ExactSetting` 改写成 `settingAtRaw` 的一层薄封装，`AgentScopeProviders` /
   `UserScopeProviders` 改成 `ProvidersAt` 的薄壳——同一个规则从三份实现变成一份；
 - 顺带删掉两个重复实现（`cmd_tools.go` 的 `loadSettingExact` 就是 `ExactSetting`
   的手抄版；`handlers_scoped.go` 的 `getConfigByNameScope` 零调用方）。
 
-代价与收益都是显式的：收敛后**configs_kv 独有的行对所有 adapter 都可见**了（此前只有
+代价与收益都是显式的：收敛后**镜像独有的行对所有 adapter 都可见**了（此前只有
 runtime 的合并读路径看得见），也就是「面板说没有、跑起来有」这一类不一致从读侧
 消失；反过来，`RowsAt` 与 `SettingNamesAt` 明确**不给**兜底，理由写在代码里
 （编辑器按 id 寻址；前缀反推 namespace 需要逆映射而布局里有改名）。
@@ -1178,8 +1176,8 @@ runtime 的合并读路径看得见），也就是「面板说没有、跑起来
 ### 文档更正
 
 「读源优先级」一节写的「`SetConfigValue` 的调用点只有双写 / 回填 / mcp undo」
-在第四轮之后就不再完整——`store.ReconcileConfigProjections` 的补标注与 `--repair`
-重投影也走它。已在原句处标注更正。
+在第四轮之后就不再完整——`store.ReconcileConfigMirrors` 的补标注与 `--repair`
+重建也走它。已在原句处标注更正。
 
 ## 对上游的 PR 提案
 

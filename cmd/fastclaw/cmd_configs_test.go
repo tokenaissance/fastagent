@@ -2,7 +2,7 @@ package main
 
 import "testing"
 
-func TestConfigsReconcileProjectionCmd_Structure(t *testing.T) {
+func TestConfigsReconcileMirrorCmd_Structure(t *testing.T) {
 	root := configsCmd()
 	if root.Use != "configs" {
 		t.Errorf("expected Use='configs', got %q", root.Use)
@@ -10,7 +10,7 @@ func TestConfigsReconcileProjectionCmd_Structure(t *testing.T) {
 
 	var found bool
 	for _, sub := range root.Commands() {
-		if sub.Use != "reconcile-kv" {
+		if sub.Use != "reconcile-mirror" {
 			continue
 		}
 		found = true
@@ -31,6 +31,6 @@ func TestConfigsReconcileProjectionCmd_Structure(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatal("missing reconcile-kv subcommand")
+		t.Fatal("missing reconcile-mirror subcommand")
 	}
 }

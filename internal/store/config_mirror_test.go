@@ -26,7 +26,7 @@ func TestConfigsKVFingerprintIsOrderIndependentAndSensitive(t *testing.T) {
 	}
 
 	// Same text, different tag: a string "1" and the number 1 must not hash
-	// the same, or value_kind would not be part of the projection identity.
+	// the same, or value_kind would not be part of the mirror identity.
 	changedKind := map[string]ConfigValue{
 		"openai.api_key":  StringValue("sk-1"),
 		"openai.api_base": {Value: "https://api.openai.com", Kind: ValueKindNull},
@@ -46,65 +46,65 @@ func TestConfigsKVFingerprintIsOrderIndependentAndSensitive(t *testing.T) {
 }
 
 // A marker certifies exactly the leaf set it was built from — no more, no less.
-func TestVerifyProjectionMarker(t *testing.T) {
+func TestVerifyConfigMirror(t *testing.T) {
 	leaves := map[string]ConfigValue{"openai.api_key": StringValue("sk-1")}
-	m := NewConfigProjectionMarker("openai.", true, leaves)
+	m := NewConfigMirror("openai.", true, leaves)
 	if m.KeyCount != 1 || m.Prefix != "openai." {
-		t.Fatalf("NewConfigProjectionMarker = %+v", m)
+		t.Fatalf("NewConfigMirror = %+v", m)
 	}
-	if !VerifyProjectionMarker(m, true, leaves) {
+	if !VerifyConfigMirror(m, true, leaves) {
 		t.Fatal("marker does not verify its own leaves")
 	}
 
-	if VerifyProjectionMarker(m, true, map[string]ConfigValue{}) {
-		t.Fatal("marker verified an empty (subset) projection")
+	if VerifyConfigMirror(m, true, map[string]ConfigValue{}) {
+		t.Fatal("marker verified an empty (subset) mirror")
 	}
 	superset := map[string]ConfigValue{
 		"openai.api_key": StringValue("sk-1"),
 		"openai.extra":   StringValue("x"),
 	}
-	if VerifyProjectionMarker(m, true, superset) {
-		t.Fatal("marker verified a superset projection")
+	if VerifyConfigMirror(m, true, superset) {
+		t.Fatal("marker verified a superset mirror")
 	}
 
 	// A marker with no fingerprint certifies nothing — an uncertified row must
 	// never read as complete just because a marker row exists.
-	if VerifyProjectionMarker(ConfigProjectionMarker{Prefix: "openai."}, true, leaves) {
+	if VerifyConfigMirror(ConfigMirror{Prefix: "openai."}, true, leaves) {
 		t.Fatal("fingerprint-less marker verified leaves")
 	}
 }
 
-// ProjectionMarkerSelfConsistent is the blob-free half of verification: the check a
+// MirrorSelfConsistent is the blob-free half of verification: the check a
 // mirror-first reader runs against the leaves it just loaded. It must hold
 // whenever the marker covers those leaves, regardless of any blob, and fail on
-// the same completeness violations VerifyProjectionMarker catches.
-func TestProjectionMarkerSelfConsistent(t *testing.T) {
+// the same completeness violations VerifyConfigMirror catches.
+func TestMirrorSelfConsistent(t *testing.T) {
 	leaves := map[string]ConfigValue{"openai.api_key": StringValue("sk-1")}
-	m := NewConfigProjectionMarker("openai.", true, leaves)
-	if !ProjectionMarkerSelfConsistent(m, leaves) {
+	m := NewConfigMirror("openai.", true, leaves)
+	if !MirrorSelfConsistent(m, leaves) {
 		t.Fatal("marker does not certify its own leaves")
 	}
 	// The decision is the marker's; self-consistency does not consult a blob,
 	// so a marker recording "disabled" still certifies its leaves.
-	if !ProjectionMarkerSelfConsistent(NewConfigProjectionMarker("openai.", false, leaves), leaves) {
+	if !MirrorSelfConsistent(NewConfigMirror("openai.", false, leaves), leaves) {
 		t.Fatal("a disabled marker did not certify its leaves")
 	}
 
-	if ProjectionMarkerSelfConsistent(m, map[string]ConfigValue{}) {
-		t.Fatal("marker certified an empty (subset) projection")
+	if MirrorSelfConsistent(m, map[string]ConfigValue{}) {
+		t.Fatal("marker certified an empty (subset) mirror")
 	}
-	if ProjectionMarkerSelfConsistent(m, map[string]ConfigValue{
+	if MirrorSelfConsistent(m, map[string]ConfigValue{
 		"openai.api_key": StringValue("sk-1"),
 		"openai.extra":   StringValue("x"),
 	}) {
-		t.Fatal("marker certified a superset projection")
+		t.Fatal("marker certified a superset mirror")
 	}
-	if ProjectionMarkerSelfConsistent(ConfigProjectionMarker{Prefix: "openai."}, leaves) {
+	if MirrorSelfConsistent(ConfigMirror{Prefix: "openai."}, leaves) {
 		t.Fatal("fingerprint-less marker certified leaves")
 	}
-	unrecorded := NewConfigProjectionMarker("openai.", true, leaves)
+	unrecorded := NewConfigMirror("openai.", true, leaves)
 	unrecorded.Enabled = nil
-	if ProjectionMarkerSelfConsistent(unrecorded, leaves) {
+	if MirrorSelfConsistent(unrecorded, leaves) {
 		t.Fatal("a marker with no recorded decision certified its leaves")
 	}
 }
@@ -112,37 +112,37 @@ func TestProjectionMarkerSelfConsistent(t *testing.T) {
 // enabled is half of what a marker attests to, so the two halves cannot be
 // swapped: leaves that match under the wrong decision are not certified, and a
 // marker written before the column existed attests to no decision at all.
-func TestVerifyProjectionMarkerCoversEnabled(t *testing.T) {
+func TestVerifyConfigMirrorCoversEnabled(t *testing.T) {
 	leaves := map[string]ConfigValue{"openai.api_key": StringValue("sk-1")}
 
-	enabledMarker := NewConfigProjectionMarker("openai.", true, leaves)
-	if VerifyProjectionMarker(enabledMarker, false, leaves) {
+	enabledMarker := NewConfigMirror("openai.", true, leaves)
+	if VerifyConfigMirror(enabledMarker, false, leaves) {
 		t.Fatal("an enabled marker verified a disabled row")
 	}
-	disabledMarker := NewConfigProjectionMarker("openai.", false, leaves)
-	if VerifyProjectionMarker(disabledMarker, true, leaves) {
+	disabledMarker := NewConfigMirror("openai.", false, leaves)
+	if VerifyConfigMirror(disabledMarker, true, leaves) {
 		t.Fatal("a disabled marker verified an enabled row")
 	}
-	if !VerifyProjectionMarker(disabledMarker, false, leaves) {
+	if !VerifyConfigMirror(disabledMarker, false, leaves) {
 		t.Fatal("a disabled marker did not verify its own decision")
 	}
 
 	// The row registry also has to represent a row with no leaves at all — a
-	// disabled namespace — which is why the empty projection is a legal,
+	// disabled namespace — which is why the empty mirror is a legal,
 	// certifiable marker rather than one that gets deleted.
-	empty := NewConfigProjectionMarker("agent.", false, map[string]ConfigValue{})
-	if !VerifyProjectionMarker(empty, false, map[string]ConfigValue{}) {
-		t.Fatal("an empty disabled projection did not verify")
+	empty := NewConfigMirror("agent.", false, map[string]ConfigValue{})
+	if !VerifyConfigMirror(empty, false, map[string]ConfigValue{}) {
+		t.Fatal("an empty disabled mirror did not verify")
 	}
-	if VerifyProjectionMarker(empty, true, map[string]ConfigValue{}) {
-		t.Fatal("an empty projection verified under the wrong decision")
+	if VerifyConfigMirror(empty, true, map[string]ConfigValue{}) {
+		t.Fatal("an empty mirror verified under the wrong decision")
 	}
 
 	// A marker with no recorded decision (written before the column existed)
 	// is rejected either way, rather than defaulting to one of the two.
 	unrecorded := disabledMarker
 	unrecorded.Enabled = nil
-	if VerifyProjectionMarker(unrecorded, false, leaves) || VerifyProjectionMarker(unrecorded, true, leaves) {
+	if VerifyConfigMirror(unrecorded, false, leaves) || VerifyConfigMirror(unrecorded, true, leaves) {
 		t.Fatal("a marker with no enabled record certified a decision")
 	}
 }
