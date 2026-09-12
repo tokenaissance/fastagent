@@ -76,7 +76,7 @@ func TestSetPreferenceWritesPerUserAgentScope(t *testing.T) {
 
 	// configs_kv dual-write at the per-(user,agent) layer.
 	v, err := db.GetConfigValue(ctx, store.KindSetting, scope.UserAgent, "chatter-1/agent-A", "prefs.timezone")
-	if err != nil || v != "Asia/Shanghai" {
+	if err != nil || v.Value != "Asia/Shanghai" {
 		t.Errorf("configs_kv prefs.timezone = %q err=%v; want Asia/Shanghai", v, err)
 	}
 

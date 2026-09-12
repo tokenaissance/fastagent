@@ -12,14 +12,14 @@ func TestConfigsKVCRUD(t *testing.T) {
 	defer db.Close()
 	ctx := context.Background()
 
-	if err := db.SetConfigValue(ctx, KindProvider, "user", "user-a", "openai.api_key", "sk-1"); err != nil {
+	if err := db.SetConfigValue(ctx, KindProvider, "user", "user-a", "openai.api_key", StringValue("sk-1")); err != nil {
 		t.Fatalf("SetConfigValue: %v", err)
 	}
 	// Upsert overwrites.
-	if err := db.SetConfigValue(ctx, KindProvider, "user", "user-a", "openai.api_key", "sk-2"); err != nil {
+	if err := db.SetConfigValue(ctx, KindProvider, "user", "user-a", "openai.api_key", StringValue("sk-2")); err != nil {
 		t.Fatalf("SetConfigValue upsert: %v", err)
 	}
-	if err := db.SetConfigValue(ctx, KindProvider, "user", "user-a", "openai.api_base", "https://api.openai.com"); err != nil {
+	if err := db.SetConfigValue(ctx, KindProvider, "user", "user-a", "openai.api_base", StringValue("https://api.openai.com")); err != nil {
 		t.Fatalf("SetConfigValue base: %v", err)
 	}
 
@@ -27,7 +27,7 @@ func TestConfigsKVCRUD(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetConfigValue: %v", err)
 	}
-	if v != "sk-2" {
+	if v.Value != "sk-2" {
 		t.Fatalf("GetConfigValue = %q, want %q", v, "sk-2")
 	}
 
@@ -36,7 +36,7 @@ func TestConfigsKVCRUD(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListConfigValues prefix: %v", err)
 	}
-	if len(m) != 2 || m["openai.api_key"] != "sk-2" {
+	if len(m) != 2 || m["openai.api_key"].Value != "sk-2" {
 		t.Fatalf("ListConfigValues prefix = %v", m)
 	}
 
@@ -138,7 +138,7 @@ func TestMigrateConfigsToKV(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GetConfigValue(%s,%s,%s,%s): %v", c.kind, c.scope, c.scopeID, c.name, err)
 		}
-		if v != c.want {
+		if v.Value != c.want {
 			t.Fatalf("migrated %s/%s/%s/%s = %q, want %q", c.kind, c.scope, c.scopeID, c.name, v, c.want)
 		}
 	}
@@ -149,7 +149,7 @@ func TestMigrateConfigsToKV(t *testing.T) {
 		t.Fatalf("second migrateConfigsToKV: %v", err)
 	}
 	v, err := db.GetConfigValue(ctx, KindProvider, "system", "", "openai.api_key")
-	if err != nil || v != "sk-sys" {
+	if err != nil || v.Value != "sk-sys" {
 		t.Fatalf("after second migrate: v=%q err=%v", v, err)
 	}
 }
@@ -157,24 +157,6 @@ func TestMigrateConfigsToKV(t *testing.T) {
 // TestCamelToSnakeAllCaps pins the a49f9d4 fix: ALL_CAPS and already_snake
 // strings pass through (lowercased only) instead of getting a per-char
 // underscore. REPLICATE_API_TOKEN was becoming r_e_p_l_i_c_a_t_e__a_p_i__t_o_k_e_n.
-func TestCamelToSnakeAllCaps(t *testing.T) {
-	cases := []struct {
-		in, want string
-	}{
-		{"apiKey", "api_key"},                          // camelCase → snake
-		{"apiBase", "api_base"},                        // camelCase → snake
-		{"REPLICATE_API_TOKEN", "replicate_api_token"}, // ALL_CAPS → lowercase only
-		{"api_base", "api_base"},                       // already_snake → passthrough lowercased
-		{"model", "model"},                             // single lowercase word
-		{"HTTP", "http"},                               // single ALL_CAPS word → lowercase only (was h_t_t_p)
-	}
-	for _, c := range cases {
-		if got := camelToSnake(c.in); got != c.want {
-			t.Errorf("camelToSnake(%q) = %q, want %q", c.in, got, c.want)
-		}
-	}
-}
-
 // TestMigrateConfigsToKV_AllCapsKey is the migration-path regression guard
 // for a49f9d4: a provider whose Data contains an ALL_CAPS key (e.g. an env
 // token like REPLICATE_API_TOKEN) must flatten to a clean dotted key, not
@@ -201,7 +183,7 @@ func TestMigrateConfigsToKV_AllCapsKey(t *testing.T) {
 	}
 
 	v, err := db.GetConfigValue(ctx, KindProvider, "user", "user-a", "replicate.replicate_api_token")
-	if err != nil || v != "r8_abc123" {
+	if err != nil || v.Value != "r8_abc123" {
 		t.Fatalf("migrated ALL_CAPS key = %q err=%v; want replicate.replicate_api_token=r8_abc123", v, err)
 	}
 	// The mangled per-char form must NOT exist.
@@ -224,7 +206,7 @@ func TestConfigsKVLIKEUnderscoreIsLiteral(t *testing.T) {
 
 	names := []string{"foo_bar.apiKey", "fooXbar.apiKey", "pct%bar.apiKey", "pctZbar.apiKey"}
 	for _, name := range names {
-		if err := db.SetConfigValue(ctx, KindProvider, "user", "user-a", name, "v"); err != nil {
+		if err := db.SetConfigValue(ctx, KindProvider, "user", "user-a", name, StringValue("v")); err != nil {
 			t.Fatalf("SetConfigValue(%s): %v", name, err)
 		}
 	}
@@ -234,14 +216,14 @@ func TestConfigsKVLIKEUnderscoreIsLiteral(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListConfigValues foo_bar.: %v", err)
 	}
-	if len(got) != 1 || got["foo_bar.apiKey"] != "v" {
+	if len(got) != 1 || got["foo_bar.apiKey"].Value != "v" {
 		t.Fatalf("ListConfigValues foo_bar. = %v, want only foo_bar.apiKey", got)
 	}
 	got, err = db.ListConfigValues(ctx, KindProvider, "user", "user-a", "pct%bar.")
 	if err != nil {
 		t.Fatalf("ListConfigValues pct%%bar.: %v", err)
 	}
-	if len(got) != 1 || got["pct%bar.apiKey"] != "v" {
+	if len(got) != 1 || got["pct%bar.apiKey"].Value != "v" {
 		t.Fatalf("ListConfigValues pct%%bar. = %v, want only pct%%bar.apiKey", got)
 	}
 
@@ -253,7 +235,7 @@ func TestConfigsKVLIKEUnderscoreIsLiteral(t *testing.T) {
 		t.Fatalf("DeleteConfigPrefix pct%%bar.: %v", err)
 	}
 	for _, name := range []string{"fooXbar.apiKey", "pctZbar.apiKey"} {
-		if v, err := db.GetConfigValue(ctx, KindProvider, "user", "user-a", name); err != nil || v != "v" {
+		if v, err := db.GetConfigValue(ctx, KindProvider, "user", "user-a", name); err != nil || v.Value != "v" {
 			t.Fatalf("%s = %q err=%v, want it untouched by the look-alike prefix delete", name, v, err)
 		}
 	}
@@ -281,10 +263,10 @@ func TestDeleteAgentEscapesLookalikeScopeIDs(t *testing.T) {
 			t.Fatalf("SaveAgent(%s): %v", ag.ID, err)
 		}
 	}
-	if err := db.SetConfigValue(ctx, KindSetting, "user-agent", "u_a/agt_1", "bindings.timezone", "drop"); err != nil {
+	if err := db.SetConfigValue(ctx, KindSetting, "user-agent", "u_a/agt_1", "bindings.timezone", StringValue("drop")); err != nil {
 		t.Fatalf("SetConfigValue doppelganger target: %v", err)
 	}
-	if err := db.SetConfigValue(ctx, KindSetting, "user-agent", "u_b/agtX1", "bindings.timezone", "keep"); err != nil {
+	if err := db.SetConfigValue(ctx, KindSetting, "user-agent", "u_b/agtX1", "bindings.timezone", StringValue("keep")); err != nil {
 		t.Fatalf("SetConfigValue lookalike: %v", err)
 	}
 
@@ -294,7 +276,7 @@ func TestDeleteAgentEscapesLookalikeScopeIDs(t *testing.T) {
 	if _, err := db.GetConfigValue(ctx, KindSetting, "user-agent", "u_a/agt_1", "bindings.timezone"); err == nil {
 		t.Fatalf("deleted agent's own user-agent rows survived")
 	}
-	if v, err := db.GetConfigValue(ctx, KindSetting, "user-agent", "u_b/agtX1", "bindings.timezone"); err != nil || v != "keep" {
+	if v, err := db.GetConfigValue(ctx, KindSetting, "user-agent", "u_b/agtX1", "bindings.timezone"); err != nil || v.Value != "keep" {
 		t.Fatalf("lookalike agent's row = %q err=%v, want it untouched", v, err)
 	}
 }
@@ -313,10 +295,10 @@ func TestDeleteUserEscapesLookalikeScopeIDs(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateUser: %v", err)
 	}
-	if err := db.SetConfigValue(ctx, KindSetting, "user-agent", "u_a/agt_9", "bindings.timezone", "drop"); err != nil {
+	if err := db.SetConfigValue(ctx, KindSetting, "user-agent", "u_a/agt_9", "bindings.timezone", StringValue("drop")); err != nil {
 		t.Fatalf("SetConfigValue doppelganger target: %v", err)
 	}
-	if err := db.SetConfigValue(ctx, KindSetting, "user-agent", "uXa/agt_9", "bindings.timezone", "keep"); err != nil {
+	if err := db.SetConfigValue(ctx, KindSetting, "user-agent", "uXa/agt_9", "bindings.timezone", StringValue("keep")); err != nil {
 		t.Fatalf("SetConfigValue lookalike: %v", err)
 	}
 
@@ -326,7 +308,7 @@ func TestDeleteUserEscapesLookalikeScopeIDs(t *testing.T) {
 	if _, err := db.GetConfigValue(ctx, KindSetting, "user-agent", "u_a/agt_9", "bindings.timezone"); err == nil {
 		t.Fatalf("deleted user's own user-agent rows survived")
 	}
-	if v, err := db.GetConfigValue(ctx, KindSetting, "user-agent", "uXa/agt_9", "bindings.timezone"); err != nil || v != "keep" {
+	if v, err := db.GetConfigValue(ctx, KindSetting, "user-agent", "uXa/agt_9", "bindings.timezone"); err != nil || v.Value != "keep" {
 		t.Fatalf("lookalike user's row = %q err=%v, want it untouched", v, err)
 	}
 }

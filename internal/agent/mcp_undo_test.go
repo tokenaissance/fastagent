@@ -260,7 +260,7 @@ type failingCursorStore struct {
 	store.Store
 }
 
-func (f *failingCursorStore) SetConfigValue(ctx context.Context, kind, scope, scopeID, name, value string) error {
+func (f *failingCursorStore) SetConfigValue(ctx context.Context, kind, scope, scopeID, name string, value store.ConfigValue) error {
 	return errors.New("cursor write failed (injected)")
 }
 

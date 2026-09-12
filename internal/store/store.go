@@ -278,20 +278,24 @@ type Store interface {
 	// --- Configs KV (single-value key-value pairs) ---
 	//
 	// configs_kv is the successor to the JSON-blob configs table. Each row
-	// stores exactly one scalar value; the dotted name encodes the former
-	// JSON hierarchy. During migration both tables are written (dual-write);
-	// reads prefer configs_kv when populated.
+	// stores exactly one value — its text plus a value_kind tag naming the
+	// JSON type that text is (see ConfigValue) — and the dotted name encodes
+	// the former JSON hierarchy. The tag exists because TEXT alone cannot
+	// tell the string "123" from the number 123, and a reader that has to
+	// guess eventually guesses wrong. During migration both tables are
+	// written (dual-write); reads prefer configs_kv when populated.
 
 	// GetConfigValue returns a single config value.
-	GetConfigValue(ctx context.Context, kind, scope, scopeID, name string) (string, error)
-	// SetConfigValue sets a single config value (upsert).
-	SetConfigValue(ctx context.Context, kind, scope, scopeID, name, value string) error
+	GetConfigValue(ctx context.Context, kind, scope, scopeID, name string) (ConfigValue, error)
+	// SetConfigValue sets a single config value (upsert). Use
+	// EncodeConfigValue to build the payload from a decoded JSON value.
+	SetConfigValue(ctx context.Context, kind, scope, scopeID, name string, value ConfigValue) error
 	// DeleteConfigValue deletes a single config value.
 	DeleteConfigValue(ctx context.Context, kind, scope, scopeID, name string) error
 	// ListConfigValues returns all config values matching a prefix.
 	// Use name="" to get all values for a (kind, scope, scopeID).
 	// Use name="sandbox." to get all sandbox.* values.
-	ListConfigValues(ctx context.Context, kind, scope, scopeID, namePrefix string) (map[string]string, error)
+	ListConfigValues(ctx context.Context, kind, scope, scopeID, namePrefix string) (map[string]ConfigValue, error)
 	// DeleteConfigPrefix deletes all values matching a name prefix.
 	DeleteConfigPrefix(ctx context.Context, kind, scope, scopeID, namePrefix string) error
 

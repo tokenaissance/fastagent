@@ -3,6 +3,7 @@ package scope
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"reflect"
 	"testing"
 
@@ -22,51 +23,72 @@ func openScopeDB(t *testing.T) *store.DBStore {
 	return db
 }
 
+// legacyKV builds untagged rows — the shape a writer that predates
+// value_kind left behind. Reconstruction tests use it to keep pinning the
+// legacy guessing path (which still exists for those rows); the tagged path
+// is covered in internal/store/config_value_test.go.
+func legacyKV(kv map[string]string) map[string]store.ConfigValue {
+	out := make(map[string]store.ConfigValue, len(kv))
+	for k, v := range kv {
+		out[k] = store.ConfigValue{Value: v}
+	}
+	return out
+}
+
 // TestGetValueScopePrecedence pins the configs_kv resolution order:
 // system → user → agent → per-(user, agent), innermost wins.
-func TestGetValueScopePrecedence(t *testing.T) {
+//
+// The precedence itself lives in GetValues (the reader the KV fallbacks go
+// through) now that the single-key GetValue wrapper is gone. The tag rides
+// with the winning row, so the assertion below is on the whole ConfigValue:
+// an inner scope must replace the outer value *and* its type, not just the
+// text.
+func TestGetValuesScopePrecedence(t *testing.T) {
 	db := openScopeDB(t)
 	defer db.Close()
 	ctx := context.Background()
 
-	set := func(sc, sid, name, val string) {
+	set := func(sc, sid, name string, val store.ConfigValue) {
 		t.Helper()
 		if err := db.SetConfigValue(ctx, store.KindSetting, sc, sid, name, val); err != nil {
 			t.Fatalf("SetConfigValue(%s,%s,%s): %v", sc, sid, name, err)
 		}
 	}
-	set(System, "", "theme", "system-theme")
-	set(User, "user-a", "theme", "user-theme")
-	set(Agent, "agent-x", "theme", "agent-theme")
-	set(UserAgent, "user-a/agent-x", "theme", "per-theme")
+	// The innermost row is tagged a number on purpose: if scope merge
+	// replaced only the text and kept the outer tag, this would come back as
+	// the string "1".
+	set(System, "", "theme", store.StringValue("system-theme"))
+	set(User, "user-a", "theme", store.StringValue("user-theme"))
+	set(Agent, "agent-x", "theme", store.StringValue("agent-theme"))
+	set(UserAgent, "user-a/agent-x", "theme", store.EncodeConfigValue(1))
 
-	v, found, err := GetValue(ctx, db, store.KindSetting, "theme", "user-a", "agent-x")
-	if err != nil || !found {
-		t.Fatalf("GetValue full chain: v=%q found=%v err=%v", v, found, err)
+	got, err := GetValues(ctx, db, store.KindSetting, "theme", "user-a", "agent-x")
+	if err != nil {
+		t.Fatalf("GetValues full chain: %v", err)
 	}
-	if v != "per-theme" {
-		t.Fatalf("per-(user,agent) should win, got %q", v)
+	if v := got["theme"]; v.Value != "1" || v.Kind != store.ValueKindNumber {
+		t.Fatalf("per-(user,agent) should win, got %+v", v)
 	}
 
 	// Without the per-(user,agent) row → agent wins.
 	if err := db.DeleteConfigValue(ctx, store.KindSetting, UserAgent, "user-a/agent-x", "theme"); err != nil {
 		t.Fatalf("delete per: %v", err)
 	}
-	v, _, _ = GetValue(ctx, db, store.KindSetting, "theme", "user-a", "agent-x")
-	if v != "agent-theme" {
-		t.Fatalf("agent should win without per layer, got %q", v)
+	got, _ = GetValues(ctx, db, store.KindSetting, "theme", "user-a", "agent-x")
+	if v := got["theme"]; v.Value != "agent-theme" || v.Kind != store.ValueKindString {
+		t.Fatalf("agent should win without per layer, got %+v", v)
 	}
 
 	// User only (agent empty) → user wins.
-	v, _, _ = GetValue(ctx, db, store.KindSetting, "theme", "user-a", "")
-	if v != "user-theme" {
-		t.Fatalf("user should win when agent empty, got %q", v)
+	got, _ = GetValues(ctx, db, store.KindSetting, "theme", "user-a", "")
+	if v := got["theme"]; v.Value != "user-theme" {
+		t.Fatalf("user should win when agent empty, got %+v", v)
 	}
 
 	// Neither user nor agent → system.
-	v, _, _ = GetValue(ctx, db, store.KindSetting, "theme", "", "")
-	if v != "system-theme" {
-		t.Fatalf("system should win when no user/agent, got %q", v)
+	got, _ = GetValues(ctx, db, store.KindSetting, "theme", "", "")
+	if v := got["theme"]; v.Value != "system-theme" {
+		t.Fatalf("system should win when no user/agent, got %+v", v)
 	}
 }
 
@@ -106,7 +128,7 @@ func TestProviderPerUserAgentIsolation(t *testing.T) {
 
 	// The value was written at the user-agent layer, not the user layer.
 	v, err := db.GetConfigValue(ctx, store.KindProvider, UserAgent, "user-a/agent-x", "openai.api_key")
-	if err != nil || v != "sk-per" {
+	if err != nil || v.Value != "sk-per" {
 		t.Fatalf("configs_kv user-agent openai.api_key = %q err=%v", v, err)
 	}
 	if _, err := db.GetConfigValue(ctx, store.KindProvider, User, "user-a", "openai.api_key"); err == nil {
@@ -135,12 +157,12 @@ func TestProvidersDualWriteReadsFromBlob(t *testing.T) {
 
 	// configs_kv now holds the flattened row.
 	v, err := db.GetConfigValue(ctx, store.KindProvider, User, "user-a", "openai.api_key")
-	if err != nil || v != "sk-1" {
+	if err != nil || v.Value != "sk-1" {
 		t.Fatalf("configs_kv openai.api_key = %q err=%v", v, err)
 	}
 
 	// A mirror-only override does not win while the blob row exists.
-	if err := db.SetConfigValue(ctx, store.KindProvider, User, "user-a", "openai.api_key", "sk-kv-override"); err != nil {
+	if err := db.SetConfigValue(ctx, store.KindProvider, User, "user-a", "openai.api_key", store.StringValue("sk-kv-override")); err != nil {
 		t.Fatalf("SetConfigValue override: %v", err)
 	}
 	provs, err := Providers(ctx, db, "user-a", "")
@@ -184,7 +206,7 @@ func TestSettingDualWriteReadsFromBlob(t *testing.T) {
 
 	// agents.defaults maps to the "agent." KV prefix (upstream contract).
 	v, err := db.GetConfigValue(ctx, store.KindSetting, User, "user-a", "agent.model")
-	if err != nil || v != "deepseek/deepseek-v4-pro" {
+	if err != nil || v.Value != "deepseek/deepseek-v4-pro" {
 		t.Fatalf("configs_kv agent.model = %q err=%v", v, err)
 	}
 
@@ -206,28 +228,6 @@ func TestSettingDualWriteReadsFromBlob(t *testing.T) {
 	}
 	if m, _ := got["model"].(string); m != "deepseek/deepseek-v4-pro" {
 		t.Fatalf("Setting fallback model = %v", got["model"])
-	}
-}
-
-// TestParseKVValue pins value type inference: bools, numbers, JSON
-// arrays/objects, and plain strings.
-func TestParseKVValue(t *testing.T) {
-	cases := []struct {
-		in   string
-		want interface{}
-	}{
-		{"true", true},
-		{"false", false},
-		{"42", float64(42)},
-		{"[1,2]", []interface{}{float64(1), float64(2)}},
-		{`{"a":1}`, map[string]interface{}{"a": float64(1)}},
-		{"hello", "hello"},
-		{"", ""},
-	}
-	for _, c := range cases {
-		if got := parseKVValue(c.in); !jsonEqual(got, c.want) {
-			t.Fatalf("parseKVValue(%q) = %#v (%T), want %#v", c.in, got, got, c.want)
-		}
 	}
 }
 
@@ -254,11 +254,11 @@ func TestSnakeCamelRoundTrip(t *testing.T) {
 // flat-key bug: tools.providers.searxng.endpoint used to yield the literal
 // key "searxng.endpoint", breaking SettingInto into typed provider configs.
 func TestKvToSettingMapNested(t *testing.T) {
-	got := kvToSettingMap("tools.providers.", map[string]string{
+	got := kvToSettingMap("tools.providers.", legacyKV(map[string]string{
 		"tools.providers.searxng.endpoint":        "https://searxng.tokenaissance.com",
 		"tools.providers.searxng.api_key":         "sk-x",
 		"tools.providers.jina.options.extra.mode": "fast",
-	})
+	}))
 	want := map[string]interface{}{
 		"searxng": map[string]interface{}{
 			"endpoint": "https://searxng.tokenaissance.com",
@@ -278,10 +278,10 @@ func TestKvToSettingMapNested(t *testing.T) {
 // TestKvToSettingMapToleratesBadDots guards against stray/trailing dots in
 // stored keys — they must be dropped, not turned into empty map keys.
 func TestKvToSettingMapToleratesBadDots(t *testing.T) {
-	got := kvToSettingMap("tools.providers.", map[string]string{
+	got := kvToSettingMap("tools.providers.", legacyKV(map[string]string{
 		"tools.providers.searxng.endpoint.": "https://x",
 		"tools.providers.searxng..api_key":  "sk-x",
-	})
+	}))
 	want := map[string]interface{}{
 		"searxng": map[string]interface{}{
 			"endpoint": "https://x",
@@ -312,7 +312,7 @@ func TestSettingNestedNamespaceRoundTrip(t *testing.T) {
 
 	// The dual-write stores the flattened dotted leaf (exactly the dev shape).
 	v, err := db.GetConfigValue(ctx, store.KindSetting, System, "", "tools.providers.searxng.endpoint")
-	if err != nil || v != "https://searxng.tokenaissance.com" {
+	if err != nil || v.Value != "https://searxng.tokenaissance.com" {
 		t.Fatalf("configs_kv leaf = %q err=%v", v, err)
 	}
 
@@ -417,7 +417,7 @@ func TestKvToSettingMapPreservesDataKeys(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := kvToSettingMap(c.prefix, c.kv); !jsonEqual(got, c.want) {
+			if got := kvToSettingMap(c.prefix, legacyKV(c.kv)); !jsonEqual(got, c.want) {
 				t.Fatalf("kvToSettingMap(%q) = %#v, want %#v", c.prefix, got, c.want)
 			}
 		})
@@ -463,7 +463,7 @@ func TestKvToSettingMapCamelCasesFieldSegments(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := kvToSettingMap(c.prefix, c.kv); !jsonEqual(got, c.want) {
+			if got := kvToSettingMap(c.prefix, legacyKV(c.kv)); !jsonEqual(got, c.want) {
 				t.Fatalf("kvToSettingMap(%q) = %#v, want %#v", c.prefix, got, c.want)
 			}
 		})
@@ -487,7 +487,7 @@ func TestSettingCategoryDataKeyRoundTrip(t *testing.T) {
 
 	// The dual-write flattens to the dev KV shape.
 	if v, err := db.GetConfigValue(ctx, store.KindSetting, System, "",
-		"tools.categories.web_search.primary"); err != nil || v != "searxng/default" {
+		"tools.categories.web_search.primary"); err != nil || v.Value != "searxng/default" {
 		t.Fatalf("configs_kv leaf = %q err=%v", v, err)
 	}
 
@@ -535,7 +535,7 @@ func TestSettingAllCapsEnvKeyRoundTrip(t *testing.T) {
 
 	// Stored verbatim (the dev/legacy spelling any operator can read).
 	if v, err := db.GetConfigValue(ctx, store.KindSetting, System, "",
-		"skills.entries.web_search_skill.env.REPLICATE_API_TOKEN"); err != nil || v != "r8_x" {
+		"skills.entries.web_search_skill.env.REPLICATE_API_TOKEN"); err != nil || v.Value != "r8_x" {
 		t.Fatalf("configs_kv leaf = %q err=%v, want REPLICATE_API_TOKEN=r8_x", v, err)
 	}
 	// The pre-fix lowercased row must not be written.
@@ -555,13 +555,17 @@ func TestSettingAllCapsEnvKeyRoundTrip(t *testing.T) {
 	}
 }
 
-// TestSettingIntoFallsBackToLegacyBlob pins the configs_kv projection
-// fallback. parseKVValue re-types every stored string ("123" → number,
-// "true" → bool, "[…]" → array), so a number-looking value living in a
-// string field makes the typed projection fail. The legacy blob keeps the
-// exact JSON type, and SettingInto must serve that instead of returning the
-// error — in the gateway the error aborts the caller's whole UserSpace load,
-// so one bucket named "123" would have locked the user out.
+// TestSettingIntoFallsBackToLegacyBlob pins the number-looking-string
+// guarantee from both sides. A bucket genuinely named "123" used to be a
+// landmine: the mirror re-typed it to a number, the typed projection failed,
+// and in the gateway that error aborted the caller's whole UserSpace load.
+//
+// Behind a blob row (the always-available safety net), an untagged mirror row
+// must still not take the caller down — Setting serves the blob.
+//
+// With no blob row (mirror-only namespaces, and anything written after the
+// tag), the tag is what carries the type, so the projection succeeds on its
+// own instead of relying on the safety net.
 func TestSettingIntoFallsBackToLegacyBlob(t *testing.T) {
 	db := openScopeDB(t)
 	defer db.Close()
@@ -572,24 +576,51 @@ func TestSettingIntoFallsBackToLegacyBlob(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("SaveSetting: %v", err)
 	}
-	// Precondition: the KV row really is the string that breaks the typed
-	// projection (as opposed to the blob, which keeps bucket as a string).
-	if v, err := db.GetConfigValue(ctx, store.KindSetting, System, "", "objectstore.s3.bucket"); err != nil || v != "123" {
-		t.Fatalf("configs_kv leaf = %q err=%v, want 123", v, err)
-	}
 
-	var got config.ObjectStoreCfg
-	if err := SettingInto(ctx, db, "objectstore", "", "", &got); err != nil {
-		t.Fatalf("SettingInto objectstore: %v", err)
+	// A row written before value_kind existed: same text, no tag. The blob is
+	// present, so the caller is safe either way.
+	if err := db.SetConfigValue(ctx, store.KindSetting, System, "", "objectstore.s3.bucket",
+		store.ConfigValue{Value: "123"}); err != nil {
+		t.Fatalf("rewrite mirror row untagged: %v", err)
 	}
-	if got.S3.Bucket != "123" || got.S3.Region != "us-east-1" {
-		t.Fatalf("objectstore s3 = %+v, want the legacy blob's string values", got.S3)
+	var behindBlob config.ObjectStoreCfg
+	if err := SettingInto(ctx, db, "objectstore", "", "", &behindBlob); err != nil {
+		t.Fatalf("SettingInto behind the blob: %v", err)
 	}
-
+	if behindBlob.S3.Bucket != "123" || behindBlob.S3.Region != "us-east-1" {
+		t.Fatalf("objectstore s3 = %+v, want the string values", behindBlob.S3)
+	}
 	// The string must survive verbatim, not as a float or an empty string.
-	bucketType := reflect.TypeOf(got.S3.Bucket).Kind()
-	if bucketType != reflect.String || got.S3.Bucket[0] != '1' {
-		t.Fatalf("bucket = %q (%v), want the literal string 123", got.S3.Bucket, bucketType)
+	bucketType := reflect.TypeOf(behindBlob.S3.Bucket).Kind()
+	if bucketType != reflect.String || behindBlob.S3.Bucket[0] != '1' {
+		t.Fatalf("bucket = %q (%v), want the literal string 123", behindBlob.S3.Bucket, bucketType)
+	}
+
+	// Re-save to restore tagged mirror rows, then drop the blob row: now the
+	// tag is the only thing carrying the type, and the projection must still
+	// land the string.
+	if err := SaveSetting(ctx, db, "", "", "objectstore", map[string]interface{}{
+		"s3": map[string]interface{}{"bucket": "123", "region": "us-east-1"},
+	}); err != nil {
+		t.Fatalf("re-SaveSetting: %v", err)
+	}
+	if v, err := db.GetConfigValue(ctx, store.KindSetting, System, "", "objectstore.s3.bucket"); err != nil ||
+		v.Value != "123" || v.Kind != store.ValueKindString {
+		t.Fatalf("configs_kv leaf = %+v err=%v, want the tagged string 123", v, err)
+	}
+	rec, err := db.GetConfigByName(ctx, store.KindSetting, "", "", "objectstore")
+	if err != nil {
+		t.Fatalf("GetConfigByName: %v", err)
+	}
+	if err := db.DeleteConfig(ctx, rec.ID); err != nil {
+		t.Fatalf("DeleteConfig: %v", err)
+	}
+	var mirrorOnly config.ObjectStoreCfg
+	if err := SettingInto(ctx, db, "objectstore", "", "", &mirrorOnly); err != nil {
+		t.Fatalf("SettingInto from a tagged mirror with no blob row: %v", err)
+	}
+	if mirrorOnly.S3.Bucket != "123" {
+		t.Fatalf("mirror-only bucket = %q, want the literal string 123", mirrorOnly.S3.Bucket)
 	}
 }
 
@@ -613,7 +644,7 @@ func TestSettingPartialMirrorDoesNotShadowBlob(t *testing.T) {
 	if err := db.DeleteConfigPrefix(ctx, store.KindSetting, System, "", "tools.categories."); err != nil {
 		t.Fatalf("DeleteConfigPrefix: %v", err)
 	}
-	if err := db.SetConfigValue(ctx, store.KindSetting, System, "", "tools.categories.tts.primary", "openai/tts-1"); err != nil {
+	if err := db.SetConfigValue(ctx, store.KindSetting, System, "", "tools.categories.tts.primary", store.StringValue("openai/tts-1")); err != nil {
 		t.Fatalf("SetConfigValue: %v", err)
 	}
 
@@ -652,7 +683,7 @@ func TestDashboardAndRuntimeAgreeOnSettings(t *testing.T) {
 	if err := db.DeleteConfigPrefix(ctx, store.KindSetting, System, "", "tools.categories."); err != nil {
 		t.Fatalf("DeleteConfigPrefix: %v", err)
 	}
-	if err := db.SetConfigValue(ctx, store.KindSetting, System, "", "tools.categories.webSearch.primary", "legacy"); err != nil {
+	if err := db.SetConfigValue(ctx, store.KindSetting, System, "", "tools.categories.webSearch.primary", store.StringValue("legacy")); err != nil {
 		t.Fatalf("SetConfigValue: %v", err)
 	}
 
@@ -676,19 +707,29 @@ func TestDashboardAndRuntimeAgreeOnSettings(t *testing.T) {
 }
 
 // TestProvidersMirrorFallbackKeepsNumericKey is the N2 regression. With no
-// blob row to fall back to, the mirror is authoritative — and there the old
-// code let parseKVValue turn an all-digit apiKey into a number, failed to
-// unmarshal it into a string field, and dropped the field silently.
+// blob row to fall back to the mirror is authoritative, and there the old
+// code let the legacy guesser turn an all-digit apiKey into a number, failed
+// to unmarshal it into a string field, and dropped the field silently.
+//
+// The first provider is seeded the way the writer seeds it now (a tagged
+// string, so the type is recorded rather than guessed). The second is seeded
+// untagged — the pre-tag shape — and must still keep the digits as text,
+// because that was the N2 fix and untagged rows are exactly the ones it
+// protects.
 func TestProvidersMirrorFallbackKeepsNumericKey(t *testing.T) {
 	db := openScopeDB(t)
 	defer db.Close()
 	ctx := context.Background()
 
-	if err := db.SetConfigValue(ctx, store.KindProvider, User, "user-a", "alpha.api_key", "123456"); err != nil {
+	if err := db.SetConfigValue(ctx, store.KindProvider, User, "user-a", "alpha.api_key", store.StringValue("123456")); err != nil {
 		t.Fatalf("SetConfigValue api_key: %v", err)
 	}
-	if err := db.SetConfigValue(ctx, store.KindProvider, User, "user-a", "alpha.api_base", "https://api.example"); err != nil {
+	if err := db.SetConfigValue(ctx, store.KindProvider, User, "user-a", "alpha.api_base", store.StringValue("https://api.example")); err != nil {
 		t.Fatalf("SetConfigValue api_base: %v", err)
+	}
+	// Untagged: same digits, no tag to say they are a string.
+	if err := db.SetConfigValue(ctx, store.KindProvider, User, "user-a", "beta.api_key", store.ConfigValue{Value: "654321"}); err != nil {
+		t.Fatalf("SetConfigValue untagged api_key: %v", err)
 	}
 
 	provs, err := Providers(ctx, db, "user-a", "")
@@ -698,6 +739,9 @@ func TestProvidersMirrorFallbackKeepsNumericKey(t *testing.T) {
 	got := provs["alpha"]
 	if got.APIKey != "123456" || got.APIBase != "https://api.example" {
 		t.Fatalf("mirror-only provider = %+v, want the stored strings", got)
+	}
+	if untagged := provs["beta"]; untagged.APIKey != "654321" {
+		t.Fatalf("untagged mirror provider = %+v, want the digits kept as text", untagged)
 	}
 }
 
@@ -780,4 +824,85 @@ func jsonEqual(a, b interface{}) bool {
 		return false
 	}
 	return string(as) == string(bs)
+}
+
+// typedProbe is the struct for TestMirrorFallbackRestoresValueTypes: mixed
+// JSON types in one namespace, including the two pairs the tag exists to keep
+// apart (the string "123" vs the number 123, and a 19-digit int64).
+type typedProbe struct {
+	Port    int64   `json:"port"`
+	Name    string  `json:"name"`
+	Enabled bool    `json:"enabled"`
+	Ratio   float64 `json:"ratio"`
+	Big     int64   `json:"big"`
+	Empty   string  `json:"empty"`
+}
+
+// TestMirrorFallbackRestoresValueTypes is the end-to-end regression for the
+// value_kind change. The mirror is read only when the blob has no row, and
+// before the tag that path had to guess every type from the text:
+//
+//   - Name ("123", a string) came back as a number, failed to unmarshal into
+//     the string field, and took the whole namespace down — with the blob row
+//     deleted there is nothing to fall back to, so SettingInto returned an
+//     error and the caller (in the gateway, a whole UserSpace load) failed.
+//   - Big (math.MaxInt64) did not survive the %g round trip at all.
+//
+// With the tag the writer's types come back exactly as written.
+func TestMirrorFallbackRestoresValueTypes(t *testing.T) {
+	db := openScopeDB(t)
+	defer db.Close()
+	ctx := context.Background()
+
+	const bigLiteral = "9223372036854775807"
+	if err := SaveSetting(ctx, db, "", "", "probe", map[string]interface{}{
+		"port":    float64(8080),
+		"name":    "123",
+		"enabled": true,
+		"ratio":   1.5,
+		"big":     json.Number(bigLiteral),
+		"empty":   "",
+	}); err != nil {
+		t.Fatalf("SaveSetting: %v", err)
+	}
+
+	// Drop the blob row so the read can only be served by the mirror.
+	rec, err := db.GetConfigByName(ctx, store.KindSetting, "", "", "probe")
+	if err != nil {
+		t.Fatalf("GetConfigByName: %v", err)
+	}
+	if err := db.DeleteConfig(ctx, rec.ID); err != nil {
+		t.Fatalf("DeleteConfig: %v", err)
+	}
+
+	var got typedProbe
+	if err := SettingInto(ctx, db, "probe", "", "", &got); err != nil {
+		t.Fatalf("SettingInto from the mirror: %v", err)
+	}
+	if got.Port != 8080 {
+		t.Errorf("Port = %d, want 8080", got.Port)
+	}
+	if got.Name != "123" {
+		t.Errorf("Name = %q, want the string \"123\" (not the number 123)", got.Name)
+	}
+	if !got.Enabled {
+		t.Errorf("Enabled = false, want true")
+	}
+	if got.Ratio != 1.5 {
+		t.Errorf("Ratio = %v, want 1.5", got.Ratio)
+	}
+	if got.Big != math.MaxInt64 {
+		t.Errorf("Big = %d, want %d (exact)", got.Big, int64(math.MaxInt64))
+	}
+	if got.Empty != "" {
+		t.Errorf("Empty = %q, want the empty string", got.Empty)
+	}
+
+	// And the tag itself is in the column, not just the text.
+	if v, err := db.GetConfigValue(ctx, store.KindSetting, System, "", "probe.name"); err != nil || v.Kind != store.ValueKindString {
+		t.Fatalf("probe.name row = %+v err=%v, want a tagged string", v, err)
+	}
+	if v, err := db.GetConfigValue(ctx, store.KindSetting, System, "", "probe.big"); err != nil || v.Value != bigLiteral {
+		t.Fatalf("probe.big row = %+v err=%v, want the literal %s", v, err, bigLiteral)
+	}
 }

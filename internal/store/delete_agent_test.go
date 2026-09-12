@@ -140,7 +140,7 @@ func TestDeleteAgentRemovesScopedRows(t *testing.T) {
 		{"agent", agentID, "agents.defaults.model"},
 		{"user-agent", ownerID + "/" + agentID, "bindings.timezone"},
 	} {
-		if err := db.SetConfigValue(ctx, KindSetting, kv.scope, kv.scopeID, kv.name, "x"); err != nil {
+		if err := db.SetConfigValue(ctx, KindSetting, kv.scope, kv.scopeID, kv.name, StringValue("x")); err != nil {
 			t.Fatalf("set config value %s/%s/%s: %v", kv.scope, kv.scopeID, kv.name, err)
 		}
 	}

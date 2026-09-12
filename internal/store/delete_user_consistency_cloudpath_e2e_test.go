@@ -166,7 +166,7 @@ func TestDeleteUser_CleansAgentScopedRows_CloudPathE2E(t *testing.T) {
 		{"user-agent", ownerID + "/" + agentID, "bindings.timezone"},
 		{"user", ownerID, "general.locale"},
 	} {
-		if err := db.SetConfigValue(ctx, KindSetting, kv.scope, kv.scopeID, kv.name, "x"); err != nil {
+		if err := db.SetConfigValue(ctx, KindSetting, kv.scope, kv.scopeID, kv.name, StringValue("x")); err != nil {
 			t.Fatalf("set config value %s/%s/%s: %v", kv.scope, kv.scopeID, kv.name, err)
 		}
 	}
