@@ -65,6 +65,10 @@ case ValueKindNumber: return json.Number(v.Value)
 blob 侧同理走 `store.JSONToMap` / `store.ValueToMap`（`Decoder.UseNumber()`），
 所以 `configs.data` 里的数字在 map 里也是字面量。两条路径的保真度因此一致。
 
+写侧还挡掉一种**结构上无法表示**的输入：provider 名必须匹配
+`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`（`scope.ValidateProviderName`，`SaveProvider`
+入口校验，HTTP 回 400）。理由见「key 正确性」与「review 第三轮修复」。
+
 ### 读路径
 
 **优先级：blob 权威，KV 兜底。** 只有当链路上四层都没有 blob 行时，才去读
@@ -77,8 +81,8 @@ blob 侧同理走 `store.JSONToMap` / `store.ValueToMap`（`Decoder.UseNumber()`
 | `Providers` | 四层，内层整行替换 | 有（`kvValsToProviders`，规则 = `kvFieldMap`） |
 | `AgentScopeProviders` / `UserScopeProviders` | 单层 | 有 |
 | `AgentPluginEnabled` | agent 层单行 | 有 |
-| `BatchSettings` | 仅 system + user 两层的 blob | **无**（面板专用，N 个 namespace 合并成 2 次查询） |
-| `Channels` | 四层，disabled 行擦除外层 | **无**（channel 不进 KV） |
+| `BatchSettings` | 仅 system + user 两层 | 有，但只对**没有 blob 行**的 namespace 逐个走 `Setting`（面板专用，N 个 namespace 合并成 2 次查询；补兜底只影响 blob 缺席的 namespace） |
+| `Channels` | 四层，disabled 行擦除外层 | **无，且刻意如此**：channel 行从不进 KV（见「存储面」），`Channels` 没有可回落的镜像。`TestChannelsAreNotMirroredInKV` 钉住这个前提 |
 
 未标注行（`value_kind = ''`，即 value_kind 之前写下的历史行）在两条读路径上
 的规则**不同**，这是历史行为，不是遗漏：
@@ -111,7 +115,9 @@ blob 侧同理走 `store.JSONToMap` / `store.ValueToMap`（`Decoder.UseNumber()`
 ——`_` 在 LIKE 里是通配符，provider 名里的下划线曾扫到别人的行。
 
 `kvValsToProviders` 用**第一个点**切 provider 名，所以带点的 provider 名会被
-切错（见残留风险）。
+切错。写侧因此不接受这种名字：`scope.ValidateProviderName`（`SaveProvider`
+的入口检查，HTTP 侧回 400）只允许 `[A-Za-z0-9][A-Za-z0-9_-]{0,63}`，理由见
+「review 第三轮修复」。
 
 ### 不变式
 
@@ -650,6 +656,55 @@ masked 响应、`gateway` 的 channel 更新、CLI 的 `structMap` /
 plugin / skills manifest 的解码。它们不参与 config 往返，需要时按同一模式换
 `UseNumber` 即可。
 
+## review 第三轮修复：provider 名白名单 / BatchSettings 兜底
+
+这一轮收掉「现状」里最后两处已知的形状不一致，两处都是**读路径承诺没被所有
+读入口兑现**，与前几轮同因。
+
+### 1. provider 名不能带点（写侧拒绝）
+
+provider 名同时是两样东西：`configs_kv` 的 key 前缀（`<名>.<字段>`，而
+`kvValsToProviders` 只能按**第一个点**切）和 `provider/model` 引用的左半边。
+名字里带 `.` 时镜像投影会把 `my.provider.api_key` 切成 provider `my` + 字段
+`provider.api_key`，投影出一个空 `ProviderConfig`；带 `/` 则与 model 引用
+的分隔符撞车。写侧原来只校验非空，于是这种名字能建出来，只在「blob 行缺席、
+读镜像」时才暴露。
+
+现在 `scope.ValidateProviderName` 是唯一规则：`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`。
+`SaveProvider` 在入口调用它（HTTP 建/改、admin API、onboarding、CLI 都走这里，
+新增调用方绕不过去），HTTP 侧把错误翻成 **400 + 规则原文**，不再是保存路径的
+500。回归测试：`scope` → `TestValidateProviderName`（含 `SaveProvider` 这条
+写入路径）、`setup` → `TestCreateProvider_RejectsAmbiguousName`。
+
+**兼容性**：存量行不动。已存在的非法名 blob 行照常读（blob 权威），它们的镜像
+行本来就是坏的（历史写入时已经按小写化存过 `my.provider.api_key`），没有可回填
+的东西。没有改名接口，这类行要么删除重建，要么保持只读；`PUT /api/providers`
+现在也会回 400 而不是让 SaveProvider 抛 500。
+
+### 2. `BatchSettings` 补上 KV 兜底（`Channels` 明确不补）
+
+除 `BatchSettings` 外每个读入口都会在「链路上没有 blob 行」时回落到镜像，
+只有它直接返回 `mergeByNamespace` 的结果。于是「只写在镜像里的 namespace」在
+面板上看不到，而运行时能解析出来——正是 `web_search` 事件的反向形态。
+
+现在对**没有 blob 行**的那几个 namespace 逐个调用 `Setting`（契约的定义者，
+`BatchSettings` 的文档注释本来就写着「等价于逐个 `Setting`」，批量路径只是它的
+优化），有 blob 行的 namespace 不付额外查询，面板的 2 次查询快路径在常见情况下
+不变。「有没有 blob 行」看的是**行**，不是合并结果：`Enabled: false` 的行是
+「关掉这个 namespace」的决定，`mergeByNamespace` 已经把它排除，若按合并结果
+判断就会把它的值从镜像里复活。回归测试：`TestBatchSettingsFallsBackToMirror`
+（blob namespace 取 blob、镜像独有 namespace 取镜像、没人写过的 namespace 仍然
+缺席）与既有的 `TestBatchSettings_DisabledRowIgnored`。
+
+`Channels` 仍然没有兜底，这是**刻意的**：channel 行从不进 `configs_kv`（它有自己的
+`channels` 表），没有可回落的镜像。这个前提现在由
+`TestChannelsAreNotMirroredInKV` 钉住——哪天有人加了 channel 的半套双写，这条
+会先红，指向 `Channels` 必须先学会兜底。
+
+**测试隔离的副作用**：`openScopeDB` 的 DSN 是 `file::memory:?cache=shared`，
+即整个 `scope` 包共用一个内存库，新测试写的 `prefs` 行会漏给时区优先级测试。
+新增 `openScopeDBNamed` 供需要自己数据的测试用（本次的 `BatchSettings` 测试）。
+
 ## 残留风险
 
 1. **未标注行仍靠猜测**：新写入的值都带 `value_kind`，但改动之前写下的行没有
@@ -670,16 +725,6 @@ plugin / skills manifest 的解码。它们不参与 config 往返，需要时�
    `plugins` 等「仅系统层可读」的 namespace（当前 CLI/HTTP 都不产生这种行）。
    约定：新增一个 agent 层可写的 namespace 时，必须同时让 runtime 读它，或者
    像 sandbox 一样在写侧拒绝——两者都没有就是这次的 bug 类。
-6. **provider 名里的点会切错 key**：`kvValsToProviders` 用第一个 `.` 切
-   provider 名，而 `handleCreateProvider` 只校验非空。名字叫 `my.provider`
-   时镜像投影会把 `my.provider.api_key` 切成 `my` + `provider.api_key`，
-   `ProviderConfig` 解不出来 → 得到一个空 provider。只在「读镜像」时出现
-   （blob 权威），修法是写侧加字符白名单（推荐，名字进 URL/CLI 也用得上）
-   或换一个不会出现在名字里的分隔符。
-7. **两个读入口没有 KV 兜底**：`BatchSettings`（面板，2 次查询换 N 个
-   namespace）与 `Channels`（channel 本来就不进 KV）。前者是刻意的性能取舍，
-   但它意味着「只写在镜像里的 namespace」在面板上看不到——如果将来真的出现
-   只写 KV 的路径，这里要么补兜底、要么把它排除在「KV 兜底」的承诺之外。
 
 ## 对上游的 PR 提案
 
