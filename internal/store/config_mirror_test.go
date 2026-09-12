@@ -74,6 +74,41 @@ func TestVerifyConfigMirror(t *testing.T) {
 	}
 }
 
+// MirrorSelfConsistent is the blob-free half of verification: the check a
+// mirror-first reader runs against the leaves it just loaded. It must hold
+// whenever the marker covers those leaves, regardless of any blob, and fail on
+// the same completeness violations VerifyConfigMirror catches.
+func TestMirrorSelfConsistent(t *testing.T) {
+	leaves := map[string]ConfigValue{"openai.api_key": StringValue("sk-1")}
+	m := NewConfigMirror("openai.", true, leaves)
+	if !MirrorSelfConsistent(m, leaves) {
+		t.Fatal("marker does not certify its own leaves")
+	}
+	// The decision is the marker's; self-consistency does not consult a blob,
+	// so a marker recording "disabled" still certifies its leaves.
+	if !MirrorSelfConsistent(NewConfigMirror("openai.", false, leaves), leaves) {
+		t.Fatal("a disabled marker did not certify its leaves")
+	}
+
+	if MirrorSelfConsistent(m, map[string]ConfigValue{}) {
+		t.Fatal("marker certified an empty (subset) projection")
+	}
+	if MirrorSelfConsistent(m, map[string]ConfigValue{
+		"openai.api_key": StringValue("sk-1"),
+		"openai.extra":   StringValue("x"),
+	}) {
+		t.Fatal("marker certified a superset projection")
+	}
+	if MirrorSelfConsistent(ConfigMirror{Prefix: "openai."}, leaves) {
+		t.Fatal("fingerprint-less marker certified leaves")
+	}
+	unrecorded := NewConfigMirror("openai.", true, leaves)
+	unrecorded.Enabled = nil
+	if MirrorSelfConsistent(unrecorded, leaves) {
+		t.Fatal("a marker with no recorded decision certified its leaves")
+	}
+}
+
 // enabled is half of what a marker attests to, so the two halves cannot be
 // swapped: leaves that match under the wrong decision are not certified, and a
 // marker written before the column existed attests to no decision at all.

@@ -27,8 +27,8 @@
 | 层 | 本仓库的落点 | 谁依赖它 |
 |---|---|---|
 | Entities | `internal/config` 的 typed 结构体（`Config` / `ProviderConfig` / `ChannelConfig` / `AgentDefaults` …）与四层所有权语义 | 被所有层依赖，自己不依赖任何 IO |
-| Use Cases | `internal/scope`：解析与合并（`Setting` / `ExactSetting` / `Providers` / `Channels` / `GetValues` / `SettingInto`）+ 单层读模型（`readmodel.go` 的 `SettingAt` / `SettingNamesAt` / `ProviderStateAt` / `ProvidersAt` / `AgentScopeRows` / `RowsAt`）——「哪一层的行胜出、值怎么投影、这次读去哪张表」 | `setup` / `gateway` / `agentcli` |
-| Interface Adapters | `internal/kvkeys`（键形状编解码）、`store.ConfigValue`（value + value_kind 编解码）、`store.ConfigMirror`（镜像完整性标记：prefix + key_count + fingerprint）、`store.JSONToMap`（blob 解码）、`scope.Save*` 的双写编排、`setup` 的 `scope` 字符串 ↔ `(user_id, agent_id)` 转换 | `scope` / `setup` |
+| Use Cases | `internal/scope`：解析与合并（`Setting` / `ExactSetting` / `Providers` / `Channels` / `GetValues` / `SettingInto`）+ 单层读模型（`readmodel.go` 的 `SettingAt` / `SettingNamesAt` / `ProviderStateAt` / `ProvidersAt` / `AgentScopeRows` / `RowsAt`）+ 读权威开关（`readmodel.go` 的 `configsReadAuthority`：`blobFirst` / `mirrorFirst` 与逐行 `certifiedMirror` 认证）——「哪一层的行胜出、值怎么投影、这次读去哪张表」 | `setup` / `gateway` / `agentcli` |
+| Interface Adapters | `internal/kvkeys`（键形状编解码）、`store.ConfigValue`（value + value_kind 编解码）、`store.ConfigMirror` / `store.MirrorSelfConsistent`（镜像完整性标记：prefix + key_count + fingerprint + enabled）、`store.JSONToMap`（blob 解码）、`scope.Save*` 的双写编排、`setup` 的 `scope` 字符串 ↔ `(user_id, agent_id)` 转换 | `scope` / `setup` |
 | Frameworks & Drivers | `internal/store/database.go` 的 SQLite / PostgreSQL、表结构、迁移；HTTP / CLI 入口 | 最外层，随时可换 |
 
 依赖方向只有向内一条：`setup → scope → store → database/sql`，`config` 在最里
@@ -120,7 +120,7 @@ KV 是镜像」，这是**迁移期的临时不变式**，不是终点。翻转�
 | 0 | typed encoding：值域能表达「这是 string / number / bool…」，不靠读侧猜 | **已做**：`configs_kv.value_kind`（数字保字面量，`json.Number`） |
 | 1 | 事务化双写：blob 与镜像不会「写一半」 | **已做**：`store.WithConfigTx`（`9dbccd9`） |
 | 2 | 完整性标记：能判定「镜像 = blob 的完整投影」，而不只是抽样一致 | **已做**：`configs_mirror` 表 + `store.ConfigMirror`（prefix / key_count / fingerprint / enabled）；双写与回填写标记，`store.VerifyConfigMirror` 判定；存量行由 `store.ReconcileConfigMirrors`（CLI `fastagent configs reconcile-mirror [--strict] [--repair]`）做 blob↔镜像核对、回填标记，`--repair` 时按 blob 重投影 diverged 行 |
-| 3 | 翻转权威：读路径改 KV 优先、blob 变兜底 | **未做** |
+| 3 | 翻转权威：读路径改 KV 优先、blob 变兜底 | **未做（机制已就位，默认仍 blob 优先）**：读路径的权威选择收敛成 `scope` 的一个开关（`readmodel.go` 的 `configsReadAuthority`），`mirrorFirst` 分支逐行要求 `store.MirrorSelfConsistent` 认证——只有标记覆盖了刚读到的叶子，镜像才作数，否则回落 blob。翻转因此是改这一个名字，不是改每一个调用方；准入仍是下面那条 `--strict` 验收 |
 | 4 | 下掉 blob：迁移完成后删除 `configs` 的 blob 列与相关读代码 | **未做** |
 
 在阶段 3 到来之前，**blob 权威**；镜像必须是对 blob 的忠实投影，这不是终点契约，
@@ -209,6 +209,22 @@ blob 侧同理走 `store.JSONToMap` / `store.ValueToMap`（`Decoder.UseNumber()`
 才去读镜像（镜像可能被直接写过、也可能是历史行）。这是**迁移期**的读序：目标
 形态是 KV 权威、blob 退场（见「目标形态与迁移阶段」），届时这张表的 KV 兜底列
 会整体翻面。
+
+**这个翻面已经收敛成一个开关，且带逐行认证。** 单层读模型（`readmodel.go`）持
+一个包级策略 `configsReadAuthority`：`blobFirst`（今天）就是上表；`mirrorFirst`
+（目标）让单层读先看镜像，但**只在这一行的完整性标记认证了刚读到的叶子时才作数**
+（`store.MirrorSelfConsistent`：指纹与 key 数都对得上、且标记记录了 enabled 决
+策）。两者都不满足就走 blob——没有标记的历史行、被手工改过而漂移的行、标记早于
+`enabled` 列的行，全都落回 blob，所以一个**不完整的投影永远不会被当成整份**服
+务（这正是 `web_search` 事件的形状）。翻转 = 把这一个名字改成 `mirrorFirst`，
+前置是下面那条 `--strict` 验收；回归测试在 `internal/scope/read_authority_test.go`
+（`blobFirst` 与 `mirrorFirst` 两种序都钉住，含「标记不再覆盖叶子 → 回落 blob」
+这一条）。
+
+仍未接入这个开关的是**合并解析器**（`Setting` / `SettingInto` / `BatchSettings` /
+`Providers`，`scope.go`）：它们逐层读 blob 再合并，`mirrorFirst` 要逐层做认证
+再合并，属于同一机制的第二半。`Channels` / `Timezone` / `SettingNamesAt` /
+`RowsAt` 刻意不参与翻面（见上表各自的「无，且刻意如此」）。
 
 | 入口 | 合并层 | KV 兜底 |
 |---|---|---|
