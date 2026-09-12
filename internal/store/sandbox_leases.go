@@ -23,7 +23,7 @@ func (d *DBStore) GetSandboxLease(ctx context.Context, scopeKey string) (*sandbo
 		return nil, nil
 	}
 	now := time.Now().Unix()
-	row := d.db.QueryRowContext(ctx,
+	row := d.handle().QueryRowContext(ctx,
 		fmt.Sprintf(`SELECT sandbox_id, envd_token, template, expires_at, epoch
 			FROM sandbox_leases
 			WHERE scope_key = %s AND expires_at > %s`, d.ph(1), d.ph(2)),
@@ -64,7 +64,7 @@ func (d *DBStore) AcquireSandboxLease(
 
 	// 1. If the row exists but is expired, claim it first so a concurrent
 	//    acquirer racing us sees an unexpired row and adopts instead.
-	if _, err := d.db.ExecContext(ctx,
+	if _, err := d.handle().ExecContext(ctx,
 		fmt.Sprintf(`UPDATE sandbox_leases
 			SET owner = %s, sandbox_id = %s, envd_token = %s, template = %s,
 			    expires_at = %s, epoch = 1, updated_at = %s
@@ -74,7 +74,7 @@ func (d *DBStore) AcquireSandboxLease(
 		return nil, false, err
 	}
 	// 2. Insert when absent; a concurrent winner's insert wins and ours no-ops.
-	if _, err := d.db.ExecContext(ctx,
+	if _, err := d.handle().ExecContext(ctx,
 		fmt.Sprintf(`INSERT INTO sandbox_leases
 			(scope_key, owner, sandbox_id, envd_token, template, expires_at, epoch, updated_at)
 			VALUES (%s, %s, %s, %s, %s, %s, 1, %s)
@@ -114,7 +114,7 @@ func (d *DBStore) RenewSandboxLease(
 		expires = now + 1
 	}
 	var epoch int64
-	err := d.db.QueryRowContext(ctx,
+	err := d.handle().QueryRowContext(ctx,
 		fmt.Sprintf(`UPDATE sandbox_leases
 			SET owner = %s, expires_at = %s, epoch = epoch + 1, updated_at = %s
 			WHERE scope_key = %s AND sandbox_id = %s AND expires_at > %s
@@ -131,7 +131,7 @@ func (d *DBStore) ReleaseSandboxLease(ctx context.Context, scopeKey, owner strin
 	if scopeKey == "" || owner == "" {
 		return false, nil
 	}
-	res, err := d.db.ExecContext(ctx,
+	res, err := d.handle().ExecContext(ctx,
 		fmt.Sprintf(`DELETE FROM sandbox_leases WHERE scope_key = %s AND owner = %s AND epoch = %s`,
 			d.ph(1), d.ph(2), d.ph(3)),
 		scopeKey, owner, epoch)

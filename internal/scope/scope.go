@@ -766,24 +766,34 @@ func SaveSetting(ctx context.Context, st store.Store, userID, agentID, namespace
 	if err := rejectUnreadableAgentScope(namespace, userID, agentID); err != nil {
 		return err
 	}
-	// Dual-write to configs_kv.
-	dualWriteSettingKV(ctx, st, userID, agentID, namespace, data)
-	if len(data) == 0 {
-		// Find and drop the row if it exists. Idempotent: missing-row is a no-op.
-		if rec, err := st.GetConfigByName(ctx, store.KindSetting, userID, agentID, namespace); err == nil && rec != nil {
-			return st.DeleteConfig(ctx, rec.ID)
+	// One transaction for both tables: the mirror is a projection of the
+	// blob, and a half-applied pair is exactly the state the readers then
+	// have to defend against (blob authoritative, mirror fallback). Failing
+	// loudly here is what keeps "both or neither" true.
+	return store.WithTx(ctx, st, func(tx store.Store) error {
+		if err := dualWriteSettingKV(ctx, tx, userID, agentID, namespace, data); err != nil {
+			return err
 		}
-		return nil
-	}
-	rec := &store.ConfigRecord{
-		Kind:    store.KindSetting,
-		UserID:  userID,
-		AgentID: agentID,
-		Name:    namespace,
-		Enabled: true,
-		Data:    data,
-	}
-	return st.SaveConfig(ctx, rec)
+		if len(data) == 0 {
+			// Find and drop the row if it exists. Idempotent: missing-row is a no-op.
+			if rec, err := tx.GetConfigByName(ctx, store.KindSetting, userID, agentID, namespace); err == nil && rec != nil {
+				return tx.DeleteConfig(ctx, rec.ID)
+			}
+			return nil
+		}
+		rec := &store.ConfigRecord{
+			Kind:    store.KindSetting,
+			UserID:  userID,
+			AgentID: agentID,
+			Name:    namespace,
+			// Writing a namespace through this path means "use this value",
+			// so it clears any veto a previous row carried — one of the two
+			// ways a disabled row goes away (the other is DeleteConfig).
+			Enabled: true,
+			Data:    data,
+		}
+		return tx.SaveConfig(ctx, rec)
+	})
 }
 
 // PluginEnabledNamespace is the row name that holds a per-agent plugin
@@ -847,21 +857,26 @@ func SaveAgentPluginEnabled(ctx context.Context, st store.Store, agentID string,
 	for k, v := range enabled {
 		data[k] = v
 	}
-	dualWritePluginEnabledKV(ctx, st, agentID, data)
-	if len(data) == 0 {
-		// Idempotent: missing row is a no-op, so "reset" can be replayed.
-		if rec, err := st.GetConfigByName(ctx, store.KindPluginEnabled, "", agentID, PluginEnabledNamespace); err == nil && rec != nil {
-			return st.DeleteConfig(ctx, rec.ID)
+	// Both tables in one transaction — see SaveSetting.
+	return store.WithTx(ctx, st, func(tx store.Store) error {
+		if err := dualWritePluginEnabledKV(ctx, tx, agentID, data); err != nil {
+			return err
 		}
-		return nil
-	}
-	return st.SaveConfig(ctx, &store.ConfigRecord{
-		Kind:    store.KindPluginEnabled,
-		UserID:  "",
-		AgentID: agentID,
-		Name:    PluginEnabledNamespace,
-		Enabled: true,
-		Data:    data,
+		if len(data) == 0 {
+			// Idempotent: missing row is a no-op, so "reset" can be replayed.
+			if rec, err := tx.GetConfigByName(ctx, store.KindPluginEnabled, "", agentID, PluginEnabledNamespace); err == nil && rec != nil {
+				return tx.DeleteConfig(ctx, rec.ID)
+			}
+			return nil
+		}
+		return tx.SaveConfig(ctx, &store.ConfigRecord{
+			Kind:    store.KindPluginEnabled,
+			UserID:  "",
+			AgentID: agentID,
+			Name:    PluginEnabledNamespace,
+			Enabled: true,
+			Data:    data,
+		})
 	})
 }
 
@@ -884,17 +899,22 @@ func boolMapFromData(data map[string]interface{}) map[string]bool {
 // dualWritePluginEnabledKV mirrors the opt-in map into configs_kv. The keys
 // below the row name are plugin ids (data keys), so the shared flattening
 // rule keeps them verbatim.
-func dualWritePluginEnabledKV(ctx context.Context, st store.Store, agentID string, data map[string]interface{}) {
+func dualWritePluginEnabledKV(ctx context.Context, st store.Store, agentID string, data map[string]interface{}) error {
 	kvPrefix := PluginEnabledNamespace + "."
-	_ = st.DeleteConfigPrefix(ctx, store.KindPluginEnabled, Agent, agentID, kvPrefix)
+	if err := st.DeleteConfigPrefix(ctx, store.KindPluginEnabled, Agent, agentID, kvPrefix); err != nil {
+		return fmt.Errorf("scope: clear configs_kv prefix %q: %w", kvPrefix, err)
+	}
 	if len(data) == 0 {
-		return
+		return nil
 	}
 	flat := map[string]store.ConfigValue{}
 	flattenJSONToKV(kvPrefix, data, flat)
 	for name, value := range flat {
-		_ = st.SetConfigValue(ctx, store.KindPluginEnabled, Agent, agentID, name, value)
+		if err := st.SetConfigValue(ctx, store.KindPluginEnabled, Agent, agentID, name, value); err != nil {
+			return fmt.Errorf("scope: mirror plugin opt-in %q: %w", name, err)
+		}
 	}
+	return nil
 }
 
 // providerNamePattern is the charset a provider name may use.
@@ -940,17 +960,21 @@ func SaveProviderState(ctx context.Context, st store.Store, userID, agentID, nam
 	if err := ValidateProviderName(name); err != nil {
 		return err
 	}
-	// Dual-write to configs_kv.
-	dualWriteProviderKV(ctx, st, userID, agentID, name, p)
-	rec := &store.ConfigRecord{
-		Kind:    store.KindProvider,
-		UserID:  userID,
-		AgentID: agentID,
-		Name:    name,
-		Enabled: enabled,
-		Data:    providerToData(p),
-	}
-	return st.SaveConfig(ctx, rec)
+	// Both tables in one transaction — see SaveSetting.
+	return store.WithTx(ctx, st, func(tx store.Store) error {
+		if err := dualWriteProviderKV(ctx, tx, userID, agentID, name, p); err != nil {
+			return err
+		}
+		rec := &store.ConfigRecord{
+			Kind:    store.KindProvider,
+			UserID:  userID,
+			AgentID: agentID,
+			Name:    name,
+			Enabled: enabled,
+			Data:    providerToData(p),
+		}
+		return tx.SaveConfig(ctx, rec)
+	})
 }
 
 // SaveChannel upserts a kind="channel" row at the given (user, agent)
@@ -1082,38 +1106,47 @@ func flattenJSONToKV(prefix string, data map[string]interface{}, out map[string]
 // dualWriteSettingKV writes the flattened KV pairs to configs_kv alongside
 // the legacy configs table write. Called by SaveSetting to keep both tables
 // in sync during migration.
-func dualWriteSettingKV(ctx context.Context, st store.Store, userID, agentID, namespace string, data map[string]interface{}) {
+func dualWriteSettingKV(ctx context.Context, st store.Store, userID, agentID, namespace string, data map[string]interface{}) error {
 	sc, sid := kvScopeFromOwnership(userID, agentID)
 	// Determine the KV name prefix.
 	kvPrefix := namespace + "."
 	if namespace == "agents.defaults" {
 		kvPrefix = "agent."
 	}
+	// The prefix delete runs in both branches: writing {} means "this
+	// namespace is empty now", which has to clear the rows it used to have.
+	if err := st.DeleteConfigPrefix(ctx, store.KindSetting, sc, sid, kvPrefix); err != nil {
+		return fmt.Errorf("scope: clear configs_kv prefix %q: %w", kvPrefix, err)
+	}
 	if len(data) == 0 {
-		// Delete all KV entries for this prefix.
-		_ = st.DeleteConfigPrefix(ctx, store.KindSetting, sc, sid, kvPrefix)
-		return
+		return nil
 	}
 	flat := map[string]store.ConfigValue{}
 	flattenJSONToKV(kvPrefix, data, flat)
-	// Delete stale keys then write new ones.
-	_ = st.DeleteConfigPrefix(ctx, store.KindSetting, sc, sid, kvPrefix)
 	for name, value := range flat {
-		_ = st.SetConfigValue(ctx, store.KindSetting, sc, sid, name, value)
+		if err := st.SetConfigValue(ctx, store.KindSetting, sc, sid, name, value); err != nil {
+			return fmt.Errorf("scope: mirror setting %q: %w", name, err)
+		}
 	}
+	return nil
 }
 
 // dualWriteProviderKV writes the flattened provider config to configs_kv.
-func dualWriteProviderKV(ctx context.Context, st store.Store, userID, agentID, providerName string, p config.ProviderConfig) {
+func dualWriteProviderKV(ctx context.Context, st store.Store, userID, agentID, providerName string, p config.ProviderConfig) error {
 	sc, sid := kvScopeFromOwnership(userID, agentID)
 	kvPrefix := providerName + "."
 	data := providerToData(p)
 	flat := map[string]store.ConfigValue{}
 	flattenJSONToKV(kvPrefix, data, flat)
-	_ = st.DeleteConfigPrefix(ctx, store.KindProvider, sc, sid, kvPrefix)
-	for name, value := range flat {
-		_ = st.SetConfigValue(ctx, store.KindProvider, sc, sid, name, value)
+	if err := st.DeleteConfigPrefix(ctx, store.KindProvider, sc, sid, kvPrefix); err != nil {
+		return fmt.Errorf("scope: clear configs_kv prefix %q: %w", kvPrefix, err)
 	}
+	for name, value := range flat {
+		if err := st.SetConfigValue(ctx, store.KindProvider, sc, sid, name, value); err != nil {
+			return fmt.Errorf("scope: mirror provider %q: %w", name, err)
+		}
+	}
+	return nil
 }
 
 // DualDeleteProviderKV removes all KV entries for a provider.
