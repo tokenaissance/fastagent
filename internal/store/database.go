@@ -1985,6 +1985,26 @@ func migrationSQLForDialect(dialect string) []string {
 			PRIMARY KEY (kind, scope, scope_id, name)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_configs_kv_prefix ON configs_kv (kind, scope, scope_id)`,
+		// configs_mirror is the completeness marker for the KV mirror: one row
+		// per legacy configs row, recording that a dual-write emitted every
+		// leaf of that row's projection and what those leaves hashed to (see
+		// ConfigMirror). It is a separate table, not a row in configs_kv,
+		// because a marker is metadata about the projection and must never
+		// appear in a prefix scan of the projection itself. It is what makes
+		// "the mirror is complete" a recorded fact instead of something a
+		// reader has to infer, which is the precondition for ever letting the
+		// mirror take over as the authoritative read source.
+		`CREATE TABLE IF NOT EXISTS configs_mirror (
+			kind TEXT NOT NULL,
+			scope TEXT NOT NULL,
+			scope_id TEXT NOT NULL DEFAULT '',
+			name TEXT NOT NULL,
+			prefix TEXT NOT NULL DEFAULT '',
+			key_count INTEGER NOT NULL DEFAULT 0,
+			fingerprint TEXT NOT NULL DEFAULT '',
+			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (kind, scope, scope_id, name)
+		)`,
 		// MCP OAuth shared stores — Postgres-backed so multiple gateway
 		// instances share pending authorizations, encrypted credentials
 		// and dynamic client registrations. Ciphertext is opaque to the
@@ -2217,6 +2237,14 @@ func (d *DBStore) DeleteUser(ctx context.Context, id string) error {
 			"agent", aid, "user-agent", "%"+escapeLike("/"+aid)); err != nil {
 			return err
 		}
+		// The completeness markers for those mirror rows go with them —
+		// a surviving marker would certify a projection that no longer exists.
+		if _, err := tx.ExecContext(ctx,
+			fmt.Sprintf(`DELETE FROM configs_mirror WHERE (scope = %s AND scope_id = %s) OR (scope = %s AND scope_id LIKE %s ESCAPE '\')`,
+				d.ph(1), d.ph(2), d.ph(3), d.ph(4)),
+			"agent", aid, "user-agent", "%"+escapeLike("/"+aid)); err != nil {
+			return err
+		}
 	}
 	if _, err := tx.ExecContext(ctx,
 		fmt.Sprintf("DELETE FROM agents WHERE user_id = %s", d.ph(1)), id); err != nil {
@@ -2244,6 +2272,12 @@ func (d *DBStore) DeleteUser(ctx context.Context, id string) error {
 	// user (overrides they authored on any agent).
 	if _, err := tx.ExecContext(ctx,
 		fmt.Sprintf(`DELETE FROM configs_kv WHERE (scope = %s AND scope_id = %s) OR (scope = %s AND scope_id LIKE %s ESCAPE '\')`,
+			d.ph(1), d.ph(2), d.ph(3), d.ph(4)),
+		"user", id, "user-agent", escapeLike(id)+"/%"); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
+		fmt.Sprintf(`DELETE FROM configs_mirror WHERE (scope = %s AND scope_id = %s) OR (scope = %s AND scope_id LIKE %s ESCAPE '\')`,
 			d.ph(1), d.ph(2), d.ph(3), d.ph(4)),
 		"user", id, "user-agent", escapeLike(id)+"/%"); err != nil {
 		return err
@@ -2609,6 +2643,12 @@ func (d *DBStore) DeleteAgent(ctx context.Context, agentID string) error {
 	// readable.
 	if _, err := tx.ExecContext(ctx,
 		fmt.Sprintf(`DELETE FROM configs_kv WHERE (scope = %s AND scope_id = %s) OR (scope = %s AND scope_id LIKE %s ESCAPE '\')`,
+			d.ph(1), d.ph(2), d.ph(3), d.ph(4)),
+		"agent", agentID, "user-agent", "%"+escapeLike("/"+agentID)); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
+		fmt.Sprintf(`DELETE FROM configs_mirror WHERE (scope = %s AND scope_id = %s) OR (scope = %s AND scope_id LIKE %s ESCAPE '\')`,
 			d.ph(1), d.ph(2), d.ph(3), d.ph(4)),
 		"agent", agentID, "user-agent", "%"+escapeLike("/"+agentID)); err != nil {
 		return err
@@ -3897,6 +3937,63 @@ func (d *DBStore) DeleteConfigPrefix(ctx context.Context, kind, scope, scopeID, 
 	return err
 }
 
+// SaveConfigMirror records the completeness marker for one configs row's
+// projection (see ConfigMirror). The dual-write calls it in the same
+// transaction as the leaves it covers, so the marker and the rows it certifies
+// commit or roll back together.
+func (d *DBStore) SaveConfigMirror(ctx context.Context, kind, scope, scopeID, name string, m ConfigMirror) error {
+	if kind == "" || name == "" {
+		return errors.New("store: SaveConfigMirror requires kind and name")
+	}
+	now := time.Now().UTC()
+	if d.dialect == "postgres" {
+		_, err := d.handle().ExecContext(ctx,
+			`INSERT INTO configs_mirror (kind, scope, scope_id, name, prefix, key_count, fingerprint, updated_at)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+				ON CONFLICT (kind, scope, scope_id, name) DO UPDATE SET
+				  prefix=$5, key_count=$6, fingerprint=$7, updated_at=$8`,
+			kind, scope, scopeID, name, m.Prefix, m.KeyCount, m.Fingerprint, now)
+		return err
+	}
+	_, err := d.handle().ExecContext(ctx,
+		`INSERT INTO configs_mirror (kind, scope, scope_id, name, prefix, key_count, fingerprint, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT (kind, scope, scope_id, name) DO UPDATE SET
+			  prefix=excluded.prefix, key_count=excluded.key_count,
+			  fingerprint=excluded.fingerprint, updated_at=excluded.updated_at`,
+		kind, scope, scopeID, name, m.Prefix, m.KeyCount, m.Fingerprint, now)
+	return err
+}
+
+// GetConfigMirror returns the marker for one configs row. The bool is false
+// (with a nil error) when the row has no marker — an uncertified projection,
+// not a lookup failure.
+func (d *DBStore) GetConfigMirror(ctx context.Context, kind, scope, scopeID, name string) (ConfigMirror, bool, error) {
+	var m ConfigMirror
+	err := d.handle().QueryRowContext(ctx,
+		fmt.Sprintf(`SELECT prefix, key_count, fingerprint FROM configs_mirror WHERE kind = %s AND scope = %s AND scope_id = %s AND name = %s`,
+			d.ph(1), d.ph(2), d.ph(3), d.ph(4)),
+		kind, scope, scopeID, name).Scan(&m.Prefix, &m.KeyCount, &m.Fingerprint)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ConfigMirror{}, false, nil
+	}
+	if err != nil {
+		return ConfigMirror{}, false, err
+	}
+	return m, true, nil
+}
+
+// DeleteConfigMirror removes the marker for one configs row. Callers delete it
+// when the projection it certified is gone, so a stale marker cannot certify
+// an empty (or later, a different) set of rows.
+func (d *DBStore) DeleteConfigMirror(ctx context.Context, kind, scope, scopeID, name string) error {
+	_, err := d.handle().ExecContext(ctx,
+		fmt.Sprintf(`DELETE FROM configs_mirror WHERE kind = %s AND scope = %s AND scope_id = %s AND name = %s`,
+			d.ph(1), d.ph(2), d.ph(3), d.ph(4)),
+		kind, scope, scopeID, name)
+	return err
+}
+
 // likePrefixPattern turns a literal KV name prefix into a LIKE pattern that
 // matches only that prefix. The metacharacters matter: "_" matches any single
 // character, so the unescaped pattern built from a provider called
@@ -4284,19 +4381,16 @@ func (d *DBStore) migrateConfigsToKV(ctx context.Context) error {
 		// instead of collapsing onto the user layer (which would leak
 		// one agent's key across all of the user's agents).
 		kvScope, kvScopeID := KVScopeFromOwnership(cfg.UserID, cfg.AgentID)
+		// The mirror prefix: a provider name or a settings namespace becomes
+		// the "<name>." prefix its leaves live under. agents.defaults is the
+		// one rename — its leaves live under "agent.".
+		kvPrefix := cfg.Name + "."
+		if cfg.Kind == KindSetting && cfg.Name == "agents.defaults" {
+			kvPrefix = "agent."
+		}
 		// Flatten JSON data into typed key-value pairs.
 		flat := map[string]ConfigValue{}
-		switch {
-		case cfg.Kind == KindProvider:
-			// name becomes "{provider_name}.{json_key_snake_case}"
-			flattenJSON(cfg.Name+".", cfg.Data, flat)
-		case cfg.Kind == KindSetting && cfg.Name == "agents.defaults":
-			// namespace becomes "agent." prefix
-			flattenJSON("agent.", cfg.Data, flat)
-		default:
-			// Other settings: name becomes "{namespace}.{json_key_snake_case}"
-			flattenJSON(cfg.Name+".", cfg.Data, flat)
-		}
+		flattenJSON(kvPrefix, cfg.Data, flat)
 		for name, value := range flat {
 			if err := d.SetConfigValue(ctx, cfg.Kind, kvScope, kvScopeID, name, value); err != nil {
 				slog.Warn("migrate config to kv failed",
@@ -4305,6 +4399,14 @@ func (d *DBStore) migrateConfigsToKV(ctx context.Context) error {
 			} else {
 				inserted++
 			}
+		}
+		// The backfill projects the whole blob, so it can certify its own
+		// output: the marker lets a mirror-authorized reader trust a
+		// backfilled row exactly as it trusts a freshly dual-written one.
+		if err := d.SaveConfigMirror(ctx, cfg.Kind, kvScope, kvScopeID, cfg.Name, NewConfigMirror(kvPrefix, flat)); err != nil {
+			slog.Warn("migrate config mirror marker failed",
+				"kind", cfg.Kind, "scope", kvScope, "scope_id", kvScopeID,
+				"name", cfg.Name, "error", err)
 		}
 	}
 	if inserted > 0 {

@@ -20,7 +20,7 @@
 |---|---|---|
 | Entities | `internal/config` 的 typed 结构体（`Config` / `ProviderConfig` / `ChannelConfig` / `AgentDefaults` …）与四层所有权语义 | 被所有层依赖，自己不依赖任何 IO |
 | Use Cases | `internal/scope`：解析与合并（`Setting` / `ExactSetting` / `Providers` / `Channels` / `GetValues` / `SettingInto`）——「哪一层的行胜出、值怎么投影」 | `setup` / `gateway` / `agentcli` |
-| Interface Adapters | `internal/kvkeys`（键形状编解码）、`store.ConfigValue`（value + value_kind 编解码）、`store.JSONToMap`（blob 解码）、`scope.Save*` 的双写编排、`setup` 的 `scope` 字符串 ↔ `(user_id, agent_id)` 转换 | `scope` / `setup` |
+| Interface Adapters | `internal/kvkeys`（键形状编解码）、`store.ConfigValue`（value + value_kind 编解码）、`store.ConfigMirror`（镜像完整性标记：prefix + key_count + fingerprint）、`store.JSONToMap`（blob 解码）、`scope.Save*` 的双写编排、`setup` 的 `scope` 字符串 ↔ `(user_id, agent_id)` 转换 | `scope` / `setup` |
 | Frameworks & Drivers | `internal/store/database.go` 的 SQLite / PostgreSQL、表结构、迁移；HTTP / CLI 入口 | 最外层，随时可换 |
 
 依赖方向只有向内一条：`setup → scope → store → database/sql`，`config` 在最里
@@ -38,6 +38,10 @@ configs             id, kind, scope(标签), user_id, agent_id, name,
 configs_kv          kind, scope, scope_id, name, value(TEXT), value_kind(TEXT)
                     PRIMARY KEY(kind, scope, scope_id, name)
                     INDEX(kind, scope, scope_id)
+
+configs_mirror      kind, scope, scope_id, name, prefix, key_count, fingerprint,
+                    时间戳
+                    PRIMARY KEY(kind, scope, scope_id, name)
 ```
 
 - **kinds**：`provider` / `setting` / `channel` / `plugin_enabled`（`store.KindPluginEnabled`）。
@@ -48,6 +52,11 @@ configs_kv          kind, scope, scope_id, name, value(TEXT), value_kind(TEXT)
 - **谁进 configs_kv**：`provider`、`setting`、`plugin_enabled` 双写；
   **`channel` 不进**（它有自己的 `channels` 表，`migrateChannelsFromConfigs`
   负责搬迁）。迁移 `migrateConfigsToKV` 只回填 `provider` + `setting`。
+- **configs_mirror 是镜像的完整性标记**：每个 `configs` 行一条，记录这一行的投影
+  覆盖哪个 KV 前缀、有多少个叶子（`key_count`）、这些叶子的指纹
+  （`fingerprint`，`store.MirrorFingerprint`）。双写在与叶子**同一个事务**里写它；
+  有标记 = 某个双写把这一行的每个叶子都写下去了。它单独一张表而不是 configs_kv
+  里的一行，因为它是**关于投影的元数据**，不能出现在投影自身的前缀扫描里。
 
 #### 目标形态与迁移阶段
 
@@ -61,25 +70,30 @@ KV 是镜像」，这是**迁移期的临时不变式**，不是终点。翻转�
 |---|---|---|
 | 0 | typed encoding：值域能表达「这是 string / number / bool…」，不靠读侧猜 | **已做**：`configs_kv.value_kind`（数字保字面量，`json.Number`） |
 | 1 | 事务化双写：blob 与镜像不会「写一半」 | **已做**：`store.WithConfigTx`（`9dbccd9`） |
-| 2 | 完整性标记：能判定「镜像 = blob 的完整投影」，而不只是抽样一致 | **未做**：需要一条标记行 / 版本，否则翻转后无法区分「镜像就该少这个 key」和「镜像漏了」 |
+| 2 | 完整性标记：能判定「镜像 = blob 的完整投影」，而不只是抽样一致 | **已做（写入侧）**：`configs_mirror` 表 + `store.ConfigMirror`（prefix / key_count / fingerprint），`store.VerifyConfigMirror` 判定；双写与回填都写标记。**剩余**：对存量行做一次 blob↔镜像核对以回填标记（见残留风险 2） |
 | 3 | 翻转权威：读路径改 KV 优先、blob 变兜底 | **未做** |
 | 4 | 下掉 blob：迁移完成后删除 `configs` 的 blob 列与相关读代码 | **未做** |
 
 在阶段 3 到来之前，**blob 权威**；镜像必须是对 blob 的忠实投影，这不是终点契约，
-而是「让阶段 3 安全着陆」的前置条件。阶段 2 的完整性标记是阶段 3 的准入条件——
-没有它，翻转权威等于把「镜像可能不全」从潜伏变成正式语义。
+而是「让阶段 3 安全着陆」的前置条件。阶段 2 的标记机制已经就位，阶段 3 的准入
+条件因此收窄成一条：**每个将被镜像服务的行都必须先被标记认证**——新写入与回填
+已经自动认证，剩下的就是存量行。没有这一步，翻转权威等于把「镜像可能不全」从
+潜伏变成正式语义。
 
 ### 写路径
 
 ```
 SaveSetting / SaveProviderState / SaveAgentPluginEnabled   ← 唯一写入口
   └─ store.WithConfigTx（Txer → *sql.Tx；不支持事务的 store 退化为顺序执行）
-       ├─ KV 侧：DeleteConfigPrefix → flattenJSONToKV
-       │            → store.EncodeConfigValue(leaf) → SetConfigValue
+       ├─ KV 侧：DeleteConfigPrefix（含标记）
+       │            → flattenJSONToKV → store.EncodeConfigValue(leaf)
+       │            → SetConfigValue × n
+       │            → SetConfigMirror（ConfigMirror = prefix + key_count + fingerprint）
        └─ blob 侧：ConfigRecord{Data map[string]interface{}} → SaveConfig → configs.data
 ```
 
-两张表在**同一个事务**里写（`9dbccd9`）。镜像现在是 blob 的投影，所以「写了一半」
+两张表在**同一个事务**里写（`9dbccd9`）；完整性标记也在这个事务里，所以「标记存在」
+等价于「这一行的每个叶子都写下去了」。镜像现在是 blob 的投影，所以「写了一半」
 不再是正常状态：任一语句失败就整体回滚，读侧不必再为半写状态兜底。
 `store.WithTx` / `store.WithConfigTx` 对没有事务能力的 store 退化成顺序执行——
 那是给测试替身和别的后端留的口子，不是生产路径的退路。
@@ -892,9 +906,13 @@ provider 名同时是两样东西：`configs_kv` 的 key 前缀（`<名>.<字段
    KV-only writer）。现在只表现为「镜像与 blob 不一致」，不影响读取，因为 blob
    仍是权威。方向是 `configs` 演进成 `configs_kv`（见「目标形态与迁移阶段」），
    镜像必须是对 blob 的忠实投影——但这是**迁移期的临时不变式**，服务于阶段 3 的
-   翻转，不是终点契约。翻转之前必须先有**完整性标记行**，否则无法区分「镜像本该
-   缺这个 key」和「镜像漏了」。在那之前，新增写入路径要么双写（收在同一个 `Save*`
-   入口里），要么明确登记为 KV-only 并同时补上读侧与编辑器的可见性。
+   翻转，不是终点契约。**这个风险现在可判定了**：`configs_mirror` 的标记让
+   「这一行被完整投影过」成为记录下来的事实，`store.VerifyConfigMirror` 同时挡住
+   「标记之后行又被改过」（手工 SQL 删一个叶子就会被抓到）。因此翻转之前剩下的
+   只有一步——**给存量行回填标记**（存量行没有标记 = 未认证 = 翻转后必须回落
+   blob），回填需要对每行做一次 blob↔镜像核对。在那之前，新增写入路径要么双写
+   （收在同一个 `Save*` 入口里，自动带标记），要么明确登记为 KV-only 并同时补上
+   读侧与编辑器的可见性。
 3. **空 map 只在读侧恢复**：`flattenJSONToKV` 仍然不为 `{}` 产出行，所以镜像里
    没有这个 key（读 blob 时正确返回空对象）。
 4. **LIKE 转义只覆盖已发现的位置**：`configs_kv` 的 name/scope_id 前缀匹配都已

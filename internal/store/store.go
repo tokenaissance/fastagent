@@ -298,6 +298,13 @@ type Store interface {
 	ListConfigValues(ctx context.Context, kind, scope, scopeID, namePrefix string) (map[string]ConfigValue, error)
 	// DeleteConfigPrefix deletes all values matching a name prefix.
 	DeleteConfigPrefix(ctx context.Context, kind, scope, scopeID, namePrefix string) error
+	// SaveConfigMirror / GetConfigMirror / DeleteConfigMirror maintain the
+	// completeness marker for one configs row's slice of the mirror (see
+	// ConfigMirror). The dual-write writes the marker in the same transaction
+	// as the rows it certifies.
+	SaveConfigMirror(ctx context.Context, kind, scope, scopeID, name string, m ConfigMirror) error
+	GetConfigMirror(ctx context.Context, kind, scope, scopeID, name string) (ConfigMirror, bool, error)
+	DeleteConfigMirror(ctx context.Context, kind, scope, scopeID, name string) error
 
 	// --- Channels (IM bot bindings) ---
 	ListChannels(ctx context.Context, userID, agentID string) ([]ChannelRecord, error)

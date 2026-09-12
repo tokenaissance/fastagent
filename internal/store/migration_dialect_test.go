@@ -19,8 +19,8 @@ func TestMigrationSQLDialectCompatibility(t *testing.T) {
 	sqliteSQL := joinStatements(migrationSQLForDialect("sqlite"))
 
 	for name, got := range map[string]string{"postgres": pgSQL, "sqlite": sqliteSQL} {
-		if !containsAll(got, "mcp_oauth_tokens", "mcp_oauth_pending", "mcp_oauth_clients", "configs_kv", "agent_mcp_servers", "sandbox_leases") {
-			t.Fatalf("%s migration missing oauth/configs_kv/agent_mcp_servers/sandbox_leases DDL", name)
+		if !containsAll(got, "mcp_oauth_tokens", "mcp_oauth_pending", "mcp_oauth_clients", "configs_kv", "configs_mirror", "agent_mcp_servers", "sandbox_leases") {
+			t.Fatalf("%s migration missing oauth/configs_kv/configs_mirror/agent_mcp_servers/sandbox_leases DDL", name)
 		}
 		if !strings.Contains(got, "epoch BIGINT NOT NULL DEFAULT 0") {
 			t.Fatalf("%s migration sandbox_leases must include the epoch fencing column", name)

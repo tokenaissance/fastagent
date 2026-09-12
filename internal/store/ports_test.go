@@ -26,11 +26,18 @@ func TestPortMethodSets(t *testing.T) {
 		}},
 		{(*ConfigStore)(nil), []string{
 			"DeleteConfig", "DeleteConfigPrefix", "DeleteConfigValue",
+			"DeleteConfigMirror",
 			"GetConfigByName", "ListConfigs", "ListConfigValues",
-			"SaveConfig", "SetConfigValue",
+			"GetConfigMirror",
+			"SaveConfig", "SaveConfigMirror", "SetConfigValue",
+		}},
+		{(*ConfigMirrorStore)(nil), []string{
+			"DeleteConfigMirror", "GetConfigMirror", "SaveConfigMirror",
 		}},
 		{(*KVStore)(nil), []string{
-			"DeleteConfigPrefix", "DeleteConfigValue", "ListConfigValues", "SetConfigValue",
+			"DeleteConfigMirror", "DeleteConfigPrefix", "DeleteConfigValue",
+			"GetConfigMirror", "ListConfigValues",
+			"SaveConfigMirror", "SetConfigValue",
 		}},
 	}
 	for _, c := range cases {
@@ -73,6 +80,7 @@ func TestPortsExcludeOtherDomains(t *testing.T) {
 		"GetConfigByName": true, "ListConfigs": true, "ListConfigValues": true,
 		"SaveConfig": true, "DeleteConfig": true,
 		"SetConfigValue": true, "DeleteConfigValue": true, "DeleteConfigPrefix": true,
+		"SaveConfigMirror": true, "GetConfigMirror": true, "DeleteConfigMirror": true,
 	}
 	for _, port := range []reflect.Type{
 		reflect.TypeOf((*ConfigReader)(nil)).Elem(),
@@ -80,6 +88,7 @@ func TestPortsExcludeOtherDomains(t *testing.T) {
 		reflect.TypeOf((*ConfigRowWriter)(nil)).Elem(),
 		reflect.TypeOf((*ConfigStore)(nil)).Elem(),
 		reflect.TypeOf((*KVStore)(nil)).Elem(),
+		reflect.TypeOf((*ConfigMirrorStore)(nil)).Elem(),
 	} {
 		for i := 0; i < port.NumMethod(); i++ {
 			name := port.Method(i).Name
