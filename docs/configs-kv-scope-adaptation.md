@@ -443,6 +443,62 @@ tag 补不回来（`TestConfigValueNumberFloat64Boundary` 钉住这条边界）�
 `EncodeConfigValue`），连同只测这个薄别名的 `TestCamelToSnakeAllCaps` 一起删除——
 实现与测试都在 `kvkeys`，留着就是第二份会漂移的副本。
 
+## 写侧保真：JSON 文本列不再经过 `float64`
+
+上一节解决的是「KV 里的值带着类型」。这一节解决它的前提：**值在写进来之前
+就已经被压成 `float64` 了**。
+
+8 处代码在做同一件事——把 typed 结构体变成可以塞进 `configs.data` 的
+`map[string]interface{}`：
+
+```go
+blob, _ := json.Marshal(v)
+var m map[string]interface{}
+_ = json.Unmarshal(blob, &m)   // ← int64 字段在这里变成 float64
+```
+
+`Marshal` 出来的 JSON 字面量是精确的，`Unmarshal` 到 `interface{}` 的默认
+解码把它变成 `float64`：`9007199254740993` 当场变成 `…992`。读侧同理，
+`scanConfigRow` / `scanConfigs` 直接 `json.Unmarshal` 进 `ConfigRecord.Data`。
+于是「DB 里的 number 是精确的」这个前提根本不成立——`configs.data` 里的数字
+可能在第一次写入时就已经四舍五入了。
+
+现在只有两个入口，都在 `internal/store/json_map.go`：
+
+```go
+func JSONToMap(blob []byte) (map[string]interface{}, error)  // Decoder.UseNumber()
+func ValueToMap(v interface{}) map[string]interface{}         // Marshal + JSONToMap
+```
+
+不变式：**任何 `interface{}` 里承载的 config 数字都是 `json.Number` 字面量**，
+`float64` 只在调用方显式转换时出现（和 `ConfigValue.Decode` 对 `number` 的约定
+一致）。`json.Number` marshal 时原样输出，所以它在每一跳都不变形：
+`SaveConfig` 写列、`flattenJSONToKV` 写镜像、HTTP 响应体、CLI 打印。
+
+覆盖：`store` 的六处 JSON 文本列解码（`configs.data` / `channels.data` /
+`agents.config`）、`scope.providerToData` / `channelToData`、
+`setup.toMap` / `wrapKeyed` / `saveAgentSkillEntries` / 两处 channel dm /
+masked 响应、`gateway` 的 channel 更新、CLI 的 `structMap` /
+`channelConfigData`。typed 目标（`json.Unmarshal(blob, &cfg)` 到结构体）不需要
+改：解码器本来就是按字段类型解析字面量的。
+
+**代价**：字面量被原样保留，所以客户端写 `2e6` 存下的就是 `2e6`，投影到 `int`
+字段会报错（旧行为是 `float64` 把它规范化成 `2000000` 才存）。JS 的
+`JSON.stringify` 对 <1e21 的整数不会产出指数形式，实际很难撞上；真要容忍
+指数写法，正确的位置是**读侧的 typed 归一化**（按目标字段解析字面量），
+而不是写侧丢掉字面量。
+
+测试：`store` → `TestConfigDataKeepsNumberLiteralsAtRest`（直接把
+`9007199254740993` 写进列、读回必须是 `json.Number`、再存回去数字不变）、
+`TestValueToMapKeepsIntDigits`（`int64` 字段 → map → 列 → KV 全程 19 位）、
+`TestJSONToMapNestedNumbers`（数组/对象里的数字）；`agentcli` →
+`TestSetGetConfigAgentScope`（`GetConfig` 返回 `json.Number`，但 CLI 渲染出的
+仍是 `0.42`）。
+
+同类未覆盖（不同域，不是 config 列）：第三方 API 响应（feishu / line）、
+plugin / skills manifest 的解码。它们不参与 config 往返，需要时按同一模式换
+`UseNumber` 即可。
+
 ## 残留风险
 
 1. **未标注行仍靠猜测**：新写入的值都带 `value_kind`，但改动之前写下的行没有

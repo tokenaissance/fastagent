@@ -2,6 +2,7 @@ package agentcli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -309,8 +310,16 @@ func TestSetGetConfigAgentScope(t *testing.T) {
 		t.Fatalf("agent-scope sandbox write should be rejected, got %v", err)
 	}
 	temp, _ := GetConfig(context.Background(), st, res.Agent.ID, "temperature")
-	if got, ok := temp.(float64); !ok || got != 0.42 {
+	// json.Number, not float64: the row stores text, and decoding it into a
+	// float64 here would be the same lossy step that drops digits out of an
+	// int64 field. The CLI output is unchanged — printValue marshals whatever
+	// this is, and a json.Number marshals as the literal it holds.
+	num, ok := temp.(json.Number)
+	if !ok || num.String() != "0.42" {
 		t.Fatalf("temperature round-trip: %#v", temp)
+	}
+	if blob, err := json.Marshal(temp); err != nil || string(blob) != "0.42" {
+		t.Fatalf("temperature renders as %s (err=%v), want 0.42", blob, err)
 	}
 	// Nothing was written for the rejected key.
 	if box, _ := GetConfig(context.Background(), st, res.Agent.ID, "sandbox"); box != nil {

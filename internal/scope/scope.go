@@ -876,10 +876,7 @@ func providerToConfig(r store.ConfigRecord) config.ProviderConfig {
 }
 
 func providerToData(p config.ProviderConfig) map[string]interface{} {
-	blob, _ := json.Marshal(p)
-	var m map[string]interface{}
-	_ = json.Unmarshal(blob, &m)
-	return m
+	return store.ValueToMap(p)
 }
 
 func channelToConfig(r store.ConfigRecord) config.ChannelConfig {
@@ -892,9 +889,7 @@ func channelToConfig(r store.ConfigRecord) config.ChannelConfig {
 }
 
 func channelToData(c config.ChannelConfig) map[string]interface{} {
-	blob, _ := json.Marshal(c)
-	var m map[string]interface{}
-	_ = json.Unmarshal(blob, &m)
+	m := store.ValueToMap(c)
 	delete(m, "enabled") // enabled lives on the row column, not in data
 	return m
 }

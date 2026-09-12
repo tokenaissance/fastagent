@@ -354,8 +354,8 @@ func purgeWeChatAccount(st store.Store, rowID, deadAccount string) error {
 	if mErr != nil {
 		return mErr
 	}
-	var data map[string]interface{}
-	if mErr := json.Unmarshal(blob, &data); mErr != nil {
+	data, mErr := store.JSONToMap(blob)
+	if mErr != nil {
 		return mErr
 	}
 	rec.Data = data

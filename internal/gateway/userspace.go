@@ -606,6 +606,8 @@ func readUserScopeAgentDefaults(ctx context.Context, st store.Store, userID stri
 	if err != nil {
 		return out
 	}
+	// Typed destination: the decoder parses each number against the field
+	// it lands in, so the digits survive without json.Number here.
 	_ = json.Unmarshal(blob, &out)
 	return out
 }

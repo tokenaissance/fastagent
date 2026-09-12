@@ -136,10 +136,7 @@ func saveAgentSkillEntries(ctx context.Context, st store.Store, agentID string, 
 	if len(entries) == 0 {
 		return scope.SaveSetting(ctx, st, "", agentID, "skills.entries", nil)
 	}
-	blob, _ := json.Marshal(entries)
-	var asMap map[string]interface{}
-	_ = json.Unmarshal(blob, &asMap)
-	return scope.SaveSetting(ctx, st, "", agentID, "skills.entries", asMap)
+	return scope.SaveSetting(ctx, st, "", agentID, "skills.entries", store.ValueToMap(entries))
 }
 
 // saveUserConfig persists the namespaced setting rows for the calling
@@ -256,12 +253,7 @@ type settingNamespace struct {
 }
 
 func toMap(v interface{}) map[string]interface{} {
-	blob, err := json.Marshal(v)
-	if err != nil {
-		return nil
-	}
-	var m map[string]interface{}
-	_ = json.Unmarshal(blob, &m)
+	m := store.ValueToMap(v)
 	if len(m) == 0 {
 		return nil
 	}
@@ -272,12 +264,7 @@ func toMap(v interface{}) map[string]interface{} {
 // fits the configs.data column. Empty maps return nil so
 // SaveSetting deletes the row instead of writing {}.
 func wrapKeyed(v interface{}) map[string]interface{} {
-	blob, err := json.Marshal(v)
-	if err != nil {
-		return nil
-	}
-	var m map[string]interface{}
-	_ = json.Unmarshal(blob, &m)
+	m := store.ValueToMap(v)
 	if len(m) == 0 {
 		return nil
 	}
@@ -563,8 +550,10 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	// callers ignore the extra `meta` key) without forcing a refactor of
 	// config.Config to carry presentation metadata.
 	blob, _ := json.Marshal(masked)
-	out := map[string]any{}
-	_ = json.Unmarshal(blob, &out)
+	out, _ := store.JSONToMap(blob)
+	if out == nil {
+		out = map[string]any{}
+	}
 	out["meta"] = map[string]any{
 		"systemDefaultModel": sysDefaults.Model,
 		"serverTimezone":     serverTimezone,

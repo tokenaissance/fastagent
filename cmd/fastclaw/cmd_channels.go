@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 
 	"github.com/google/uuid"
@@ -161,9 +160,7 @@ func channelsDeleteCmd() *cobra.Command {
 }
 
 func channelConfigData(c config.ChannelConfig) map[string]interface{} {
-	blob, _ := json.Marshal(c)
-	var m map[string]interface{}
-	_ = json.Unmarshal(blob, &m)
+	m := store.ValueToMap(c)
 	delete(m, "enabled")
 	return m
 }

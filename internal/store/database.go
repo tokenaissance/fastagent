@@ -2468,7 +2468,7 @@ func (d *DBStore) GetAgent(ctx context.Context, agentID string) (*AgentRecord, e
 	if err := row.Scan(&ag.ID, &ag.UserID, &ag.Name, &cfgStr, &ag.IsPublic, &ag.CreatedAt, &ag.UpdatedAt); err != nil {
 		return nil, scanErr(err)
 	}
-	json.Unmarshal([]byte(cfgStr), &ag.Config)
+	ag.Config = jsonTextToMap(cfgStr)
 	return &ag, nil
 }
 
@@ -2585,7 +2585,7 @@ func scanAgents(rows *sql.Rows) ([]AgentRecord, error) {
 		if err := rows.Scan(&ag.ID, &ag.UserID, &ag.Name, &cfgStr, &ag.IsPublic, &ag.CreatedAt, &ag.UpdatedAt); err != nil {
 			return nil, err
 		}
-		json.Unmarshal([]byte(cfgStr), &ag.Config)
+		ag.Config = jsonTextToMap(cfgStr)
 		out = append(out, ag)
 	}
 	return out, rows.Err()
@@ -3898,7 +3898,7 @@ func scanConfigRow(row rowScanner) (*ConfigRecord, error) {
 	if err := row.Scan(&c.ID, &c.Kind, &c.Scope, &c.UserID, &c.AgentID, &c.Name, &c.Enabled, &c.CredentialKey, &dataStr, &c.CreatedAt, &c.UpdatedAt); err != nil {
 		return nil, scanErr(err)
 	}
-	json.Unmarshal([]byte(dataStr), &c.Data)
+	c.Data = jsonTextToMap(dataStr)
 	return &c, nil
 }
 
@@ -3910,10 +3910,22 @@ func scanConfigs(rows *sql.Rows) ([]ConfigRecord, error) {
 		if err := rows.Scan(&c.ID, &c.Kind, &c.Scope, &c.UserID, &c.AgentID, &c.Name, &c.Enabled, &c.CredentialKey, &dataStr, &c.CreatedAt, &c.UpdatedAt); err != nil {
 			return nil, err
 		}
-		json.Unmarshal([]byte(dataStr), &c.Data)
+		c.Data = jsonTextToMap(dataStr)
 		out = append(out, c)
 	}
 	return out, rows.Err()
+}
+
+// jsonTextToMap decodes one of the JSON-text columns (configs.data,
+// channels.data, agents.config) with numbers kept as json.Number literals.
+// A row that fails to decode keeps the old behaviour: nil map, no error
+// (the column was already validated on write).
+func jsonTextToMap(dataStr string) map[string]interface{} {
+	m, err := JSONToMap([]byte(dataStr))
+	if err != nil {
+		return nil
+	}
+	return m
 }
 
 // --- Channels (IM bot bindings) ---
@@ -4028,7 +4040,7 @@ func scanChannelRow(row rowScanner) (*ChannelRecord, error) {
 	}
 	c.Enabled = enabledInt != 0
 	c.SharedIdentity = sharedIdent != 0
-	json.Unmarshal([]byte(dataStr), &c.Data)
+	c.Data = jsonTextToMap(dataStr)
 	return &c, nil
 }
 
@@ -4043,7 +4055,7 @@ func scanChannels(rows *sql.Rows) ([]ChannelRecord, error) {
 		}
 		c.Enabled = enabledInt != 0
 		c.SharedIdentity = sharedIdent != 0
-		json.Unmarshal([]byte(dataStr), &c.Data)
+		c.Data = jsonTextToMap(dataStr)
 		out = append(out, c)
 	}
 	return out, rows.Err()
