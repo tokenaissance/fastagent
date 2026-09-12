@@ -30,10 +30,10 @@ func TestMigratePluginEnabledKind(t *testing.T) {
 		t.Fatalf("save system plugins row: %v", err)
 	}
 	// Mirror rows for both, in the shape their writers produce.
-	if err := db.SetConfigValue(ctx, KindSetting, "agent", "agent-x", "plugins.enabled.browserUse", "true"); err != nil {
+	if err := db.SetConfigValue(ctx, KindSetting, "agent", "agent-x", "plugins.enabled.browserUse", StringValue("true")); err != nil {
 		t.Fatalf("seed mirror opt-in: %v", err)
 	}
-	if err := db.SetConfigValue(ctx, KindSetting, "system", "", "plugins.enabled", "false"); err != nil {
+	if err := db.SetConfigValue(ctx, KindSetting, "system", "", "plugins.enabled", StringValue("false")); err != nil {
 		t.Fatalf("seed mirror scalar: %v", err)
 	}
 
@@ -49,11 +49,11 @@ func TestMigratePluginEnabledKind(t *testing.T) {
 		t.Fatalf("legacy row still under KindSetting: %v", err)
 	}
 	// Mirror: the agent's key moved…
-	if v, err := db.GetConfigValue(ctx, KindPluginEnabled, "agent", "agent-x", "plugins.enabled.browserUse"); err != nil || v != "true" {
+	if v, err := db.GetConfigValue(ctx, KindPluginEnabled, "agent", "agent-x", "plugins.enabled.browserUse"); err != nil || v.Value != "true" {
 		t.Fatalf("mirror opt-in not moved: %q %v", v, err)
 	}
 	// …and the system scalar did not.
-	if v, err := db.GetConfigValue(ctx, KindSetting, "system", "", "plugins.enabled"); err != nil || v != "false" {
+	if v, err := db.GetConfigValue(ctx, KindSetting, "system", "", "plugins.enabled"); err != nil || v.Value != "false" {
 		t.Fatalf("system scalar mirror was disturbed: %q %v", v, err)
 	}
 

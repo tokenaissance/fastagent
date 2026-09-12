@@ -167,6 +167,14 @@ func (d *DBStore) Migrate(ctx context.Context) error {
 	if err := d.migrateChannelsFromConfigs(ctx); err != nil {
 		return fmt.Errorf("migrate channels from configs: %w", err)
 	}
+	// Schema first, then the data that depends on it: migrateConfigsToKV
+	// writes configs_kv rows through SetConfigValue, which names the
+	// value_kind column, so a legacy table missing that column must be
+	// retrofitted before the backfill runs (an empty pre-tag table plus
+	// configs rows is enough to hit this).
+	if err := d.migrateConfigsKvValueKind(ctx); err != nil {
+		return fmt.Errorf("migrate configs_kv value_kind: %w", err)
+	}
 	if err := d.migrateConfigsToKV(ctx); err != nil {
 		return fmt.Errorf("migrate configs to kv: %w", err)
 	}
@@ -174,6 +182,37 @@ func (d *DBStore) Migrate(ctx context.Context) error {
 		return fmt.Errorf("migrate plugins.enabled kind: %w", err)
 	}
 	return nil
+}
+
+// migrateConfigsKvValueKind retrofits the value_kind column onto a
+// configs_kv table created before it existed (CREATE TABLE IF NOT EXISTS
+// leaves an existing table alone, so the new column in the schema literal
+// only reaches fresh databases).
+//
+// Existing rows keep the column default — the empty string, i.e. "untagged"
+// — and therefore decode through the legacy heuristic exactly as they did
+// before. There is deliberately no backfill: the pre-tag data does not
+// contain the information a backfill would need (that is the whole problem),
+// so a guess written into the column would be indistinguishable from a fact.
+// Rows acquire a tag the next time they are written.
+func (d *DBStore) migrateConfigsKvValueKind(ctx context.Context) error {
+	exists, err := d.tableExists(ctx, "configs_kv")
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+	has, err := d.tableHasColumn(ctx, "configs_kv", "value_kind")
+	if err != nil {
+		return err
+	}
+	if has {
+		return nil
+	}
+	_, err = d.db.ExecContext(ctx,
+		`ALTER TABLE configs_kv ADD COLUMN value_kind TEXT NOT NULL DEFAULT ''`)
+	return err
 }
 
 // migratePluginEnabledKind moves the per-agent plugin opt-in row out of
@@ -1874,17 +1913,25 @@ func migrationSQLForDialect(dialect string) []string {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_channels_user ON channels (user_id, agent_id)`,
 		// configs_kv is the single-value key-value successor to the JSON-blob
-		// configs table. Each row stores exactly one scalar; the dotted name
+		// configs table. Each row stores exactly one value plus the tag naming
+		// its JSON type (value_kind — see ConfigValue); the dotted name
 		// encodes the hierarchy that the old JSON blob carried. The old
 		// configs table is kept for backward compatibility (dual-write during
 		// migration); this table is the read-preferred source of truth once
 		// populated.
+		//
+		// value_kind defaults to the empty string on purpose: that is the
+		// "untagged" tag, which readers resolve with the legacy heuristic, so
+		// every row that predates the column keeps its historical reading.
+		// Writes always set it (see migrateConfigsKvValueKind for the
+		// retrofit).
 		`CREATE TABLE IF NOT EXISTS configs_kv (
 			kind TEXT NOT NULL,
 			scope TEXT NOT NULL,
 			scope_id TEXT NOT NULL DEFAULT '',
 			name TEXT NOT NULL,
 			value TEXT NOT NULL DEFAULT '',
+			value_kind TEXT NOT NULL DEFAULT '',
 			PRIMARY KEY (kind, scope, scope_id, name)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_configs_kv_prefix ON configs_kv (kind, scope, scope_id)`,
@@ -3715,32 +3762,32 @@ func (d *DBStore) DeleteConfig(ctx context.Context, id string) error {
 
 // --- Configs KV (single-value key-value pairs) ---
 
-func (d *DBStore) GetConfigValue(ctx context.Context, kind, scope, scopeID, name string) (string, error) {
-	var value string
+func (d *DBStore) GetConfigValue(ctx context.Context, kind, scope, scopeID, name string) (ConfigValue, error) {
+	var v ConfigValue
 	err := d.db.QueryRowContext(ctx,
-		fmt.Sprintf(`SELECT value FROM configs_kv WHERE kind = %s AND scope = %s AND scope_id = %s AND name = %s`,
+		fmt.Sprintf(`SELECT value, value_kind FROM configs_kv WHERE kind = %s AND scope = %s AND scope_id = %s AND name = %s`,
 			d.ph(1), d.ph(2), d.ph(3), d.ph(4)),
-		kind, scope, scopeID, name).Scan(&value)
+		kind, scope, scopeID, name).Scan(&v.Value, &v.Kind)
 	if err != nil {
-		return "", scanErr(err)
+		return ConfigValue{}, scanErr(err)
 	}
-	return value, nil
+	return v, nil
 }
 
-func (d *DBStore) SetConfigValue(ctx context.Context, kind, scope, scopeID, name, value string) error {
+func (d *DBStore) SetConfigValue(ctx context.Context, kind, scope, scopeID, name string, value ConfigValue) error {
 	if d.dialect == "postgres" {
 		_, err := d.db.ExecContext(ctx,
-			`INSERT INTO configs_kv (kind, scope, scope_id, name, value)
-				VALUES ($1, $2, $3, $4, $5)
-				ON CONFLICT (kind, scope, scope_id, name) DO UPDATE SET value=$5`,
-			kind, scope, scopeID, name, value)
+			`INSERT INTO configs_kv (kind, scope, scope_id, name, value, value_kind)
+				VALUES ($1, $2, $3, $4, $5, $6)
+				ON CONFLICT (kind, scope, scope_id, name) DO UPDATE SET value=$5, value_kind=$6`,
+			kind, scope, scopeID, name, value.Value, value.Kind)
 		return err
 	}
 	_, err := d.db.ExecContext(ctx,
-		`INSERT INTO configs_kv (kind, scope, scope_id, name, value)
-			VALUES (?, ?, ?, ?, ?)
-			ON CONFLICT (kind, scope, scope_id, name) DO UPDATE SET value=excluded.value`,
-		kind, scope, scopeID, name, value)
+		`INSERT INTO configs_kv (kind, scope, scope_id, name, value, value_kind)
+			VALUES (?, ?, ?, ?, ?, ?)
+			ON CONFLICT (kind, scope, scope_id, name) DO UPDATE SET value=excluded.value, value_kind=excluded.value_kind`,
+		kind, scope, scopeID, name, value.Value, value.Kind)
 	return err
 }
 
@@ -3752,17 +3799,17 @@ func (d *DBStore) DeleteConfigValue(ctx context.Context, kind, scope, scopeID, n
 	return err
 }
 
-func (d *DBStore) ListConfigValues(ctx context.Context, kind, scope, scopeID, namePrefix string) (map[string]string, error) {
+func (d *DBStore) ListConfigValues(ctx context.Context, kind, scope, scopeID, namePrefix string) (map[string]ConfigValue, error) {
 	var rows *sql.Rows
 	var err error
 	if namePrefix == "" {
 		rows, err = d.db.QueryContext(ctx,
-			fmt.Sprintf(`SELECT name, value FROM configs_kv WHERE kind = %s AND scope = %s AND scope_id = %s ORDER BY name`,
+			fmt.Sprintf(`SELECT name, value, value_kind FROM configs_kv WHERE kind = %s AND scope = %s AND scope_id = %s ORDER BY name`,
 				d.ph(1), d.ph(2), d.ph(3)),
 			kind, scope, scopeID)
 	} else {
 		rows, err = d.db.QueryContext(ctx,
-			fmt.Sprintf(`SELECT name, value FROM configs_kv WHERE kind = %s AND scope = %s AND scope_id = %s AND name LIKE %s ESCAPE '\' ORDER BY name`,
+			fmt.Sprintf(`SELECT name, value, value_kind FROM configs_kv WHERE kind = %s AND scope = %s AND scope_id = %s AND name LIKE %s ESCAPE '\' ORDER BY name`,
 				d.ph(1), d.ph(2), d.ph(3), d.ph(4)),
 			kind, scope, scopeID, likePrefixPattern(namePrefix))
 	}
@@ -3770,13 +3817,14 @@ func (d *DBStore) ListConfigValues(ctx context.Context, kind, scope, scopeID, na
 		return nil, err
 	}
 	defer rows.Close()
-	out := map[string]string{}
+	out := map[string]ConfigValue{}
 	for rows.Next() {
-		var name, value string
-		if err := rows.Scan(&name, &value); err != nil {
+		var name string
+		var v ConfigValue
+		if err := rows.Scan(&name, &v.Value, &v.Kind); err != nil {
 			return nil, err
 		}
-		out[name] = value
+		out[name] = v
 	}
 	return out, rows.Err()
 }
@@ -4107,46 +4155,29 @@ func (d *DBStore) migrateChannelsFromConfigs(ctx context.Context) error {
 
 // --- Configs KV migration ---
 
-// camelToSnake converts a camelCase string to snake_case. Thin alias for
-// kvkeys.CamelToSnake — the write path used to carry its own copy of this
-// function (a49f9d4), which is how the read side drifted from it. The data-key
-// exception lives in kvkeys; prefer kvkeys.StoredSegment for flattening.
-func camelToSnake(s string) string {
-	return kvkeys.CamelToSnake(s)
-}
-
-// flattenJSON recursively flattens a map into dotted-key → string pairs.
-// Arrays and nested objects that aren't maps are serialized as JSON strings.
+// flattenJSON recursively flattens a map into dotted-key → ConfigValue pairs.
+//
+// The tag comes from EncodeConfigValue, so the read path restores the JSON
+// type the value had instead of guessing it — including the array/object
+// case, which used to be handled here by a hand-rolled type switch that
+// could only ever produce strings.
 //
 // Map keys (data segments: tool category ids, provider names, skill ids, env
 // var names) are written verbatim so the read path can restore them; struct
 // fields are snake_cased. See kvkeys.
-func flattenJSON(prefix string, data map[string]interface{}, out map[string]string) {
+func flattenJSON(prefix string, data map[string]interface{}, out map[string]ConfigValue) {
 	prefixPath := kvkeys.Path(prefix)
 	for k, v := range data {
 		seg := kvkeys.StoredSegment(prefixPath, k)
 		fullKey := prefix + seg
-		switch val := v.(type) {
-		case map[string]interface{}:
-			flattenJSON(fullKey+".", val, out)
-		case string:
-			out[fullKey] = val
-		case bool:
-			if val {
-				out[fullKey] = "true"
-			} else {
-				out[fullKey] = "false"
-			}
-		case float64:
-			// Use %g to avoid trailing zeros for integers.
-			out[fullKey] = fmt.Sprintf("%g", val)
-		case nil:
-			// skip nil values
-		default:
-			// Arrays and complex values: store as JSON string.
-			blob, _ := json.Marshal(val)
-			out[fullKey] = string(blob)
+		// Nested maps keep descending; everything else is a leaf. A nil leaf
+		// is now written as a tagged null row rather than skipped, so
+		// {"a":null} and {} stop looking the same in the mirror.
+		if nested, ok := v.(map[string]interface{}); ok {
+			flattenJSON(fullKey+".", nested, out)
+			continue
 		}
+		out[fullKey] = EncodeConfigValue(v)
 	}
 }
 
@@ -4200,8 +4231,8 @@ func (d *DBStore) migrateConfigsToKV(ctx context.Context) error {
 			kvScope = "agent"
 			kvScopeID = cfg.AgentID
 		}
-		// Flatten JSON data into key-value pairs.
-		flat := map[string]string{}
+		// Flatten JSON data into typed key-value pairs.
+		flat := map[string]ConfigValue{}
 		switch {
 		case cfg.Kind == KindProvider:
 			// name becomes "{provider_name}.{json_key_snake_case}"

@@ -70,7 +70,7 @@ func TestPreference_CloudPathE2E(t *testing.T) {
 
 	// configs_kv dual-write at the per-(user,agent) layer.
 	if v, err := db.GetConfigValue(ctx, store.KindSetting, scope.UserAgent, chatter+"/"+agentID,
-		scope.PrefsNamespace+"."+prefKey); err != nil || v != prefVal {
+		scope.PrefsNamespace+"."+prefKey); err != nil || v.Value != prefVal {
 		t.Errorf("configs_kv %s = %q err=%v; want %s", prefKey, v, err, prefVal)
 	}
 

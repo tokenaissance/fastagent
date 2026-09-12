@@ -70,9 +70,13 @@ func mcpToolUndo(ctx context.Context, ag *Agent, rc config.ResolvedAgent) (strin
 
 	consumed := map[string]bool{}
 	cursorName := "undo:" + sessionKey
-	if raw, err := ag.dataStore.GetConfigValue(ctx, mcpUndoCursorKind, mcpUndoCursorScope, rc.ID, cursorName); err == nil && raw != "" {
+	// The row is a JSON array of event ids; the kind tag rides along but this
+	// reader owns the shape, so it parses the text directly. Untagged rows
+	// (written before value_kind existed) carry the same text and read the
+	// same way.
+	if raw, err := ag.dataStore.GetConfigValue(ctx, mcpUndoCursorKind, mcpUndoCursorScope, rc.ID, cursorName); err == nil && raw.Value != "" {
 		var ids []string
-		if json.Unmarshal([]byte(raw), &ids) == nil {
+		if json.Unmarshal([]byte(raw.Value), &ids) == nil {
 			for _, id := range ids {
 				consumed[id] = true
 			}
@@ -137,7 +141,8 @@ func markUndoCursor(ctx context.Context, st store.Store, agentID, cursorName str
 		trimmed := ids[len(ids)-mcpUndoCursorMax:]
 		raw, _ = json.Marshal(trimmed)
 	}
-	return st.SetConfigValue(ctx, mcpUndoCursorKind, mcpUndoCursorScope, agentID, cursorName, string(raw))
+	return st.SetConfigValue(ctx, mcpUndoCursorKind, mcpUndoCursorScope, agentID, cursorName,
+		store.ConfigValue{Value: string(raw), Kind: store.ValueKindArray})
 }
 
 // toolResultUndoPayload extracts the <mcp-undo> marker from a persisted

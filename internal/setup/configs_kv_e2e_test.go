@@ -45,7 +45,7 @@ func TestProviders_CloudPathE2E(t *testing.T) {
 		t.Fatalf("create user-scope provider status = %d", code)
 	}
 	v, err := s.dataStore.GetConfigValue(ctx, store.KindProvider, scope.User, uid, "openai.api_key")
-	if err != nil || v != "sk-e2e-user" {
+	if err != nil || v.Value != "sk-e2e-user" {
 		t.Fatalf("configs_kv user openai.api_key = %q err=%v; want sk-e2e-user", v, err)
 	}
 	// Nothing leaked into the agent layer.
@@ -59,7 +59,7 @@ func TestProviders_CloudPathE2E(t *testing.T) {
 		t.Fatalf("create agent-scope provider status = %d", code)
 	}
 	v, err = s.dataStore.GetConfigValue(ctx, store.KindProvider, scope.Agent, aid, "anthropic.api_key")
-	if err != nil || v != "sk-e2e-agent" {
+	if err != nil || v.Value != "sk-e2e-agent" {
 		t.Fatalf("configs_kv agent anthropic.api_key = %q err=%v; want sk-e2e-agent", v, err)
 	}
 
@@ -169,7 +169,7 @@ func TestSettings_AllCapsKeyDualWriteE2E(t *testing.T) {
 	// flatten to a clean dotted key, and the old per-char mangle must not
 	// exist.
 	v, err := s.dataStore.GetConfigValue(ctx, store.KindSetting, scope.Agent, aid, "agent.replicate_api_token")
-	if err != nil || v != "r8_abc123" {
+	if err != nil || v.Value != "r8_abc123" {
 		t.Fatalf("dual-written ALL_CAPS key = %q err=%v; want agent.replicate_api_token=r8_abc123", v, err)
 	}
 	if _, err := s.dataStore.GetConfigValue(ctx, store.KindSetting, scope.Agent, aid,
@@ -177,7 +177,7 @@ func TestSettings_AllCapsKeyDualWriteE2E(t *testing.T) {
 		t.Fatalf("mangled per-char key still written on dual-write path")
 	}
 	// The camelCase field that the patch actually touched stays clean too.
-	if v, err := s.dataStore.GetConfigValue(ctx, store.KindSetting, scope.Agent, aid, "agent.model"); err != nil || v != "deepseek/deepseek-v4-lite" {
+	if v, err := s.dataStore.GetConfigValue(ctx, store.KindSetting, scope.Agent, aid, "agent.model"); err != nil || v.Value != "deepseek/deepseek-v4-lite" {
 		t.Fatalf("agent.model = %q err=%v; want updated value", v, err)
 	}
 }

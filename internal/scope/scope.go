@@ -151,8 +151,8 @@ func providersFromKV(ctx context.Context, st store.Store, userID, agentID string
 // kvValsToProviders is a helper that converts flat KV pairs (from a single
 // scope) into a provider map. Used by AgentScopeProviders and
 // UserScopeProviders where scope merge is not needed.
-func kvValsToProviders(kvVals map[string]string) map[string]config.ProviderConfig {
-	providerKVs := map[string]map[string]string{}
+func kvValsToProviders(kvVals map[string]store.ConfigValue) map[string]config.ProviderConfig {
+	providerKVs := map[string]map[string]store.ConfigValue{}
 	for fullKey, value := range kvVals {
 		idx := -1
 		for i, c := range fullKey {
@@ -167,7 +167,7 @@ func kvValsToProviders(kvVals map[string]string) map[string]config.ProviderConfi
 		provName := fullKey[:idx]
 		fieldKey := fullKey[idx+1:]
 		if providerKVs[provName] == nil {
-			providerKVs[provName] = map[string]string{}
+			providerKVs[provName] = map[string]store.ConfigValue{}
 		}
 		providerKVs[provName][fieldKey] = value
 	}
@@ -176,9 +176,10 @@ func kvValsToProviders(kvVals map[string]string) map[string]config.ProviderConfi
 		m := kvFieldMap(fields)
 		blob, _ := json.Marshal(m)
 		var pc config.ProviderConfig
-		// Never swallow the projection error: parseKVValue re-types values
-		// ("123456" → number, "true" → bool), and the field that failed used
-		// to vanish without a trace — an all-digit apiKey read back empty.
+		// Never swallow the projection error: a tagged row that still fails
+		// here (or an untagged row the legacy guesser re-typed — "123456" →
+		// number) used to lose the field without a trace, so an all-digit
+		// apiKey read back empty.
 		if err := json.Unmarshal(blob, &pc); err != nil {
 			slog.Warn("configs_kv provider projection failed; provider skipped",
 				"provider", provName, "error", err)
@@ -190,20 +191,24 @@ func kvValsToProviders(kvVals map[string]string) map[string]config.ProviderConfi
 }
 
 // kvFieldMap rebuilds the camelCase JSON object for one config entry from its
-// flat KV field rows. JSON objects and arrays keep their structure; every
-// other value passes through as the raw string it was stored as. Projecting
-// scalars through parseKVValue is lossy in a way the KV table cannot express:
-// a stored "123" (or "true") is indistinguishable from the string "123", and
-// guessing wrong drops the field on projection.
-func kvFieldMap(fields map[string]string) map[string]interface{} {
+// flat KV field rows.
+//
+// A tagged row is decoded by its tag. An untagged (legacy) row keeps the old
+// conservative rule: only JSON-looking text is decoded, everything else
+// passes through as the raw string it was stored as. That rule exists because
+// the legacy guesser is lossy in a way the KV table could not express — a
+// stored "123" is indistinguishable from the string "123", and guessing
+// wrong dropped the field on projection. Tagged rows do not need the
+// workaround: the writer said what the value was.
+func kvFieldMap(fields map[string]store.ConfigValue) map[string]interface{} {
 	m := make(map[string]interface{}, len(fields))
 	for storedKey, value := range fields {
 		camelKey := snakeToCamel(storedKey)
-		if len(value) > 0 && (value[0] == '{' || value[0] == '[') {
-			m[camelKey] = parseKVValue(value)
+		if value.Kind != "" {
+			m[camelKey] = value.Decode()
 			continue
 		}
-		m[camelKey] = value
+		m[camelKey] = value.Value
 	}
 	return m
 }
@@ -446,7 +451,11 @@ func Setting(ctx context.Context, st store.Store, namespace, userID, agentID str
 // struct-field segments are converted back to camelCase, and map-key
 // segments (see kvkeys.dataPaths) are kept verbatim. Nested dots produce
 // nested maps.
-func kvToSettingMap(prefix string, kv map[string]string) map[string]interface{} {
+//
+// Each leaf is decoded by its own value_kind tag, so a stored "123" comes
+// back as the string "123" and a stored 123 as a number — an untagged row
+// still falls back to the legacy guess.
+func kvToSettingMap(prefix string, kv map[string]store.ConfigValue) map[string]interface{} {
 	out := map[string]interface{}{}
 	// The namespace seeds the path matched against kvkeys.dataPaths.
 	// agents.defaults is stored under the "agent." prefix, which matches
@@ -484,7 +493,7 @@ func kvToSettingMap(prefix string, kv map[string]string) map[string]interface{} 
 				key = kvkeys.RestoredSegment(path, seg)
 			}
 			if i == len(segments)-1 {
-				node[key] = parseKVValue(value)
+				node[key] = value.Decode()
 				continue
 			}
 			child, ok := node[key].(map[string]interface{})
@@ -503,32 +512,12 @@ func kvToSettingMap(prefix string, kv map[string]string) map[string]interface{} 
 // codec in the storage direction they care about.
 func snakeToCamel(s string) string { return kvkeys.SnakeToCamel(s) }
 
-// parseKVValue attempts to interpret a string value as its original Go type.
-func parseKVValue(s string) interface{} {
-	if s == "true" {
-		return true
-	}
-	if s == "false" {
-		return false
-	}
-	// Try JSON array/object.
-	if len(s) > 0 && (s[0] == '[' || s[0] == '{') {
-		var v interface{}
-		if json.Unmarshal([]byte(s), &v) == nil {
-			return v
-		}
-	}
-	// Try number — only if the entire string is numeric.
-	var f float64
-	if _, err := fmt.Sscanf(s, "%g", &f); err == nil {
-		// Verify the scan consumed the whole string.
-		check := fmt.Sprintf("%g", f)
-		if check == s {
-			return f
-		}
-	}
-	return s
-}
+// There is deliberately no value parser here any more. Values carry their
+// JSON type in configs_kv.value_kind (store.ConfigValue), so the read path
+// restores the type the writer recorded instead of re-deriving it from the
+// text. The old heuristic that used to live at this spot — parseKVValue —
+// survives only as store.decodeLegacyValue, for rows written before the tag
+// existed.
 
 // SettingInto resolves Setting and unmarshals the merged JSON into dst.
 // Convenience for callers that want a typed config block.
@@ -839,7 +828,7 @@ func dualWritePluginEnabledKV(ctx context.Context, st store.Store, agentID strin
 	if len(data) == 0 {
 		return
 	}
-	flat := map[string]string{}
+	flat := map[string]store.ConfigValue{}
 	flattenJSONToKV(kvPrefix, data, flat)
 	for name, value := range flat {
 		_ = st.SetConfigValue(ctx, store.KindPluginEnabled, Agent, agentID, name, value)
@@ -932,55 +921,18 @@ func kvScopeFromOwnership(userID, agentID string) (scope, scopeID string) {
 	}
 }
 
-// GetValue reads a single config value with scope precedence:
-// system → user → agent → per-(user,agent). Inner scope wins.
-func GetValue(ctx context.Context, st store.Store, kind, name, userID, agentID string) (string, bool, error) {
-	if st == nil {
-		return "", false, errors.New("scope.GetValue: store is required")
-	}
-	var found bool
-	var value string
-	tryGet := func(sc, sid string) error {
-		v, err := st.GetConfigValue(ctx, kind, sc, sid, name)
-		if err != nil {
-			if errors.Is(err, store.ErrNotFound) {
-				return nil
-			}
-			return err
-		}
-		value = v
-		found = true
-		return nil
-	}
-	if err := tryGet(System, ""); err != nil {
-		return "", false, err
-	}
-	if userID != "" {
-		if err := tryGet(User, userID); err != nil {
-			return "", false, err
-		}
-	}
-	if agentID != "" {
-		if err := tryGet(Agent, agentID); err != nil {
-			return "", false, err
-		}
-	}
-	if userID != "" && agentID != "" {
-		if err := tryGet(UserAgent, userID+"/"+agentID); err != nil {
-			return "", false, err
-		}
-	}
-	return value, found, nil
-}
-
 // GetValues reads all values matching a prefix with scope merge.
 // System values are read first, then user overrides, then agent overrides.
 // For each name key, the innermost scope wins.
-func GetValues(ctx context.Context, st store.Store, kind, prefix, userID, agentID string) (map[string]string, error) {
+//
+// The values stay tagged (store.ConfigValue) rather than being pre-decoded:
+// the caller knows which keys are data keys and which are struct fields, and
+// Decode is what turns a tag into a Go value.
+func GetValues(ctx context.Context, st store.Store, kind, prefix, userID, agentID string) (map[string]store.ConfigValue, error) {
 	if st == nil {
 		return nil, errors.New("scope.GetValues: store is required")
 	}
-	out := map[string]string{}
+	out := map[string]store.ConfigValue{}
 	merge := func(sc, sid string) error {
 		m, err := st.ListConfigValues(ctx, kind, sc, sid, prefix)
 		if err != nil {
@@ -1012,51 +964,36 @@ func GetValues(ctx context.Context, st store.Store, kind, prefix, userID, agentI
 	return out, nil
 }
 
-// SetValue writes a single config value at the specified scope.
-func SetValue(ctx context.Context, st store.Store, kind, scope, scopeID, name, value string) error {
-	if st == nil {
-		return errors.New("scope.SetValue: store is required")
-	}
-	return st.SetConfigValue(ctx, kind, scope, scopeID, name, value)
-}
-
 // camelToSnake converts a camelCase string to snake_case. Thin alias for
 // kvkeys.CamelToSnake — the implementation (and the data-key exception) lives
 // in one place now, so the dual-write path and store.flattenJSON can no longer
 // drift apart the way the two historical copies did.
 func camelToSnake(s string) string { return kvkeys.CamelToSnake(s) }
 
-// flattenJSONToKV flattens a map into dotted-key → string pairs, used for
-// dual-writing to configs_kv. Same logic as store.flattenJSON.
+// flattenJSONToKV flattens a map into dotted-key → store.ConfigValue pairs,
+// used for dual-writing to configs_kv. Same logic as store.flattenJSON.
+//
+// Each leaf carries the tag naming its JSON type (store.EncodeConfigValue).
+// The write side is the only place that still knows the type, so it is the
+// only place that can record it — the earlier version stringified every
+// scalar and left the read side to guess it back.
 //
 // Map keys (data segments) are written verbatim, struct fields snake_case —
 // see kvkeys. Without the data-key exception an ALL_CAPS skill env var
 // (REPLICATE_API_TOKEN) was lowercased to replicate_api_token and could never
 // be restored from configs_kv.
-func flattenJSONToKV(prefix string, data map[string]interface{}, out map[string]string) {
+func flattenJSONToKV(prefix string, data map[string]interface{}, out map[string]store.ConfigValue) {
 	prefixPath := kvkeys.Path(prefix)
 	for k, v := range data {
 		seg := kvkeys.StoredSegment(prefixPath, k)
 		fullKey := prefix + seg
-		switch val := v.(type) {
-		case map[string]interface{}:
-			flattenJSONToKV(fullKey+".", val, out)
-		case string:
-			out[fullKey] = val
-		case bool:
-			if val {
-				out[fullKey] = "true"
-			} else {
-				out[fullKey] = "false"
-			}
-		case float64:
-			out[fullKey] = fmt.Sprintf("%g", val)
-		case nil:
-			// skip
-		default:
-			blob, _ := json.Marshal(val)
-			out[fullKey] = string(blob)
+		if nested, ok := v.(map[string]interface{}); ok {
+			flattenJSONToKV(fullKey+".", nested, out)
+			continue
 		}
+		// A nil leaf gets a tagged null row instead of being skipped: with
+		// a tag, {"a":null} and {} are no longer the same mirror.
+		out[fullKey] = store.EncodeConfigValue(v)
 	}
 }
 
@@ -1075,7 +1012,7 @@ func dualWriteSettingKV(ctx context.Context, st store.Store, userID, agentID, na
 		_ = st.DeleteConfigPrefix(ctx, store.KindSetting, sc, sid, kvPrefix)
 		return
 	}
-	flat := map[string]string{}
+	flat := map[string]store.ConfigValue{}
 	flattenJSONToKV(kvPrefix, data, flat)
 	// Delete stale keys then write new ones.
 	_ = st.DeleteConfigPrefix(ctx, store.KindSetting, sc, sid, kvPrefix)
@@ -1089,7 +1026,7 @@ func dualWriteProviderKV(ctx context.Context, st store.Store, userID, agentID, p
 	sc, sid := kvScopeFromOwnership(userID, agentID)
 	kvPrefix := providerName + "."
 	data := providerToData(p)
-	flat := map[string]string{}
+	flat := map[string]store.ConfigValue{}
 	flattenJSONToKV(kvPrefix, data, flat)
 	_ = st.DeleteConfigPrefix(ctx, store.KindProvider, sc, sid, kvPrefix)
 	for name, value := range flat {

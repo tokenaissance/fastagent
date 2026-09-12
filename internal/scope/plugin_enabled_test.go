@@ -49,7 +49,7 @@ func TestAgentPluginEnabledRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListConfigValues: %v", err)
 	}
-	if kv["plugins.enabled.browserUse"] != "true" || kv["plugins.enabled.BROWSER_TOOL"] != "false" {
+	if kv["plugins.enabled.browserUse"].Value != "true" || kv["plugins.enabled.BROWSER_TOOL"].Value != "false" {
 		t.Fatalf("mirror keys were folded: %v", kv)
 	}
 

@@ -191,7 +191,8 @@ web_search，模型只能回 “Unknown tool: web_search”，而 owner 自己�
    调用方已有的 bindings。dev 库目前没有 bindings 行，属于潜伏问题。
    回归测试：`internal/gateway/bindings_row_test.go`。
 
-2. **`parseKVValue` 的类型再推断会打断投影**。KV 里存的是字符串，读回时
+2. **`parseKVValue` 的类型再推断会打断投影**（这一整类问题已由后面的
+   `value_kind` 根治，此条保留作为历史记录）。KV 里存的是字符串，读回时
    `"123"` → number、`"true"` → bool、`"{…}"`/`"[…]"` → object/array。
    于是 `objectstore.s3.bucket = "123"` 这类「字符串字段装了数字样的值」会在
    `json.Unmarshal` 处失败并带走整个 namespace。`SettingInto` 现在在这种
@@ -228,7 +229,9 @@ KV 没覆盖到的那些 key。`web_search` 事件正是这条链路的产物。
 
 投影侧同时补了两处：`kvkeys` 对「自由 map 容器」（`options` / `env` / `config`）
 改用前缀规则，任意深度都算数据 key；provider 投影不再吞掉
-`json.Unmarshal` 错误，且标量一律按存储字符串还原（`kvFieldMap`）。
+`json.Unmarshal` 错误，且未标注的标量一律按存储字符串还原（`kvFieldMap`）。
+带 `value_kind` 的行不走这条保守规则——写侧已经说明了类型，读侧直接采信
+（见下文「值保真」）。
 
 ## review 第二轮修复：agent 层可写但没人读 / plugins.enabled 形状（本次变更）
 
@@ -317,11 +320,112 @@ per-agent 行不可见 + base 不被改写）、`TestEnsureAgentHonorsAgentScope
 `TestPluginsNamespaceIgnoresAgentOptIns`（含 KV fallback 路径）；
 `store` → `TestMigratePluginEnabledKind`；`kvkeys` → `plugins.enabled.*` 正负例。
 
+## 值保真：`configs_kv.value_kind`（本次变更）
+
+前三轮修的是「key 写丢了」「分区撞车」「代理层没人读」。这一轮修的是最后一层：
+**值写进去的时候类型就丢了**。
+
+### 问题
+
+`configs_kv.value` 是 `TEXT`。写入时 `flattenJSONToKV` 把每个叶子 stringify，
+读取时 `parseKVValue` 再从文本猜回来。猜必然出错：
+
+- 字符串 `"123"` 与数字 `123` 在列里完全同形；
+- `%g` 往返把 `9223372036854775807` 变成 `9.223372036854776e+18`，
+  与原串不等 → 旧代码判定「不是数字」→ 19 位 id 以**字符串**回来，
+  再 unmarshal 进 `int64` 字段就报错；
+- `nil` 直接跳过不写行，于是 `{"a":null}` 与 `{}` 在镜像里长得一样。
+
+这是量变到质变：靠读侧校验补不回来，因为信息在**写入时**就已经不在了。
+
+### 方案：给行加一个类型 tag
+
+```sql
+ALTER TABLE configs_kv ADD COLUMN value_kind TEXT NOT NULL DEFAULT ''
+```
+
+`value_kind` 表明这一行的文本是 **JSON 数据模型的哪一种**（`string` / `number` /
+`bool` / `null` / `object` / `array`），**不是 Go 的类型名**。选 JSON 域而不是
+Go 域的理由：
+
+1. JSON 本来就是这个数据的域——`configs.data` 是 JSON blob，`encoding/json`
+   映射到 `interface{}` 恰好就是这六种，所以 tag 记录的是「它本来是什么」，
+   不是给数据强加 Go 的型；
+2. 任何语言的读者都能据它行动（面板是 JS）；
+3. Go 侧把 `int` 改成 `int64`、重命名结构体，都不会变成数据迁移。
+   反过来，tag 写 `int64` / `time.Duration` 才是强绑定。
+
+tag 是**解码提示，不是约束**：文本与 tag 不符时仍然返回值（`Decode` 兜底），
+因为拒收一个值就是在丢数据——正是这套机制要消灭的失败。
+
+### 落地形状
+
+`internal/store/config_value.go`（新文件）：
+
+```go
+type ConfigValue struct { Value string; Kind string }  // Kind == "" = 未标注
+func EncodeConfigValue(v interface{}) ConfigValue      // JSON 值 → (文本, tag)
+func (v ConfigValue) Decode() interface{}              // tag → JSON 值
+func StringValue(s string) ConfigValue                 // 不透明文本的简写
+```
+
+`Store` 的 KV 接口改为收发 `ConfigValue` 而不是裸 `string`：
+`GetConfigValue` / `SetConfigValue` / `ListConfigValues`。**写不出未标注的行**，
+所以这个迁移不会在代码里悄悄退化。
+
+### 迁移与向后兼容
+
+- `store.migrateConfigsKvValueKind` 用 `tableHasColumn` + `ALTER TABLE` 给已存在的
+  表补列（`CREATE TABLE IF NOT EXISTS` 不会碰老表），可重复执行；
+  **它必须排在 `migrateConfigsToKV` 之前**——后者经 `SetConfigValue` 写行，
+  SQL 里带 `value_kind` 列名，老表上先跑回填会「no column」失败（而且是
+  逐行 `slog.Warn` 静默丢行，不报错），
+  `TestMigrateRetrofitsValueKindBeforeBackfill` 钉住这个顺序；
+- 老行的 `value_kind` 就是默认值 `''` = 未标注，读时走**原样保留的旧启发式**
+  （`store.decodeLegacyValue`，从 `scope.parseKVValue` 原封搬过去），
+  行为与改动前逐字节一致；
+- **刻意不做回填**：老数据里没有回填所需的信息（这正是问题本身），
+  把猜测写进列里就再也分不清猜测与事实了。老行在下次被写入时自然获得 tag；
+- `scope.parseKVValue` 因此退场（写侧不再产出无类型文本，读侧不再需要猜），
+  只在 store 里以 legacy 形态保留一份。
+
+### 数字为什么用 `json.Number`
+
+`Decode` 对 `number` 返回 `json.Number` 而不是 `float64`：`encoding/json` 把
+`json.Number` 按字面量原样 marshal，所以 `jsonInto` 的
+marshal→unmarshal 一跳仍能把精确的 `int64` 落进 `int64` 字段。要 `float64` 的
+调用方显式转换——于是「哪里允许丢精度」被写在了代码里，而不是藏在读写往返里。
+
+边界要说清楚：如果**写侧**拿到的是 `float64`，精度在到达编码函数之前就已经没了，
+tag 补不回来（`TestConfigValueNumberFloat64Boundary` 钉住这条边界）。
+
+### 回归测试
+
+`store` → `TestEncodeDecodeConfigValueRoundTrip`（六种类型的往返矩阵，
+含「`"123"` 是字符串不是数字」）、`TestConfigValueNumberKeepsLargeInt64`
+（19 位整数精确往返）、`TestConfigValueFloatFormatIsValidJSON`
+（`1e21` / `5e-324` 这类格式化结果必须仍是合法 JSON 数字）、
+`TestConfigValueNumberFloat64Boundary`、`TestDecodeConfigValueUnknownKindFallsBack`、
+`TestDecodeConfigValueMalformedObjectKeepsText`、`TestDecodeLegacyValue`
+（旧启发式逐例保留）、`TestConfigsKvValueKindRoundTrip`（tag 落库并读回）、
+`TestMigrateConfigsKvValueKindRetrofitsLegacyTable`（老表补列 + 幂等 + 老行仍可读）；
+`scope` → `TestMirrorFallbackRestoresValueTypes`（**端到端**：删掉 blob 行后从镜像
+投影出 `int64` / `string "123"` / `bool` / 空串，未加 tag 时该测试失败）、
+`TestGetValuesScopePrecedence`（内层同时替换值与 tag）、
+`TestProvidersMirrorFallbackKeepsNumericKey`（标注行与未标注行各一例）。
+
+### 顺带删掉的
+
+`store.camelToSnake` 失去了最后一个生产调用者（`flattenJSON` 改用
+`EncodeConfigValue`），连同只测这个薄别名的 `TestCamelToSnakeAllCaps` 一起删除——
+实现与测试都在 `kvkeys`，留着就是第二份会漂移的副本。
+
 ## 残留风险
 
-1. **`parseKVValue` 仍是启发式的**：`"123"` / `"true"` 这类字符串在 KV 里无法
-   与数字/布尔区分。blob 优先后运行时不再受影响，但 KV 兜底路径（无 blob 行）
-   仍可能猜错类型——`SettingInto` 有 blob 回退，provider 侧已按字符串还原。
+1. **未标注行仍靠猜测**：新写入的值都带 `value_kind`，但改动之前写下的行没有
+   （信息本来就不在），读它们仍走 `decodeLegacyValue` 猜——`"123"` 与数字 `123`
+   不可分。这些行只在被重新写入时获得 tag。回填被刻意排除：那是把猜测写成事实。
+   排查这类行可用 `SELECT ... WHERE value_kind = ''`。
 2. **KV 镜像本身仍可能不完整**：非事务的双写、历史行、手写行都会留下子集。
    现在只表现为「镜像与 blob 不一致」，不再影响读取；如果以后要把 KV 提升为
    权威读源，需要先给它加完整性标记并事务化写入。
