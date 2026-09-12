@@ -19,6 +19,14 @@
 > 「演进到 `configs_kv`」的路线继续：阶段 3 = 翻转权威，阶段 4 = 下掉 blob。
 > 同一条决策钉下**用户模型分层**：第 4 层 scope 的 `user` 是**发起人**
 > （principal），不是固定的 owner —— 见「现状 · 用户模型分层」。
+>
+> **术语（2026-09-13）**：三个词指三件不同的东西，不互换。**`configs_kv` 是数据**
+> （散文里也叫「镜像」，KV 就是它自己的叫法）；**「投影」是谓词**，只用来描述
+> 「这一行是从 blob 派生而来、因而有完整性问题」这层关系（它同时也被
+> `jsonInto` 的「投影到 typed dst」占用，所以不适合再兼任数据的名词）；
+> **标记**才是记录「投影完整发生过」的那个实体，类型名
+> `store.ConfigProjectionMarker`，表名 `configs_mirror`——它是体检报告，不是数据。
+> 也就是说：数据叫 KV，投影是关系，标记是那纸证明。
 
 ## 现状：实现对照（权威）
 
@@ -28,7 +36,7 @@
 |---|---|---|
 | Entities | `internal/config` 的 typed 结构体（`Config` / `ProviderConfig` / `ChannelConfig` / `AgentDefaults` …）与四层所有权语义 | 被所有层依赖，自己不依赖任何 IO |
 | Use Cases | `internal/scope`：解析与合并（`Setting` / `ExactSetting` / `Providers` / `Channels` / `GetValues` / `SettingInto`，逐层走 `settingLayerAt` / `providersLayerAt`）+ 单层读模型（`readmodel.go` 的 `SettingAt` / `SettingNamesAt` / `ProviderStateAt` / `ProvidersAt` / `AgentScopeRows` / `RowsAt`）+ 读权威开关（`readmodel.go` 的 `configsReadAuthority`：`blobFirst` / `mirrorFirst` 与逐行 `certifiedMirror` 认证）——「哪一层的行胜出、值怎么投影、这次读去哪张表」 | `setup` / `gateway` / `agentcli` |
-| Interface Adapters | `internal/kvkeys`（键形状编解码）、`store.ConfigValue`（value + value_kind 编解码）、`store.ConfigMirror` / `store.MirrorSelfConsistent`（镜像完整性标记：prefix + key_count + fingerprint + enabled）、`store.JSONToMap`（blob 解码）、`scope.Save*` 的双写编排、`setup` 的 `scope` 字符串 ↔ `(user_id, agent_id)` 转换 | `scope` / `setup` |
+| Interface Adapters | `internal/kvkeys`（键形状编解码）、`store.ConfigValue`（value + value_kind 编解码）、`store.ConfigProjectionMarker` / `store.MirrorSelfConsistent`（镜像完整性标记：prefix + key_count + fingerprint + enabled）、`store.JSONToMap`（blob 解码）、`scope.Save*` 的双写编排、`setup` 的 `scope` 字符串 ↔ `(user_id, agent_id)` 转换 | `scope` / `setup` |
 | Frameworks & Drivers | `internal/store/database.go` 的 SQLite / PostgreSQL、表结构、迁移；HTTP / CLI 入口 | 最外层，随时可换 |
 
 依赖方向只有向内一条：`setup → scope → store → database/sql`，`config` 在最里
@@ -119,7 +127,7 @@ KV 是镜像」，这是**迁移期的临时不变式**，不是终点。翻转�
 |---|---|---|
 | 0 | typed encoding：值域能表达「这是 string / number / bool…」，不靠读侧猜 | **已做**：`configs_kv.value_kind`（数字保字面量，`json.Number`） |
 | 1 | 事务化双写：blob 与镜像不会「写一半」 | **已做**：`store.WithConfigTx`（`9dbccd9`） |
-| 2 | 完整性标记：能判定「镜像 = blob 的完整投影」，而不只是抽样一致 | **已做**：`configs_mirror` 表 + `store.ConfigMirror`（prefix / key_count / fingerprint / enabled）；双写与回填写标记，`store.VerifyConfigMirror` 判定；存量行由 `store.ReconcileConfigMirrors`（CLI `fastagent configs reconcile-mirror [--strict] [--repair]`）做 blob↔镜像核对、回填标记，`--repair` 时按 blob 重投影 diverged 行 |
+| 2 | 完整性标记：能判定「镜像 = blob 的完整投影」，而不只是抽样一致 | **已做**：`configs_mirror` 表 + `store.ConfigProjectionMarker`（prefix / key_count / fingerprint / enabled）；双写与回填写标记，`store.VerifyConfigMirror` 判定；存量行由 `store.ReconcileConfigMirrors`（CLI `fastagent configs reconcile-mirror [--strict] [--repair]`）做 blob↔镜像核对、回填标记，`--repair` 时按 blob 重投影 diverged 行 |
 | 3 | 翻转权威：读路径改 KV 优先、blob 变兜底 | **未做（机制已就位，默认仍 blob 优先）**：读路径的权威选择收敛成 `scope` 的一个开关（`readmodel.go` 的 `configsReadAuthority`），单层与合并两类入口都接上，`mirrorFirst` 分支逐行要求 `store.MirrorSelfConsistent` 认证——只有标记覆盖了刚读到的叶子，镜像才作数，否则回落 blob。翻转因此是改这一个名字，不是改每一个调用方；准入仍是下面那条 `--strict` 验收 |
 | 4 | 下掉 blob：迁移完成后删除 `configs` 的 blob 列与相关读代码 | **未做** |
 
@@ -171,7 +179,7 @@ SaveSetting / SaveProviderState / SaveAgentPluginEnabled   ← 唯一写入口
        ├─ KV 侧：DeleteConfigPrefix（含标记）
        │            → flattenJSONToKV → store.EncodeConfigValue(leaf)
        │            → SetConfigValue × n
-       │            → SetConfigMirror（ConfigMirror = prefix + key_count + fingerprint）
+       │            → SetConfigMirror（ConfigProjectionMarker = prefix + key_count + fingerprint）
        └─ blob 侧：ConfigRecord{Data map[string]interface{}} → SaveConfig → configs.data
 ```
 

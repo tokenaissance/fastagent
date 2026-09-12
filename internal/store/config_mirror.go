@@ -7,16 +7,22 @@ import (
 	"sort"
 )
 
-// ConfigMirror is the completeness marker for one configs row's slice of the
-// configs_kv mirror.
+// ConfigProjectionMarker is the completeness marker for one configs row's slice
+// of the configs_kv mirror.
 //
-// The mirror is a projection of the legacy blob: the dual-write flattens one
-// blob row into one configs_kv row per leaf (see scope.flattenJSONToKV). A
-// projection can be *incomplete* — a row written before the mirror existed, a
-// hand-edited row, or a writer that never saw the whole blob leaves a subset
-// behind, and from the rows alone a subset is indistinguishable from a whole.
-// That is the shape the `web_search` outage took: once reads preferred the
-// mirror, a subset silently truncated a namespace.
+// Three words, three different things, and they are not interchangeable:
+// configs_kv is the *data* (one row per leaf); "the projection" is the
+// *relation* between a blob row and the leaves derived from it — the dual-write
+// flattens one blob row into one configs_kv row per leaf (see
+// scope.flattenJSONToKV); and this type is the *marker*, the record that such a
+// projection happened and covered the whole row.
+//
+// The marker exists because a projection can be *incomplete* — a row written
+// before the mirror existed, a hand-edited row, or a writer that never saw the
+// whole blob leaves a subset behind, and from the rows alone a subset is
+// indistinguishable from a whole. That is the shape the `web_search` outage
+// took: once reads preferred the mirror, a subset silently truncated a
+// namespace.
 //
 // This marker makes completeness a fact someone wrote down instead of a
 // property a reader infers. It is recorded in the same transaction as the rows
@@ -28,7 +34,7 @@ import (
 //
 // It is deliberately not a configs_kv row: a marker is metadata about the
 // projection, not a leaf of it, and it must not surface in a prefix scan.
-type ConfigMirror struct {
+type ConfigProjectionMarker struct {
 	// Prefix is the configs_kv name prefix this marker covers ("openai.",
 	// "prefs.", "agent."). Stored so verification does not have to rebuild
 	// the namespace -> prefix mapping, which has a rename in it
@@ -49,11 +55,11 @@ type ConfigMirror struct {
 	Enabled *bool
 }
 
-// NewConfigMirror builds the marker for a projection: the prefix the leaves
-// live under, the row's enabled decision, how many there are, and their
+// NewConfigProjectionMarker builds the marker for a projection: the prefix the
+// leaves live under, the row's enabled decision, how many there are, and their
 // fingerprint.
-func NewConfigMirror(prefix string, enabled bool, leaves map[string]ConfigValue) ConfigMirror {
-	return ConfigMirror{
+func NewConfigProjectionMarker(prefix string, enabled bool, leaves map[string]ConfigValue) ConfigProjectionMarker {
+	return ConfigProjectionMarker{
 		Prefix:      prefix,
 		KeyCount:    len(leaves),
 		Fingerprint: MirrorFingerprint(leaves),
@@ -101,7 +107,7 @@ func MirrorFingerprint(leaves map[string]ConfigValue) string {
 // A caller that trusts the mirror calls this with the leaves it just read; a
 // false answer means "do not serve this row from the mirror", not "the rows
 // are wrong".
-func MirrorSelfConsistent(m ConfigMirror, leaves map[string]ConfigValue) bool {
+func MirrorSelfConsistent(m ConfigProjectionMarker, leaves map[string]ConfigValue) bool {
 	if m.Fingerprint == "" || m.Enabled == nil {
 		return false
 	}
@@ -120,7 +126,7 @@ func MirrorSelfConsistent(m ConfigMirror, leaves map[string]ConfigValue) bool {
 // disabled row erases outer layers and blocks the fallback) without the blob.
 // VerifyConfigMirror is MirrorSelfConsistent plus the one check that needs the
 // blob — that the marker's recorded decision is the row's decision.
-func VerifyConfigMirror(m ConfigMirror, enabled bool, leaves map[string]ConfigValue) bool {
+func VerifyConfigMirror(m ConfigProjectionMarker, enabled bool, leaves map[string]ConfigValue) bool {
 	return MirrorSelfConsistent(m, leaves) && *m.Enabled == enabled
 }
 

@@ -12,7 +12,7 @@ func TestConfigMirrorRoundTrip(t *testing.T) {
 
 	leaves := map[string]ConfigValue{"openai.api_key": StringValue("sk-1")}
 	if err := db.SaveConfigMirror(ctx, KindProvider, "user", "u1", "openai",
-		NewConfigMirror("openai.", true, leaves)); err != nil {
+		NewConfigProjectionMarker("openai.", true, leaves)); err != nil {
 		t.Fatalf("SaveConfigMirror: %v", err)
 	}
 	got, ok, err := db.GetConfigMirror(ctx, KindProvider, "user", "u1", "openai")
@@ -26,7 +26,7 @@ func TestConfigMirrorRoundTrip(t *testing.T) {
 	// Upsert replaces the fingerprint: the old leaf set must stop verifying.
 	updated := map[string]ConfigValue{"openai.api_key": StringValue("sk-2")}
 	if err := db.SaveConfigMirror(ctx, KindProvider, "user", "u1", "openai",
-		NewConfigMirror("openai.", true, updated)); err != nil {
+		NewConfigProjectionMarker("openai.", true, updated)); err != nil {
 		t.Fatalf("SaveConfigMirror upsert: %v", err)
 	}
 	got, _, _ = db.GetConfigMirror(ctx, KindProvider, "user", "u1", "openai")
@@ -41,7 +41,7 @@ func TestConfigMirrorRoundTrip(t *testing.T) {
 	// exactly like a changed leaf does — a decision recorded in the marker is a
 	// decision a later reader compares against, not a label it copies.
 	if err := db.SaveConfigMirror(ctx, KindProvider, "user", "u1", "openai",
-		NewConfigMirror("openai.", false, updated)); err != nil {
+		NewConfigProjectionMarker("openai.", false, updated)); err != nil {
 		t.Fatalf("SaveConfigMirror disable: %v", err)
 	}
 	got, _, _ = db.GetConfigMirror(ctx, KindProvider, "user", "u1", "openai")
@@ -180,20 +180,20 @@ func TestListConfigMirrors(t *testing.T) {
 	openaiLeaves := map[string]ConfigValue{"openai.api_key": StringValue("sk-1")}
 	anthropicLeaves := map[string]ConfigValue{"anthropic.api_key": StringValue("sk-ant")}
 	if err := db.SaveConfigMirror(ctx, KindProvider, "user", "u1", "openai",
-		NewConfigMirror("openai.", true, openaiLeaves)); err != nil {
+		NewConfigProjectionMarker("openai.", true, openaiLeaves)); err != nil {
 		t.Fatalf("SaveConfigMirror openai: %v", err)
 	}
 	if err := db.SaveConfigMirror(ctx, KindProvider, "user", "u1", "anthropic",
-		NewConfigMirror("anthropic.", false, anthropicLeaves)); err != nil {
+		NewConfigProjectionMarker("anthropic.", false, anthropicLeaves)); err != nil {
 		t.Fatalf("SaveConfigMirror anthropic: %v", err)
 	}
 	// A different scope and a different kind must not leak in.
 	if err := db.SaveConfigMirror(ctx, KindProvider, "user", "u2", "openai",
-		NewConfigMirror("openai.", true, openaiLeaves)); err != nil {
+		NewConfigProjectionMarker("openai.", true, openaiLeaves)); err != nil {
 		t.Fatalf("SaveConfigMirror other scope: %v", err)
 	}
 	if err := db.SaveConfigMirror(ctx, KindSetting, "user", "u1", "prefs",
-		NewConfigMirror("prefs.", true, map[string]ConfigValue{})); err != nil {
+		NewConfigProjectionMarker("prefs.", true, map[string]ConfigValue{})); err != nil {
 		t.Fatalf("SaveConfigMirror other kind: %v", err)
 	}
 

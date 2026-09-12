@@ -72,13 +72,13 @@ var configsReadAuthority = blobFirst
 // read-path half of store.VerifyConfigMirror: the reconciler compares the
 // marker against the blob, a reader compares it against the leaves it just
 // loaded and never needs the blob to do so.
-func certifiedMirror(ctx context.Context, st store.ConfigReadStore, kind, sc, sid, name string, leaves map[string]store.ConfigValue) (store.ConfigMirror, bool) {
+func certifiedMirror(ctx context.Context, st store.ConfigReadStore, kind, sc, sid, name string, leaves map[string]store.ConfigValue) (store.ConfigProjectionMarker, bool) {
 	m, ok, err := st.GetConfigMirror(ctx, kind, sc, sid, name)
 	if err != nil || !ok {
-		return store.ConfigMirror{}, false
+		return store.ConfigProjectionMarker{}, false
 	}
 	if !store.MirrorSelfConsistent(m, leaves) {
-		return store.ConfigMirror{}, false
+		return store.ConfigProjectionMarker{}, false
 	}
 	return m, true
 }
@@ -87,10 +87,10 @@ func certifiedMirror(ctx context.Context, st store.ConfigReadStore, kind, sc, si
 // read for the whole scope (ListConfigMirrors), so a reader certifying many
 // names at one scope does not issue one marker query per name. The rule is the
 // same one store.MirrorSelfConsistent applies; only the lookup differs.
-func certifiedMirrorIn(markers map[string]store.ConfigMirror, name string, leaves map[string]store.ConfigValue) (store.ConfigMirror, bool) {
+func certifiedMirrorIn(markers map[string]store.ConfigProjectionMarker, name string, leaves map[string]store.ConfigValue) (store.ConfigProjectionMarker, bool) {
 	m, ok := markers[name]
 	if !ok || !store.MirrorSelfConsistent(m, leaves) {
-		return store.ConfigMirror{}, false
+		return store.ConfigProjectionMarker{}, false
 	}
 	return m, true
 }
@@ -369,7 +369,7 @@ func ProvidersAt(ctx context.Context, st store.ConfigReadStore, userID, agentID 
 		return out, nil
 	}
 	// One marker query for the whole scope, not one per name.
-	var markers map[string]store.ConfigMirror
+	var markers map[string]store.ConfigProjectionMarker
 	if configsReadAuthority == mirrorFirst {
 		markers, err = st.ListConfigMirrors(ctx, store.KindProvider, sc, sid)
 		if err != nil {

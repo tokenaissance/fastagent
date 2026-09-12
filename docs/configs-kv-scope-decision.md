@@ -15,7 +15,8 @@ scope 设计**全部保留**。如需后续再评估再提。
 2026-09-12/13 把「删掉 `configs_kv`」重新摆上台面复核了一遍（问题：删表会不会
 丢数据、影响面多大）。结论是**不删**，而且方向从「维持现状」升级为「继续演进」：
 
-- **数据侧无损**：当前不变式是「blob 权威、`configs_kv` 是可验证投影」——
+- **数据侧无损**：当前不变式是「blob 权威、`configs_kv` 是 KV 镜像、对 blob 的
+  忠实投影（术语见 `configs-kv-scope-adaptation.md` 开头）」——
   provider / setting / plugin_enabled 行在 blob 里都有本体，写/删成对、读路径
   blob 优先、dev reconcile 146/146 认证。删表对这三类**不丢任何东西**。
 - **唯一的损失面**是两个**只写在 `configs_kv`、blob 没有**的命名空间：
