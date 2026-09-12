@@ -35,6 +35,63 @@ func legacyKV(kv map[string]string) map[string]store.ConfigValue {
 	return out
 }
 
+// TestSettingLargeIntThroughKVOnlyPath is the end-to-end form of the
+// store-level number tests: a settings write shaped the way every HTTP
+// write is shaped — struct → marshal → map[string]interface{}, which is
+// where an int becomes a float64 — served from the KV mirror only.
+//
+// maxTokens: 2000000 used to be stored as "2e+06". That is a valid JSON
+// number but not an integer literal, so projecting it onto
+// AgentDefaults.MaxTokens failed and SettingInto had no blob left to fall
+// back to. The integer form has to survive the round trip.
+func TestSettingLargeIntThroughKVOnlyPath(t *testing.T) {
+	db := openScopeDB(t)
+	defer db.Close()
+	ctx := context.Background()
+
+	// The shape setup.toMap produces.
+	blob, err := json.Marshal(config.AgentDefaults{Model: "openai/gpt-5.5", MaxTokens: 2_000_000})
+	if err != nil {
+		t.Fatalf("marshal defaults: %v", err)
+	}
+	var data map[string]interface{}
+	if err := json.Unmarshal(blob, &data); err != nil {
+		t.Fatalf("unmarshal defaults: %v", err)
+	}
+	if _, ok := data["maxTokens"].(float64); !ok {
+		t.Fatalf("expected the settings shape to carry maxTokens as float64, got %#v", data["maxTokens"])
+	}
+
+	if err := SaveSetting(ctx, db, "", "", "agents.defaults", data); err != nil {
+		t.Fatalf("SaveSetting: %v", err)
+	}
+
+	// Serve it from the mirror only: drop the authoritative blob row, which
+	// is the state a KV-only writer leaves behind.
+	rec, err := db.GetConfigByName(ctx, store.KindSetting, "", "", "agents.defaults")
+	if err != nil {
+		t.Fatalf("get blob row: %v", err)
+	}
+	if err := db.DeleteConfig(ctx, rec.ID); err != nil {
+		t.Fatalf("delete blob row: %v", err)
+	}
+	rows, err := db.ListConfigValues(ctx, store.KindSetting, System, "", "agent.")
+	if err != nil {
+		t.Fatalf("list mirror rows: %v", err)
+	}
+	if got := rows["agent.max_tokens"]; got.Value != "2000000" || got.Kind != store.ValueKindNumber {
+		t.Fatalf("mirror agent.max_tokens = %+v, want the tagged integer 2000000", got)
+	}
+
+	var got config.AgentDefaults
+	if err := SettingInto(ctx, db, "agents.defaults", "", "", &got); err != nil {
+		t.Fatalf("SettingInto from the KV mirror: %v", err)
+	}
+	if got.MaxTokens != 2_000_000 {
+		t.Fatalf("MaxTokens = %d, want 2000000", got.MaxTokens)
+	}
+}
+
 // TestGetValueScopePrecedence pins the configs_kv resolution order:
 // system → user → agent → per-(user, agent), innermost wins.
 //

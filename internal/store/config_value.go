@@ -3,7 +3,9 @@ package store
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strconv"
+	"strings"
 )
 
 // A configs_kv value is stored as TEXT, which cannot say whether the text
@@ -70,13 +72,9 @@ func EncodeConfigValue(v interface{}) ConfigValue {
 		// 9.223372036854776e+18.
 		return ConfigValue{Value: t.String(), Kind: ValueKindNumber}
 	case float64:
-		// 'g' with -1 precision is the shortest form that parses back to
-		// the same float64. The old write path used %g for this and then
-		// the read path compared the reformatted result against the input,
-		// which is why 1e21 came back as the *string* "1e21".
-		return ConfigValue{Value: strconv.FormatFloat(t, 'g', -1, 64), Kind: ValueKindNumber}
+		return encodeFloat(t, 64)
 	case float32:
-		return ConfigValue{Value: strconv.FormatFloat(float64(t), 'g', -1, 32), Kind: ValueKindNumber}
+		return encodeFloat(t, 32)
 	case int:
 		return ConfigValue{Value: strconv.FormatInt(int64(t), 10), Kind: ValueKindNumber}
 	case int8:
@@ -113,6 +111,29 @@ func EncodeConfigValue(v interface{}) ConfigValue {
 		}
 		return configValueFromJSON(blob)
 	}
+}
+
+// encodeFloat is the one way a float becomes stored text: the bytes
+// encoding/json would write for it.
+//
+// strconv.FormatFloat('g', -1, n) is the same *value* in a different *text*.
+// It switches to exponent form at 1e6 (1e-4 going down), while
+// encoding/json switches only at 1e21 (1e-6) — and an exponent literal is
+// not an integer literal, so jsonInto refused to unmarshal "1e+06" into an
+// int64 field and the whole namespace fell back. A value that is integral
+// has to stay written as an integer, because the reader that knows the
+// field is an int is a later, separate hop.
+//
+// The bits parameter exists because encoding/json formats a float32 with
+// float32 precision ("0.1" rather than float64's "0.10000000149011612").
+func encodeFloat(v interface{}, bits int) ConfigValue {
+	if blob, err := json.Marshal(v); err == nil {
+		return ConfigValue{Value: string(blob), Kind: ValueKindNumber}
+	}
+	// NaN and ±Inf have no JSON form. Nothing JSON-decoded can reach this,
+	// so keep the old text instead of failing the write.
+	f := reflect.ValueOf(v).Float()
+	return ConfigValue{Value: strconv.FormatFloat(f, 'g', -1, bits), Kind: ValueKindNumber}
 }
 
 // StringValue is the tagged-string shorthand, for callers that store an
@@ -174,8 +195,14 @@ func (v ConfigValue) Decode() interface{} {
 	case ValueKindNull:
 		return nil
 	case ValueKindObject, ValueKindArray:
+		// UseNumber so nested numbers keep the digits the row holds. Plain
+		// Unmarshal would hand back float64 for every one of them, and a
+		// 19-digit id inside {"id": …} would come back rounded even though
+		// the text on disk was exact.
+		dec := json.NewDecoder(strings.NewReader(v.Value))
+		dec.UseNumber()
 		var out interface{}
-		if err := json.Unmarshal([]byte(v.Value), &out); err != nil {
+		if err := dec.Decode(&out); err != nil {
 			// A malformed tagged row is a write bug, not a read
 			// instruction: hand back the text instead of dropping it.
 			return v.Value

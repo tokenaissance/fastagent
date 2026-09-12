@@ -399,6 +399,26 @@ marshal→unmarshal 一跳仍能把精确的 `int64` 落进 `int64` 字段。要
 边界要说清楚：如果**写侧**拿到的是 `float64`，精度在到达编码函数之前就已经没了，
 tag 补不回来（`TestConfigValueNumberFloat64Boundary` 钉住这条边界）。
 
+### 文本形式也必须与 `encoding/json` 一致
+
+`json.Number` 只在文本本身就是那个精确字面量时才救得回精度。同一轮 review 里
+发现写侧还有两个「类型对了、文本错了」的口子：
+
+- `strconv.FormatFloat(t, 'g', -1, 64)` 在 **1e6** 就切指数记法（`"1e+06"`），
+  而 `encoding/json` 要到 1e21 才切。`"1e+06"` 是合法 JSON 数字，但不是整数字面量，
+  `jsonInto` 把 `contextWindow: 1000000` 投影回 `int` 字段时报
+  `cannot unmarshal number 1e+06 into Go value of type int64`——而这个 float64
+  是**每个**设置写入的常态（`setup.toMap` 的结构体 → `map[string]interface{}`
+  一跳就把 int 变成 float64）。现在 float 分支直接输出 `json.Marshal` 的字节
+  （float32 走 32 位精度），整数值的浮点仍然写成整数形式；
+- `object` / `array` 的解码用 `json.Unmarshal`，嵌套数字一律变回 `float64`，
+  于是 `{"id":9223372036854775807}` 在读对象那一跳就把低位抹成 0 了。
+  现在改用 `Decoder.UseNumber()`，嵌套数字与顶层同样保持字面量。
+
+`TestConfigValueIntegralFloatKeepsJSONIntForm` / `TestConfigValueNestedNumbersKeepTheirDigits`
+与 `scope` 侧的 `TestSettingLargeIntThroughKVOnlyPath`（`maxTokens: 2000000`
+经 `toMap` 落库再从镜像投影回 `AgentDefaults`）钉住这两条。
+
 ### 回归测试
 
 `store` → `TestEncodeDecodeConfigValueRoundTrip`（六种类型的往返矩阵，
@@ -406,13 +426,16 @@ tag 补不回来（`TestConfigValueNumberFloat64Boundary` 钉住这条边界）�
 （19 位整数精确往返）、`TestConfigValueFloatFormatIsValidJSON`
 （`1e21` / `5e-324` 这类格式化结果必须仍是合法 JSON 数字）、
 `TestConfigValueNumberFloat64Boundary`、`TestDecodeConfigValueUnknownKindFallsBack`、
+`TestConfigValueIntegralFloatKeepsJSONIntForm`（1e6 起必须仍是整数字面量）、
+`TestConfigValueNestedNumbersKeepTheirDigits`（对象里的 19 位整数）、
 `TestDecodeConfigValueMalformedObjectKeepsText`、`TestDecodeLegacyValue`
 （旧启发式逐例保留）、`TestConfigsKvValueKindRoundTrip`（tag 落库并读回）、
 `TestMigrateConfigsKvValueKindRetrofitsLegacyTable`（老表补列 + 幂等 + 老行仍可读）；
 `scope` → `TestMirrorFallbackRestoresValueTypes`（**端到端**：删掉 blob 行后从镜像
 投影出 `int64` / `string "123"` / `bool` / 空串，未加 tag 时该测试失败）、
 `TestGetValuesScopePrecedence`（内层同时替换值与 tag）、
-`TestProvidersMirrorFallbackKeepsNumericKey`（标注行与未标注行各一例）。
+`TestProvidersMirrorFallbackKeepsNumericKey`（标注行与未标注行各一例）、
+`TestSettingLargeIntThroughKVOnlyPath`（1e6 以上的 int 端到端）。
 
 ### 顺带删掉的
 
