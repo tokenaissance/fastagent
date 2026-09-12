@@ -1,11 +1,15 @@
 /**
- * [INPUT]: gets a store.ConfigReader from the caller; uses store.MirrorPrefixFor
- *   and store.ListConfigValues for the mirror half. Imports config (provider
- *   shapes) and kvkeys indirectly through scope's own projection helpers.
+ * [INPUT]: the settable/providable resolvers get a store.ConfigReadStore from
+ *   the caller (ConfigReader plus the mirror marker, MirrorReader); the
+ *   row-enumeration ones (SettingNamesAt / RowsAt / AgentScopeRows) still take
+ *   store.ConfigReader. Uses store.MirrorPrefixFor, store.ListConfigValues and
+ *   store.GetConfigMirror. Imports config (provider shapes) and kvkeys
+ *   indirectly through scope's own projection helpers.
  * [OUTPUT]: the per-scope read models adapters resolve through instead of
  *   naming a table: SettingAt / SettingNamesAt / ProviderStateAt /
  *   ProvidersAt / RowsAt. ExactSetting is re-expressed on the same single
- *   resolution rule.
+ *   resolution rule. The table they pick is configsReadAuthority, and the
+ *   mirror-first branch certifies each row through certifiedMirror.
  * [POS]: scope package's read face. scope.go owns the layer-merge resolvers
  *   (Setting / SettingInto / BatchSettings / Providers); this file owns the
  *   single-scope ones. Together they are the only place in the codebase that
@@ -26,19 +30,109 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/store"
 )
 
+// readAuthority selects which table a configs read resolves through, and it is
+// the single lever the configs -> configs_kv migration pulls to flip authority
+// (docs/configs-kv-scope-adaptation.md 目标形态与迁移阶段).
+//
+//   - blobFirst is the migration-period order: the legacy blob is
+//     authoritative, and the mirror answers only rows the blob does not have.
+//   - mirrorFirst is the target: the mirror answers a row whose completeness
+//     marker certifies it, and the blob is the fallback for rows the mirror
+//     cannot certify.
+//
+// The per-row certification is not optional in mirrorFirst: trusting the
+// mirror without it is the web_search outage — a partial projection served as
+// if it were the whole namespace.
+//
+// It is a package variable, not a per-call argument, because the decision is
+// process-global and belongs to this one layer: every read site above funnels
+// through this file, so the flip is this one name and never reaches into a
+// caller. The value stays blobFirst until the reconcile gate is green
+// (fastagent configs reconcile-mirror --strict), which is the last acceptance
+// before the flip.
+type readAuthority int
+
+const (
+	blobFirst readAuthority = iota
+	mirrorFirst
+)
+
+var configsReadAuthority = blobFirst
+
+// certifiedMirror returns the row's completeness marker when it certifies
+// exactly these leaves, judged against the marker alone.
+//
+// ok=false covers every reason a mirror-first reader must not serve the mirror
+// for this row: no marker at all (a legacy row, or one only ever written to
+// configs_kv), a marker that predates the enabled column, leaves that drifted
+// after the marker was written (fingerprint or count mismatch), or a marker
+// read error — the caller falls back to the blob in every case. It is the
+// read-path half of store.VerifyConfigMirror: the reconciler compares the
+// marker against the blob, a reader compares it against the leaves it just
+// loaded and never needs the blob to do so.
+func certifiedMirror(ctx context.Context, st store.ConfigReadStore, kind, sc, sid, name string, leaves map[string]store.ConfigValue) (store.ConfigMirror, bool) {
+	m, ok, err := st.GetConfigMirror(ctx, kind, sc, sid, name)
+	if err != nil || !ok {
+		return store.ConfigMirror{}, false
+	}
+	if !store.MirrorSelfConsistent(m, leaves) {
+		return store.ConfigMirror{}, false
+	}
+	return m, true
+}
+
 // settingAtRaw is the one resolution rule for a single setting namespace at a
 // single (userID, agentID) scope, and every single-scope settings reader is a
-// projection of it. Blob first — exact JSON types, the complete key set, and
-// the enabled veto — with the configs_kv mirror consulted only when no blob row
-// exists at all. The blob is authoritative only while the migration is in
-// flight; when it flips, this function is the one place the order changes (see
-// docs/configs-kv-scope-adaptation.md).
+// projection of it. Which table answers is configsReadAuthority's decision;
+// both orders funnel through this function, which is the one place the flip
+// changes (see docs/configs-kv-scope-adaptation.md).
 //
 // A missing row, a disabled row and an empty row are all "nothing here" and
 // return a nil map, which is what lets the callers keep their old behaviour
 // (a disabled row is this layer's decision that the namespace has no value,
 // and it must not be undone by the mirror).
-func settingAtRaw(ctx context.Context, st store.ConfigReader, namespace, userID, agentID string) (map[string]interface{}, error) {
+func settingAtRaw(ctx context.Context, st store.ConfigReadStore, namespace, userID, agentID string) (map[string]interface{}, error) {
+	if configsReadAuthority == mirrorFirst {
+		if m, served, err := settingFromCertifiedMirror(ctx, st, namespace, userID, agentID); err != nil {
+			return nil, err
+		} else if served {
+			return m, nil
+		}
+	}
+	return settingFromBlob(ctx, st, namespace, userID, agentID)
+}
+
+// settingFromCertifiedMirror answers one setting namespace from the configs_kv
+// mirror when the row's marker certifies the leaves just read. served=false
+// means the mirror cannot answer for this row — no marker, drifted/legacy
+// leaves, or a read error — and the caller falls back to the blob. served=true
+// means the mirror is the answer, including the case where it answers "nothing"
+// because the row is switched off.
+func settingFromCertifiedMirror(ctx context.Context, st store.ConfigReadStore, namespace, userID, agentID string) (map[string]interface{}, bool, error) {
+	sc, sid := kvScopeFromOwnership(userID, agentID)
+	m, ok, err := st.GetConfigMirror(ctx, store.KindSetting, sc, sid, namespace)
+	if err != nil || !ok {
+		return nil, false, nil
+	}
+	kvPrefix := kvPrefixForNamespace(namespace)
+	leaves, err := st.ListConfigValues(ctx, store.KindSetting, sc, sid, kvPrefix)
+	if err != nil {
+		return nil, false, nil
+	}
+	if !store.MirrorSelfConsistent(m, leaves) {
+		return nil, false, nil
+	}
+	if m.Enabled != nil && !*m.Enabled {
+		// The row's veto: nothing here, and the blob must not resurrect it.
+		return nil, true, nil
+	}
+	return kvToSettingMap(kvPrefix, leaves), true, nil
+}
+
+// settingFromBlob is the migration-period order: the legacy blob is
+// authoritative — exact JSON types, the complete key set, and the enabled veto
+// — with the configs_kv mirror consulted only when no blob row exists at all.
+func settingFromBlob(ctx context.Context, st store.ConfigReadStore, namespace, userID, agentID string) (map[string]interface{}, error) {
 	rec, err := st.GetConfigByName(ctx, store.KindSetting, userID, agentID, namespace)
 	if err != nil {
 		if !errors.Is(err, store.ErrNotFound) {
@@ -71,7 +165,7 @@ func settingAtRaw(ctx context.Context, st store.ConfigReader, namespace, userID,
 // patches one key and saves the result) cannot write back through the map the
 // store just handed out. Nested values are shared, which is what the callers
 // that mutate a single top-level key need.
-func SettingAt(ctx context.Context, st store.ConfigReader, namespace, userID, agentID string) (map[string]interface{}, error) {
+func SettingAt(ctx context.Context, st store.ConfigReadStore, namespace, userID, agentID string) (map[string]interface{}, error) {
 	if st == nil {
 		return nil, errors.New("scope.SettingAt: store is required")
 	}
@@ -126,7 +220,7 @@ func SettingNamesAt(ctx context.Context, st store.ConfigReader, userID, agentID 
 // that the name is not here: it is absent from the result, and callers that
 // overlay the result on an already-merged view get the erase-the-outer-entry
 // behaviour for free, because "not present" is exactly what they overwrite with.
-func ProvidersAt(ctx context.Context, st store.ConfigReader, userID, agentID string) (map[string]config.ProviderConfig, error) {
+func ProvidersAt(ctx context.Context, st store.ConfigReadStore, userID, agentID string) (map[string]config.ProviderConfig, error) {
 	if st == nil {
 		return nil, errors.New("scope.ProvidersAt: store is required")
 	}
@@ -145,11 +239,32 @@ func ProvidersAt(ctx context.Context, st store.ConfigReader, userID, agentID str
 		out[r.Name] = providerToConfig(r)
 	}
 	sc, sid := kvScopeFromOwnership(userID, agentID)
-	if kvVals, err := st.ListConfigValues(ctx, store.KindProvider, sc, sid, ""); err == nil && len(kvVals) > 0 {
-		for name, pc := range kvValsToProviders(kvVals) {
-			if !inBlob[name] {
-				out[name] = pc
+	kvVals, err := st.ListConfigValues(ctx, store.KindProvider, sc, sid, "")
+	if err != nil || len(kvVals) == 0 {
+		return out, nil
+	}
+	for name, leaves := range groupProviderLeaves(kvVals) {
+		pc, ok := kvValsToProviders(leaves)[name]
+		if !ok {
+			continue
+		}
+		if configsReadAuthority == mirrorFirst {
+			if m, certified := certifiedMirror(ctx, st, store.KindProvider, sc, sid, name, leaves); certified {
+				// Certified: the mirror decides this name outright — payload
+				// and veto. A mirror-only provider has no row to be switched
+				// off, but a marker can still record the decision.
+				if m.Enabled != nil && !*m.Enabled {
+					delete(out, name)
+				} else {
+					out[name] = pc
+				}
+				continue
 			}
+		}
+		// Not certified (or blobFirst): a name with no blob row is served from
+		// the mirror, as before; a name the blob already decided keeps the blob.
+		if !inBlob[name] {
+			out[name] = pc
 		}
 	}
 	return out, nil
@@ -167,9 +282,25 @@ func ProvidersAt(ctx context.Context, st store.ConfigReader, userID, agentID str
 // about to save the row back (the CLI setting one field) wants the payload,
 // which still exists while the row is switched off; collapsing the two would
 // make editing a disabled provider silently reset it to the preset defaults.
-func ProviderStateAt(ctx context.Context, st store.ConfigReader, name, userID, agentID string) (pc config.ProviderConfig, present, enabled bool, err error) {
+func ProviderStateAt(ctx context.Context, st store.ConfigReadStore, name, userID, agentID string) (pc config.ProviderConfig, present, enabled bool, err error) {
 	if st == nil {
 		return config.ProviderConfig{}, false, false, errors.New("scope.ProviderStateAt: store is required")
+	}
+	kvPrefix := store.MirrorPrefixFor(store.KindProvider, name)
+	sc, sid := kvScopeFromOwnership(userID, agentID)
+	// Mirror-first: a marker-certified projection answers both halves of the
+	// caller's question without the blob — the payload (present) and the veto
+	// (enabled). An uncertified row falls through to the blob below.
+	if configsReadAuthority == mirrorFirst {
+		if leaves, lerr := st.ListConfigValues(ctx, store.KindProvider, sc, sid, kvPrefix); lerr == nil && len(leaves) > 0 {
+			if m, certified := certifiedMirror(ctx, st, store.KindProvider, sc, sid, name, leaves); certified {
+				p, ok := kvValsToProviders(leaves)[name]
+				if !ok {
+					p = config.ProviderConfig{}
+				}
+				return p, true, m.Enabled != nil && *m.Enabled, nil
+			}
+		}
 	}
 	rec, err := st.GetConfigByName(ctx, store.KindProvider, userID, agentID, name)
 	if err != nil {
@@ -181,8 +312,6 @@ func ProviderStateAt(ctx context.Context, st store.ConfigReader, name, userID, a
 	}
 	// No blob row: the provider exists only in the mirror, where a row's mere
 	// presence is the decision (there is no enabled column to contradict it).
-	kvPrefix := store.MirrorPrefixFor(store.KindProvider, name)
-	sc, sid := kvScopeFromOwnership(userID, agentID)
 	if kvVals, err := st.ListConfigValues(ctx, store.KindProvider, sc, sid, kvPrefix); err == nil && len(kvVals) > 0 {
 		if pc, ok := kvValsToProviders(kvVals)[name]; ok {
 			return pc, true, true, nil

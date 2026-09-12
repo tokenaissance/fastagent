@@ -181,27 +181,13 @@ func providersFromKV(ctx context.Context, st store.ConfigReader, userID, agentID
 // scope) into a provider map. Used by AgentScopeProviders and
 // UserScopeProviders where scope merge is not needed.
 func kvValsToProviders(kvVals map[string]store.ConfigValue) map[string]config.ProviderConfig {
-	providerKVs := map[string]map[string]store.ConfigValue{}
-	for fullKey, value := range kvVals {
-		idx := -1
-		for i, c := range fullKey {
-			if c == '.' {
-				idx = i
-				break
-			}
+	grouped := groupProviderLeaves(kvVals)
+	out := make(map[string]config.ProviderConfig, len(grouped))
+	for provName, leaves := range grouped {
+		fields := make(map[string]store.ConfigValue, len(leaves))
+		for fullKey, value := range leaves {
+			fields[fullKey[len(provName)+1:]] = value
 		}
-		if idx < 0 {
-			continue
-		}
-		provName := fullKey[:idx]
-		fieldKey := fullKey[idx+1:]
-		if providerKVs[provName] == nil {
-			providerKVs[provName] = map[string]store.ConfigValue{}
-		}
-		providerKVs[provName][fieldKey] = value
-	}
-	out := make(map[string]config.ProviderConfig, len(providerKVs))
-	for provName, fields := range providerKVs {
 		m := kvFieldMap(fields)
 		blob, _ := json.Marshal(m)
 		var pc config.ProviderConfig
@@ -215,6 +201,27 @@ func kvValsToProviders(kvVals map[string]store.ConfigValue) map[string]config.Pr
 			continue
 		}
 		out[provName] = pc
+	}
+	return out
+}
+
+// groupProviderLeaves splits a scope's flat provider rows by provider name —
+// the first dotted segment, which is the MirrorPrefixFor layout ("<name>.").
+// The keys stay full ("openai.api_key"), not stripped, so each name's leaf set
+// can be handed to the completeness marker: MirrorFingerprint covers the full
+// names, so stripping them here would make the fingerprint check fail.
+func groupProviderLeaves(kvVals map[string]store.ConfigValue) map[string]map[string]store.ConfigValue {
+	out := map[string]map[string]store.ConfigValue{}
+	for fullKey, value := range kvVals {
+		idx := strings.IndexByte(fullKey, '.')
+		if idx < 0 {
+			continue
+		}
+		name := fullKey[:idx]
+		if out[name] == nil {
+			out[name] = map[string]store.ConfigValue{}
+		}
+		out[name][fullKey] = value
 	}
 	return out
 }
@@ -248,7 +255,7 @@ func kvFieldMap(fields map[string]store.ConfigValue) map[string]interface{} {
 // already system+user-merged view: re-running the full Providers walk
 // would re-apply outer layers and silently clobber any user-scope
 // override the caller already merged in.
-func AgentScopeProviders(ctx context.Context, st store.ConfigReader, agentID string) (map[string]config.ProviderConfig, error) {
+func AgentScopeProviders(ctx context.Context, st store.ConfigReadStore, agentID string) (map[string]config.ProviderConfig, error) {
 	if st == nil {
 		return nil, errors.New("scope.AgentScopeProviders: store is required")
 	}
@@ -264,7 +271,7 @@ func AgentScopeProviders(ctx context.Context, st store.ConfigReader, agentID str
 // provider credentials without dragging the owner's full merged view
 // (which would re-apply system rows on top of the viewer's already-
 // merged set).
-func UserScopeProviders(ctx context.Context, st store.ConfigReader, userID string) (map[string]config.ProviderConfig, error) {
+func UserScopeProviders(ctx context.Context, st store.ConfigReadStore, userID string) (map[string]config.ProviderConfig, error) {
 	if st == nil {
 		return nil, errors.New("scope.UserScopeProviders: store is required")
 	}
@@ -292,7 +299,7 @@ func kvPrefixForNamespace(namespace string) string {
 // when no blob row exists.
 //
 // Missing row is not an error: dst is left untouched.
-func ExactSetting(ctx context.Context, st store.ConfigReader, namespace, userID, agentID string, dst interface{}) error {
+func ExactSetting(ctx context.Context, st store.ConfigReadStore, namespace, userID, agentID string, dst interface{}) error {
 	if st == nil {
 		return errors.New("scope.ExactSetting: store is required")
 	}
@@ -312,7 +319,7 @@ func ExactSetting(ctx context.Context, st store.ConfigReader, namespace, userID,
 // UserScopeSetting loads one setting namespace at (user=X, agent='') only —
 // the user's personal row, without the system layer merged in. Thin wrapper
 // over ExactSetting kept for the callers that express "the user layer".
-func UserScopeSetting(ctx context.Context, st store.ConfigReader, namespace, userID string, dst interface{}) error {
+func UserScopeSetting(ctx context.Context, st store.ConfigReadStore, namespace, userID string, dst interface{}) error {
 	if st == nil {
 		return errors.New("scope.UserScopeSetting: store is required")
 	}
@@ -757,12 +764,29 @@ const PluginEnabledNamespace = "plugins.enabled"
 // ((user_id, agent_id) = ("", Y)), or nil when no row exists. Missing keys
 // fall through to the system-wide plugin state; callers treat nil as
 // "no overrides".
-func AgentPluginEnabled(ctx context.Context, st store.ConfigReader, agentID string) (map[string]bool, error) {
+func AgentPluginEnabled(ctx context.Context, st store.ConfigReadStore, agentID string) (map[string]bool, error) {
 	if st == nil {
 		return nil, errors.New("scope.AgentPluginEnabled: store is required")
 	}
 	if agentID == "" {
 		return nil, nil
+	}
+	// Mirror-first: a marker-certified projection answers the row outright,
+	// including the "no overrides" veto. An uncertified row falls through to
+	// the blob below — same guard as every other mirrored kind.
+	if configsReadAuthority == mirrorFirst {
+		kvPrefix := store.MirrorPrefixFor(store.KindPluginEnabled, PluginEnabledNamespace)
+		if leaves, err := st.ListConfigValues(ctx, store.KindPluginEnabled, Agent, agentID, kvPrefix); err == nil && len(leaves) > 0 {
+			if m, ok := certifiedMirror(ctx, st, store.KindPluginEnabled, Agent, agentID, PluginEnabledNamespace, leaves); ok {
+				if m.Enabled != nil && !*m.Enabled {
+					return nil, nil
+				}
+				if data := kvToSettingMap(kvPrefix, leaves); len(data) > 0 {
+					return boolMapFromData(data), nil
+				}
+				return nil, nil
+			}
+		}
 	}
 	// Blob first (authoritative), mirror only for blob-less rows — same
 	// contract as every other read in this package.

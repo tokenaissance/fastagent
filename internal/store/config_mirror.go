@@ -86,6 +86,28 @@ func MirrorFingerprint(leaves map[string]ConfigValue) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+// MirrorSelfConsistent reports whether the marker attests to exactly these
+// leaves, judged against the marker alone — no blob to compare against.
+//
+// It is the half of verification a mirror-first reader can run: the migration
+// target is "the blob need not be read to answer", so the check cannot depend
+// on the blob's enabled flag. What it still enforces is the completeness the
+// marker exists for — the fingerprint covers every leaf (name, value and
+// value_kind) and the count agrees, so a subset, a rename or an edit made
+// after the marker was written fails it. A marker with no fingerprint, or one
+// written before the marker carried the enabled flag, records no decision at
+// all and returns false: "not certified" is the answer, not a defaulted one.
+//
+// A caller that trusts the mirror calls this with the leaves it just read; a
+// false answer means "do not serve this row from the mirror", not "the rows
+// are wrong".
+func MirrorSelfConsistent(m ConfigMirror, leaves map[string]ConfigValue) bool {
+	if m.Fingerprint == "" || m.Enabled == nil {
+		return false
+	}
+	return m.KeyCount == len(leaves) && m.Fingerprint == MirrorFingerprint(leaves)
+}
+
 // VerifyConfigMirror reports whether leaves and enabled are exactly the read
 // state the marker attests to. A marker with no fingerprint, or one written
 // before the marker carried the enabled flag, certifies nothing and returns
@@ -96,11 +118,10 @@ func MirrorFingerprint(leaves map[string]ConfigValue) string {
 // rows are wrong". enabled is the configs row's flag: recording it in the
 // marker is what lets a mirror-first reader answer the veto question (a
 // disabled row erases outer layers and blocks the fallback) without the blob.
+// VerifyConfigMirror is MirrorSelfConsistent plus the one check that needs the
+// blob — that the marker's recorded decision is the row's decision.
 func VerifyConfigMirror(m ConfigMirror, enabled bool, leaves map[string]ConfigValue) bool {
-	if m.Fingerprint == "" || m.Enabled == nil || *m.Enabled != enabled {
-		return false
-	}
-	return m.KeyCount == len(leaves) && m.Fingerprint == MirrorFingerprint(leaves)
+	return MirrorSelfConsistent(m, leaves) && *m.Enabled == enabled
 }
 
 // MirrorPrefixFor maps a configs row (kind, name) to the configs_kv name prefix

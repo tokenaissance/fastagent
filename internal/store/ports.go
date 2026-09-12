@@ -15,10 +15,12 @@
 //
 // Scope of each port, by the tables it can touch:
 //
-//	ConfigReader  -> configs + configs_kv reads
-//	ConfigWriter  -> configs + configs_kv writes
-//	ConfigStore   -> both (the whole configs domain)
-//	KVStore       -> configs_kv only (the legacy blob stays untouched)
+//	ConfigReader    -> configs + configs_kv reads
+//	ConfigReadStore -> configs + configs_kv reads + the mirror's marker
+//	MirrorReader    -> the marker read alone
+//	ConfigWriter    -> configs + configs_kv writes
+//	ConfigStore     -> both (the whole configs domain)
+//	KVStore         -> configs_kv only (the legacy blob stays untouched)
 package store
 
 import "context"
@@ -38,6 +40,32 @@ type ConfigReader interface {
 	ListConfigs(ctx context.Context, kind, userID, agentID string) ([]ConfigRecord, error)
 	ListConfigValues(ctx context.Context, kind, scope, scopeID, namePrefix string) (map[string]ConfigValue, error)
 	BatchGetConfigsByAgentIDs(ctx context.Context, kind, name string, agentIDs []string) ([]ConfigRecord, error)
+}
+
+// MirrorReader is the read half of ConfigMirrorStore: reading a row's
+// completeness marker. It is split out because a resolver that must certify a
+// projection only ever reads the marker — the dual-write and the reconciler are
+// the only things that write one — so a read view can take this without also
+// depending on marker writes.
+type MirrorReader interface {
+	GetConfigMirror(ctx context.Context, kind, scope, scopeID, name string) (ConfigMirror, bool, error)
+}
+
+// ConfigReadStore is the view a resolver needs once it must decide whether a
+// configs_kv projection may be trusted: the two configs tables (ConfigReader)
+// plus the completeness marker (MirrorReader) it verifies the projection
+// against.
+//
+// Reading the marker is a read concern in its own right — a mirror-first reader
+// loads the leaves and the marker and serves the leaves only if the marker
+// certifies them (see ConfigMirror, MirrorSelfConsistent) — so it has to be
+// part of the port such a reader takes. It is a separate composite rather than
+// a widening of ConfigReader so that a caller which only reads rows, and never
+// certifies them, still depends on four methods: the migration-phase read path
+// takes ConfigReadStore, everything else keeps ConfigReader.
+type ConfigReadStore interface {
+	ConfigReader
+	MirrorReader
 }
 
 // ConfigWriter is the write half of the configs domain. Writers need both
@@ -113,6 +141,8 @@ type KVStore interface {
 // at this line.
 var (
 	_ ConfigReader           = (Store)(nil)
+	_ ConfigReadStore        = (Store)(nil)
+	_ MirrorReader           = (Store)(nil)
 	_ ConfigWriter           = (Store)(nil)
 	_ ConfigRowWriter        = (Store)(nil)
 	_ ConfigMirrorStore      = (Store)(nil)
