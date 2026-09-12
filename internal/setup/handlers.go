@@ -143,7 +143,20 @@ func saveAgentSkillEntries(ctx context.Context, st store.Store, agentID string, 
 // user's scope. Providers/Channels live in their own configs rows
 // and are NOT touched here — the dedicated /api/providers and /api/channels
 // endpoints (and the onboard handler) write those.
+//
+// It writes EVERY namespace in the table, which is what the callers that own
+// a whole config (cron, plugins, tools) want. The PATCH-style /api/config
+// uses saveUserConfigNamespaces instead.
 func (s *Server) saveUserConfig(r *http.Request, cfg *config.Config) error {
+	return s.saveUserConfigNamespaces(r, cfg, nil)
+}
+
+// saveUserConfigNamespaces writes only the namespaces in `only` (nil = all).
+// Writing the whole table on every save turned one dashboard edit into ~17
+// namespace writes, each clearing and rebuilding its configs_kv prefix, and
+// let a stale snapshot overwrite a namespace the caller never touched. The
+// namespaces the request did not mention are now left exactly as they were.
+func (s *Server) saveUserConfigNamespaces(r *http.Request, cfg *config.Config, only map[string]bool) error {
 	if s.dataStore == nil {
 		return errors.New("store not configured")
 	}
@@ -161,6 +174,9 @@ func (s *Server) saveUserConfig(r *http.Request, cfg *config.Config) error {
 		uid = ident.UserID
 	}
 	for _, ns := range settingNamespaces {
+		if only != nil && !only[ns.namespace] {
+			continue
+		}
 		data := ns.collect(cfg)
 		if err := scope.SaveSetting(r.Context(), s.dataStore, uid, "", ns.namespace, data); err != nil {
 			return err
@@ -173,34 +189,34 @@ func (s *Server) saveUserConfig(r *http.Request, cfg *config.Config) error {
 // saveUserConfig. Adding a new sub-block of Config to the round-trip is
 // a single append here.
 var settingNamespaces = []settingNamespace{
-	{namespace: "agents.defaults",
+	{namespace: "agents.defaults", jsonPath: []string{"agents", "defaults"},
 		dst:     func(c *config.Config) interface{} { return &c.Agents.Defaults },
 		collect: func(c *config.Config) map[string]interface{} { return toMap(c.Agents.Defaults) }},
-	{namespace: "sandbox",
+	{namespace: "sandbox", jsonPath: []string{"sandbox"},
 		dst:     func(c *config.Config) interface{} { return &c.Sandbox },
 		collect: func(c *config.Config) map[string]interface{} { return toMap(c.Sandbox) }},
-	{namespace: "objectstore",
+	{namespace: "objectstore", jsonPath: []string{"objectStore"},
 		dst:     func(c *config.Config) interface{} { return &c.ObjectStore },
 		collect: func(c *config.Config) map[string]interface{} { return toMap(c.ObjectStore) }},
-	{namespace: "hooks",
+	{namespace: "hooks", jsonPath: []string{"hooks"},
 		dst:     func(c *config.Config) interface{} { return &c.Hooks },
 		collect: func(c *config.Config) map[string]interface{} { return toMap(c.Hooks) }},
-	{namespace: "plugins",
+	{namespace: "plugins", jsonPath: []string{"plugins"},
 		dst:     func(c *config.Config) interface{} { return &c.Plugins },
 		collect: func(c *config.Config) map[string]interface{} { return toMap(c.Plugins) }},
-	{namespace: "taskqueue",
+	{namespace: "taskqueue", jsonPath: []string{"taskQueue"},
 		dst:     func(c *config.Config) interface{} { return &c.TaskQueue },
 		collect: func(c *config.Config) map[string]interface{} { return toMap(c.TaskQueue) }},
-	{namespace: "tools.providers",
+	{namespace: "tools.providers", jsonPath: []string{"toolProviders"},
 		dst:     func(c *config.Config) interface{} { return &c.ToolProviders },
 		collect: func(c *config.Config) map[string]interface{} { return wrapKeyed(c.ToolProviders) }},
-	{namespace: "tools.categories",
+	{namespace: "tools.categories", jsonPath: []string{"tools"},
 		dst:     func(c *config.Config) interface{} { return &c.Tools },
 		collect: func(c *config.Config) map[string]interface{} { return wrapKeyed(c.Tools) }},
-	{namespace: "skills.install",
+	{namespace: "skills.install", jsonPath: []string{"skills", "install"},
 		dst:     func(c *config.Config) interface{} { return &c.Skills.Install },
 		collect: func(c *config.Config) map[string]interface{} { return toMap(c.Skills.Install) }},
-	{namespace: "skills.entries",
+	{namespace: "skills.entries", jsonPath: []string{"skills", "entries"},
 		dst:     func(c *config.Config) interface{} { return &c.Skills.Entries },
 		collect: func(c *config.Config) map[string]interface{} { return wrapKeyed(c.Skills.Entries) }},
 	// Per-agent skill env/key overrides have been split off this table
@@ -209,22 +225,22 @@ var settingNamespaces = []settingNamespace{
 	// every agent's overrides into a single user/system-scope row let
 	// the JSON blob grow with every agent × skill, and forced a full
 	// rewrite on every patch.
-	{namespace: "memory",
+	{namespace: "memory", jsonPath: []string{"memory"},
 		dst:     func(c *config.Config) interface{} { return &c.Memory },
 		collect: func(c *config.Config) map[string]interface{} { return toMap(c.Memory) }},
-	{namespace: "privacy",
+	{namespace: "privacy", jsonPath: []string{"privacy"},
 		dst:     func(c *config.Config) interface{} { return &c.Privacy },
 		collect: func(c *config.Config) map[string]interface{} { return toMap(c.Privacy) }},
-	{namespace: "skillsLearner",
+	{namespace: "skillsLearner", jsonPath: []string{"skillsLearner"},
 		dst:     func(c *config.Config) interface{} { return &c.SkillsLearner },
 		collect: func(c *config.Config) map[string]interface{} { return toMap(c.SkillsLearner) }},
-	{namespace: "heartbeat",
+	{namespace: "heartbeat", jsonPath: []string{"heartbeat"},
 		dst:     func(c *config.Config) interface{} { return &c.Heartbeat },
 		collect: func(c *config.Config) map[string]interface{} { return toMap(c.Heartbeat) }},
-	{namespace: "teams",
+	{namespace: "teams", jsonPath: []string{"teams"},
 		dst:     func(c *config.Config) interface{} { return &c.Teams },
 		collect: func(c *config.Config) map[string]interface{} { return wrapKeyed(c.Teams) }},
-	{namespace: "bindings",
+	{namespace: "bindings", jsonPath: []string{"bindings"},
 		// Stored as {"list":[…]} (see collect below) — read it back through
 		// the envelope, not straight into the slice: the shapes differ and
 		// the raw unmarshal silently failed (and hard-failed the gateway).
@@ -241,15 +257,65 @@ var settingNamespaces = []settingNamespace{
 	// prefs (runtime settings): single timezone field, loaded/saved
 	// through the same batch path. Mirrors upstream's per-namespace
 	// SettingInto(PrefsNamespace) — same storage, batch-consistent.
-	{namespace: "prefs",
+	{namespace: "prefs", jsonPath: []string{"prefs"},
 		dst:     func(c *config.Config) interface{} { return &c.Prefs },
 		collect: func(c *config.Config) map[string]interface{} { return toMap(c.Prefs) }},
 }
 
 type settingNamespace struct {
 	namespace string
+	// jsonPath locates the namespace in the /api/config request body. It is
+	// not derivable from namespace: the wire shape keeps upstream's names
+	// (objectStore, toolProviders, tools) while the storage name is the
+	// namespace, and two namespaces can share one wire key (skills.install /
+	// skills.entries both hang off "skills").
+	jsonPath  []string
 	dst       func(*config.Config) interface{}
 	collect   func(*config.Config) map[string]interface{}
+}
+
+// namespacesInBody returns the namespaces the request body actually carries.
+// The dashboard's POST /api/config is a PATCH: a key that is absent means
+// "leave this namespace alone", so only the namespaces found here are
+// written. An explicit null does not count — there is no value to collect,
+// and treating it as a write would delete a namespace the caller never
+// mentioned.
+func namespacesInBody(body map[string]interface{}) map[string]bool {
+	out := make(map[string]bool, len(settingNamespaces))
+	for _, ns := range settingNamespaces {
+		if jsonPathPresent(body, ns.jsonPath) {
+			out[ns.namespace] = true
+		}
+	}
+	return out
+}
+
+func jsonPathPresent(body map[string]interface{}, path []string) bool {
+	var cur interface{} = body
+	for _, seg := range path {
+		m, ok := cur.(map[string]interface{})
+		if !ok {
+			return false
+		}
+		v, found := m[seg]
+		if !found {
+			// encoding/json matches object keys case-insensitively, so the
+			// typed decode accepts "objectstore" for the "objectStore" tag.
+			// The presence check has to agree with it, or a key the decoder
+			// accepted would silently write nothing.
+			for k, candidate := range m {
+				if strings.EqualFold(k, seg) {
+					v, found = candidate, true
+					break
+				}
+			}
+		}
+		if !found || v == nil {
+			return false
+		}
+		cur = v
+	}
+	return true
 }
 
 func toMap(v interface{}) map[string]interface{} {
@@ -577,6 +643,16 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
+	// Which namespaces this PATCH touches. Decoding the body twice is
+	// deliberate: the typed pass below keeps the struct semantics, this one
+	// answers "was the key there at all", which a decoded struct cannot
+	// (absent and zero both land on the zero value).
+	bodyMap, err := store.JSONToMap(buf)
+	if err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	touched := namespacesInBody(bodyMap)
 	var raw struct {
 		Prefs   *config.PrefsCfg `json:"prefs"`
 		Sandbox *json.RawMessage `json:"sandbox"`
@@ -608,7 +684,7 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
-	if err := s.saveUserConfig(r, merged); err != nil {
+	if err := s.saveUserConfigNamespaces(r, merged, touched); err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
