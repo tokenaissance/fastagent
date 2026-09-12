@@ -340,8 +340,17 @@ func assembleConfig(ctx context.Context, st store.Store, userID, agentID string)
 	if err := scope.SettingInto(ctx, st, NSTeams, userID, agentID, &cfg.Teams); err != nil {
 		return nil, err
 	}
-	if err := scope.SettingInto(ctx, st, NSBindings, userID, agentID, &cfg.Bindings); err != nil {
+	// bindings is stored as {"list":[…]} while Config.Bindings is a slice —
+	// project through the envelope (see config.BindingsPayload) instead of
+	// unmarshalling the stored map into the slice, which fails and would
+	// abort every load for that user. Only bindings present in the row
+	// replace the synthesized ones.
+	var bindingsRow config.BindingsPayload
+	if err := scope.SettingInto(ctx, st, NSBindings, userID, agentID, &bindingsRow); err != nil {
 		return nil, err
+	}
+	if len(bindingsRow.List) > 0 {
+		cfg.Bindings = bindingsRow.List
 	}
 	provs, err := scope.Providers(ctx, st, userID, agentID)
 	if err != nil {
@@ -358,6 +367,52 @@ func assembleConfig(ctx context.Context, st store.Store, userID, agentID string)
 		cfg.Channels[k] = v
 	}
 	return cfg, nil
+}
+
+// toolConfigForAgent returns the config view registerAgentToolChains should
+// read for one lazily attached agent: the UserSpace's own merged
+// (system + viewer-user) snapshot, with the agent owner's *user-scope*
+// tools.providers / tools.categories rows layered on top when the caller is a
+// foreign viewer and shareModelConfig allows it.
+//
+// Only the owner's user-scope rows are pulled — never the owner's full merged
+// view — so re-applying system rows can't clobber a viewer-scope override
+// (same rule as the UserScopeProviders overlay above).
+//
+// Returns base unchanged when there is nothing to overlay, so the common
+// same-user call allocates nothing.
+func toolConfigForAgent(ctx context.Context, st store.Store, base *config.Config, ownerUserID string, overlayOwner bool) *config.Config {
+	if !overlayOwner || st == nil || base == nil || ownerUserID == "" {
+		return base
+	}
+	ownerTools := map[string]config.ToolCategoryCfg{}
+	if err := scope.UserScopeSetting(ctx, st, NSToolCategories, ownerUserID, &ownerTools); err != nil {
+		slog.Warn("owner tool categories overlay failed", "owner", ownerUserID, "error", err)
+	}
+	ownerProviders := map[string]config.ToolProviderCfg{}
+	if err := scope.UserScopeSetting(ctx, st, NSToolProviders, ownerUserID, &ownerProviders); err != nil {
+		slog.Warn("owner tool providers overlay failed", "owner", ownerUserID, "error", err)
+	}
+	if len(ownerTools) == 0 && len(ownerProviders) == 0 {
+		return base
+	}
+	merged := *base
+	merged.Tools = mergeStringMap(base.Tools, ownerTools)
+	merged.ToolProviders = mergeStringMap(base.ToolProviders, ownerProviders)
+	return &merged
+}
+
+// mergeStringMap returns base ∪ over with `over` winning, as a fresh map so
+// the caller's config snapshot is never mutated in place.
+func mergeStringMap[V any](base, over map[string]V) map[string]V {
+	out := make(map[string]V, len(base)+len(over))
+	for k, v := range base {
+		out[k] = v
+	}
+	for k, v := range over {
+		out[k] = v
+	}
+	return out
 }
 
 // UserSpace holds the per-user runtime: their config snapshot, LLM
@@ -659,6 +714,19 @@ func (sp *UserSpace) EnsureAgent(ctx context.Context, st store.Store, mb *bus.Me
 		if ag := sp.Agents.AgentByID(rc.ID); ag != nil {
 			ag.SetProjectRuntime(sp.ProjectRuntime)
 		}
+	}
+	// Provider-backed tool chains (web_search / web_fetch / image_gen /
+	// tts). loadUserSpace wires these for every agent it builds; this
+	// lazy-attach path used to skip the call entirely, so an agent
+	// reached through a channel binding, a public link or an apikey
+	// reported "Unknown tool: web_search" even though the owner's own
+	// web chat could search with it — the chain config was in the DB
+	// the whole time, just never read into a chain. Owner-scope rows
+	// are layered in under the same isForeign gate as the provider
+	// overlay above (tools follow the owner, like the model does).
+	if ag := sp.Agents.AgentByID(rc.ID); ag != nil {
+		toolCfg := toolConfigForAgent(ctx, st, sp.Config, rec.UserID, isForeign && applyOwnerOverlays)
+		registerAgentToolChains(toolCfg, []*agent.Agent{ag})
 	}
 	// Wire hook plugins onto the freshly-attached agent. Mirrors what
 	// loadUserSpace does for owner agents — without this, hook

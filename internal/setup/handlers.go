@@ -228,7 +228,13 @@ var settingNamespaces = []settingNamespace{
 		dst:     func(c *config.Config) interface{} { return &c.Teams },
 		collect: func(c *config.Config) map[string]interface{} { return wrapKeyed(c.Teams) }},
 	{namespace: "bindings",
-		dst: func(c *config.Config) interface{} { return &c.Bindings },
+		// Stored as {"list":[…]} (see collect below) — read it back through
+		// the envelope, not straight into the slice: the shapes differ and
+		// the raw unmarshal silently failed (and hard-failed the gateway).
+		// Seeding List keeps already-loaded bindings when the row is absent.
+		dst: func(c *config.Config) interface{} {
+			return &config.BindingsPayload{List: c.Bindings}
+		},
 		collect: func(c *config.Config) map[string]interface{} {
 			if len(c.Bindings) == 0 {
 				return nil
