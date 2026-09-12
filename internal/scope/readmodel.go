@@ -1,16 +1,18 @@
 /**
  * [INPUT]: the settable/providable resolvers get a store.ConfigReadStore from
- *   the caller (ConfigReader plus the mirror marker, MirrorReader); the
- *   row-enumeration ones (SettingNamesAt / RowsAt / AgentScopeRows) still take
- *   store.ConfigReader. Uses store.ConfigsKVPrefixFor, store.ListConfigValues and
- *   store.GetConfigMirror. Imports config (provider shapes) and kvkeys
- *   indirectly through scope's own mirror helpers.
+ *   the caller (ConfigReader plus the mirror marker, MirrorReader), and so now
+ *   does AgentScopeRows, because a mirror-first batch must certify each lane it
+ *   answers. Only the two views that never certify (SettingNamesAt / RowsAt)
+ *   still take store.ConfigReader. Uses store.ConfigsKVPrefixFor,
+ *   store.ListConfigValues and store.GetConfigMirror. Imports config (provider
+ *   shapes) and kvkeys indirectly through scope's own mirror helpers.
  * [OUTPUT]: the per-scope read models adapters resolve through instead of
  *   naming a table: SettingAt / SettingNamesAt / ProviderStateAt /
- *   ProvidersAt / RowsAt. ExactSetting is re-expressed on the same single
- *   resolution rule. The table they pick is configsReadAuthority, and the
- *   mirror-first branch certifies each row through certifiedMirror (one name)
- *   or certifiedMirrorIn (a scope's markers read once via ListConfigMirrors).
+ *   ProvidersAt / AgentScopeRows / RowsAt. ExactSetting is re-expressed on the
+ *   same single resolution rule. The table they pick is configsReadAuthority, and
+ *   the mirror-first branch certifies each row through certifiedMirror (one
+ *   name), certifiedMirrorIn (a scope's markers read once via
+ *   ListConfigMirrors), or the lane-batched form inside agentScopeRowsCertified.
  * [POS]: scope package's read face. scope.go owns the layer-merge resolvers
  *   (Setting / SettingInto / BatchSettings / Providers); this file owns the
  *   single-scope ones. Together they are the only place in the codebase that
@@ -487,29 +489,119 @@ func RowsAt(ctx context.Context, st store.ConfigReader, kind, userID, agentID st
 // *and* the caller's per-(caller, agent) row out of the same batch, and applies
 // them in an order the query cannot express. Only enabled rows come back.
 //
-// The batching is why this is not N calls to SettingAt: loadUserSpace runs it
-// for every agent of a user. That is also why the mirror fallback is not here
-// yet — the blob batch is the whole point of the call shape, and these four
-// namespaces are always written through the dual-write, so a page of agents
-// with no blob row at all does not occur in practice.
+// Under blobFirst it is one query over the blob, unchanged. Under
+// configsKVFirst — the shipped default — every row the blob enumerated is
+// re-answered from its own certified mirror leaf set, so the *data* this
+// returns is the data Setting / BatchSettings resolve through the same lever;
+// a row the marker does not certify keeps the blob row it came from (a mirror
+// read error is not fatal for the same reason: the blob is the fallback).
 //
-// Two things this view therefore cannot answer, both of which the merged
+// The blob stays the *registry* even under configsKVFirst: it is what
+// enumerates which (user, agent) lanes exist, because configs_kv has no
+// agent-indexed way to enumerate them back (an agent's rows live under
+// scope="agent"/scope_id=agentID and, per caller, under
+// scope="user-agent"/scope_id=userID/agentID, and the pair cannot be inverted
+// from the rows alone). These four namespaces are always written through the
+// dual-write, so during the dual-write a lane the blob does not have is not a
+// lane that exists — the phase that drops the blob as the registry is the
+// phase that ends the dual-write.
+//
+// Two things this view still cannot answer, both of which the merged
 // resolvers can — so it must not be used as if it were Setting:
 //
 //   - A row that exists only in the mirror (no blob row) is invisible here.
 //     Unreachable for these four namespaces as long as every writer goes
 //     through SaveSetting, which dual-writes both tables in one transaction.
-//   - A row that exists but is switched OFF is filtered out by the query's
-//     `enabled = true`, so "off" and "no row" look alike. The resolvers keep
-//     them apart: a disabled row is a veto that clears the outer layers, an
-//     absent row lets them through. A caller that needs that distinction has
-//     to resolve the namespace with Setting / BatchSettings instead of
-//     overlaying these rows itself.
-func AgentScopeRows(ctx context.Context, st store.ConfigReader, namespace string, agentIDs []string) ([]store.ConfigRecord, error) {
+//   - The blob query's `enabled = true` filter drops a row that is switched
+//     OFF at the lane it is off at, so "off here" and "no row here" both look
+//     like "not in the result" (a row the certified mirror vetoes is dropped
+//     too, by agentScopeRowsCertified). The resolvers keep them apart: a
+//     disabled row is a veto that clears the outer layers, an absent row lets
+//     them through. A caller that needs that distinction has to resolve the
+//     namespace with Setting / BatchSettings instead of overlaying these rows
+//     itself.
+//
+// The per-row certification is not optional (see configsReadAuthority): serving
+// an uncertified leaf set is the web_search shape — a partial mirror answered as
+// if it were the whole namespace.
+func AgentScopeRows(ctx context.Context, st store.ConfigReadStore, namespace string, agentIDs []string) ([]store.ConfigRecord, error) {
 	if st == nil {
 		return nil, errors.New("scope.AgentScopeRows: store is required")
 	}
-	return st.BatchGetConfigsByAgentIDs(ctx, store.KindSetting, namespace, agentIDs)
+	rows, err := st.BatchGetConfigsByAgentIDs(ctx, store.KindSetting, namespace, agentIDs)
+	if err != nil {
+		return nil, err
+	}
+	if configsReadAuthority != configsKVFirst || len(rows) == 0 {
+		return rows, nil
+	}
+	return agentScopeRowsCertified(ctx, st, namespace, rows), nil
+}
+
+// agentScopeRowsCertified re-answers blob-enumerated rows from their certified
+// mirrors, leaving a row the marker does not certify exactly as the blob read
+// it. rows is the blob registry: one entry per (user_id, agent_id, name) lane.
+//
+// One lane shares one leaf read and one marker read — the leaves are read by
+// scope (empty prefix = every setting leaf at that scope) and the marker map by
+// row name — so a page of agents costs two queries per lane, not two per row.
+// That is the batch cost the flip buys: the point of the mirror-first order is
+// correct data, and ListConfigValues/ListConfigMirrors are the batched shapes
+// that keep it from being two queries per *row*.
+func agentScopeRowsCertified(ctx context.Context, st store.ConfigReadStore, namespace string, rows []store.ConfigRecord) []store.ConfigRecord {
+	prefix := kvPrefixForNamespace(namespace)
+	type lane struct{ userID, agentID string }
+	type laneMirror struct {
+		leaves  map[string]store.ConfigValue
+		markers map[string]store.ConfigMirror
+		ok      bool
+	}
+	readLane := func(userID, agentID string) laneMirror {
+		sc, sid := kvScopeFromOwnership(userID, agentID)
+		leaves, err := st.ListConfigValues(ctx, store.KindSetting, sc, sid, "")
+		if err != nil {
+			return laneMirror{}
+		}
+		markers, err := st.ListConfigMirrors(ctx, store.KindSetting, sc, sid)
+		if err != nil {
+			return laneMirror{}
+		}
+		return laneMirror{leaves: leaves, markers: markers, ok: true}
+	}
+	lanes := map[lane]laneMirror{}
+	out := make([]store.ConfigRecord, 0, len(rows))
+	for _, r := range rows {
+		l := lane{r.UserID, r.AgentID}
+		mir, seen := lanes[l]
+		if !seen {
+			mir = readLane(l.userID, l.agentID)
+			lanes[l] = mir
+		}
+		if !mir.ok {
+			// The lane's mirror could not be read: keep the blob row. A
+			// best-effort mirror must not fail a read the blob can answer.
+			out = append(out, r)
+			continue
+		}
+		leaves := leavesUnderPrefix(mir.leaves, prefix)
+		m, certified := certifiedMirrorIn(mir.markers, namespace, leaves)
+		if !certified {
+			out = append(out, r)
+			continue
+		}
+		if m.Enabled == nil || !*m.Enabled {
+			// The row's veto: this lane has nothing here, so the row drops out
+			// of the result and the blob row (enabled, the query already
+			// filtered on it) does not resurrect it. This is the half the
+			// plain `enabled = true` filter cannot reach: it only sees the
+			// blob's decision, not the mirror's.
+			continue
+		}
+		r.Data = kvToSettingMap(prefix, leaves)
+		r.Enabled = true
+		out = append(out, r)
+	}
+	return out
 }
 
 // cloneTopLevel copies a map's own keys so a caller mutating the result cannot

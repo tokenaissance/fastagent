@@ -561,3 +561,184 @@ func TestEmptyObjectSurvivesTheMirrorUnderBothOrders(t *testing.T) {
 		}
 	}
 }
+
+// AgentScopeRows is a read entry point too, so the flip reaches it: the rows it
+// returns carry the *certified mirror's* data under configsKVFirst and the
+// blob's under blobFirst, while the blob keeps enumerating which (user, agent)
+// lanes exist (configs_kv cannot invert a user-agent scope_id back to its pair).
+func TestAgentScopeRowsConfigsKVFirstTrustsCertifiedRowsOverBlob(t *testing.T) {
+	db := openScopeDBNamed(t, "readauth_agentrows_certified")
+	defer db.Close()
+	ctx := context.Background()
+
+	// One dual-write: blob + mirror + a marker that certifies the mirror.
+	if err := SaveSetting(ctx, db, "", "agt1", "agents.defaults",
+		map[string]interface{}{"model": "mirror-model"}); err != nil {
+		t.Fatalf("SaveSetting: %v", err)
+	}
+	// Change the blob alone. The mirror and its marker are untouched, so the
+	// marker still certifies what is on disk in configs_kv.
+	if err := db.SaveConfig(ctx, &store.ConfigRecord{
+		Kind: store.KindSetting, AgentID: "agt1", Name: "agents.defaults",
+		Enabled: true, Data: map[string]interface{}{"model": "blob-model"},
+	}); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+
+	withReadAuthority(t, blobFirst)
+	rows, err := AgentScopeRows(ctx, db, "agents.defaults", []string{"agt1"})
+	if err != nil {
+		t.Fatalf("AgentScopeRows(blobFirst): %v", err)
+	}
+	if len(rows) != 1 || rows[0].Data["model"] != "blob-model" {
+		t.Fatalf("blobFirst rows = %#v, want one row with model=blob-model", rows)
+	}
+
+	withReadAuthority(t, configsKVFirst)
+	rows, err = AgentScopeRows(ctx, db, "agents.defaults", []string{"agt1"})
+	if err != nil {
+		t.Fatalf("AgentScopeRows(configsKVFirst): %v", err)
+	}
+	if len(rows) != 1 || rows[0].Data["model"] != "mirror-model" {
+		t.Fatalf("configsKVFirst rows = %#v, want one row with model=mirror-model (the certified mirror answers)", rows)
+	}
+}
+
+// A row whose marker does not certify the leaves is not served, exactly as the
+// single-scope readers do not serve one: the batch keeps the blob row.
+func TestAgentScopeRowsConfigsKVFirstFallsBackOnUncertifiedRow(t *testing.T) {
+	db := openScopeDBNamed(t, "readauth_agentrows_uncertified")
+	defer db.Close()
+	ctx := context.Background()
+
+	if err := db.SaveConfig(ctx, &store.ConfigRecord{
+		Kind: store.KindSetting, AgentID: "agt1", Name: "agents.defaults",
+		Enabled: true, Data: map[string]interface{}{"model": "blob-model"},
+	}); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+	// Mirror rows written straight into configs_kv, with no marker: an
+	// unmarked subset is indistinguishable from the whole.
+	if err := db.SetConfigValue(ctx, store.KindSetting, Agent, "agt1",
+		"agent.model", store.StringValue("mirror-model")); err != nil {
+		t.Fatalf("SetConfigValue: %v", err)
+	}
+
+	withReadAuthority(t, configsKVFirst)
+	rows, err := AgentScopeRows(ctx, db, "agents.defaults", []string{"agt1"})
+	if err != nil {
+		t.Fatalf("AgentScopeRows: %v", err)
+	}
+	if len(rows) != 1 || rows[0].Data["model"] != "blob-model" {
+		t.Fatalf("rows = %#v, want the blob row (an uncertified mirror must not be served)", rows)
+	}
+}
+
+// The batch answers lane by lane: one agent's certified row must not answer for
+// another agent whose row the marker does not certify.
+func TestAgentScopeRowsConfigsKVFirstCertifiesPerLane(t *testing.T) {
+	db := openScopeDBNamed(t, "readauth_agentrows_lanes")
+	defer db.Close()
+	ctx := context.Background()
+
+	// agt1: dual-written, so its marker certifies the mirror.
+	if err := SaveSetting(ctx, db, "", "agt1", "agents.defaults",
+		map[string]interface{}{"model": "mirror-model"}); err != nil {
+		t.Fatalf("SaveSetting: %v", err)
+	}
+	// agt2: blob-only, no marker at all.
+	if err := db.SaveConfig(ctx, &store.ConfigRecord{
+		Kind: store.KindSetting, AgentID: "agt2", Name: "agents.defaults",
+		Enabled: true, Data: map[string]interface{}{"model": "blob-model-2"},
+	}); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+
+	withReadAuthority(t, configsKVFirst)
+	rows, err := AgentScopeRows(ctx, db, "agents.defaults", []string{"agt1", "agt2"})
+	if err != nil {
+		t.Fatalf("AgentScopeRows: %v", err)
+	}
+	got := map[string]interface{}{}
+	for _, r := range rows {
+		got[r.AgentID] = r.Data["model"]
+	}
+	if got["agt1"] != "mirror-model" {
+		t.Fatalf("agt1 model = %v, want mirror-model (certified lane)", got["agt1"])
+	}
+	if got["agt2"] != "blob-model-2" {
+		t.Fatalf("agt2 model = %v, want blob-model-2 (no marker → blob)", got["agt2"])
+	}
+}
+
+// The mirror's veto is a row decision AgentScopeRows has to honour, or a stale
+// enabled blob row would resurrect a namespace the certified mirror switched
+// off. Drives the real writer (SaveSettingState) and then flips the blob back on
+// behind the mirror's back to make blob and marker disagree.
+func TestAgentScopeRowsConfigsKVFirstDropsARowTheCertifiedMirrorVetoes(t *testing.T) {
+	db := openScopeDBNamed(t, "readauth_agentrows_veto")
+	defer db.Close()
+	ctx := context.Background()
+
+	if err := SaveSetting(ctx, db, "", "agt1", "agents.defaults",
+		map[string]interface{}{"model": "mirror-model"}); err != nil {
+		t.Fatalf("SaveSetting: %v", err)
+	}
+	if err := SaveSettingState(ctx, db, "", "agt1", "agents.defaults", nil, false); err != nil {
+		t.Fatalf("SaveSettingState(veto): %v", err)
+	}
+	if err := db.SaveConfig(ctx, &store.ConfigRecord{
+		Kind: store.KindSetting, AgentID: "agt1", Name: "agents.defaults",
+		Enabled: true, Data: map[string]interface{}{"model": "mirror-model"},
+	}); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+
+	withReadAuthority(t, blobFirst)
+	rows, err := AgentScopeRows(ctx, db, "agents.defaults", []string{"agt1"})
+	if err != nil {
+		t.Fatalf("AgentScopeRows(blobFirst): %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("blobFirst rows = %#v, want the blob's enabled row", rows)
+	}
+
+	withReadAuthority(t, configsKVFirst)
+	rows, err = AgentScopeRows(ctx, db, "agents.defaults", []string{"agt1"})
+	if err != nil {
+		t.Fatalf("AgentScopeRows(configsKVFirst): %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("configsKVFirst rows = %#v, want none — the certified mirror vetoes the row", rows)
+	}
+}
+
+// Timezone resolves each layer through the same per-layer rule, so the flip
+// reaches it too: a certified prefs mirror answers under configsKVFirst and the
+// blob answers under blobFirst. It stays a precedence walk (first hit wins), not
+// a merge.
+func TestTimezoneConfigsKVFirstTrustsCertifiedRowsOverBlob(t *testing.T) {
+	db := openScopeDBNamed(t, "readauth_timezone")
+	defer db.Close()
+	ctx := context.Background()
+
+	if err := SaveUserTimezone(ctx, db, "u1", "Asia/Shanghai"); err != nil {
+		t.Fatalf("SaveUserTimezone: %v", err)
+	}
+	// Change the blob alone; the mirror and its marker are untouched.
+	if err := db.SaveConfig(ctx, &store.ConfigRecord{
+		Kind: store.KindSetting, UserID: "u1", Name: PrefsNamespace,
+		Enabled: true, Data: map[string]interface{}{"timezone": "UTC"},
+	}); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+
+	withReadAuthority(t, blobFirst)
+	if tz := Timezone(ctx, db, "u1", ""); tz != "UTC" {
+		t.Fatalf("blobFirst tz = %q, want UTC", tz)
+	}
+	withReadAuthority(t, configsKVFirst)
+	if tz := Timezone(ctx, db, "u1", ""); tz != "Asia/Shanghai" {
+		t.Fatalf("configsKVFirst tz = %q, want Asia/Shanghai (the certified mirror answers)", tz)
+	}
+}
