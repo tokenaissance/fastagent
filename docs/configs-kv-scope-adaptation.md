@@ -93,6 +93,7 @@ blob 侧同理走 `store.JSONToMap` / `store.ValueToMap`（`Decoder.UseNumber()`
 | `AgentPluginEnabled` | agent 层单行 | 有 |
 | `BatchSettings` | 仅 system + user 两层 | 有，但只对**没有 blob 行**的 namespace 逐个走 `Setting`（面板专用，N 个 namespace 合并成 2 次查询；补兜底只影响 blob 缺席的 namespace） |
 | `Channels` | 四层，disabled 行擦除外层（同下节的统一规则） | **无，且刻意如此**：channel 行从不进 KV（见「存储面」），`Channels` 没有可回落的镜像。`TestChannelsAreNotMirroredInKV` 钉住这个前提 |
+| `Timezone` | chatter → agent → user → system（反向优先级） | **无**（已知不对称，见残留风险 6）：`prefs` 明明是双写 namespace，但 `Timezone` 只逐层点查 blob。生产写入全部走 `SaveUserTimezone → SaveSetting`，所以今天没有只写镜像的 prefs 行；一旦有（KV-only writer / 手工修数据），面板会显示时区而聊天时间显示退回服务端本地——正是「面板正常、运行时不生效」 |
 
 #### enabled 语义：所有读入口一条规则（`23736ee`）
 
@@ -843,11 +844,17 @@ provider 名同时是两样东西：`configs_kv` 的 key 前缀（`<名>.<字段
 4. **LIKE 转义只覆盖已发现的位置**：`configs_kv` 的 name/scope_id 前缀匹配都已
    转义；新增按前缀匹配的 SQL 时要记得走 `likePrefixPattern` / `escapeLike`。
 5. **agent 层「写了没人读」只堵住了已知的 sandbox**：`scope.SaveSetting` 是通用
-   入口，理论上仍可写入 agent 层的 `memory` / `privacy` / `hooks` /
-   `objectstore` / `taskqueue` / `heartbeat` / `teams` / `skills.install` /
-   `plugins` 等「仅系统层可读」的 namespace（当前 CLI/HTTP 都不产生这种行）。
-   约定：新增一个 agent 层可写的 namespace 时，必须同时让 runtime 读它，或者
-   像 sandbox 一样在写侧拒绝——两者都没有就是这次的 bug 类。
+  入口，理论上仍可写入 agent 层的 `memory` / `privacy` / `hooks` /
+  `objectstore` / `taskqueue` / `heartbeat` / `teams` / `skills.install` /
+  `plugins` 等「仅系统层可读」的 namespace（当前 CLI/HTTP 都不产生这种行）。
+  约定：新增一个 agent 层可写的 namespace 时，必须同时让 runtime 读它，或者
+  像 sandbox 一样在写侧拒绝——两者都没有就是这次的 bug 类。
+6. **`Timezone` 是最后一个没有镜像兜底的读入口**：形状与修复前的 `Providers`
+   相同（「今天没有只写 KV 的写入方，所以潜伏」），只是它的读路径是自己写的
+   层循环，没有复用 `Setting` / `ExactSetting` 的兜底分支。修法是让 blob 缺席的
+   那一层按同一 namespace 读一次镜像（可与 `ExactSetting` 共用
+   `kvToSettingMap`），并补一条「镜像独有 prefs 行」的测试。在此之前，这个
+   不对称是**已知且被记录**的，而不是遗漏。
 
 ## 对上游的 PR 提案
 
