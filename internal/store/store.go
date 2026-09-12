@@ -739,6 +739,36 @@ func computeConfigScope(userID, agentID string) string {
 	}
 }
 
+// KVScopeFromOwnership maps a configs row's (user_id, agent_id) ownership
+// onto the (scope, scope_id) pair configs_kv keys its rows by. Same four
+// layers as computeConfigScope, except the per-(user, agent) layer needs a
+// scope_id that identifies the *pair*, not just the user: "%s/%s".
+//
+// This lives in store, not scope, because the migration that backfills
+// configs_kv (migrateConfigsToKV) is in this package and cannot import scope
+// (scope imports store). It used to be spelled out a second time there, which
+// is how the upstream variant silently folded (X, Y) onto (user, X) and
+// leaked one agent's provider key to its siblings.
+func KVScopeFromOwnership(userID, agentID string) (scope, scopeID string) {
+	switch {
+	case userID != "" && agentID != "":
+		return "user-agent", KVUserAgentScopeID(userID, agentID)
+	case userID != "":
+		return "user", userID
+	case agentID != "":
+		return "agent", agentID
+	default:
+		return "system", ""
+	}
+}
+
+// KVUserAgentScopeID is the configs_kv scope_id of the per-(user, agent)
+// layer. Deletes match it by pattern ("<user>/%", "%/<agent>"), so the
+// separator is part of the storage contract, not a formatting choice.
+func KVUserAgentScopeID(userID, agentID string) string {
+	return userID + "/" + agentID
+}
+
 // LegacyScope returns the scope label suitable for the HTTP-layer
 // (scope, scopeId) JSON shape. Reads the persisted column when set;
 // falls back to recomputing for rows that pre-date the column-add

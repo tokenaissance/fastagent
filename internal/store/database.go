@@ -2157,7 +2157,10 @@ func (d *DBStore) DeleteUser(ctx context.Context, id string) error {
 		}
 		// Same configs_kv sweep as DeleteAgent: the mirror keeps both
 		// scope='agent' rows and scope='user-agent' '<user>/<agent>'
-		// rows for this agent; the read path is KV-first, so drop them.
+		// rows for this agent. The blob is the authoritative read source, so
+		// these rows can't resurrect a deleted value on their own — but they
+		// are still read whenever a namespace has no blob row, so drop them
+		// with the configs rows they mirror.
 		if _, err := tx.ExecContext(ctx,
 			fmt.Sprintf(`DELETE FROM configs_kv WHERE (scope = %s AND scope_id = %s) OR (scope = %s AND scope_id LIKE %s ESCAPE '\')`,
 				d.ph(1), d.ph(2), d.ph(3), d.ph(4)),
@@ -2550,10 +2553,10 @@ func (d *DBStore) DeleteAgent(ctx context.Context, agentID string) error {
 	// configs_kv mirrors agent-scoped config rows under two scope
 	// encodings (kvScopeFromOwnership): scope='agent', scope_id=agentID
 	// (official rows) and scope='user-agent', scope_id='<user>/<agent>'
-	// (per-user overrides). The blob configs table above is
-	// authoritative, but the KV read path is read-preferred
-	// (scope.GetValue/Setting try configs_kv first), so sweep both
-	// encodings or stale values survive the delete and can be read.
+	// (per-user overrides). Sweep both encodings: the blob configs table
+	// above is authoritative, but any namespace without a blob row is served
+	// from the mirror, so a surviving KV row would keep a deleted value
+	// readable.
 	if _, err := tx.ExecContext(ctx,
 		fmt.Sprintf(`DELETE FROM configs_kv WHERE (scope = %s AND scope_id = %s) OR (scope = %s AND scope_id LIKE %s ESCAPE '\')`,
 			d.ph(1), d.ph(2), d.ph(3), d.ph(4)),
@@ -4230,19 +4233,7 @@ func (d *DBStore) migrateConfigsToKV(ctx context.Context) error {
 		// per-agent provider keys keep their isolation in configs_kv
 		// instead of collapsing onto the user layer (which would leak
 		// one agent's key across all of the user's agents).
-		kvScope := "system"
-		kvScopeID := ""
-		switch {
-		case cfg.UserID != "" && cfg.AgentID != "":
-			kvScope = "user-agent"
-			kvScopeID = cfg.UserID + "/" + cfg.AgentID
-		case cfg.UserID != "":
-			kvScope = "user"
-			kvScopeID = cfg.UserID
-		case cfg.AgentID != "":
-			kvScope = "agent"
-			kvScopeID = cfg.AgentID
-		}
+		kvScope, kvScopeID := KVScopeFromOwnership(cfg.UserID, cfg.AgentID)
 		// Flatten JSON data into typed key-value pairs.
 		flat := map[string]ConfigValue{}
 		switch {
