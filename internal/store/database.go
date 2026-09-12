@@ -229,7 +229,7 @@ func (d *DBStore) Migrate(ctx context.Context) error {
 	// column, so a configs_mirror table created without it has to be
 	// retrofitted before any of them runs (the backfill below writes markers
 	// itself).
-	if err := d.migrateConfigsMirrorEnabled(ctx); err != nil {
+	if err := d.migrateProjectionMarkerEnabled(ctx); err != nil {
 		return fmt.Errorf("migrate configs_mirror enabled: %w", err)
 	}
 	if err := d.migrateConfigsToKV(ctx); err != nil {
@@ -272,7 +272,7 @@ func (d *DBStore) migrateConfigsKvValueKind(ctx context.Context) error {
 	return err
 }
 
-// migrateConfigsMirrorEnabled retrofits the enabled column onto a
+// migrateProjectionMarkerEnabled retrofits the enabled column onto a
 // configs_mirror table created before it existed (CREATE TABLE IF NOT EXISTS
 // leaves an existing table alone, so the column in the schema literal only
 // reaches fresh databases).
@@ -280,14 +280,14 @@ func (d *DBStore) migrateConfigsKvValueKind(ctx context.Context) error {
 // The column is nullable and existing rows keep NULL, which is not "disabled" —
 // it is "this marker predates the column and therefore recorded no decision".
 // ConfigProjectionMarker.Enabled is a pointer for the same reason and
-// VerifyConfigMirror rejects a NULL, so an old marker goes uncertified instead
+// VerifyProjectionMarker rejects a NULL, so an old marker goes uncertified instead
 // of certifying an enabled state nobody wrote down. There is deliberately no
 // default: unlike value_kind, where the information was destroyed at write
 // time, the answer could be read back out of configs.enabled — but a marker is
 // a statement about what a writer recorded, and back-filling it would turn a
-// missing record into an assertion. Re-running store.ReconcileConfigMirrors
+// missing record into an assertion. Re-running store.ReconcileConfigProjections
 // (or any dual-write) records it for real.
-func (d *DBStore) migrateConfigsMirrorEnabled(ctx context.Context) error {
+func (d *DBStore) migrateProjectionMarkerEnabled(ctx context.Context) error {
 	exists, err := d.tableExists(ctx, "configs_mirror")
 	if err != nil {
 		return err
@@ -2043,7 +2043,7 @@ func migrationSQLForDialect(dialect string) []string {
 		// projection a reader still could not resolve, and a disabled row with
 		// no leaves would have no representation here at all. It is nullable
 		// on purpose: NULL is the marker written before the column existed,
-		// which recorded no decision (see migrateConfigsMirrorEnabled).
+		// which recorded no decision (see migrateProjectionMarkerEnabled).
 		`CREATE TABLE IF NOT EXISTS configs_mirror (
 			kind TEXT NOT NULL,
 			scope TEXT NOT NULL,
@@ -3988,13 +3988,13 @@ func (d *DBStore) DeleteConfigPrefix(ctx context.Context, kind, scope, scopeID, 
 	return err
 }
 
-// SaveConfigMirror records the completeness marker for one configs row's
+// SaveProjectionMarker records the completeness marker for one configs row's
 // projection (see ConfigProjectionMarker). The dual-write calls it in the same
 // transaction as the leaves it covers, so the marker and the rows it certifies
 // commit or roll back together.
-func (d *DBStore) SaveConfigMirror(ctx context.Context, kind, scope, scopeID, name string, m ConfigProjectionMarker) error {
+func (d *DBStore) SaveProjectionMarker(ctx context.Context, kind, scope, scopeID, name string, m ConfigProjectionMarker) error {
 	if kind == "" || name == "" {
-		return errors.New("store: SaveConfigMirror requires kind and name")
+		return errors.New("store: SaveProjectionMarker requires kind and name")
 	}
 	now := time.Now().UTC()
 	if d.dialect == "postgres" {
@@ -4017,10 +4017,10 @@ func (d *DBStore) SaveConfigMirror(ctx context.Context, kind, scope, scopeID, na
 	return err
 }
 
-// GetConfigMirror returns the marker for one configs row. The bool is false
+// GetProjectionMarker returns the marker for one configs row. The bool is false
 // (with a nil error) when the row has no marker — an uncertified projection,
 // not a lookup failure.
-func (d *DBStore) GetConfigMirror(ctx context.Context, kind, scope, scopeID, name string) (ConfigProjectionMarker, bool, error) {
+func (d *DBStore) GetProjectionMarker(ctx context.Context, kind, scope, scopeID, name string) (ConfigProjectionMarker, bool, error) {
 	var m ConfigProjectionMarker
 	err := d.handle().QueryRowContext(ctx,
 		fmt.Sprintf(`SELECT prefix, key_count, fingerprint, enabled FROM configs_mirror WHERE kind = %s AND scope = %s AND scope_id = %s AND name = %s`,
@@ -4035,12 +4035,12 @@ func (d *DBStore) GetConfigMirror(ctx context.Context, kind, scope, scopeID, nam
 	return m, true, nil
 }
 
-// ListConfigMirrors returns every marker for one (kind, scope, scope_id), keyed
-// by the row's config name. It is the batched form of GetConfigMirror: a
+// ListProjectionMarkers returns every marker for one (kind, scope, scope_id), keyed
+// by the row's config name. It is the batched form of GetProjectionMarker: a
 // mirror-first reader that certifies a whole layer — every provider at a scope,
 // a page of settings namespaces — would otherwise issue one marker query per
 // row. A scope with no markers returns an empty map, not an error.
-func (d *DBStore) ListConfigMirrors(ctx context.Context, kind, scope, scopeID string) (map[string]ConfigProjectionMarker, error) {
+func (d *DBStore) ListProjectionMarkers(ctx context.Context, kind, scope, scopeID string) (map[string]ConfigProjectionMarker, error) {
 	rows, err := d.handle().QueryContext(ctx,
 		fmt.Sprintf(`SELECT name, prefix, key_count, fingerprint, enabled FROM configs_mirror WHERE kind = %s AND scope = %s AND scope_id = %s`,
 			d.ph(1), d.ph(2), d.ph(3)),
@@ -4061,10 +4061,10 @@ func (d *DBStore) ListConfigMirrors(ctx context.Context, kind, scope, scopeID st
 	return out, rows.Err()
 }
 
-// DeleteConfigMirror removes the marker for one configs row. Callers delete it
+// DeleteProjectionMarker removes the marker for one configs row. Callers delete it
 // when the projection it certified is gone, so a stale marker cannot certify
 // an empty (or later, a different) set of rows.
-func (d *DBStore) DeleteConfigMirror(ctx context.Context, kind, scope, scopeID, name string) error {
+func (d *DBStore) DeleteProjectionMarker(ctx context.Context, kind, scope, scopeID, name string) error {
 	_, err := d.handle().ExecContext(ctx,
 		fmt.Sprintf(`DELETE FROM configs_mirror WHERE kind = %s AND scope = %s AND scope_id = %s AND name = %s`,
 			d.ph(1), d.ph(2), d.ph(3), d.ph(4)),
@@ -4072,7 +4072,7 @@ func (d *DBStore) DeleteConfigMirror(ctx context.Context, kind, scope, scopeID, 
 	return err
 }
 
-// ReconcileConfigMirrors is the certification pass that has to run before the
+// ReconcileConfigProjections is the certification pass that has to run before the
 // mirror may take over as the authoritative read source.
 //
 // It walks every configs row with a KV projection, re-projects the blob the
@@ -4095,8 +4095,8 @@ func (d *DBStore) DeleteConfigMirror(ctx context.Context, kind, scope, scopeID, 
 //
 // It is idempotent and safe to re-run: a second pass over an already
 // reconciled database reports the same certification and no new gaps.
-func (d *DBStore) ReconcileConfigMirrors(ctx context.Context, repair bool) (ConfigMirrorReconcile, error) {
-	var rep ConfigMirrorReconcile
+func (d *DBStore) ReconcileConfigProjections(ctx context.Context, repair bool) (ConfigProjectionReconcile, error) {
+	var rep ConfigProjectionReconcile
 	rows, err := d.handle().QueryContext(ctx,
 		fmt.Sprintf(`SELECT `+configSelectCols+` FROM configs WHERE kind IN (%s, %s, %s) ORDER BY kind, user_id, agent_id, name`,
 			d.ph(1), d.ph(2), d.ph(3)),
@@ -4113,7 +4113,7 @@ func (d *DBStore) ReconcileConfigMirrors(ctx context.Context, repair bool) (Conf
 		cfg := &configs[i]
 		rep.Examined++
 		scope, scopeID := KVScopeFromOwnership(cfg.UserID, cfg.AgentID)
-		prefix := MirrorPrefixFor(cfg.Kind, cfg.Name)
+		prefix := ConfigsKVPrefixFor(cfg.Kind, cfg.Name)
 		want := map[string]ConfigValue{}
 		if len(cfg.Data) > 0 {
 			flattenJSON(prefix, cfg.Data, want)
@@ -4130,15 +4130,15 @@ func (d *DBStore) ReconcileConfigMirrors(ctx context.Context, repair bool) (Conf
 		// delete the marker instead, which left the row uncertified and made
 		// "gap zero" satisfiable while a row the mirror would have to serve
 		// had nothing vouching for it.)
-		delta, untagged := classifyConfigMirror(want, got)
+		delta, untagged := classifyConfigProjection(want, got)
 		switch delta {
-		case mirrorExact:
-			if err := d.SaveConfigMirror(ctx, cfg.Kind, scope, scopeID, cfg.Name,
+		case projectionExact:
+			if err := d.SaveProjectionMarker(ctx, cfg.Kind, scope, scopeID, cfg.Name,
 				NewConfigProjectionMarker(prefix, cfg.Enabled, got)); err != nil {
 				return rep, err
 			}
 			rep.Certified++
-		case mirrorUntypedOnly:
+		case projectionUntypedOnly:
 			// The text already matches; only value_kind is missing (a row
 			// written before the column existed). Filling it records a type
 			// the blob already states — the value is not touched — so it is a
@@ -4148,7 +4148,7 @@ func (d *DBStore) ReconcileConfigMirrors(ctx context.Context, repair bool) (Conf
 					return rep, err
 				}
 			}
-			if err := d.SaveConfigMirror(ctx, cfg.Kind, scope, scopeID, cfg.Name,
+			if err := d.SaveProjectionMarker(ctx, cfg.Kind, scope, scopeID, cfg.Name,
 				NewConfigProjectionMarker(prefix, cfg.Enabled, want)); err != nil {
 				return rep, err
 			}
@@ -4171,7 +4171,7 @@ func (d *DBStore) ReconcileConfigMirrors(ctx context.Context, repair bool) (Conf
 						return rep, err
 					}
 				}
-				if err := d.SaveConfigMirror(ctx, cfg.Kind, scope, scopeID, cfg.Name,
+				if err := d.SaveProjectionMarker(ctx, cfg.Kind, scope, scopeID, cfg.Name,
 					NewConfigProjectionMarker(prefix, cfg.Enabled, want)); err != nil {
 					return rep, err
 				}
@@ -4180,10 +4180,10 @@ func (d *DBStore) ReconcileConfigMirrors(ctx context.Context, repair bool) (Conf
 				rep.Rewritten += len(want)
 				continue
 			}
-			if err := d.DeleteConfigMirror(ctx, cfg.Kind, scope, scopeID, cfg.Name); err != nil {
+			if err := d.DeleteProjectionMarker(ctx, cfg.Kind, scope, scopeID, cfg.Name); err != nil {
 				return rep, err
 			}
-			rep.Gaps = append(rep.Gaps, mirrorGap(cfg.Kind, scope, scopeID, cfg.Name, want, got))
+			rep.Gaps = append(rep.Gaps, projectionGap(cfg.Kind, scope, scopeID, cfg.Name, want, got))
 		}
 	}
 	return rep, nil
@@ -4583,7 +4583,7 @@ func (d *DBStore) migrateConfigsToKV(ctx context.Context) error {
 		// The mirror prefix: a provider name or a settings namespace becomes
 		// the "<name>." prefix its leaves live under. agents.defaults is the
 		// one rename — its leaves live under "agent.".
-		kvPrefix := MirrorPrefixFor(cfg.Kind, cfg.Name)
+		kvPrefix := ConfigsKVPrefixFor(cfg.Kind, cfg.Name)
 		// Flatten JSON data into typed key-value pairs.
 		flat := map[string]ConfigValue{}
 		flattenJSON(kvPrefix, cfg.Data, flat)
@@ -4599,7 +4599,7 @@ func (d *DBStore) migrateConfigsToKV(ctx context.Context) error {
 		// The backfill projects the whole blob, so it can certify its own
 		// output: the marker lets a mirror-authorized reader trust a
 		// backfilled row exactly as it trusts a freshly dual-written one.
-		if err := d.SaveConfigMirror(ctx, cfg.Kind, kvScope, kvScopeID, cfg.Name, NewConfigProjectionMarker(kvPrefix, cfg.Enabled, flat)); err != nil {
+		if err := d.SaveProjectionMarker(ctx, cfg.Kind, kvScope, kvScopeID, cfg.Name, NewConfigProjectionMarker(kvPrefix, cfg.Enabled, flat)); err != nil {
 			slog.Warn("migrate config mirror marker failed",
 				"kind", cfg.Kind, "scope", kvScope, "scope_id", kvScopeID,
 				"name", cfg.Name, "error", err)

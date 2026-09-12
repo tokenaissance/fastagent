@@ -24,7 +24,7 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/store"
 )
 
-func TestProviderKVRoundTripThroughMirror(t *testing.T) {
+func TestProviderKVRoundTripThroughConfigsKV(t *testing.T) {
 	db := openScopeDBNamed(t, "provider_data_key")
 	defer db.Close()
 	ctx := context.Background()

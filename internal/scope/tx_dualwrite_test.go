@@ -14,7 +14,7 @@ import (
 // the state that used to be reachable, and the reason the readers carry a
 // fallback at all.
 
-var errMirrorDown = errors.New("configs_kv is down")
+var errConfigsKVDown = errors.New("configs_kv is down")
 
 // failingKVStore fails the mirror write. WithTx re-wraps the transaction
 // handle so the injected failure applies to the store the writer actually
@@ -28,7 +28,7 @@ type failingKVStore struct {
 func (f *failingKVStore) SetConfigValue(ctx context.Context, kind, scope, scopeID, name string, value store.ConfigValue) error {
 	f.calls++
 	if f.calls >= f.failFrom {
-		return errMirrorDown
+		return errConfigsKVDown
 	}
 	return f.DBStore.SetConfigValue(ctx, kind, scope, scopeID, name, value)
 }
@@ -67,7 +67,7 @@ func noBlob(t *testing.T, db *store.DBStore, kind, uid, aid, name string) {
 
 // A settings namespace flattens to several rows; failing on the second one
 // proves the transaction covers the whole namespace, not just one statement.
-func TestSaveSettingRollsBackBlobWhenMirrorFailsMidway(t *testing.T) {
+func TestSaveSettingRollsBackBlobWhenConfigsKVFailsMidway(t *testing.T) {
 	db := openScopeDBNamed(t, "tx_setting_midway")
 	defer db.Close()
 	ctx := context.Background()
@@ -76,7 +76,7 @@ func TestSaveSettingRollsBackBlobWhenMirrorFailsMidway(t *testing.T) {
 	err := SaveSetting(ctx, failing, "u1", "", "objectstore", map[string]interface{}{
 		"provider": "s3", "bucket": "b", "region": "us-east-1",
 	})
-	if !errors.Is(err, errMirrorDown) {
+	if !errors.Is(err, errConfigsKVDown) {
 		t.Fatalf("SaveSetting = %v, want the mirror error", err)
 	}
 	noBlob(t, db, store.KindSetting, "u1", "", "objectstore")
@@ -98,7 +98,7 @@ func TestSaveSettingRollsBackBlobWhenMirrorFailsMidway(t *testing.T) {
 	}
 }
 
-func TestSaveProviderRollsBackBlobWhenMirrorFails(t *testing.T) {
+func TestSaveProviderRollsBackBlobWhenConfigsKVFails(t *testing.T) {
 	db := openScopeDBNamed(t, "tx_provider")
 	defer db.Close()
 	ctx := context.Background()
@@ -106,21 +106,21 @@ func TestSaveProviderRollsBackBlobWhenMirrorFails(t *testing.T) {
 
 	err := SaveProviderState(ctx, failing, "u1", "", "openai",
 		config.ProviderConfig{APIKey: "sk-x"}, true)
-	if !errors.Is(err, errMirrorDown) {
+	if !errors.Is(err, errConfigsKVDown) {
 		t.Fatalf("SaveProviderState = %v, want the mirror error", err)
 	}
 	noBlob(t, db, store.KindProvider, "u1", "", "openai")
 	noRows(t, db, store.KindProvider, User, "u1")
 }
 
-func TestSaveAgentPluginEnabledRollsBackBlobWhenMirrorFails(t *testing.T) {
+func TestSaveAgentPluginEnabledRollsBackBlobWhenConfigsKVFails(t *testing.T) {
 	db := openScopeDBNamed(t, "tx_plugin_enabled")
 	defer db.Close()
 	ctx := context.Background()
 	failing := &failingKVStore{DBStore: db, failFrom: 1}
 
 	err := SaveAgentPluginEnabled(ctx, failing, "a1", map[string]bool{"webSearch": true})
-	if !errors.Is(err, errMirrorDown) {
+	if !errors.Is(err, errConfigsKVDown) {
 		t.Fatalf("SaveAgentPluginEnabled = %v, want the mirror error", err)
 	}
 	noBlob(t, db, store.KindPluginEnabled, "", "a1", PluginEnabledNamespace)

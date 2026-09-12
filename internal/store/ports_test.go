@@ -23,10 +23,10 @@ func TestPortMethodSets(t *testing.T) {
 		}},
 		{(*ConfigReadStore)(nil), []string{
 			"BatchGetConfigsByAgentIDs",
-			"GetConfigByName", "GetConfigMirror",
-			"ListConfigMirrors", "ListConfigs", "ListConfigValues",
+			"GetConfigByName", "GetProjectionMarker",
+			"ListProjectionMarkers", "ListConfigs", "ListConfigValues",
 		}},
-		{(*MirrorReader)(nil), []string{"GetConfigMirror", "ListConfigMirrors"}},
+		{(*ProjectionMarkerReader)(nil), []string{"GetProjectionMarker", "ListProjectionMarkers"}},
 		{(*ConfigRowWriter)(nil), []string{"SaveConfig"}},
 		{(*ConfigWriter)(nil), []string{
 			"DeleteConfig", "DeleteConfigPrefix", "DeleteConfigValue",
@@ -35,19 +35,19 @@ func TestPortMethodSets(t *testing.T) {
 		{(*ConfigStore)(nil), []string{
 			"BatchGetConfigsByAgentIDs",
 			"DeleteConfig", "DeleteConfigPrefix", "DeleteConfigValue",
-			"DeleteConfigMirror",
+			"DeleteProjectionMarker",
 			"GetConfigByName", "ListConfigs", "ListConfigValues",
-			"GetConfigMirror",
-			"SaveConfig", "SaveConfigMirror", "SetConfigValue",
+			"GetProjectionMarker",
+			"SaveConfig", "SaveProjectionMarker", "SetConfigValue",
 		}},
-		{(*ConfigMirrorStore)(nil), []string{
-			"DeleteConfigMirror", "GetConfigMirror", "SaveConfigMirror",
+		{(*ProjectionMarkerStore)(nil), []string{
+			"DeleteProjectionMarker", "GetProjectionMarker", "SaveProjectionMarker",
 		}},
-		{(*ConfigMirrorReconciler)(nil), []string{"ReconcileConfigMirrors"}},
+		{(*ConfigProjectionReconciler)(nil), []string{"ReconcileConfigProjections"}},
 		{(*KVStore)(nil), []string{
-			"DeleteConfigMirror", "DeleteConfigPrefix", "DeleteConfigValue",
-			"GetConfigMirror", "ListConfigValues",
-			"SaveConfigMirror", "SetConfigValue",
+			"DeleteProjectionMarker", "DeleteConfigPrefix", "DeleteConfigValue",
+			"GetProjectionMarker", "ListConfigValues",
+			"SaveProjectionMarker", "SetConfigValue",
 		}},
 	}
 	for _, c := range cases {
@@ -91,20 +91,20 @@ func TestPortsExcludeOtherDomains(t *testing.T) {
 		"GetConfigByName":           true, "ListConfigs": true, "ListConfigValues": true,
 		"SaveConfig": true, "DeleteConfig": true,
 		"SetConfigValue": true, "DeleteConfigValue": true, "DeleteConfigPrefix": true,
-		"SaveConfigMirror": true, "GetConfigMirror": true, "DeleteConfigMirror": true,
-		"ListConfigMirrors":      true,
-		"ReconcileConfigMirrors": true,
+		"SaveProjectionMarker": true, "GetProjectionMarker": true, "DeleteProjectionMarker": true,
+		"ListProjectionMarkers":      true,
+		"ReconcileConfigProjections": true,
 	}
 	for _, port := range []reflect.Type{
 		reflect.TypeOf((*ConfigReader)(nil)).Elem(),
 		reflect.TypeOf((*ConfigReadStore)(nil)).Elem(),
-		reflect.TypeOf((*MirrorReader)(nil)).Elem(),
+		reflect.TypeOf((*ProjectionMarkerReader)(nil)).Elem(),
 		reflect.TypeOf((*ConfigWriter)(nil)).Elem(),
 		reflect.TypeOf((*ConfigRowWriter)(nil)).Elem(),
 		reflect.TypeOf((*ConfigStore)(nil)).Elem(),
 		reflect.TypeOf((*KVStore)(nil)).Elem(),
-		reflect.TypeOf((*ConfigMirrorStore)(nil)).Elem(),
-		reflect.TypeOf((*ConfigMirrorReconciler)(nil)).Elem(),
+		reflect.TypeOf((*ProjectionMarkerStore)(nil)).Elem(),
+		reflect.TypeOf((*ConfigProjectionReconciler)(nil)).Elem(),
 	} {
 		for i := 0; i < port.NumMethod(); i++ {
 			name := port.Method(i).Name

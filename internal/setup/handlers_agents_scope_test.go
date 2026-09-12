@@ -415,7 +415,7 @@ func TestAgentScopePlugins_NotFound(t *testing.T) {
 // nothing, the agent says something" shape that produced the web_search
 // incident. They resolve through the same read model now, and this pins it: the
 // row below has no blob counterpart at all.
-func TestAgentScopeReadsSeeMirrorOnlyRows(t *testing.T) {
+func TestAgentScopeReadsSeeConfigsKVOnlyRows(t *testing.T) {
 	s := setupTestServer(t)
 	ctx := context.Background()
 

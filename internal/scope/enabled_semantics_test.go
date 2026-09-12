@@ -88,7 +88,7 @@ func TestEnabledVeto_SettingDropsOuterFields(t *testing.T) {
 
 // A blob row owns the name even when it is disabled: the mirror holds rows
 // written straight into configs_kv, and a veto is a decision, not an absence.
-func TestEnabledVeto_BlocksMirrorFallback(t *testing.T) {
+func TestEnabledVeto_BlocksConfigsKVFallback(t *testing.T) {
 	db := openScopeDBNamed(t, "enabled_mirror_block")
 	defer db.Close()
 	ctx := context.Background()
@@ -122,7 +122,7 @@ func TestEnabledVeto_BlocksMirrorFallback(t *testing.T) {
 
 // The mirror fallback is decided per name, not per chain: a provider that
 // only the mirror carries stays visible next to blob-backed siblings.
-func TestProvidersMirrorFallbackIsPerName(t *testing.T) {
+func TestProvidersConfigsKVFallbackIsPerName(t *testing.T) {
 	db := openScopeDBNamed(t, "enabled_mirror_pername")
 	defer db.Close()
 	ctx := context.Background()

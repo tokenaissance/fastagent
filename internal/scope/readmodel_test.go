@@ -17,7 +17,7 @@ import (
 
 // A namespace that only ever existed in configs_kv is exactly what the layer
 // has to serve: a blob-first reader would answer "nothing here" for it.
-func TestSettingAtServesMirrorOnlyRows(t *testing.T) {
+func TestSettingAtServesConfigsKVOnlyRows(t *testing.T) {
 	db := openScopeDBNamed(t, "readmodel_mirror_only")
 	defer db.Close()
 	ctx := context.Background()

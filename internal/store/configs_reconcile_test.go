@@ -5,10 +5,10 @@ import (
 	"testing"
 )
 
-// ReconcileConfigMirrors certifies the rows whose mirror matches the blob,
+// ReconcileConfigProjections certifies the rows whose mirror matches the blob,
 // retags a row that matches on text but predates value_kind, and reports the
 // rows that genuinely diverge (dropping any marker that would vouch for one).
-func TestReconcileConfigMirrors(t *testing.T) {
+func TestReconcileConfigProjections(t *testing.T) {
 	db, err := NewDBStore("sqlite", "file:reconcile?mode=memory&cache=shared")
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -58,14 +58,14 @@ func TestReconcileConfigMirrors(t *testing.T) {
 	if err := db.SetConfigValue(ctx, KindSetting, "user", "u1", "prefs.timezone", StringValue("UTC")); err != nil {
 		t.Fatalf("seed prefs mirror: %v", err)
 	}
-	if err := db.SaveConfigMirror(ctx, KindSetting, "user", "u1", "prefs",
+	if err := db.SaveProjectionMarker(ctx, KindSetting, "user", "u1", "prefs",
 		NewConfigProjectionMarker("prefs.", true, map[string]ConfigValue{"prefs.timezone": StringValue("UTC")})); err != nil {
 		t.Fatalf("seed stale marker: %v", err)
 	}
 
-	rep, err := db.ReconcileConfigMirrors(ctx, false)
+	rep, err := db.ReconcileConfigProjections(ctx, false)
 	if err != nil {
-		t.Fatalf("ReconcileConfigMirrors: %v", err)
+		t.Fatalf("ReconcileConfigProjections: %v", err)
 	}
 	if rep.Examined != 4 || rep.Certified != 2 || rep.Untyped != 1 || rep.Retagged != 1 || len(rep.Gaps) != 2 {
 		t.Fatalf("reconcile = %+v, want examined=4 certified=2 untyped=1 retagged=1 gaps=2", rep)
@@ -73,7 +73,7 @@ func TestReconcileConfigMirrors(t *testing.T) {
 
 	// openai certified with a verifying marker.
 	openaiLeaves := map[string]ConfigValue{"openai.api_key": StringValue("sk-1"), "openai.api_base": StringValue("https://x")}
-	if m, ok, _ := db.GetConfigMirror(ctx, KindProvider, "user", "u1", "openai"); !ok || !VerifyConfigMirror(m, true, openaiLeaves) {
+	if m, ok, _ := db.GetProjectionMarker(ctx, KindProvider, "user", "u1", "openai"); !ok || !VerifyProjectionMarker(m, true, openaiLeaves) {
 		t.Fatalf("openai marker = %+v ok=%v", m, ok)
 	}
 	// legacy retagged: the stored kind is now filled, and its marker verifies.
@@ -85,12 +85,12 @@ func TestReconcileConfigMirrors(t *testing.T) {
 		t.Fatalf("legacy row = %+v, want value sk-9 tagged string", got)
 	}
 	legacyLeaves := map[string]ConfigValue{"legacy.api_key": StringValue("sk-9")}
-	if m, ok, _ := db.GetConfigMirror(ctx, KindProvider, "user", "u1", "legacy"); !ok || !VerifyConfigMirror(m, true, legacyLeaves) {
+	if m, ok, _ := db.GetProjectionMarker(ctx, KindProvider, "user", "u1", "legacy"); !ok || !VerifyProjectionMarker(m, true, legacyLeaves) {
 		t.Fatalf("legacy marker = %+v ok=%v", m, ok)
 	}
 
 	// The two gaps are skew (value disagrees) and prefs (a missing leaf).
-	gaps := map[string]ConfigMirrorGap{}
+	gaps := map[string]ConfigProjectionGap{}
 	for _, g := range rep.Gaps {
 		gaps[g.Name] = g
 	}
@@ -101,18 +101,18 @@ func TestReconcileConfigMirrors(t *testing.T) {
 		t.Fatalf("prefs gap = %+v, want missing=[prefs.locale]", g)
 	}
 	// prefs' stale marker is gone.
-	if _, ok, _ := db.GetConfigMirror(ctx, KindSetting, "user", "u1", "prefs"); ok {
+	if _, ok, _ := db.GetProjectionMarker(ctx, KindSetting, "user", "u1", "prefs"); ok {
 		t.Fatal("stale marker survived a mismatched reconcile")
 	}
 	// skew never got a marker.
-	if _, ok, _ := db.GetConfigMirror(ctx, KindProvider, "user", "u1", "skew"); ok {
+	if _, ok, _ := db.GetProjectionMarker(ctx, KindProvider, "user", "u1", "skew"); ok {
 		t.Fatal("diverged row was certified")
 	}
 
 	// Re-running is idempotent: the same verdict, but nothing left to retag.
-	rep2, err := db.ReconcileConfigMirrors(ctx, false)
+	rep2, err := db.ReconcileConfigProjections(ctx, false)
 	if err != nil {
-		t.Fatalf("second ReconcileConfigMirrors: %v", err)
+		t.Fatalf("second ReconcileConfigProjections: %v", err)
 	}
 	if rep2.Examined != 4 || rep2.Certified != 2 || len(rep2.Gaps) != 2 || rep2.Untyped != 0 || rep2.Retagged != 0 {
 		t.Fatalf("second reconcile = %+v, want the same verdict with no retagging", rep2)
@@ -139,9 +139,9 @@ func TestReconcileRejectsContradictingKind(t *testing.T) {
 		ConfigValue{Value: "1234", Kind: ValueKindNumber}); err != nil {
 		t.Fatalf("seed mirror: %v", err)
 	}
-	rep, err := db.ReconcileConfigMirrors(ctx, false)
+	rep, err := db.ReconcileConfigProjections(ctx, false)
 	if err != nil {
-		t.Fatalf("ReconcileConfigMirrors: %v", err)
+		t.Fatalf("ReconcileConfigProjections: %v", err)
 	}
 	if rep.Certified != 0 || len(rep.Gaps) != 1 {
 		t.Fatalf("reconcile = %+v, want 0 certified and 1 gap", rep)
@@ -189,7 +189,7 @@ func TestReconcileRepairReprojectsDiverged(t *testing.T) {
 	}
 
 	// Default pass: report both, touch neither.
-	rep, err := db.ReconcileConfigMirrors(ctx, false)
+	rep, err := db.ReconcileConfigProjections(ctx, false)
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -201,7 +201,7 @@ func TestReconcileRepairReprojectsDiverged(t *testing.T) {
 	}
 
 	// --repair: re-project both from the blob.
-	rep, err = db.ReconcileConfigMirrors(ctx, true)
+	rep, err = db.ReconcileConfigProjections(ctx, true)
 	if err != nil {
 		t.Fatalf("reconcile --repair: %v", err)
 	}
@@ -233,22 +233,22 @@ func TestReconcileRepairReprojectsDiverged(t *testing.T) {
 		{"system", "", "tools.providers"},
 		{"agent", "agt1", "skills.entries"},
 	} {
-		m, ok, err := db.GetConfigMirror(ctx, KindSetting, c.scope, c.scopeID, c.name)
+		m, ok, err := db.GetProjectionMarker(ctx, KindSetting, c.scope, c.scopeID, c.name)
 		if err != nil || !ok {
 			t.Fatalf("marker %s/%s: ok=%v err=%v", c.scope, c.scopeID, ok, err)
 		}
 		leaves, err := db.ListConfigValues(ctx, KindSetting, c.scope, c.scopeID,
-			MirrorPrefixFor(KindSetting, c.name))
+			ConfigsKVPrefixFor(KindSetting, c.name))
 		if err != nil {
 			t.Fatalf("leaves %s: %v", c.name, err)
 		}
-		if !VerifyConfigMirror(m, true, leaves) {
+		if !VerifyProjectionMarker(m, true, leaves) {
 			t.Fatalf("marker %s/%s does not verify", c.scope, c.scopeID)
 		}
 	}
 
 	// Idempotent: a second repair pass has nothing left to do.
-	rep2, err := db.ReconcileConfigMirrors(ctx, true)
+	rep2, err := db.ReconcileConfigProjections(ctx, true)
 	if err != nil {
 		t.Fatalf("second repair: %v", err)
 	}
