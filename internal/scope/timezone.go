@@ -30,6 +30,15 @@ const prefsTimezoneKey = "timezone"
 // setting (follows them across agents), then the agent's default, then
 // the system default. Returns "" when nothing is set — callers fall
 // back to server-local time.
+//
+// No configs_kv fallback, deliberately. prefs is a dual-written namespace, so
+// every production write (SaveUserTimezone → SaveSetting) leaves a blob row and
+// there is nothing to fall back to; the dev database has zero mirror-only prefs
+// rows. This reader walks layers for precedence, it does not merge and it does
+// not project — widening it to serve a row the authoritative table does not have
+// would let a non-authoritative row change a user-visible time. If a KV-only
+// prefs writer ever appears, that writer owes the blob row; do not widen this
+// loop to cover it.
 func Timezone(ctx context.Context, st store.ConfigReader, chatterUID, agentID string) string {
 	if st == nil {
 		return ""

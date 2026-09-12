@@ -4,6 +4,10 @@
 > 「现状」描述当前代码实际在做的事（改代码先改这一节），后面按时间保留每轮
 > review 的推理过程，最后一节是给**上游 fastclaw** 的 PR 提案。历史小节里的
 > 结论如果与「现状」冲突，以「现状」为准。
+>
+> **决策（2026-09-12）：`configs_kv` 长期保留，不是迁移期的过渡件。** 两表并存
+> 是目标形态，所以「blob 权威 + 镜像必须是 blob 的忠实投影」是**长期契约**，
+> 不是过渡期的妥协；「删掉镜像」这条路不再作为备选。
 
 ## 现状：实现对照（权威）
 
@@ -93,7 +97,7 @@ blob 侧同理走 `store.JSONToMap` / `store.ValueToMap`（`Decoder.UseNumber()`
 | `AgentPluginEnabled` | agent 层单行 | 有 |
 | `BatchSettings` | 仅 system + user 两层 | 有，但只对**没有 blob 行**的 namespace 逐个走 `Setting`（面板专用，N 个 namespace 合并成 2 次查询；补兜底只影响 blob 缺席的 namespace） |
 | `Channels` | 四层，disabled 行擦除外层（同下节的统一规则） | **无，且刻意如此**：channel 行从不进 KV（见「存储面」），`Channels` 没有可回落的镜像。`TestChannelsAreNotMirroredInKV` 钉住这个前提 |
-| `Timezone` | chatter → agent → user → system（反向优先级） | **无**（已知不对称，见残留风险 6）：`prefs` 明明是双写 namespace，但 `Timezone` 只逐层点查 blob。生产写入全部走 `SaveUserTimezone → SaveSetting`，所以今天没有只写镜像的 prefs 行；一旦有（KV-only writer / 手工修数据），面板会显示时区而聊天时间显示退回服务端本地——正是「面板正常、运行时不生效」 |
+| `Timezone` | chatter → agent → user → system（反向优先级） | **无 —— 决定不补**（见残留风险 6）：`prefs` 是双写 namespace，但 `Timezone` 只逐层点查 blob。理由是它做的是「按优先级走层」而不是合并/投影，宽化它等于让非权威行去改一个用户可见的时间；生产写入只有 `SaveUserTimezone → SaveSetting`（事务化双写），dev 库镜像独有 prefs 行实测 0 |
 
 #### enabled 语义：所有读入口一条规则（`23736ee`）
 
@@ -188,16 +192,20 @@ provider 行的形状还有一条隐含前提：前缀 `<名字>.` 之后**每�
 (scope, scopeId) 组织的 CRUD（`GET/POST/PUT/DELETE /api/providers`、
 `/api/channels`）——走的是 `listConfigsByScope`（`setup/handlers_scoped.go:130`）
 → `store.ListConfigs`，读的是**某一个 scope 的 blob 行**，不合并、不回落镜像。
-对一个编辑器来说这是刻意的（它要列出「这一层有哪些行」而不是「解析结果是什么」），
-但两条已知后果要记在这里，别再当作同构：
+对一个编辑器来说这是刻意的（它要列出「这一层有哪些行」而不是「解析结果是什么」）。
+两个后果分别做了取舍（测试：`setup/providers_scope_list_test.go`）：
 
-- provider 列表**不返回 `enabled`**（channel 列表返回，见 `:346`），所以一条被
-  直接写成 `enabled=false` 的 provider 行在编辑器里与启用行长得一样，而 runtime
-  会删掉它并否决外层同名条目。当前没有任何 HTTP 路径会写出 disabled 的 provider
-  行（`handleCreateProvider` → `SaveProvider` 恒为 true），所以是潜伏。
-- provider 列表看不到**只存在于镜像**的行（runtime 的 `Providers` 按名字兜底看得
-  到），与 `configs_kv_e2e_test.go` 里那条陈旧的注释（原写「handleListProviders
-  reads through scope.Providers」）是同一件事的两面——注释已更正。
+- **`enabled` 对齐**：provider 列表现在返回 `enabled`（channel 列表一直有，见
+  `:346`）。既然 enabled 对 provider 是有语义的（disabled 行删掉该 provider 并
+  否决外层同名条目），编辑器就必须能表示这个状态，否则它会展示一条 runtime 根本
+  不用的行、却看起来一切正常。
+- **不合并镜像，刻意不对齐**：列表只报本 scope 的 blob 行，看不到只存在于镜像的
+  provider。这个端点是一张按 `id` 增删改的 CRUD 表，而 `id` / `updatedAt` 都是
+  blob 行的属性——列出镜像行等于给调用方一个无法寻址的条目。解析后的合并视图是
+  `/api/config`（以及 runtime 的 `Providers`）的职责。
+
+另：`configs_kv_e2e_test.go` 里曾有一条陈旧注释（原写「handleListProviders
+reads through scope.Providers」），是 51780fa 之前的化石，已更正。
 
 ### 依赖面：store 的能力端口（`internal/store/ports.go`）
 
@@ -851,9 +859,11 @@ provider 名同时是两样东西：`configs_kv` 的 key 前缀（`<名>.<字段
    数字 `123` 在列里本就不可分。这些行只在被重新写入时获得 tag。回填被刻意
    排除：那是把猜测写成事实。排查这类行可用 `SELECT ... WHERE value_kind = ''`。
 2. **KV 镜像仍可能不完整**：生产写入已事务化，但历史行与直接写镜像的路径仍会留下
-   子集（迁移回填、手工 SQL、以后可能出现的 KV-only writer）。现在只表现为
-   「镜像与 blob 不一致」，不影响读取；要把 KV 提升为权威读源，前提仍是完整性
-   标记行 + 事务化写入。
+  子集（迁移回填、手工 SQL、以后可能出现的 KV-only writer）。现在只表现为
+   「镜像与 blob 不一致」，不影响读取。既然已决定 `configs_kv` 长期保留，「镜像
+   必须真的是 blob 的投影」就是长期契约：新增写入路径要么双写（收在同一个
+   `Save*` 入口里），要么明确登记为 KV-only 并同时补上读侧与编辑器的可见性。要把
+   KV 提升为权威读源，前提仍是完整性标记行 + 事务化写入。
 3. **空 map 只在读侧恢复**：`flattenJSONToKV` 仍然不为 `{}` 产出行，所以镜像里
    没有这个 key（读 blob 时正确返回空对象）。
 4. **LIKE 转义只覆盖已发现的位置**：`configs_kv` 的 name/scope_id 前缀匹配都已
@@ -864,12 +874,15 @@ provider 名同时是两样东西：`configs_kv` 的 key 前缀（`<名>.<字段
   `plugins` 等「仅系统层可读」的 namespace（当前 CLI/HTTP 都不产生这种行）。
   约定：新增一个 agent 层可写的 namespace 时，必须同时让 runtime 读它，或者
   像 sandbox 一样在写侧拒绝——两者都没有就是这次的 bug 类。
-6. **`Timezone` 是最后一个没有镜像兜底的读入口**：形状与修复前的 `Providers`
-   相同（「今天没有只写 KV 的写入方，所以潜伏」），只是它的读路径是自己写的
-   层循环，没有复用 `Setting` / `ExactSetting` 的兜底分支。修法是让 blob 缺席的
-   那一层按同一 namespace 读一次镜像（可与 `ExactSetting` 共用
-   `kvToSettingMap`），并补一条「镜像独有 prefs 行」的测试。在此之前，这个
-   不对称是**已知且被记录**的，而不是遗漏。
+6. **`Timezone` 是唯一没有镜像兜底的读入口——决定：不补**（2026-09-12）。它的
+   形状与修复前的 `Providers` 相同，但结论相反，理由是它做的事不同：`Timezone`
+   是按优先级**走层**（chatter → agent → user → system），不是合并也不是投影；
+   给它加兜底等于让一个非权威行去决定用户可见的时间，而这恰好是「blob 权威」这
+   条规则要挡住的方向。生产写入只有 `SaveUserTimezone → SaveSetting`（事务化双写，
+   必然留下 blob 行），dev 库镜像独有 prefs 行实测为 0，所以没有需要服务的行。
+   若将来出现 KV-only 的 prefs 写入方，**由那条写入路径负责补 blob 行**，而不是
+   宽化这个读循环。`timezone.go` 的函数注释里记了同一条，避免下一次 review 又把它
+   当遗漏重新提出来。
 
 ## 对上游的 PR 提案
 
