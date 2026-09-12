@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"maps"
 	"sort"
 	"strings"
 	"time"
@@ -4001,9 +4000,11 @@ func (d *DBStore) DeleteConfigMirror(ctx context.Context, kind, scope, scopeID, 
 // It walks every configs row with a KV projection, re-projects the blob the
 // same way the dual-write does, and compares that against what is actually in
 // configs_kv. Rows that match are certified (a marker is written, so a
-// mirror-first reader may trust them); rows that do not are left uncertified
-// and reported, and any stale marker on them is dropped so nothing vouches for
-// a wrong projection.
+// mirror-first reader may trust them). A row that matches on names and values
+// but predates value_kind is retagged — its type is stated by the blob, so
+// filling the tag records a fact rather than guessing one — and then certified.
+// Rows that genuinely diverge are left uncertified and reported, and any stale
+// marker on them is dropped so nothing vouches for a wrong projection.
 //
 // It is idempotent and safe to re-run: a second pass over an already
 // reconciled database reports the same certification and no new gaps. It does
@@ -4044,18 +4045,37 @@ func (d *DBStore) ReconcileConfigMirrors(ctx context.Context) (ConfigMirrorRecon
 			}
 			continue
 		}
-		if maps.Equal(want, got) {
+		delta, untagged := classifyConfigMirror(want, got)
+		switch delta {
+		case mirrorExact:
 			if err := d.SaveConfigMirror(ctx, cfg.Kind, scope, scopeID, cfg.Name,
 				NewConfigMirror(prefix, got)); err != nil {
 				return rep, err
 			}
 			rep.Certified++
-			continue
+		case mirrorUntypedOnly:
+			// The text already matches; only value_kind is missing (a row
+			// written before the column existed). Filling it records a type
+			// the blob already states — the value is not touched — so it is a
+			// safe repair, not a guess. Do it, then certify.
+			for _, k := range untagged {
+				if err := d.SetConfigValue(ctx, cfg.Kind, scope, scopeID, k, want[k]); err != nil {
+					return rep, err
+				}
+			}
+			if err := d.SaveConfigMirror(ctx, cfg.Kind, scope, scopeID, cfg.Name,
+				NewConfigMirror(prefix, want)); err != nil {
+				return rep, err
+			}
+			rep.Certified++
+			rep.Untyped++
+			rep.Retagged += len(untagged)
+		default:
+			if err := d.DeleteConfigMirror(ctx, cfg.Kind, scope, scopeID, cfg.Name); err != nil {
+				return rep, err
+			}
+			rep.Gaps = append(rep.Gaps, mirrorGap(cfg.Kind, scope, scopeID, cfg.Name, want, got))
 		}
-		if err := d.DeleteConfigMirror(ctx, cfg.Kind, scope, scopeID, cfg.Name); err != nil {
-			return rep, err
-		}
-		rep.Gaps = append(rep.Gaps, mirrorGap(cfg.Kind, scope, scopeID, cfg.Name, want, got))
 	}
 	return rep, nil
 }

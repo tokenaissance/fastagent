@@ -127,11 +127,63 @@ type ConfigMirrorReconcile struct {
 	// Examined is how many configs rows have a KV projection (provider /
 	// setting / plugin_enabled).
 	Examined int
-	// Certified is how many of those matched the blob and are now marked.
+	// Certified is how many rows matched the blob (exactly, or after only a
+	// value_kind backfill) and are now marked.
 	Certified int
+	// Untyped is how many certified rows needed that backfill first: their
+	// values already matched, only the value_kind tag was missing.
+	Untyped int
+	// Retagged is how many leaves gained a value_kind during the pass.
+	Retagged int
 	// Gaps are rows whose mirror does not match the blob. They are left (or
 	// made) uncertified, so a mirror-first reader falls back to the blob.
 	Gaps []ConfigMirrorGap
+}
+
+// mirrorDelta classifies how a stored mirror differs from the blob projection.
+type mirrorDelta int
+
+const (
+	// mirrorExact: same names, values and value_kind.
+	mirrorExact mirrorDelta = iota
+	// mirrorUntypedOnly: same names and values; at least one row carries no
+	// value_kind because it predates the column. Recordable, not a gap.
+	mirrorUntypedOnly
+	// mirrorDiverged: anything else — a missing/extra leaf, a different value,
+	// or a stored type that contradicts the blob.
+	mirrorDiverged
+)
+
+// classifyConfigMirror compares a blob projection (want) against the stored
+// mirror (got). want is always tagged — the flattener tags every leaf — so a
+// stored row with no tag is the pre-value_kind case, and its type is knowable
+// from the blob rather than guessed. It also returns the leaves that need their
+// tag filled when the verdict is mirrorUntypedOnly.
+func classifyConfigMirror(want, got map[string]ConfigValue) (mirrorDelta, []string) {
+	if len(want) != len(got) {
+		return mirrorDiverged, nil
+	}
+	var untagged []string
+	for k, wv := range want {
+		gv, ok := got[k]
+		if !ok || gv.Value != wv.Value {
+			return mirrorDiverged, nil
+		}
+		switch {
+		case gv.Kind == wv.Kind:
+			// exact for this leaf
+		case gv.Kind == "":
+			// pre-value_kind row: text matches, tag missing
+			untagged = append(untagged, k)
+		default:
+			// a stored type that contradicts the blob is a real divergence
+			return mirrorDiverged, nil
+		}
+	}
+	if len(untagged) > 0 {
+		return mirrorUntypedOnly, untagged
+	}
+	return mirrorExact, nil
 }
 
 // mirrorGap builds the diagnostic for one mismatched row and caps the leaf-name

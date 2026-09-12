@@ -5,9 +5,9 @@ import (
 	"testing"
 )
 
-// ReconcileConfigMirrors certifies the rows whose mirror matches the blob and
-// reports the ones that do not, dropping any marker that would otherwise vouch
-// for a wrong projection.
+// ReconcileConfigMirrors certifies the rows whose mirror matches the blob,
+// retags a row that matches on text but predates value_kind, and reports the
+// rows that genuinely diverge (dropping any marker that would vouch for one).
 func TestReconcileConfigMirrors(t *testing.T) {
 	db, err := NewDBStore("sqlite", "file:reconcile?mode=memory&cache=shared")
 	if err != nil {
@@ -19,30 +19,47 @@ func TestReconcileConfigMirrors(t *testing.T) {
 		t.Fatalf("migrate: %v", err)
 	}
 
-	// Two blob rows. Their mirrors are seeded by hand to look like state left
-	// by an older build: one complete, one a subset.
-	if err := db.SaveConfig(ctx, &ConfigRecord{Kind: KindProvider, UserID: "u1", Name: "openai",
-		Enabled: true, Data: map[string]interface{}{"api_key": "sk-1", "api_base": "https://x"}}); err != nil {
-		t.Fatalf("SaveConfig provider: %v", err)
-	}
-	if err := db.SaveConfig(ctx, &ConfigRecord{Kind: KindSetting, UserID: "u1", Name: "prefs",
-		Enabled: true, Data: map[string]interface{}{"timezone": "UTC", "locale": "zh"}}); err != nil {
-		t.Fatalf("SaveConfig setting: %v", err)
-	}
-
-	// openai: a complete, matching mirror.
-	for name, val := range map[string]string{"openai.api_key": "sk-1", "openai.api_base": "https://x"} {
-		if err := db.SetConfigValue(ctx, KindProvider, "user", "u1", name, StringValue(val)); err != nil {
-			t.Fatalf("seed provider mirror %s: %v", name, err)
+	seed := func(name string, data map[string]interface{}) {
+		t.Helper()
+		if err := db.SaveConfig(ctx, &ConfigRecord{Kind: KindProvider, UserID: "u1", Name: name,
+			Enabled: true, Data: data}); err != nil {
+			t.Fatalf("SaveConfig %s: %v", name, err)
 		}
 	}
-	// prefs: a subset (locale missing) plus a stale marker that must not
-	// survive — it would certify the wrong projection.
+	mirror := func(leaves map[string]ConfigValue) {
+		t.Helper()
+		for k, v := range leaves {
+			if err := db.SetConfigValue(ctx, KindProvider, "user", "u1", k, v); err != nil {
+				t.Fatalf("seed mirror %s: %v", k, err)
+			}
+		}
+	}
+
+	// openai: a complete, correctly tagged mirror.
+	seed("openai", map[string]interface{}{"api_key": "sk-1", "api_base": "https://x"})
+	mirror(map[string]ConfigValue{
+		"openai.api_key":  StringValue("sk-1"),
+		"openai.api_base": StringValue("https://x"),
+	})
+
+	// legacy: text matches, but the rows predate value_kind (untagged).
+	seed("legacy", map[string]interface{}{"api_key": "sk-9"})
+	mirror(map[string]ConfigValue{"legacy.api_key": {Value: "sk-9"}})
+
+	// skew: untagged and the text disagrees — a real divergence, not a retag.
+	seed("skew", map[string]interface{}{"api_key": "sk-new"})
+	mirror(map[string]ConfigValue{"skew.api_key": {Value: "sk-old"}})
+
+	// prefs: a tagged subset (locale missing) plus a stale marker.
+	if err := db.SaveConfig(ctx, &ConfigRecord{Kind: KindSetting, UserID: "u1", Name: "prefs",
+		Enabled: true, Data: map[string]interface{}{"timezone": "UTC", "locale": "zh"}}); err != nil {
+		t.Fatalf("SaveConfig prefs: %v", err)
+	}
 	if err := db.SetConfigValue(ctx, KindSetting, "user", "u1", "prefs.timezone", StringValue("UTC")); err != nil {
 		t.Fatalf("seed prefs mirror: %v", err)
 	}
-	stale := map[string]ConfigValue{"prefs.timezone": StringValue("UTC")}
-	if err := db.SaveConfigMirror(ctx, KindSetting, "user", "u1", "prefs", NewConfigMirror("prefs.", stale)); err != nil {
+	if err := db.SaveConfigMirror(ctx, KindSetting, "user", "u1", "prefs",
+		NewConfigMirror("prefs.", map[string]ConfigValue{"prefs.timezone": StringValue("UTC")})); err != nil {
 		t.Fatalf("seed stale marker: %v", err)
 	}
 
@@ -50,37 +67,83 @@ func TestReconcileConfigMirrors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReconcileConfigMirrors: %v", err)
 	}
-	if rep.Examined != 2 || rep.Certified != 1 || len(rep.Gaps) != 1 {
-		t.Fatalf("reconcile = %+v, want examined=2 certified=1 gaps=1", rep)
-	}
-	g := rep.Gaps[0]
-	if g.Kind != KindSetting || g.Name != "prefs" || g.ScopeID != "u1" {
-		t.Fatalf("gap identity = %+v", g)
-	}
-	if len(g.Missing) != 1 || g.Missing[0] != "prefs.locale" {
-		t.Fatalf("gap.Missing = %v, want [prefs.locale]", g.Missing)
+	if rep.Examined != 4 || rep.Certified != 2 || rep.Untyped != 1 || rep.Retagged != 1 || len(rep.Gaps) != 2 {
+		t.Fatalf("reconcile = %+v, want examined=4 certified=2 untyped=1 retagged=1 gaps=2", rep)
 	}
 
-	// openai is certified and verifies.
-	want := map[string]ConfigValue{"openai.api_key": StringValue("sk-1"), "openai.api_base": StringValue("https://x")}
-	m, ok, err := db.GetConfigMirror(ctx, KindProvider, "user", "u1", "openai")
-	if err != nil || !ok {
-		t.Fatalf("openai not certified: ok=%v err=%v", ok, err)
+	// openai certified with a verifying marker.
+	openaiLeaves := map[string]ConfigValue{"openai.api_key": StringValue("sk-1"), "openai.api_base": StringValue("https://x")}
+	if m, ok, _ := db.GetConfigMirror(ctx, KindProvider, "user", "u1", "openai"); !ok || !VerifyConfigMirror(m, openaiLeaves) {
+		t.Fatalf("openai marker = %+v ok=%v", m, ok)
 	}
-	if !VerifyConfigMirror(m, want) {
-		t.Fatalf("certified marker does not verify: %+v", m)
+	// legacy retagged: the stored kind is now filled, and its marker verifies.
+	got, err := db.GetConfigValue(ctx, KindProvider, "user", "u1", "legacy.api_key")
+	if err != nil {
+		t.Fatalf("GetConfigValue legacy: %v", err)
+	}
+	if got.Kind != ValueKindString || got.Value != "sk-9" {
+		t.Fatalf("legacy row = %+v, want value sk-9 tagged string", got)
+	}
+	legacyLeaves := map[string]ConfigValue{"legacy.api_key": StringValue("sk-9")}
+	if m, ok, _ := db.GetConfigMirror(ctx, KindProvider, "user", "u1", "legacy"); !ok || !VerifyConfigMirror(m, legacyLeaves) {
+		t.Fatalf("legacy marker = %+v ok=%v", m, ok)
+	}
+
+	// The two gaps are skew (value disagrees) and prefs (a missing leaf).
+	gaps := map[string]ConfigMirrorGap{}
+	for _, g := range rep.Gaps {
+		gaps[g.Name] = g
+	}
+	if g, ok := gaps["skew"]; !ok || len(g.Changed) != 1 || g.Changed[0] != "skew.api_key" {
+		t.Fatalf("skew gap = %+v, want changed=[skew.api_key]", g)
+	}
+	if g, ok := gaps["prefs"]; !ok || len(g.Missing) != 1 || g.Missing[0] != "prefs.locale" {
+		t.Fatalf("prefs gap = %+v, want missing=[prefs.locale]", g)
 	}
 	// prefs' stale marker is gone.
 	if _, ok, _ := db.GetConfigMirror(ctx, KindSetting, "user", "u1", "prefs"); ok {
 		t.Fatal("stale marker survived a mismatched reconcile")
 	}
+	// skew never got a marker.
+	if _, ok, _ := db.GetConfigMirror(ctx, KindProvider, "user", "u1", "skew"); ok {
+		t.Fatal("diverged row was certified")
+	}
 
-	// Re-running is idempotent: same verdict, no drift.
+	// Re-running is idempotent: the same verdict, but nothing left to retag.
 	rep2, err := db.ReconcileConfigMirrors(ctx)
 	if err != nil {
 		t.Fatalf("second ReconcileConfigMirrors: %v", err)
 	}
-	if rep2.Examined != 2 || rep2.Certified != 1 || len(rep2.Gaps) != 1 {
-		t.Fatalf("second reconcile = %+v, want the same verdict", rep2)
+	if rep2.Examined != 4 || rep2.Certified != 2 || len(rep2.Gaps) != 2 || rep2.Untyped != 0 || rep2.Retagged != 0 {
+		t.Fatalf("second reconcile = %+v, want the same verdict with no retagging", rep2)
+	}
+}
+
+// A stored tag that contradicts the blob is a divergence, not a retag.
+func TestReconcileRejectsContradictingKind(t *testing.T) {
+	db, err := NewDBStore("sqlite", "file:reconcile_kind?mode=memory&cache=shared")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if err := db.SaveConfig(ctx, &ConfigRecord{Kind: KindProvider, UserID: "u1", Name: "typed",
+		Enabled: true, Data: map[string]interface{}{"api_key": "1234"}}); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+	// Same text, but stored as a number while the blob says string.
+	if err := db.SetConfigValue(ctx, KindProvider, "user", "u1", "typed.api_key",
+		ConfigValue{Value: "1234", Kind: ValueKindNumber}); err != nil {
+		t.Fatalf("seed mirror: %v", err)
+	}
+	rep, err := db.ReconcileConfigMirrors(ctx)
+	if err != nil {
+		t.Fatalf("ReconcileConfigMirrors: %v", err)
+	}
+	if rep.Certified != 0 || len(rep.Gaps) != 1 {
+		t.Fatalf("reconcile = %+v, want 0 certified and 1 gap", rep)
 	}
 }
