@@ -56,8 +56,10 @@ func TestCreateProvider_RejectsAmbiguousName(t *testing.T) {
 //   - handleCreateProvider dual-writes each provider to configs_kv
 //     (single-value rows at the right scope layer) AND the legacy
 //     configs JSON blob;
-//   - handleListProviders reads through scope.Providers, which prefers
-//     configs_kv once populated;
+//   - handleListProviders lists ONE scope's rows through
+//     listConfigsByScope → store.ListConfigs, i.e. the legacy blob only.
+//     Step 4 below therefore exercises the blob path; the merged resolver
+//     (scope.Providers, which does fall back to configs_kv) is step 3.
 //   - handleDeleteProvider dual-deletes, draining the configs_kv row
 //     together with the legacy configs row.
 func TestProviders_CloudPathE2E(t *testing.T) {

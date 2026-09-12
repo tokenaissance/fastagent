@@ -184,6 +184,21 @@ provider 行的形状还有一条隐含前提：前缀 `<名字>.` 之后**每�
 - 存在性检查必须大小写不敏感。否则 `{"objectstore":…}` 会被 typed 解码接受，
   却在这层判定里被当成「没提到」而静默不写（e2e 抓到的就是这个）。
 
+**这条「面板与 runtime 同构」只覆盖 `/api/config`。** 另一组面板端点——按
+(scope, scopeId) 组织的 CRUD（`GET/POST/PUT/DELETE /api/providers`、
+`/api/channels`）——走的是 `listConfigsByScope`（`setup/handlers_scoped.go:130`）
+→ `store.ListConfigs`，读的是**某一个 scope 的 blob 行**，不合并、不回落镜像。
+对一个编辑器来说这是刻意的（它要列出「这一层有哪些行」而不是「解析结果是什么」），
+但两条已知后果要记在这里，别再当作同构：
+
+- provider 列表**不返回 `enabled`**（channel 列表返回，见 `:346`），所以一条被
+  直接写成 `enabled=false` 的 provider 行在编辑器里与启用行长得一样，而 runtime
+  会删掉它并否决外层同名条目。当前没有任何 HTTP 路径会写出 disabled 的 provider
+  行（`handleCreateProvider` → `SaveProvider` 恒为 true），所以是潜伏。
+- provider 列表看不到**只存在于镜像**的行（runtime 的 `Providers` 按名字兜底看得
+  到），与 `configs_kv_e2e_test.go` 里那条陈旧的注释（原写「handleListProviders
+  reads through scope.Providers」）是同一件事的两面——注释已更正。
+
 ### 依赖面：store 的能力端口（`internal/store/ports.go`）
 
 `store.Store` 是 115 个方法的单一接口，而 configs 域实际只用 6 个：读侧
