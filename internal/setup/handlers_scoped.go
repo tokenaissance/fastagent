@@ -210,8 +210,8 @@ func (s *Server) handleCreateProvider(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
-	if req.Name == "" {
-		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "name required"})
+	if err := scope.ValidateProviderName(req.Name); err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
 	sc, scopeID := req.Scope, req.ScopeID
@@ -251,6 +251,13 @@ func (s *Server) handleUpdateProvider(w http.ResponseWriter, r *http.Request) {
 	}
 	var req writeProviderRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	// The row predates the name check, so the name is not the caller's fault —
+	// say what is wrong instead of returning the 500 SaveProvider would give.
+	// There is no rename endpoint; delete and re-create under a valid name.
+	if err := scope.ValidateProviderName(rec.Name); err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}

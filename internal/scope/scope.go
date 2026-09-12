@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"log/slog"
 	"reflect"
+	"regexp"
 	"strings"
 
 	"github.com/fastclaw-ai/fastclaw/internal/config"
@@ -594,7 +595,45 @@ func BatchSettings(
 		}
 	}
 
-	return mergeByNamespace(systemRows, userRows, namespaces), nil
+	merged := mergeByNamespace(systemRows, userRows, namespaces)
+
+	// Every other reader serves a blob-less namespace from the mirror; this
+	// one used to return nothing for it, so a namespace that exists only in
+	// configs_kv was invisible to the dashboard while the runtime resolved it
+	// fine — the "面板显示正常、运行时不生效" failure with the two sides
+	// swapped. Only namespaces with no blob row anywhere pay for the extra
+	// lookups, so the batch fast path is unchanged in the common case.
+	//
+	// Setting() is the resolver that defines this contract (the docstring
+	// above already promises "the semantics of calling Setting() for each
+	// namespace individually"); the batch path is an optimization of it, and
+	// for the only production caller (loadUserConfig, agentID == "") the two
+	// walk exactly the same layers.
+	//
+	// "Blob-less" is decided by the rows, not by the merged result: a row that
+	// exists but is disabled is a decision to ignore that namespace, and
+	// mergeByNamespace already left it out. Reading the mirror for it would
+	// resurrect a value the row was switched off.
+	present := make(map[string]bool, len(systemRows)+len(userRows))
+	for _, row := range systemRows {
+		present[row.Name] = true
+	}
+	for _, row := range userRows {
+		present[row.Name] = true
+	}
+	for _, ns := range namespaces {
+		if present[ns] {
+			continue
+		}
+		fromMirror, err := Setting(ctx, st, ns, userID, agentID)
+		if err != nil {
+			return nil, fmt.Errorf("scope.BatchSettings: resolve %q: %w", ns, err)
+		}
+		if len(fromMirror) > 0 {
+			merged[ns] = fromMirror
+		}
+	}
+	return merged, nil
 }
 
 // mergeByNamespace groups config rows by name and merges field-wise.
@@ -832,9 +871,39 @@ func dualWritePluginEnabledKV(ctx context.Context, st store.Store, agentID strin
 	}
 }
 
+// providerNamePattern is the charset a provider name may use.
+//
+// The name is not just a label: it is the configs_kv key prefix
+// ("<name>.<field>") and the left half of a "provider/model" reference. A
+// '.' inside it is ambiguous — the mirror reader can only split at the first
+// dot, so "my.provider.api_key" is read as provider "my" with field
+// "provider.api_key", which projects to an empty ProviderConfig; a '/' would
+// collide with the model reference separator. Both used to be accepted
+// (handleCreateProvider checked only for non-empty) and produced a provider
+// that reads back empty whenever the blob row is absent.
+var providerNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`)
+
+// ValidateProviderName rejects names the storage layout cannot represent
+// faithfully. Exported so the HTTP layer can answer 400 instead of letting
+// the generic 500 path carry it, and so the CLI reports the same reason.
+func ValidateProviderName(name string) error {
+	if name == "" {
+		return errors.New("provider name is required")
+	}
+	if !providerNamePattern.MatchString(name) {
+		return fmt.Errorf("invalid provider name %q: use letters, digits, '_' or '-' (%d chars max, starting with a letter or digit); '.' and '/' would be ambiguous in the configs_kv key layout and in provider/model references", name, 64)
+	}
+	return nil
+}
+
 // SaveProvider upserts a kind="provider" row at the given (user, agent)
 // ownership.
 func SaveProvider(ctx context.Context, st store.Store, userID, agentID, name string, p config.ProviderConfig) error {
+	// Single choke point: HTTP create/update, the admin API, onboarding and
+	// the CLI all land here, so the rule cannot be bypassed by a new caller.
+	if err := ValidateProviderName(name); err != nil {
+		return err
+	}
 	// Dual-write to configs_kv.
 	dualWriteProviderKV(ctx, st, userID, agentID, name, p)
 	rec := &store.ConfigRecord{
