@@ -31,24 +31,20 @@ const prefsTimezoneKey = "timezone"
 // the system default. Returns "" when nothing is set — callers fall
 // back to server-local time.
 //
-// No configs_kv fallback, deliberately. prefs is a dual-written namespace, so
-// every production write (SaveUserTimezone → SaveSetting) leaves a blob row and
-// there is nothing to fall back to; the dev database has zero mirror-only prefs
-// rows. This reader walks layers for precedence, it does not merge and it does
-// not project — widening it to serve a row the authoritative table does not have
-// would let a non-authoritative row change a user-visible time. If a KV-only
-// prefs writer ever appears, that writer owes the blob row; do not widen this
-// loop to cover it. Blob is authoritative only during the configs -> configs_kv
-// migration; when authority flips to KV, this reader flips with it as a whole
-// (KV first), it is not patched one branch at a time.
+// Each layer is resolved through settingLayerAt, the one per-layer rule every
+// settings reader shares, so this reader answers from a marker-certified mirror
+// under configsKVFirst and from the blob under blobFirst — it is not a second
+// read path with its own table choice. What is special here is only the *layer
+// order* (most specific first, first hit wins) and that a disabled row at a
+// layer vetoes the less specific layers below it instead of being skipped past.
 //
-// The authority lever has since flipped to configsKVFirst, and this reader is
-// deliberately unchanged by it: the blob is still written for every prefs row
-// (dual-write), and every mirror-first reader falls back to the blob for a row
-// its marker does not certify, so the answer here is byte-for-byte the answer a
-// certified-mirror read would give. What it flips *with* is the end of the
-// dual-write — the phase where the blob stops carrying rows — not the lever.
-func Timezone(ctx context.Context, st store.ConfigReader, chatterUID, agentID string) string {
+// The walk deliberately does not merge or project: it asks one layer at a time
+// whether it has a timezone. That keeps a non-authoritative row from changing a
+// user-visible time — a prefs row that only exists in an uncertified mirror
+// falls back to the blob like every other read, and a KV-only prefs writer (none
+// exists today; SaveUserTimezone → SaveSetting dual-writes) would owe the blob
+// row rather than get served by widening this loop.
+func Timezone(ctx context.Context, st store.ConfigReadStore, chatterUID, agentID string) string {
 	if st == nil {
 		return ""
 	}
@@ -65,17 +61,17 @@ func Timezone(ctx context.Context, st store.ConfigReader, chatterUID, agentID st
 	}
 	layers = append(layers, layer{"", ""})
 	for _, l := range layers {
-		rec, err := st.GetConfigByName(ctx, store.KindSetting, l.uid, l.aid, PrefsNamespace)
-		if err != nil || rec == nil {
+		data, enabled, present, err := settingLayerAt(ctx, st, PrefsNamespace, l.uid, l.aid)
+		if err != nil || !present {
 			continue
 		}
 		// Same rule as every other reader: a disabled row is this layer's
 		// decision that the name is off, so the less specific layers below
 		// it must not answer instead.
-		if !rec.Enabled {
+		if !enabled {
 			return ""
 		}
-		if tz, ok := rec.Data[prefsTimezoneKey].(string); ok && tz != "" {
+		if tz, ok := data[prefsTimezoneKey].(string); ok && tz != "" {
 			return tz
 		}
 	}

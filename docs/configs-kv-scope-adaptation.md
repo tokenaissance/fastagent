@@ -249,8 +249,9 @@ blob 侧同理走 `store.JSONToMap` / `store.ValueToMap`（`Decoder.UseNumber()`
   必须相等，`TestBatchSettingsMatchesSettingUnderConfigsKVFirst` 钉住（fixture 覆盖
   认证行 / blob-only 未认证行 / disabled veto / 仅存在于原始镜像的行四条分支）。
 
-`Channels` / `Timezone` / `SettingNamesAt` / `RowsAt` 刻意不参与翻面（见上表各自
-的「无，且刻意如此」）。
+`Channels` / `SettingNamesAt` / `RowsAt` 刻意不参与翻面（见上表各自的「无，且刻
+意如此」）。`AgentScopeRows` 与 `Timezone` 参与翻面：它们的**数据**由读权威开关
+决定（`configsKVFirst` 优先逐行认证的镜像，认证不过回落 blob），见下表。
 
 一个刻意的例外：**「哪张表都没有这一行」的最后一跳仍然直接读合并后的镜像，不
 做认证**。`configsKVFirst` 的认证只在「blob 本来能回答这一行」时才有意义——认证失
@@ -269,7 +270,7 @@ configs_kv 里（`mcp_undo` / `mcp_oauth_reload` 这类直接写镜像的 namesp
 | `AgentPluginEnabled` | agent 层单行 | 有 |
 | `BatchSettings` | 仅 system + user 两层 | 有。`blobFirst`：每层一次 `ListConfigs`，只对**没有 blob 行**的 namespace 逐个走 `Setting`（面板专用，N 个 namespace 合并成 2 次查询）。`configsKVFirst`：每层三次（`ListConfigs` + `ListConfigValues` + `ListConfigMirrors`）后在本地逐 namespace 认证合并（`batchSettingsConfigsKVFirst`）|
 | `Channels` | 四层，disabled 行擦除外层（同下节的统一规则） | **无，且刻意如此**：channel 行从不进 KV（见「存储面」），`Channels` 没有可回落的镜像。`TestChannelsHaveNoConfigsKVHalf` 钉住这个前提 |
-| `Timezone` | chatter → agent → user → system（反向优先级） | **无 —— 决定不补**（见残留风险 6）：`prefs` 是双写 namespace，但 `Timezone` 只逐层点查 blob。理由是它做的是「按优先级走层」而不是合并/镜像，宽化它等于让非权威行去改一个用户可见的时间；生产写入只有 `SaveUserTimezone → SaveSetting`（事务化双写），dev 库镜像独有 prefs 行实测 0 |
+| `Timezone` | chatter → agent → user → system（反向优先级） | 有：每层经 `settingLayerAt` 解析，所以 `configsKVFirst` 下由逐行认证的镜像作答、认证不过回落 blob。它保留的是**层序**（最具体先命中）和「内层 disabled 否决外层」，不是合并 |
 
 单层读模型（`readmodel.go`）是同一份规则的另一种形状，给「只要这一层」的调用方用：
 
@@ -279,7 +280,7 @@ configs_kv 里（`mcp_undo` / `mcp_oauth_reload` 这类直接写镜像的 namesp
 | `ExactSetting` / `UserScopeSetting` | 同上，解码进 typed dst | 有 |
 | `ProvidersAt` / `ProviderStateAt` | 一个 scope 上的全部 / 单个 provider，`AgentScopeProviders` 与 `UserScopeProviders` 现在是它的两个薄壳。单数形式返回 `(payload, present, enabled)`：读-改-写要 `present`（被禁用的行仍有 payload，不能重置成 preset），运行时「这个 scope 用哪个 provider」要 `enabled` | 有，按名字 |
 | `SettingNamesAt` | 一个 scope **有行**的 namespace 集合（配置 dump、按 namespace 复制） | **无，且刻意如此**：从 KV 前缀反推 namespace 名需要 `ConfigsKVPrefixFor` 的逆映射，而这个布局里有改名，逆映射不存在。与 `Channels` / `Timezone` 同一取舍 |
-| `AgentScopeRows` | 一个 namespace 在 agent 层的**批量**行读（`tools.categories` / `tools.providers` / `skills.entries` / `agents.defaults` 的逐 agent 覆盖） | **暂无，且翻转没有改变这一点**：批量的意义就是一次查询，而这四个 namespace 都只经双写落盘，所以「这一页 agent 里某个 agent 只有镜像行」在双写期间不可达。另外它**只返回 enabled 行**，所以「这一层把 namespace 关掉」和「这一层没有这行」在这里同形——需要这个区分的调用方必须用 `Setting` / `BatchSettings`，不能自己 overlay 这些行 |
+| `AgentScopeRows` | 一个 namespace 在 agent 层的**批量**行读（`tools.categories` / `tools.providers` / `skills.entries` / `agents.defaults` 的逐 agent 覆盖） | **有，逐 lane 认证**：blob 仍是**行登记册**（谁有这一行），数据在 `configsKVFirst` 下由每条 (user_id, agent_id) lane 上认证过的镜像作答、认证不过保留 blob 行；一个 lane 共享一次标记读 + 一次叶子读。仍**只返回 enabled 行**（镜像否决的行会被丢掉），所以「这一层把 namespace 关掉」和「这一层没有这行」在这里同形——需要这个区分的调用方必须用 `Setting` / `BatchSettings`，不能自己 overlay 这些行 |
 | `RowsAt` | 一个 scope 的原始行（面板 CRUD 编辑器要的是「这一层有哪些行」，用 id / updatedAt 寻址） | **无，且刻意如此**：镜像独有的名字没有 id，列出来调用方也寻址不了。合并视图是 `Providers` / `Setting` / `BatchSettings` |
 
 **收敛本身是可执行的**：`internal/scope/read_routing_test.go` 扫
@@ -1106,22 +1107,14 @@ provider 名同时是两样东西：`configs_kv` 的 key 前缀（`<名>.<字段
   `plugins` 等「仅系统层可读」的 namespace（当前 CLI/HTTP 都不产生这种行）。
   约定：新增一个 agent 层可写的 namespace 时，必须同时让 runtime 读它，或者
   像 sandbox 一样在写侧拒绝——两者都没有就是这次的 bug 类。
-6. **`Timezone` 是唯一没有镜像兜底的读入口——决定：不补**（2026-09-12）。它的
-   形状与修复前的 `Providers` 相同，但结论相反，理由是它做的事不同：`Timezone`
-   是按优先级**走层**（chatter → agent → user → system），不是合并也不是镜像；
-   给它加兜底等于让一个非权威行去决定用户可见的时间，而这恰好是「blob 权威」这
-   条规则要挡住的方向。生产写入只有 `SaveUserTimezone → SaveSetting`（事务化双写，
-   必然留下 blob 行），dev 库镜像独有 prefs 行实测为 0，所以没有需要服务的行。
-   若将来出现 KV-only 的 prefs 写入方，**由那条写入路径负责补 blob 行**，而不是
-   宽化这个读循环。`timezone.go` 的函数注释里记了同一条，避免下一次 review 又把它
-   当遗漏重新提出来。翻转权威（阶段 3）时它会**整体**从 blob 优先改成 KV 优先，
-   而不是在迁移期零敲碎打地补兜底。
-
-   **2026-09-13 补记**：翻转已经发生（`configsReadAuthority = configsKVFirst`），
-   而这一条**没有跟着改**，这是有意的：翻转后读源是逐行认证的，认证不过的行仍然
-   由 blob 作答；`prefs` 每一行都还在被双写，所以这里读 blob 得到的答案与「读了
-   一个认证过的镜像」逐字节相同。它真正要跟着翻的是**双写停止**那一天（blob 不再
-   承载行），不是这个开关。
+6. **`Timezone` 的读源改为经 `settingLayerAt` 解析**（2026-09-12 曾决定「不补镜
+   像兜底」；2026-09-13 改成参与翻面）。它做的是「按优先级**走层**」（chatter →
+   agent → user → system），不是合并也不是投影，层序和「内层 disabled 否决外层」
+   这两条必须保留——这部分没变。变的只是每层去哪张表：以前逐层点查 blob，现在每
+   层走 `settingLayerAt`，于是和 `Setting` / `Providers` 共用同一条规则，
+   `configsKVFirst` 下由逐行认证的镜像作答、认证不过回落 blob。真正的残留是：若将
+   来出现 KV-only 的 prefs 写入方，那条写入路径仍然要负责补 blob 行——`Timezone`
+   不会为一行只存在于镜像、又没有标记的 prefs 行改变用户可见的时间。
 
 ## review 第五轮：标记补 enabled / 读模型收敛（2026-09-13）
 
@@ -1189,7 +1182,8 @@ runtime 的合并读路径看得见），也就是「面板说没有、跑起来
 在第四轮之后就不再完整——`store.ReconcileConfigMirrors` 的补标注与 `--repair`
 重建也走它。已在原句处标注更正。
 
-## 对上游的 PR 提案
+## review 第六轮：翻转落地与两处读入口补正（e292d5a，2026-09-13）
+
 > 下面这一节记录**翻转本身**（阶段 3 落地）以及它带出来的四类修正。翻转不是
 > 「把一个默认值从 `blobFirst` 改成 `configsKVFirst`」——只改默认会同时踩到
 > 「空缺值」「二义性」「逻辑漏洞」「测试错误」四类问题，下面逐条对应。
@@ -1250,13 +1244,24 @@ settings 版的 `SaveProviderState`，veto 与普通写入一样走事务化双�
 `SaveSetting` / `SaveChannel` 是全部写入方），所以这是**测试造了一个生产造不出来
 的状态**：测试错，不是产品错。已改成走 `scope.SaveSettingState`。
 
-### 5. 翻转**没有**改的两处（明确记下来，别当作遗漏）
+### 5. 翻转当时**没有**改、随后补上的两处（2026-09-13）
 
-- `AgentScopeRows` 仍是 blob-only 批量读，并且仍然只返回 enabled 行。批量的意义
-  就是一次查询，而这四个 namespace 都只经双写落盘（双写期内「某个 agent 只有镜像
-  行」不可达）。但它因此**无法区分「这一层关掉」与「这一层没有」**——需要这个区分
-  必须用 `Setting` / `BatchSettings`。函数注释与本文件读模型表都已写明。
-- `Timezone` 仍读 blob（理由见上面第 6 条补记）。
+翻转当天留下的两个「刻意例外」后来判定为**不一致**：同一份数据，逐 scope 读走认
+证镜像、批量读/时区读走 blob，两者在有漂移时给出两个答案。现在两处都参与翻面。
+
+- `AgentScopeRows`：逐 lane 认证。blob 仍是**行登记册**（谁有这一行——configs_kv
+  无法从 `user-agent` 的 scope_id 反推回它表征的 (user, agent) 对），数据在
+  `configsKVFirst` 下由认证过的镜像作答、认证不过保留 blob 行；一个 lane 共享一次
+  标记读 + 一次叶子读。仍**只返回 enabled 行**（镜像否决的行会丢掉），所以「这一层
+  关掉」与「这一层没有」在这里同形——需要这个区分必须用 `Setting` / `BatchSettings`。
+- `Timezone`：每层走 `settingLayerAt`（理由见上面第 6 条），保留层序与 disabled
+  否决外层，不再是一份「只读 blob」的私有实现。
+
+回归：`TestAgentScopeRowsConfigsKVFirstTrustsCertifiedRowsOverBlob` /
+`TestAgentScopeRowsConfigsKVFirstFallsBackOnUncertifiedRow` /
+`TestAgentScopeRowsConfigsKVFirstCertifiesPerLane` /
+`TestAgentScopeRowsConfigsKVFirstDropsARowTheCertifiedMirrorVetoes` /
+`TestTimezoneConfigsKVFirstTrustsCertifiedRowsOverBlob`。
 
 ## 对上游的 PR 提案
 

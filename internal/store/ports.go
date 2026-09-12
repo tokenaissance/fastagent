@@ -28,8 +28,9 @@ import "context"
 // ConfigReader is the read half of the configs domain: the legacy JSON-blob
 // table (GetConfigByName, ListConfigs) plus its configs_kv mirror
 // (ListConfigValues). Both tables belong in this port because every reader in
-// the system resolves the same way — blob first, mirror as the fallback — so
-// a reader that could only see one of them would be wrong, not narrow.
+// the system resolves the same way — the mirror answers a row its marker
+// certifies, the blob answers the rest (see ConfigReadStore) — so a reader that
+// could only see one of them would be wrong, not narrow.
 //
 // BatchGetConfigsByAgentIDs is the batched form of ListConfigs restricted to
 // the agent layer; it is here rather than in its own port because it answers
@@ -65,8 +66,10 @@ type MirrorReader interface {
 // certifies them (see ConfigMirror, MirrorSelfConsistent) — so it has to be
 // part of the port such a reader takes. It is a separate composite rather than
 // a widening of ConfigReader so that a caller which only reads rows, and never
-// certifies them, still depends on four methods: the migration-phase read path
-// takes ConfigReadStore, everything else keeps ConfigReader.
+// certifies them, still depends on four methods: every mirror-first read path
+// (the merged resolvers, AgentScopeRows, Timezone) takes ConfigReadStore, and
+// the views that answer from the blob's own rows by definition (SettingNamesAt,
+// RowsAt) keep ConfigReader.
 type ConfigReadStore interface {
 	ConfigReader
 	MirrorReader
