@@ -525,6 +525,16 @@ type Peer struct {
 	ID   string `json:"id,omitempty"`
 }
 
+// BindingsPayload is the on-disk shape of the "bindings" setting namespace:
+// {"list":[…]}. Config.Bindings is the flat slice the runtime consumes, so
+// readers must project through this envelope — unmarshalling the stored map
+// straight into []Binding fails ("cannot unmarshal object into Go value of
+// type []config.Binding"), and in the gateway that error takes the whole
+// UserSpace down with it.
+type BindingsPayload struct {
+	List []Binding `json:"list"`
+}
+
 // AgentFileConfigLoader is the indirection point for layer-3 agent config.
 // The per-agent `agent.json` file has been retired: agent config is DB-only
 // (agents.config column + per-key agent_mcp_servers rows). Composition roots

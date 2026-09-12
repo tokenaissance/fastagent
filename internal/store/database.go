@@ -16,7 +16,9 @@ import (
 	"unicode"
 
 	_ "github.com/jackc/pgx/v5/stdlib" // PostgreSQL driver
-	_ "modernc.org/sqlite"             // SQLite driver (pure Go)
+
+	"github.com/fastclaw-ai/fastclaw/internal/kvkeys"
+	_ "modernc.org/sqlite" // SQLite driver (pure Go)
 )
 
 // DBStore implements Store using a SQL database (PostgreSQL or SQLite).
@@ -2068,9 +2070,9 @@ func (d *DBStore) DeleteUser(ctx context.Context, id string) error {
 		// scope='agent' rows and scope='user-agent' '<user>/<agent>'
 		// rows for this agent; the read path is KV-first, so drop them.
 		if _, err := tx.ExecContext(ctx,
-			fmt.Sprintf(`DELETE FROM configs_kv WHERE (scope = %s AND scope_id = %s) OR (scope = %s AND scope_id LIKE %s)`,
+			fmt.Sprintf(`DELETE FROM configs_kv WHERE (scope = %s AND scope_id = %s) OR (scope = %s AND scope_id LIKE %s ESCAPE '\')`,
 				d.ph(1), d.ph(2), d.ph(3), d.ph(4)),
-			"agent", aid, "user-agent", "%/"+aid); err != nil {
+			"agent", aid, "user-agent", "%"+escapeLike("/"+aid)); err != nil {
 			return err
 		}
 	}
@@ -2099,9 +2101,9 @@ func (d *DBStore) DeleteUser(ctx context.Context, id string) error {
 	// plus scope='user-agent' rows whose '<user>/<agent>' prefix is this
 	// user (overrides they authored on any agent).
 	if _, err := tx.ExecContext(ctx,
-		fmt.Sprintf(`DELETE FROM configs_kv WHERE (scope = %s AND scope_id = %s) OR (scope = %s AND scope_id LIKE %s)`,
+		fmt.Sprintf(`DELETE FROM configs_kv WHERE (scope = %s AND scope_id = %s) OR (scope = %s AND scope_id LIKE %s ESCAPE '\')`,
 			d.ph(1), d.ph(2), d.ph(3), d.ph(4)),
-		"user", id, "user-agent", id+"/%"); err != nil {
+		"user", id, "user-agent", escapeLike(id)+"/%"); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx,
@@ -2464,9 +2466,9 @@ func (d *DBStore) DeleteAgent(ctx context.Context, agentID string) error {
 	// (scope.GetValue/Setting try configs_kv first), so sweep both
 	// encodings or stale values survive the delete and can be read.
 	if _, err := tx.ExecContext(ctx,
-		fmt.Sprintf(`DELETE FROM configs_kv WHERE (scope = %s AND scope_id = %s) OR (scope = %s AND scope_id LIKE %s)`,
+		fmt.Sprintf(`DELETE FROM configs_kv WHERE (scope = %s AND scope_id = %s) OR (scope = %s AND scope_id LIKE %s ESCAPE '\')`,
 			d.ph(1), d.ph(2), d.ph(3), d.ph(4)),
-		"agent", agentID, "user-agent", "%/"+agentID); err != nil {
+		"agent", agentID, "user-agent", "%"+escapeLike("/"+agentID)); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx,
@@ -3718,9 +3720,9 @@ func (d *DBStore) ListConfigValues(ctx context.Context, kind, scope, scopeID, na
 			kind, scope, scopeID)
 	} else {
 		rows, err = d.db.QueryContext(ctx,
-			fmt.Sprintf(`SELECT name, value FROM configs_kv WHERE kind = %s AND scope = %s AND scope_id = %s AND name LIKE %s ORDER BY name`,
+			fmt.Sprintf(`SELECT name, value FROM configs_kv WHERE kind = %s AND scope = %s AND scope_id = %s AND name LIKE %s ESCAPE '\' ORDER BY name`,
 				d.ph(1), d.ph(2), d.ph(3), d.ph(4)),
-			kind, scope, scopeID, namePrefix+"%")
+			kind, scope, scopeID, likePrefixPattern(namePrefix))
 	}
 	if err != nil {
 		return nil, err
@@ -3746,10 +3748,27 @@ func (d *DBStore) DeleteConfigPrefix(ctx context.Context, kind, scope, scopeID, 
 		return err
 	}
 	_, err := d.db.ExecContext(ctx,
-		fmt.Sprintf(`DELETE FROM configs_kv WHERE kind = %s AND scope = %s AND scope_id = %s AND name LIKE %s`,
+		fmt.Sprintf(`DELETE FROM configs_kv WHERE kind = %s AND scope = %s AND scope_id = %s AND name LIKE %s ESCAPE '\'`,
 			d.ph(1), d.ph(2), d.ph(3), d.ph(4)),
-		kind, scope, scopeID, namePrefix+"%")
+		kind, scope, scopeID, likePrefixPattern(namePrefix))
 	return err
+}
+
+// likePrefixPattern turns a literal KV name prefix into a LIKE pattern that
+// matches only that prefix. The metacharacters matter: "_" matches any single
+// character, so the unescaped pattern built from a provider called
+// "my_provider." also matched "myZprovider." — ListConfigValues then spliced
+// another provider's rows into the result and DeleteConfigPrefix deleted
+// them. Provider names come straight from the API (handleCreateProvider only
+// checks for non-empty), so the prefix is not guaranteed metacharacter-free.
+// Both supported dialects (PostgreSQL, SQLite) honour ESCAPE '\'.
+func likePrefixPattern(prefix string) string {
+	return escapeLike(prefix) + "%"
+}
+
+// escapeLike makes s literal inside a LIKE pattern (pair with ESCAPE '\').
+func escapeLike(s string) string {
+	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
 }
 
 func (d *DBStore) LookupChannelByCredential(ctx context.Context, channelType, credKey string) (*ConfigRecord, error) {
@@ -4046,41 +4065,25 @@ func (d *DBStore) migrateChannelsFromConfigs(ctx context.Context) error {
 
 // --- Configs KV migration ---
 
-// camelToSnake converts a camelCase string to snake_case.
-// ALL_CAPS and already_snake strings pass through (lowercased only).
+// camelToSnake converts a camelCase string to snake_case. Thin alias for
+// kvkeys.CamelToSnake — the write path used to carry its own copy of this
+// function (a49f9d4), which is how the read side drifted from it. The data-key
+// exception lives in kvkeys; prefer kvkeys.StoredSegment for flattening.
 func camelToSnake(s string) string {
-	hasUpper, hasLower := false, false
-	for _, r := range s {
-		if r >= 'A' && r <= 'Z' {
-			hasUpper = true
-		}
-		if r >= 'a' && r <= 'z' {
-			hasLower = true
-		}
-	}
-	if !hasUpper || !hasLower {
-		return strings.ToLower(s)
-	}
-	var result strings.Builder
-	for i, r := range s {
-		if r >= 'A' && r <= 'Z' {
-			if i > 0 {
-				result.WriteByte('_')
-			}
-			result.WriteByte(byte(r + 32))
-		} else {
-			result.WriteRune(r)
-		}
-	}
-	return result.String()
+	return kvkeys.CamelToSnake(s)
 }
 
 // flattenJSON recursively flattens a map into dotted-key → string pairs.
 // Arrays and nested objects that aren't maps are serialized as JSON strings.
+//
+// Map keys (data segments: tool category ids, provider names, skill ids, env
+// var names) are written verbatim so the read path can restore them; struct
+// fields are snake_cased. See kvkeys.
 func flattenJSON(prefix string, data map[string]interface{}, out map[string]string) {
+	prefixPath := kvkeys.Path(prefix)
 	for k, v := range data {
-		snakeKey := camelToSnake(k)
-		fullKey := prefix + snakeKey
+		seg := kvkeys.StoredSegment(prefixPath, k)
+		fullKey := prefix + seg
 		switch val := v.(type) {
 		case map[string]interface{}:
 			flattenJSON(fullKey+".", val, out)
