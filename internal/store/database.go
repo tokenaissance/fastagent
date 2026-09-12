@@ -4035,6 +4035,32 @@ func (d *DBStore) GetConfigMirror(ctx context.Context, kind, scope, scopeID, nam
 	return m, true, nil
 }
 
+// ListConfigMirrors returns every marker for one (kind, scope, scope_id), keyed
+// by the row's config name. It is the batched form of GetConfigMirror: a
+// mirror-first reader that certifies a whole layer — every provider at a scope,
+// a page of settings namespaces — would otherwise issue one marker query per
+// row. A scope with no markers returns an empty map, not an error.
+func (d *DBStore) ListConfigMirrors(ctx context.Context, kind, scope, scopeID string) (map[string]ConfigMirror, error) {
+	rows, err := d.handle().QueryContext(ctx,
+		fmt.Sprintf(`SELECT name, prefix, key_count, fingerprint, enabled FROM configs_mirror WHERE kind = %s AND scope = %s AND scope_id = %s`,
+			d.ph(1), d.ph(2), d.ph(3)),
+		kind, scope, scopeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]ConfigMirror{}
+	for rows.Next() {
+		var name string
+		var m ConfigMirror
+		if err := rows.Scan(&name, &m.Prefix, &m.KeyCount, &m.Fingerprint, &m.Enabled); err != nil {
+			return nil, err
+		}
+		out[name] = m
+	}
+	return out, rows.Err()
+}
+
 // DeleteConfigMirror removes the marker for one configs row. Callers delete it
 // when the projection it certified is gone, so a stale marker cannot certify
 // an empty (or later, a different) set of rows.

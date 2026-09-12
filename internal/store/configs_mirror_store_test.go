@@ -169,3 +169,53 @@ func TestMigrateConfigsMirrorEnabledRetrofitsLegacyMarkers(t *testing.T) {
 		t.Fatal("legacy marker certified a decision it never recorded")
 	}
 }
+
+// ListConfigMirrors is the batched form of GetConfigMirror: every marker at one
+// (kind, scope, scope_id), keyed by row name, and nothing from other scopes.
+func TestListConfigMirrors(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	ctx := context.Background()
+
+	openaiLeaves := map[string]ConfigValue{"openai.api_key": StringValue("sk-1")}
+	anthropicLeaves := map[string]ConfigValue{"anthropic.api_key": StringValue("sk-ant")}
+	if err := db.SaveConfigMirror(ctx, KindProvider, "user", "u1", "openai",
+		NewConfigMirror("openai.", true, openaiLeaves)); err != nil {
+		t.Fatalf("SaveConfigMirror openai: %v", err)
+	}
+	if err := db.SaveConfigMirror(ctx, KindProvider, "user", "u1", "anthropic",
+		NewConfigMirror("anthropic.", false, anthropicLeaves)); err != nil {
+		t.Fatalf("SaveConfigMirror anthropic: %v", err)
+	}
+	// A different scope and a different kind must not leak in.
+	if err := db.SaveConfigMirror(ctx, KindProvider, "user", "u2", "openai",
+		NewConfigMirror("openai.", true, openaiLeaves)); err != nil {
+		t.Fatalf("SaveConfigMirror other scope: %v", err)
+	}
+	if err := db.SaveConfigMirror(ctx, KindSetting, "user", "u1", "prefs",
+		NewConfigMirror("prefs.", true, map[string]ConfigValue{})); err != nil {
+		t.Fatalf("SaveConfigMirror other kind: %v", err)
+	}
+
+	got, err := db.ListConfigMirrors(ctx, KindProvider, "user", "u1")
+	if err != nil {
+		t.Fatalf("ListConfigMirrors: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("ListConfigMirrors returned %d markers, want 2: %#v", len(got), got)
+	}
+	if !VerifyConfigMirror(got["openai"], true, openaiLeaves) {
+		t.Fatalf("openai marker = %+v, want a certified enabled marker", got["openai"])
+	}
+	if !VerifyConfigMirror(got["anthropic"], false, anthropicLeaves) {
+		t.Fatalf("anthropic marker = %+v, want a certified disabled marker", got["anthropic"])
+	}
+
+	empty, err := db.ListConfigMirrors(ctx, KindProvider, "user", "nobody")
+	if err != nil {
+		t.Fatalf("ListConfigMirrors(empty): %v", err)
+	}
+	if len(empty) != 0 {
+		t.Fatalf("ListConfigMirrors(empty) = %#v, want empty map", empty)
+	}
+}

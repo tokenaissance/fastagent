@@ -386,7 +386,10 @@ func TestProvidersMirrorFirstHonoursTheMarkerVeto(t *testing.T) {
 }
 
 // BatchSettings must not be able to disagree with Setting in either mode — the
-// batch form exists only to replace the per-namespace queries.
+// batch form exists only to replace the per-namespace queries. The fixture
+// covers every branch of the batched resolver: a certified row (mirror wins), a
+// blob-only uncertified row (blob answers), a disabled row (veto), and a row
+// that exists only in the raw mirror (last-resort fallback).
 func TestBatchSettingsMatchesSettingUnderMirrorFirst(t *testing.T) {
 	db := openScopeDBNamed(t, "readauth_merged_batch")
 	defer db.Close()
@@ -402,7 +405,17 @@ func TestBatchSettingsMatchesSettingUnderMirrorFirst(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("SaveConfig: %v", err)
 	}
-	namespaces := []string{"agents.defaults", "tools.categories", "tools.providers"}
+	if err := db.SaveConfig(ctx, &store.ConfigRecord{
+		Kind: store.KindSetting, UserID: "u1", Name: "sandbox",
+		Enabled: false, Data: map[string]interface{}{"enabled": true},
+	}); err != nil {
+		t.Fatalf("SaveConfig disabled: %v", err)
+	}
+	if err := db.SetConfigValue(ctx, store.KindSetting, User, "u1",
+		"tools.providers.searxng.endpoint", store.StringValue("http://searx")); err != nil {
+		t.Fatalf("SetConfigValue raw-mirror row: %v", err)
+	}
+	namespaces := []string{"agents.defaults", "tools.categories", "sandbox", "tools.providers"}
 
 	for _, auth := range []readAuthority{blobFirst, mirrorFirst} {
 		withReadAuthority(t, auth)
