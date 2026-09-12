@@ -255,29 +255,7 @@ func AgentScopeProviders(ctx context.Context, st store.ConfigReader, agentID str
 	if agentID == "" {
 		return map[string]config.ProviderConfig{}, nil
 	}
-	// Blob first (authoritative), mirror only for names with no blob row —
-	// see Providers.
-	rows, err := st.ListConfigs(ctx, store.KindProvider, "", agentID)
-	if err != nil {
-		return nil, err
-	}
-	out := make(map[string]config.ProviderConfig, len(rows))
-	inBlob := make(map[string]bool, len(rows))
-	for _, r := range rows {
-		inBlob[r.Name] = true
-		if !r.Enabled {
-			continue
-		}
-		out[r.Name] = providerToConfig(r)
-	}
-	if kvVals, err := st.ListConfigValues(ctx, store.KindProvider, Agent, agentID, ""); err == nil && len(kvVals) > 0 {
-		for name, pc := range kvValsToProviders(kvVals) {
-			if !inBlob[name] {
-				out[name] = pc
-			}
-		}
-	}
-	return out, nil
+	return ProvidersAt(ctx, st, "", agentID)
 }
 
 // UserScopeProviders returns providers stored at (user=X, agent='')
@@ -293,29 +271,7 @@ func UserScopeProviders(ctx context.Context, st store.ConfigReader, userID strin
 	if userID == "" {
 		return map[string]config.ProviderConfig{}, nil
 	}
-	// Blob first (authoritative), mirror only for names with no blob row —
-	// see Providers.
-	rows, err := st.ListConfigs(ctx, store.KindProvider, userID, "")
-	if err != nil {
-		return nil, err
-	}
-	out := make(map[string]config.ProviderConfig, len(rows))
-	inBlob := make(map[string]bool, len(rows))
-	for _, r := range rows {
-		inBlob[r.Name] = true
-		if !r.Enabled {
-			continue
-		}
-		out[r.Name] = providerToConfig(r)
-	}
-	if kvVals, err := st.ListConfigValues(ctx, store.KindProvider, User, userID, ""); err == nil && len(kvVals) > 0 {
-		for name, pc := range kvValsToProviders(kvVals) {
-			if !inBlob[name] {
-				out[name] = pc
-			}
-		}
-	}
-	return out, nil
+	return ProvidersAt(ctx, st, userID, "")
 }
 
 // kvPrefixForNamespace maps a settings namespace onto the configs_kv name
@@ -340,27 +296,17 @@ func ExactSetting(ctx context.Context, st store.ConfigReader, namespace, userID,
 	if st == nil {
 		return errors.New("scope.ExactSetting: store is required")
 	}
-	kvPrefix := kvPrefixForNamespace(namespace)
-	// Blob first — exact JSON types, complete key set (see Setting).
-	rec, err := st.GetConfigByName(ctx, store.KindSetting, userID, agentID, namespace)
+	// One resolution rule for every single-scope settings read: settingAtRaw
+	// owns blob-first / veto / mirror-fallback, and the typed form is a
+	// projection of it rather than a second implementation of the same rule.
+	m, err := settingAtRaw(ctx, st, namespace, userID, agentID)
 	if err != nil {
-		if !errors.Is(err, store.ErrNotFound) {
-			return err
-		}
-	} else if rec != nil {
-		// The blob owns this (user, agent); a disabled row means "nothing
-		// here", and the mirror must not resurrect it (see the package doc).
-		if !rec.Enabled || len(rec.Data) == 0 {
-			return nil
-		}
-		return jsonInto(rec.Data, dst)
+		return err
 	}
-	// No blob row — the row exists only in the mirror.
-	sc, sid := kvScopeFromOwnership(userID, agentID)
-	if kvVals, err := st.ListConfigValues(ctx, store.KindSetting, sc, sid, kvPrefix); err == nil && len(kvVals) > 0 {
-		return jsonInto(kvToSettingMap(kvPrefix, kvVals), dst)
+	if len(m) == 0 {
+		return nil
 	}
-	return nil
+	return jsonInto(m, dst)
 }
 
 // UserScopeSetting loads one setting namespace at (user=X, agent='') only —
@@ -760,6 +706,12 @@ func SaveSetting(ctx context.Context, st store.ConfigStore, userID, agentID, nam
 	if st == nil {
 		return errors.New("scope.SaveSetting: store is required")
 	}
+	// Single choke point for settings writes, so the configs_kv layout rule
+	// cannot be bypassed by a new caller — same shape as ValidateProviderName
+	// at SaveProviderState's entry.
+	if err := store.ValidateConfigName(store.KindSetting, namespace); err != nil {
+		return err
+	}
 	if err := rejectUnreadableAgentScope(namespace, userID, agentID); err != nil {
 		return err
 	}
@@ -911,7 +863,7 @@ func dualWritePluginEnabledKV(ctx context.Context, st store.KVStore, agentID str
 			return fmt.Errorf("scope: mirror plugin opt-in %q: %w", name, err)
 		}
 	}
-	return saveMirror(ctx, st, store.KindPluginEnabled, Agent, agentID, PluginEnabledNamespace, kvPrefix, flat)
+	return saveMirror(ctx, st, store.KindPluginEnabled, Agent, agentID, PluginEnabledNamespace, kvPrefix, true, flat)
 }
 
 // providerNamePattern is the charset a provider name may use.
@@ -959,7 +911,7 @@ func SaveProviderState(ctx context.Context, st store.ConfigStore, userID, agentI
 	}
 	// Both tables in one transaction — see SaveSetting.
 	return store.WithConfigTx(ctx, st, func(tx store.ConfigStore) error {
-		if err := dualWriteProviderKV(ctx, tx, userID, agentID, name, p); err != nil {
+		if err := dualWriteProviderKV(ctx, tx, userID, agentID, name, p, enabled); err != nil {
 			return err
 		}
 		rec := &store.ConfigRecord{
@@ -1131,21 +1083,31 @@ func dualWriteSettingKV(ctx context.Context, st store.KVStore, userID, agentID, 
 			return fmt.Errorf("scope: mirror setting %q: %w", name, err)
 		}
 	}
-	return saveMirror(ctx, st, store.KindSetting, sc, sid, namespace, kvPrefix, flat)
+	// A row written through SaveSetting is "use this value", so its enabled
+	// decision is true — the marker records it so a mirror-first reader can
+	// answer the veto question without the blob.
+	return saveMirror(ctx, st, store.KindSetting, sc, sid, namespace, kvPrefix, true, flat)
 }
 
 // saveMirror records the completeness marker for a projection that was just
 // written. flat is the exact leaf set that went into configs_kv, so the marker
-// fingerprints what is on disk rather than what was intended.
-func saveMirror(ctx context.Context, st store.ConfigMirrorStore, kind, sc, sid, name, prefix string, flat map[string]store.ConfigValue) error {
-	if err := st.SaveConfigMirror(ctx, kind, sc, sid, name, store.NewConfigMirror(prefix, flat)); err != nil {
+// fingerprints what is on disk rather than what was intended; enabled is the
+// decision the paired blob row carries, so the marker records the row's whole
+// read state (leaves + on/off) and not just its payload.
+func saveMirror(ctx context.Context, st store.ConfigMirrorStore, kind, sc, sid, name, prefix string, enabled bool, flat map[string]store.ConfigValue) error {
+	if err := st.SaveConfigMirror(ctx, kind, sc, sid, name, store.NewConfigMirror(prefix, enabled, flat)); err != nil {
 		return fmt.Errorf("scope: mirror marker for %q: %w", name, err)
 	}
 	return nil
 }
 
 // dualWriteProviderKV writes the flattened provider config to configs_kv.
-func dualWriteProviderKV(ctx context.Context, st store.KVStore, userID, agentID, providerName string, p config.ProviderConfig) error {
+//
+// The leaves are written whether or not the row is enabled: disabling a
+// provider is a row decision (it erases the outer entries, it does not erase
+// the payload), and the paired blob write records that decision. The marker
+// therefore has to carry it too — see ConfigMirror.Enabled.
+func dualWriteProviderKV(ctx context.Context, st store.KVStore, userID, agentID, providerName string, p config.ProviderConfig, enabled bool) error {
 	sc, sid := kvScopeFromOwnership(userID, agentID)
 	kvPrefix := store.MirrorPrefixFor(store.KindProvider, providerName)
 	data := providerToData(p)
@@ -1159,7 +1121,7 @@ func dualWriteProviderKV(ctx context.Context, st store.KVStore, userID, agentID,
 			return fmt.Errorf("scope: mirror provider %q: %w", name, err)
 		}
 	}
-	return saveMirror(ctx, st, store.KindProvider, sc, sid, providerName, kvPrefix, flat)
+	return saveMirror(ctx, st, store.KindProvider, sc, sid, providerName, kvPrefix, enabled, flat)
 }
 
 // DualDeleteProviderKV removes all KV entries for a provider.

@@ -43,15 +43,25 @@ func agentShareModelConfig(rec *store.AgentRecord) bool {
 	return v
 }
 
-// agentScopeModel reads the per-agent model override from the configs
-// table — the kind=setting, scope=agent row that supersedes the
-// system/user defaults when set.
-func (s *Server) agentScopeModel(r *http.Request, agentID string) string {
-	rec, err := s.dataStore.GetConfigByName(r.Context(), store.KindSetting, "", agentID, "agents.defaults")
-	if err != nil || rec == nil {
-		return ""
+// agentScopeDefaultsRow reads the agent-scope agents.defaults row through the
+// scope resolver — the same read model the runtime uses. Two things follow from
+// that and not from reading the configs table here: a namespace that exists only
+// in the configs_kv mirror still resolves, and a disabled row resolves to "no
+// override" instead of leaking a payload the runtime ignores. Errors are
+// swallowed because every caller treats a missing override path as "unset" and
+// none of them can do anything about a store failure at this point.
+func (s *Server) agentScopeDefaultsRow(r *http.Request, agentID string) map[string]interface{} {
+	data, err := scope.SettingAt(r.Context(), s.dataStore, "agents.defaults", "", agentID)
+	if err != nil {
+		return nil
 	}
-	if v, ok := rec.Data["model"].(string); ok {
+	return data
+}
+
+// agentScopeModel reads the per-agent model override — the agents.defaults key
+// that supersedes the system/user defaults when set.
+func (s *Server) agentScopeModel(r *http.Request, agentID string) string {
+	if v, ok := s.agentScopeDefaultsRow(r, agentID)["model"].(string); ok {
 		return v
 	}
 	return ""
@@ -72,17 +82,13 @@ func (s *Server) saveAgentScopeModel(r *http.Request, agentID, model string) err
 // this as the base for merge-aware patches (read-modify-write) so a
 // single PATCH that touches one field doesn't clobber the rest.
 func (s *Server) agentScopeDefaultsRead(r *http.Request, agentID string) map[string]interface{} {
-	rec, err := s.dataStore.GetConfigByName(r.Context(), store.KindSetting, "", agentID, "agents.defaults")
-	if err != nil || rec == nil || rec.Data == nil {
-		return map[string]interface{}{}
+	// SettingAt already hands back a copy, so callers mutating the result
+	// cannot write back through the map the store returned. A nil result (no
+	// row) becomes an empty map: callers assign into it.
+	if data := s.agentScopeDefaultsRow(r, agentID); len(data) > 0 {
+		return data
 	}
-	// Copy so callers mutating the result don't accidentally write
-	// back through the cached store object.
-	out := make(map[string]interface{}, len(rec.Data))
-	for k, v := range rec.Data {
-		out[k] = v
-	}
-	return out
+	return map[string]interface{}{}
 }
 
 // applyAgentScopeDefaultsPatch merges patch into the current
@@ -142,11 +148,7 @@ func (s *Server) applyAgentScopePluginsPatch(r *http.Request, agentID string, pa
 // dashboard could choose to render "unset" differently from "off", but
 // today the Switch renders both as off and that's fine).
 func (s *Server) agentScopeSplitReplies(r *http.Request, agentID string) *bool {
-	rec, err := s.dataStore.GetConfigByName(r.Context(), store.KindSetting, "", agentID, "agents.defaults")
-	if err != nil || rec == nil {
-		return nil
-	}
-	v, ok := rec.Data["splitReplies"].(bool)
+	v, ok := s.agentScopeDefaultsRow(r, agentID)["splitReplies"].(bool)
 	if !ok {
 		return nil
 	}
@@ -155,11 +157,7 @@ func (s *Server) agentScopeSplitReplies(r *http.Request, agentID string) *bool {
 
 // agentScopePromptMode reads the per-agent promptMode override.
 func (s *Server) agentScopePromptMode(r *http.Request, agentID string) string {
-	rec, err := s.dataStore.GetConfigByName(r.Context(), store.KindSetting, "", agentID, "agents.defaults")
-	if err != nil || rec == nil {
-		return ""
-	}
-	if v, ok := rec.Data["promptMode"].(string); ok {
+	if v, ok := s.agentScopeDefaultsRow(r, agentID)["promptMode"].(string); ok {
 		return v
 	}
 	return ""
@@ -183,11 +181,7 @@ func (s *Server) agentScopePlugins(r *http.Request, agentID string) map[string]b
 // USER.md / MEMORY.md) which is the only chatter-memory persistence
 // path in chatbot mode.
 func (s *Server) agentScopeAutoPersist(r *http.Request, agentID string) *bool {
-	rec, err := s.dataStore.GetConfigByName(r.Context(), store.KindSetting, "", agentID, "agents.defaults")
-	if err != nil || rec == nil {
-		return nil
-	}
-	v, ok := rec.Data["autoPersist"].(bool)
+	v, ok := s.agentScopeDefaultsRow(r, agentID)["autoPersist"].(bool)
 	if !ok {
 		return nil
 	}
@@ -204,23 +198,20 @@ type agentDefaults struct {
 }
 
 // agentScopeDefaults reads the agents.defaults row once and extracts all
-// fields. This replaces 4 separate GetConfigByName calls with 1.
+// fields, so handleGetAgent resolves the row once instead of four times.
 func (s *Server) agentScopeDefaults(r *http.Request, agentID string) agentDefaults {
-	rec, err := s.dataStore.GetConfigByName(r.Context(), store.KindSetting, "", agentID, "agents.defaults")
-	if err != nil || rec == nil {
-		return agentDefaults{}
-	}
+	data := s.agentScopeDefaultsRow(r, agentID)
 	var d agentDefaults
-	if v, ok := rec.Data["model"].(string); ok {
+	if v, ok := data["model"].(string); ok {
 		d.Model = v
 	}
-	if v, ok := rec.Data["promptMode"].(string); ok {
+	if v, ok := data["promptMode"].(string); ok {
 		d.PromptMode = v
 	}
-	if v, ok := rec.Data["splitReplies"].(bool); ok {
+	if v, ok := data["splitReplies"].(bool); ok {
 		d.SplitReplies = &v
 	}
-	if v, ok := rec.Data["autoPersist"].(bool); ok {
+	if v, ok := data["autoPersist"].(bool); ok {
 		d.AutoPersist = &v
 	}
 	return d
@@ -299,8 +290,8 @@ func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 		for i, ar := range owned {
 			agentIDs[i] = ar.ID
 		}
-		if configs, err := s.dataStore.BatchGetConfigsByAgentIDs(
-			r.Context(), store.KindSetting, "agents.defaults", agentIDs,
+		if configs, err := scope.AgentScopeRows(
+			r.Context(), s.dataStore, "agents.defaults", agentIDs,
 		); err == nil {
 			for _, cfg := range configs {
 				if model, ok := cfg.Data["model"].(string); ok {

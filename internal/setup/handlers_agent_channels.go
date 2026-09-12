@@ -148,11 +148,11 @@ func (s *Server) handleListAgentChannels(w http.ResponseWriter, r *http.Request)
 	if !hasNewRows {
 		// Fallback: read from configs for pre-migration installs.
 		if caller != "" {
-			if rows, err := s.dataStore.ListConfigs(r.Context(), store.KindChannel, caller, id); err == nil {
+			if rows, err := scope.RowsAt(r.Context(), s.dataStore, store.KindChannel, caller, id); err == nil {
 				out = append(out, flattenChannelRows(rows, "agent", "", "")...)
 			}
 		}
-		if rows, err := s.dataStore.ListConfigs(r.Context(), store.KindChannel, "", id); err == nil {
+		if rows, err := scope.RowsAt(r.Context(), s.dataStore, store.KindChannel, "", id); err == nil {
 			out = append(out, flattenChannelRows(rows, "agent", "", "")...)
 		}
 	}
@@ -408,7 +408,7 @@ func (s *Server) handleDisconnectAgentChannel(w http.ResponseWriter, r *http.Req
 	// Locate the channel row at the resolved scope (agent for owner /
 	// admin, user for non-owner overlay). Match by accountID inside the
 	// row's Accounts map.
-	rows, err := s.dataStore.ListConfigs(r.Context(), store.KindChannel, uid, aid)
+	rows, err := scope.RowsAt(r.Context(), s.dataStore, store.KindChannel, uid, aid)
 	if err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return

@@ -947,15 +947,19 @@ func (s *Server) forkAgentContent(r *http.Request, src, dst *store.AgentRecord) 
 			return err
 		}
 	}
-	rows, err := s.dataStore.ListConfigs(r.Context(), store.KindSetting, "", src.ID)
-	if err != nil {
-		return err
-	}
-	for _, row := range rows {
-		if !forkAgentScopeConfigs[row.Name] {
+	// Iterate the allowlist rather than the source's rows: the fork should
+	// carry over what the runtime resolves for the source agent, which is what
+	// the resolver returns (blob or mirror, and a disabled row resolves to
+	// nothing rather than being re-enabled at the destination by the copy).
+	for name := range forkAgentScopeConfigs {
+		data, err := scope.SettingAt(r.Context(), s.dataStore, name, "", src.ID)
+		if err != nil {
+			return err
+		}
+		if len(data) == 0 {
 			continue
 		}
-		if err := scope.SaveSettingByScope(r.Context(), s.dataStore, scope.Agent, dst.ID, row.Name, row.Data); err != nil {
+		if err := scope.SaveSettingByScope(r.Context(), s.dataStore, scope.Agent, dst.ID, name, data); err != nil {
 			return err
 		}
 	}

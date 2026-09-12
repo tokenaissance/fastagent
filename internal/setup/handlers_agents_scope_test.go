@@ -406,3 +406,70 @@ func TestAgentScopePlugins_NotFound(t *testing.T) {
 		t.Errorf("agentScopePlugins = %v, want nil", got)
 	}
 }
+
+// --- Read-model convergence ---
+
+// The per-agent readers used to read the configs row themselves, so a row that
+// exists only in the configs_kv mirror was invisible to the dashboard while the
+// runtime (which resolves through the scope layer) served it — the "panel says
+// nothing, the agent says something" shape that produced the web_search
+// incident. They resolve through the same read model now, and this pins it: the
+// row below has no blob counterpart at all.
+func TestAgentScopeReadsSeeMirrorOnlyRows(t *testing.T) {
+	s := setupTestServer(t)
+	ctx := context.Background()
+
+	// agents.defaults is the one namespace whose mirror prefix is not its name.
+	if err := s.dataStore.SetConfigValue(ctx, store.KindSetting, "agent", "agt_mirror",
+		"agent.model", store.StringValue("openrouter/mirror")); err != nil {
+		t.Fatalf("seed mirror row: %v", err)
+	}
+
+	if got := s.agentScopeModel(dummyRequest(), "agt_mirror"); got != "openrouter/mirror" {
+		t.Errorf("agentScopeModel = %q, want the mirror row's model", got)
+	}
+	if got := s.agentScopeDefaults(dummyRequest(), "agt_mirror"); got.Model != "openrouter/mirror" {
+		t.Errorf("agentScopeDefaults.Model = %q, want the mirror row's model", got.Model)
+	}
+	if got := s.agentScopeDefaultsRead(dummyRequest(), "agt_mirror"); got["model"] != "openrouter/mirror" {
+		t.Errorf("agentScopeDefaultsRead = %#v, want the mirror row's model", got)
+	}
+}
+
+// A disabled row is the agent layer saying "not here": no reader serves it, and
+// the mirror must not resurrect it.
+func TestAgentScopeReadsHonourDisabledRows(t *testing.T) {
+	s := setupTestServer(t)
+	ctx := context.Background()
+
+	if err := s.dataStore.SaveConfig(ctx, &store.ConfigRecord{
+		ID: "cfg_disabled", Kind: store.KindSetting, AgentID: "agt_off",
+		Name: "agents.defaults", Enabled: false,
+		Data: map[string]interface{}{"model": "from-blob", "promptMode": "structured"},
+	}); err != nil {
+		t.Fatalf("save disabled row: %v", err)
+	}
+	if err := s.dataStore.SetConfigValue(ctx, store.KindSetting, "agent", "agt_off",
+		"agent.model", store.StringValue("from-mirror")); err != nil {
+		t.Fatalf("seed mirror row: %v", err)
+	}
+
+	if got := s.agentScopeModel(dummyRequest(), "agt_off"); got != "" {
+		t.Errorf("agentScopeModel = %q, want empty for a disabled row", got)
+	}
+	if got := s.agentScopePromptMode(dummyRequest(), "agt_off"); got != "" {
+		t.Errorf("agentScopePromptMode = %q, want empty for a disabled row", got)
+	}
+}
+
+// The PATCH handlers build their next write by assigning into what this returns,
+// so "no row" has to come back as an assignable map rather than nil.
+func TestAgentScopeDefaultsReadIsAlwaysAssignable(t *testing.T) {
+	s := setupTestServer(t)
+
+	got := s.agentScopeDefaultsRead(dummyRequest(), "agt_absent")
+	if got == nil {
+		t.Fatal("agentScopeDefaultsRead returned nil, which callers cannot assign into")
+	}
+	got["model"] = "patched"
+}

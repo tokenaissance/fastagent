@@ -3,6 +3,7 @@ package store
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"sort"
 )
 
@@ -38,15 +39,25 @@ type ConfigMirror struct {
 	// Fingerprint is MirrorFingerprint over those leaves. Empty means the
 	// marker certifies nothing and VerifyConfigMirror rejects it.
 	Fingerprint string
+	// Enabled is the configs row's on/off decision — the half of a row's
+	// read state that is not a leaf. It is a pointer because it has three
+	// values, not two: a marker written before configs_mirror carried the
+	// column recorded the leaves but not the decision, and neither boolean
+	// is then the row's answer. VerifyConfigMirror rejects such a marker, the
+	// same way it rejects an empty fingerprint, rather than defaulting it.
+	// Re-running store.ReconcileConfigMirrors or any dual-write records it.
+	Enabled *bool
 }
 
 // NewConfigMirror builds the marker for a projection: the prefix the leaves
-// live under, how many there are, and their fingerprint.
-func NewConfigMirror(prefix string, leaves map[string]ConfigValue) ConfigMirror {
+// live under, the row's enabled decision, how many there are, and their
+// fingerprint.
+func NewConfigMirror(prefix string, enabled bool, leaves map[string]ConfigValue) ConfigMirror {
 	return ConfigMirror{
 		Prefix:      prefix,
 		KeyCount:    len(leaves),
 		Fingerprint: MirrorFingerprint(leaves),
+		Enabled:     &enabled,
 	}
 }
 
@@ -75,15 +86,18 @@ func MirrorFingerprint(leaves map[string]ConfigValue) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// VerifyConfigMirror reports whether leaves is exactly the projection the
-// marker attests to. A marker with no fingerprint (never written, or written
-// by an older build) certifies nothing and returns false.
+// VerifyConfigMirror reports whether leaves and enabled are exactly the read
+// state the marker attests to. A marker with no fingerprint, or one written
+// before the marker carried the enabled flag, certifies nothing and returns
+// false.
 //
-// A caller that trusts the mirror calls this with the rows it just read; a
+// A caller that trusts the mirror calls this with the row it just read; a
 // false answer means "treat this row as missing from the mirror", not "the
-// rows are wrong".
-func VerifyConfigMirror(m ConfigMirror, leaves map[string]ConfigValue) bool {
-	if m.Fingerprint == "" {
+// rows are wrong". enabled is the configs row's flag: recording it in the
+// marker is what lets a mirror-first reader answer the veto question (a
+// disabled row erases outer layers and blocks the fallback) without the blob.
+func VerifyConfigMirror(m ConfigMirror, enabled bool, leaves map[string]ConfigValue) bool {
+	if m.Fingerprint == "" || m.Enabled == nil || *m.Enabled != enabled {
 		return false
 	}
 	return m.KeyCount == len(leaves) && m.Fingerprint == MirrorFingerprint(leaves)
@@ -92,13 +106,60 @@ func VerifyConfigMirror(m ConfigMirror, leaves map[string]ConfigValue) bool {
 // MirrorPrefixFor maps a configs row (kind, name) to the configs_kv name prefix
 // its leaves live under. It is the storage-layout contract the dual-write, the
 // backfill and the reconciler all share, defined once so the three cannot
-// drift. agents.defaults is the single rename: the blob row keeps its dotted
-// namespace, its mirror lives under "agent.".
+// drift, and every reader resolves the prefix through it too
+// (scope.kvPrefixForNamespace).
+//
+// The mapping must be injective within a kind: two rows that share a prefix
+// share a DeleteConfigPrefix range and a prefix scan, so one would silently
+// delete or merge the other's leaves. A plain name maps to "<name>.", so the
+// only way to collide with a renamed row is to be named after the stem of its
+// prefix — see reservedMirrorStems and ValidateConfigName, which is what makes
+// that injectivity a checked property rather than a hope.
 func MirrorPrefixFor(kind, name string) string {
-	if kind == KindSetting && name == "agents.defaults" {
-		return "agent."
+	if kind == KindSetting {
+		if prefix, ok := mirrorRenames[name]; ok {
+			return prefix
+		}
 	}
 	return name + "."
+}
+
+// mirrorRenames maps a row whose configs_kv prefix is not simply its name onto
+// that prefix. It exists because agents.defaults was written under "agent."
+// before this layer did, and that layout is live data in every deployed
+// database — it cannot be renamed, so the mapping stays here and everyone goes
+// through MirrorPrefixFor.
+//
+// It is a map rather than a branch in MirrorPrefixFor so the invariant above
+// is enumerable: TestMirrorPrefixIsInjective walks the reserved and ordinary
+// names together and proves no two rows of one kind share a prefix.
+var mirrorRenames = map[string]string{
+	"agents.defaults": "agent.",
+}
+
+// reservedMirrorStems holds every <name> for which "<name>." is some renamed
+// row's prefix. A configs row named one of these would land in the renamed
+// row's configs_kv range: DeleteConfigPrefix(kind, scope, scopeID, "agent.")
+// would take both rows' leaves with it, and a prefix scan would merge them, so
+// ValidateConfigName refuses the name instead.
+var reservedMirrorStems = map[string]bool{
+	"agent": true, // the stem of mirrorRenames["agents.defaults"]
+}
+
+// ValidateConfigName refuses a configs row name the configs_kv layout cannot
+// represent without a collision (see reservedMirrorStems). It is the name-side
+// half of MirrorPrefixFor being injective, checked at the write entry point
+// (scope.SaveSetting) so a bad name is a rejected write rather than a silently
+// shared prefix.
+func ValidateConfigName(kind, name string) error {
+	if kind != KindSetting {
+		return nil
+	}
+	if reservedMirrorStems[name] {
+		return fmt.Errorf("config name %q is reserved: configs_kv rows for the %q namespace live under the %q prefix, so this name would share that prefix and one write would overwrite the other",
+			name, "agents.defaults", "agent.")
+	}
+	return nil
 }
 
 // mirrorGapKeys is how many differing leaf names a gap report keeps per list —

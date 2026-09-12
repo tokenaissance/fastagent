@@ -40,13 +40,14 @@ func loadAgentSkillEntries(ctx context.Context, st store.Store, userID string) (
 	}
 	out := map[string]map[string]config.SkillEntryCfg{}
 	for _, ar := range agents {
-		rec, err := st.GetConfigByName(ctx, store.KindSetting, "", ar.ID, "skills.entries")
-		if err != nil || rec == nil || len(rec.Data) == 0 {
+		var entries map[string]config.SkillEntryCfg
+		// Resolved at agent scope through the same read model the runtime uses,
+		// so a row that only exists in the configs_kv mirror is picked up here
+		// rather than silently dropped.
+		if err := scope.ExactSetting(ctx, st, "skills.entries", "", ar.ID, &entries); err != nil {
 			continue
 		}
-		blob, _ := json.Marshal(rec.Data)
-		var entries map[string]config.SkillEntryCfg
-		if json.Unmarshal(blob, &entries) == nil && len(entries) > 0 {
+		if len(entries) > 0 {
 			out[ar.ID] = entries
 		}
 	}
@@ -480,11 +481,11 @@ func toolOverlaysForAgents(ctx context.Context, st store.Store, callerUserID str
 	if st == nil || len(agentIDs) == 0 {
 		return out
 	}
-	catRows, err := st.BatchGetConfigsByAgentIDs(ctx, store.KindSetting, NSToolCategories, agentIDs)
+	catRows, err := scope.AgentScopeRows(ctx, st, NSToolCategories, agentIDs)
 	if err != nil {
 		slog.Warn("batch tool categories read failed", "agents", len(agentIDs), "error", err)
 	}
-	provRows, err := st.BatchGetConfigsByAgentIDs(ctx, store.KindSetting, NSToolProviders, agentIDs)
+	provRows, err := scope.AgentScopeRows(ctx, st, NSToolProviders, agentIDs)
 	if err != nil {
 		slog.Warn("batch tool providers read failed", "agents", len(agentIDs), "error", err)
 	}
@@ -598,17 +599,12 @@ func readUserScopeAgentDefaults(ctx context.Context, st store.Store, userID stri
 	if userID == "" || st == nil {
 		return out
 	}
-	rec, err := st.GetConfigByName(ctx, store.KindSetting, userID, "", NSAgentDefaults)
-	if err != nil || rec == nil {
-		return out
-	}
-	blob, err := json.Marshal(rec.Data)
-	if err != nil {
-		return out
-	}
-	// Typed destination: the decoder parses each number against the field
-	// it lands in, so the digits survive without json.Number here.
-	_ = json.Unmarshal(blob, &out)
+	// The resolver is the only reader of this namespace: it owns who wins
+	// between the blob and the mirror, and it applies the enabled veto (a
+	// disabled row is "no explicit preference", which is the distinction this
+	// function exists to make). A typed destination means the decoder parses
+	// each number against the field it lands in, so the digits survive.
+	_ = scope.ExactSetting(ctx, st, NSAgentDefaults, userID, "", &out)
 	return out
 }
 
@@ -726,10 +722,10 @@ func (sp *UserSpace) EnsureAgent(ctx context.Context, st store.Store, mb *bus.Me
 		}
 	}
 	if applyOwnerOverlays {
-		if cfgRec, err := st.GetConfigByName(ctx, store.KindSetting, "", rc.ID, "agents.defaults"); err == nil && cfgRec != nil {
-			var ovr config.AgentDefaults
-			blob, _ := json.Marshal(cfgRec.Data)
-			_ = json.Unmarshal(blob, &ovr)
+		var ovr config.AgentDefaults
+		// Agent-scope read through the resolver: blob or mirror, whichever
+		// holds the row, and a disabled row means "no overlay here".
+		if err := scope.ExactSetting(ctx, st, "agents.defaults", "", rc.ID, &ovr); err == nil {
 			if ovr.Model != "" {
 				rc.Model = ovr.Model
 			}
@@ -822,23 +818,20 @@ func (sp *UserSpace) EnsureAgent(ctx context.Context, st store.Store, mb *bus.Me
 	// that would leak the owner's API keys into another user's session
 	// for skills they may not even be invoking.
 	skillsCfg := sp.Config.Skills
-	if cfgRec, err := st.GetConfigByName(ctx, store.KindSetting, "", rc.ID, "skills.entries"); err == nil && cfgRec != nil && len(cfgRec.Data) > 0 {
-		blob, _ := json.Marshal(cfgRec.Data)
-		var entries map[string]config.SkillEntryCfg
-		if json.Unmarshal(blob, &entries) == nil && len(entries) > 0 {
-			if skillsCfg.AgentEntries == nil {
-				skillsCfg.AgentEntries = map[string]map[string]config.SkillEntryCfg{}
-			} else {
-				// Copy-on-write: don't mutate the shared map the rest
-				// of UserSpace.Config still points at.
-				cp := make(map[string]map[string]config.SkillEntryCfg, len(skillsCfg.AgentEntries)+1)
-				for k, v := range skillsCfg.AgentEntries {
-					cp[k] = v
-				}
-				skillsCfg.AgentEntries = cp
+	var entries map[string]config.SkillEntryCfg
+	if err := scope.ExactSetting(ctx, st, "skills.entries", "", rc.ID, &entries); err == nil && len(entries) > 0 {
+		if skillsCfg.AgentEntries == nil {
+			skillsCfg.AgentEntries = map[string]map[string]config.SkillEntryCfg{}
+		} else {
+			// Copy-on-write: don't mutate the shared map the rest
+			// of UserSpace.Config still points at.
+			cp := make(map[string]map[string]config.SkillEntryCfg, len(skillsCfg.AgentEntries)+1)
+			for k, v := range skillsCfg.AgentEntries {
+				cp[k] = v
 			}
-			skillsCfg.AgentEntries[rc.ID] = entries
+			skillsCfg.AgentEntries = cp
 		}
+		skillsCfg.AgentEntries[rc.ID] = entries
 	}
 	if err := sp.Agents.AddAgentWithSkillsCfg(rc, sp.Provider, mb, skillsCfg); err != nil {
 		return fmt.Errorf("EnsureAgent: add agent: %w", err)
@@ -960,9 +953,7 @@ func loadUserSpace(ctx context.Context, userID string, mb *bus.MessageBus, st st
 		// and chat silently uses the system/user default.
 		rc := &resolved[i]
 		var agentOverride config.AgentDefaults
-		if rec, err := st.GetConfigByName(ctx, store.KindSetting, "", rc.ID, "agents.defaults"); err == nil && rec != nil {
-			blob, _ := json.Marshal(rec.Data)
-			_ = json.Unmarshal(blob, &agentOverride)
+		if err := scope.ExactSetting(ctx, st, "agents.defaults", "", rc.ID, &agentOverride); err == nil {
 			if agentOverride.Model != "" {
 				rc.Model = agentOverride.Model
 			}
@@ -1447,12 +1438,12 @@ func bindingsFromChannelRows(ctx context.Context, st store.Store, userID string,
 
 	// Fallback: read from configs for pre-migration installs.
 	for _, ar := range agents {
-		rows, err := st.ListConfigs(ctx, store.KindChannel, "", ar.ID)
+		rows, err := scope.RowsAt(ctx, st, store.KindChannel, "", ar.ID)
 		if err == nil {
 			out = append(out, expandChannelBindings(rows, ar.ID)...)
 		}
 		if userID != "" {
-			rows, err := st.ListConfigs(ctx, store.KindChannel, userID, ar.ID)
+			rows, err := scope.RowsAt(ctx, st, store.KindChannel, userID, ar.ID)
 			if err == nil {
 				out = append(out, expandChannelBindings(rows, ar.ID)...)
 			}

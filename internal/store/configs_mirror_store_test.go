@@ -12,29 +12,47 @@ func TestConfigMirrorRoundTrip(t *testing.T) {
 
 	leaves := map[string]ConfigValue{"openai.api_key": StringValue("sk-1")}
 	if err := db.SaveConfigMirror(ctx, KindProvider, "user", "u1", "openai",
-		NewConfigMirror("openai.", leaves)); err != nil {
+		NewConfigMirror("openai.", true, leaves)); err != nil {
 		t.Fatalf("SaveConfigMirror: %v", err)
 	}
 	got, ok, err := db.GetConfigMirror(ctx, KindProvider, "user", "u1", "openai")
 	if err != nil || !ok {
 		t.Fatalf("GetConfigMirror = %+v, ok=%v, err=%v", got, ok, err)
 	}
-	if !VerifyConfigMirror(got, leaves) {
+	if !VerifyConfigMirror(got, true, leaves) {
 		t.Fatalf("round-tripped marker does not verify: %+v", got)
 	}
 
 	// Upsert replaces the fingerprint: the old leaf set must stop verifying.
 	updated := map[string]ConfigValue{"openai.api_key": StringValue("sk-2")}
 	if err := db.SaveConfigMirror(ctx, KindProvider, "user", "u1", "openai",
-		NewConfigMirror("openai.", updated)); err != nil {
+		NewConfigMirror("openai.", true, updated)); err != nil {
 		t.Fatalf("SaveConfigMirror upsert: %v", err)
 	}
 	got, _, _ = db.GetConfigMirror(ctx, KindProvider, "user", "u1", "openai")
-	if VerifyConfigMirror(got, leaves) {
+	if VerifyConfigMirror(got, true, leaves) {
 		t.Fatal("stale marker still verifies after the projection changed")
 	}
-	if !VerifyConfigMirror(got, updated) {
+	if !VerifyConfigMirror(got, true, updated) {
 		t.Fatal("updated marker does not verify the new leaves")
+	}
+
+	// The enabled flag round-trips too, and flipping it invalidates the marker
+	// exactly like a changed leaf does — a decision recorded in the marker is a
+	// decision a later reader compares against, not a label it copies.
+	if err := db.SaveConfigMirror(ctx, KindProvider, "user", "u1", "openai",
+		NewConfigMirror("openai.", false, updated)); err != nil {
+		t.Fatalf("SaveConfigMirror disable: %v", err)
+	}
+	got, _, _ = db.GetConfigMirror(ctx, KindProvider, "user", "u1", "openai")
+	if got.Enabled == nil || *got.Enabled {
+		t.Fatalf("marker enabled = %v, want a recorded false", got.Enabled)
+	}
+	if VerifyConfigMirror(got, true, updated) {
+		t.Fatal("a marker recording disabled verified an enabled row")
+	}
+	if !VerifyConfigMirror(got, false, updated) {
+		t.Fatal("a marker recording disabled did not verify a disabled row")
 	}
 
 	// A row with no marker is reported as absent, not as an error.
@@ -91,7 +109,63 @@ func TestMigrateConfigsToKVWritesMirrorMarkers(t *testing.T) {
 	if !ok {
 		t.Fatal("backfill did not certify the row it projected")
 	}
-	if !VerifyConfigMirror(m, leaves) {
+	if !VerifyConfigMirror(m, true, leaves) {
 		t.Fatalf("backfill marker does not verify its leaves: %+v", m)
+	}
+}
+
+// A configs_mirror table created before the enabled column existed (CREATE
+// TABLE IF NOT EXISTS leaves an existing table alone) gets the column added,
+// and its existing markers keep NULL — "no decision was recorded" — rather than
+// being handed a default that would read as a decision nobody made.
+func TestMigrateConfigsMirrorEnabledRetrofitsLegacyMarkers(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	ctx := context.Background()
+
+	// Rebuild the table in the shape a build that predates the column left.
+	if _, err := db.handle().ExecContext(ctx, `DROP TABLE configs_mirror`); err != nil {
+		t.Fatalf("drop: %v", err)
+	}
+	if _, err := db.handle().ExecContext(ctx, `CREATE TABLE configs_mirror (
+		kind TEXT NOT NULL,
+		scope TEXT NOT NULL,
+		scope_id TEXT NOT NULL DEFAULT '',
+		name TEXT NOT NULL,
+		prefix TEXT NOT NULL DEFAULT '',
+		key_count INTEGER NOT NULL DEFAULT 0,
+		fingerprint TEXT NOT NULL DEFAULT '',
+		updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		PRIMARY KEY (kind, scope, scope_id, name)
+	)`); err != nil {
+		t.Fatalf("create legacy table: %v", err)
+	}
+	leaves := map[string]ConfigValue{"openai.api_key": StringValue("sk-1")}
+	if _, err := db.handle().ExecContext(ctx,
+		`INSERT INTO configs_mirror (kind, scope, scope_id, name, prefix, key_count, fingerprint)
+		 VALUES ('provider', 'user', 'u1', 'openai', 'openai.', 1, ?)`,
+		MirrorFingerprint(leaves)); err != nil {
+		t.Fatalf("seed legacy marker: %v", err)
+	}
+
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	has, err := db.tableHasColumn(ctx, "configs_mirror", "enabled")
+	if err != nil || !has {
+		t.Fatalf("enabled column missing after migration: has=%v err=%v", has, err)
+	}
+
+	m, ok, err := db.GetConfigMirror(ctx, KindProvider, "user", "u1", "openai")
+	if err != nil || !ok {
+		t.Fatalf("legacy marker unreadable: ok=%v err=%v", ok, err)
+	}
+	if m.Enabled != nil {
+		t.Fatalf("legacy marker enabled = %v, want no recorded decision", *m.Enabled)
+	}
+	// An unrecorded decision is not a default: the marker certifies nothing
+	// until a write (or a reconcile pass) records the decision for real.
+	if VerifyConfigMirror(m, true, leaves) || VerifyConfigMirror(m, false, leaves) {
+		t.Fatal("legacy marker certified a decision it never recorded")
 	}
 }

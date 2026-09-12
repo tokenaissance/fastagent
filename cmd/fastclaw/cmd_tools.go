@@ -193,7 +193,7 @@ func addToolScopeFlags(cmd *cobra.Command, userID, agentID *string) {
 
 func loadToolProvidersExact(ctx context.Context, st store.Store, userID, agentID string) (map[string]config.ToolProviderCfg, error) {
 	var out map[string]config.ToolProviderCfg
-	if err := loadSettingExact(ctx, st, userID, agentID, gateway.NSToolProviders, &out); err != nil {
+	if err := scope.ExactSetting(ctx, st, gateway.NSToolProviders, userID, agentID, &out); err != nil {
 		return nil, err
 	}
 	if out == nil {
@@ -204,28 +204,13 @@ func loadToolProvidersExact(ctx context.Context, st store.Store, userID, agentID
 
 func loadToolCategoriesExact(ctx context.Context, st store.Store, userID, agentID string) (map[string]config.ToolCategoryCfg, error) {
 	var out map[string]config.ToolCategoryCfg
-	if err := loadSettingExact(ctx, st, userID, agentID, gateway.NSToolCategories, &out); err != nil {
+	if err := scope.ExactSetting(ctx, st, gateway.NSToolCategories, userID, agentID, &out); err != nil {
 		return nil, err
 	}
 	if out == nil {
 		out = map[string]config.ToolCategoryCfg{}
 	}
 	return out, nil
-}
-
-func loadSettingExact(ctx context.Context, st store.Store, userID, agentID, namespace string, dst interface{}) error {
-	rec, err := st.GetConfigByName(ctx, store.KindSetting, userID, agentID, namespace)
-	if err != nil {
-		if err == store.ErrNotFound {
-			return nil
-		}
-		return err
-	}
-	blob, err := json.Marshal(rec.Data)
-	if err != nil {
-		return err
-	}
-	return json.Unmarshal(blob, dst)
 }
 
 func saveToolProviders(ctx context.Context, st store.Store, userID, agentID string, providers map[string]config.ToolProviderCfg) error {

@@ -18,13 +18,16 @@ func TestPortMethodSets(t *testing.T) {
 		port interface{}
 		want []string
 	}{
-		{(*ConfigReader)(nil), []string{"GetConfigByName", "ListConfigs", "ListConfigValues"}},
+		{(*ConfigReader)(nil), []string{
+			"BatchGetConfigsByAgentIDs", "GetConfigByName", "ListConfigs", "ListConfigValues",
+		}},
 		{(*ConfigRowWriter)(nil), []string{"SaveConfig"}},
 		{(*ConfigWriter)(nil), []string{
 			"DeleteConfig", "DeleteConfigPrefix", "DeleteConfigValue",
 			"SaveConfig", "SetConfigValue",
 		}},
 		{(*ConfigStore)(nil), []string{
+			"BatchGetConfigsByAgentIDs",
 			"DeleteConfig", "DeleteConfigPrefix", "DeleteConfigValue",
 			"DeleteConfigMirror",
 			"GetConfigByName", "ListConfigs", "ListConfigValues",
@@ -78,7 +81,8 @@ func TestPortsExcludeOtherDomains(t *testing.T) {
 	// methods whose names the configs domain owns.
 	store := reflect.TypeOf((*Store)(nil)).Elem()
 	allowed := map[string]bool{
-		"GetConfigByName": true, "ListConfigs": true, "ListConfigValues": true,
+		"BatchGetConfigsByAgentIDs": true,
+		"GetConfigByName":           true, "ListConfigs": true, "ListConfigValues": true,
 		"SaveConfig": true, "DeleteConfig": true,
 		"SetConfigValue": true, "DeleteConfigValue": true, "DeleteConfigPrefix": true,
 		"SaveConfigMirror": true, "GetConfigMirror": true, "DeleteConfigMirror": true,

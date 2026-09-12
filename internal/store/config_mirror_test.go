@@ -48,28 +48,103 @@ func TestMirrorFingerprintIsOrderIndependentAndSensitive(t *testing.T) {
 // A marker certifies exactly the leaf set it was built from — no more, no less.
 func TestVerifyConfigMirror(t *testing.T) {
 	leaves := map[string]ConfigValue{"openai.api_key": StringValue("sk-1")}
-	m := NewConfigMirror("openai.", leaves)
+	m := NewConfigMirror("openai.", true, leaves)
 	if m.KeyCount != 1 || m.Prefix != "openai." {
 		t.Fatalf("NewConfigMirror = %+v", m)
 	}
-	if !VerifyConfigMirror(m, leaves) {
+	if !VerifyConfigMirror(m, true, leaves) {
 		t.Fatal("marker does not verify its own leaves")
 	}
 
-	if VerifyConfigMirror(m, map[string]ConfigValue{}) {
+	if VerifyConfigMirror(m, true, map[string]ConfigValue{}) {
 		t.Fatal("marker verified an empty (subset) projection")
 	}
 	superset := map[string]ConfigValue{
 		"openai.api_key": StringValue("sk-1"),
 		"openai.extra":   StringValue("x"),
 	}
-	if VerifyConfigMirror(m, superset) {
+	if VerifyConfigMirror(m, true, superset) {
 		t.Fatal("marker verified a superset projection")
 	}
 
 	// A marker with no fingerprint certifies nothing — an uncertified row must
 	// never read as complete just because a marker row exists.
-	if VerifyConfigMirror(ConfigMirror{Prefix: "openai."}, leaves) {
+	if VerifyConfigMirror(ConfigMirror{Prefix: "openai."}, true, leaves) {
 		t.Fatal("fingerprint-less marker verified leaves")
+	}
+}
+
+// enabled is half of what a marker attests to, so the two halves cannot be
+// swapped: leaves that match under the wrong decision are not certified, and a
+// marker written before the column existed attests to no decision at all.
+func TestVerifyConfigMirrorCoversEnabled(t *testing.T) {
+	leaves := map[string]ConfigValue{"openai.api_key": StringValue("sk-1")}
+
+	enabledMarker := NewConfigMirror("openai.", true, leaves)
+	if VerifyConfigMirror(enabledMarker, false, leaves) {
+		t.Fatal("an enabled marker verified a disabled row")
+	}
+	disabledMarker := NewConfigMirror("openai.", false, leaves)
+	if VerifyConfigMirror(disabledMarker, true, leaves) {
+		t.Fatal("a disabled marker verified an enabled row")
+	}
+	if !VerifyConfigMirror(disabledMarker, false, leaves) {
+		t.Fatal("a disabled marker did not verify its own decision")
+	}
+
+	// The row registry also has to represent a row with no leaves at all — a
+	// disabled namespace — which is why the empty projection is a legal,
+	// certifiable marker rather than one that gets deleted.
+	empty := NewConfigMirror("agent.", false, map[string]ConfigValue{})
+	if !VerifyConfigMirror(empty, false, map[string]ConfigValue{}) {
+		t.Fatal("an empty disabled projection did not verify")
+	}
+	if VerifyConfigMirror(empty, true, map[string]ConfigValue{}) {
+		t.Fatal("an empty projection verified under the wrong decision")
+	}
+
+	// A marker with no recorded decision (written before the column existed)
+	// is rejected either way, rather than defaulting to one of the two.
+	unrecorded := disabledMarker
+	unrecorded.Enabled = nil
+	if VerifyConfigMirror(unrecorded, false, leaves) || VerifyConfigMirror(unrecorded, true, leaves) {
+		t.Fatal("a marker with no enabled record certified a decision")
+	}
+}
+
+// MirrorPrefixFor must stay injective within a kind: two rows sharing a prefix
+// share a delete range and a prefix scan. The one rename is why the stem it
+// occupies is reserved, and ValidateConfigName is what enforces it.
+func TestMirrorPrefixIsInjective(t *testing.T) {
+	names := []string{"agents.defaults", "prefs", "sandbox", "skills.entries", "agent", "agents"}
+	seen := map[string]string{}
+	for _, name := range names {
+		prefix := MirrorPrefixFor(KindSetting, name)
+		if err := ValidateConfigName(KindSetting, name); err != nil {
+			if name != "agent" {
+				t.Fatalf("ValidateConfigName(%q) rejected a legal name: %v", name, err)
+			}
+			// A rejected name is allowed to share a prefix precisely because
+			// nothing may write it.
+			continue
+		}
+		if other, ok := seen[prefix]; ok {
+			t.Fatalf("names %q and %q share the configs_kv prefix %q", other, name, prefix)
+		}
+		seen[prefix] = name
+	}
+	if err := ValidateConfigName(KindSetting, "agent"); err == nil {
+		t.Fatal("the reserved stem was accepted as a settings namespace")
+	}
+	if got := MirrorPrefixFor(KindSetting, "agents.defaults"); got != "agent." {
+		t.Fatalf("agents.defaults prefix = %q, want agent. (the live layout)", got)
+	}
+	// Other kinds have no rename, so their prefixes are the plain mapping and
+	// the settings reservation does not apply to them.
+	if got := MirrorPrefixFor(KindProvider, "agent"); got != "agent." {
+		t.Fatalf("provider agent prefix = %q", got)
+	}
+	if err := ValidateConfigName(KindProvider, "agent"); err != nil {
+		t.Fatalf("provider names are validated by ValidateProviderName instead: %v", err)
 	}
 }
