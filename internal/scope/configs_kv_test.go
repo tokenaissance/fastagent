@@ -1160,6 +1160,13 @@ func TestFlattenDescendsIntoAnyJSONObject(t *testing.T) {
 		{"nested map of map",
 			map[string]interface{}{"searxng": map[string]map[string]interface{}{"default": {"endpoint": "https://x"}}},
 			[]string{"tools.providers.searxng.default.endpoint"}},
+		// An EMPTY object is the boundary case in the other direction: it has
+		// no keys to descend into, so it is one object-valued leaf. Skipping
+		// it would make `{"searxng":{}}` flatten to no rows at all, i.e. the
+		// same mirror as a map with no "searxng" key.
+		{"empty object",
+			map[string]interface{}{"searxng": map[string]interface{}{}},
+			[]string{"tools.providers.searxng"}},
 	}
 	for i, c := range cases {
 		db := openScopeDBNamed(t, fmt.Sprintf("flattendepth%d", i))

@@ -832,9 +832,34 @@ func rejectUnreadableAgentScope(namespace, userID, agentID string) error {
 // SaveSetting upserts a single namespace at the given (user, agent)
 // ownership. Pass nil/empty data to delete the row instead of writing
 // {}. Pass empty userID/agentID for system-level.
+//
+// "Delete" is not "switch off": a deleted row lets the outer layers answer,
+// while a disabled row is a veto that clears them. SaveSetting is the first
+// shape only; SaveSettingState is how a caller writes the second.
 func SaveSetting(ctx context.Context, st store.ConfigStore, userID, agentID, namespace string, data map[string]interface{}) error {
+	return SaveSettingState(ctx, st, userID, agentID, namespace, data, true)
+}
+
+// SaveSettingState is SaveSetting with the row's enabled decision made
+// explicit — the settings half of the contract SaveProviderState and
+// SaveAgentPluginEnabled already implement.
+//
+// The readers have always had a veto: settingLayerAt returns enabled=false for
+// a disabled row and mergeSettingLayers clears the outer layers for it. What
+// was missing was a writer that records it, so `enabled=false` existed only in
+// hand-written rows — and once reads were answered by the mirror, a hand
+// written veto had no marker to carry its decision and the mirror's stale
+// `enabled=true` won instead (TestPanelConfigMatchesRuntimeResolver pinned the
+// loss). This is that writer: the veto is dual-written like every other row
+// state, so the marker records it and both read orders agree.
+//
+// enabled=false with data still writes the payload's leaves: switching a
+// namespace off is a decision about the row, not an erasure of it (same rule
+// as a disabled provider — see dualWriteProviderKV), so editing a disabled row
+// back on does not lose its value.
+func SaveSettingState(ctx context.Context, st store.ConfigStore, userID, agentID, namespace string, data map[string]interface{}, enabled bool) error {
 	if st == nil {
-		return errors.New("scope.SaveSetting: store is required")
+		return errors.New("scope.SaveSettingState: store is required")
 	}
 	// Single choke point for settings writes, so the configs_kv layout rule
 	// cannot be bypassed by a new caller — same shape as ValidateProviderName
@@ -850,11 +875,18 @@ func SaveSetting(ctx context.Context, st store.ConfigStore, userID, agentID, nam
 	// have to defend against (blob authoritative, mirror fallback). Failing
 	// loudly here is what keeps "both or neither" true.
 	return store.WithConfigTx(ctx, st, func(tx store.ConfigStore) error {
-		if err := dualWriteSettingKV(ctx, tx, userID, agentID, namespace, data); err != nil {
+		if err := dualWriteSettingKV(ctx, tx, userID, agentID, namespace, data, enabled); err != nil {
 			return err
 		}
-		if len(data) == 0 {
-			// Find and drop the row if it exists. Idempotent: missing-row is a no-op.
+		if len(data) == 0 && enabled {
+			// enabled + nothing to write is "this namespace is empty now":
+			// find and drop the row if it exists, and drop the marker with it
+			// so nothing vouches for a row that is gone. Idempotent:
+			// missing-row is a no-op.
+			sc, sid := kvScopeFromOwnership(userID, agentID)
+			if err := tx.DeleteConfigMirror(ctx, store.KindSetting, sc, sid, namespace); err != nil {
+				return err
+			}
 			if rec, err := tx.GetConfigByName(ctx, store.KindSetting, userID, agentID, namespace); err == nil && rec != nil {
 				return tx.DeleteConfig(ctx, rec.ID)
 			}
@@ -865,10 +897,12 @@ func SaveSetting(ctx context.Context, st store.ConfigStore, userID, agentID, nam
 			UserID:  userID,
 			AgentID: agentID,
 			Name:    namespace,
-			// Writing a namespace through this path means "use this value",
-			// so it clears any veto a previous row carried — one of the two
-			// ways a disabled row goes away (the other is DeleteConfig).
-			Enabled: true,
+			// The caller's decision travels to the row and, through
+			// dualWriteSettingKV's marker, to the mirror. SaveSetting always
+			// passes true, so writing a namespace through that path still
+			// clears any veto a previous row carried — one of the two ways a
+			// disabled row goes away (the other is DeleteConfig).
+			Enabled: enabled,
 			Data:    data,
 		}
 		return tx.SaveConfig(ctx, rec)
@@ -1184,6 +1218,10 @@ func GetValues(ctx context.Context, st store.ConfigReader, kind, prefix, userID,
 // see kvkeys. Without the data-key exception an ALL_CAPS skill env var
 // (REPLICATE_API_TOKEN) was lowercased to replicate_api_token and could never
 // be restored from configs_kv.
+//
+// An empty object stops here rather than descending: descending yields zero
+// leaves, so `{"config":{}}` would flatten to nothing and a mirror-first read
+// would answer "no such key". JSONObjectOf owns that rule for both flatteners.
 func flattenJSONToKV(prefix string, data map[string]interface{}, out map[string]store.ConfigValue) {
 	prefixPath := kvkeys.Path(prefix)
 	for k, v := range data {
@@ -1203,25 +1241,30 @@ func flattenJSONToKV(prefix string, data map[string]interface{}, out map[string]
 		}
 		// A nil leaf gets a tagged null row instead of being skipped: with
 		// a tag, {"a":null} and {} are no longer the same mirror.
+		// An empty object reaches this line for the same reason (see
+		// JSONObjectOf): it is a leaf, and {"config":{}} must not flatten to
+		// the same rows as a map with no "config" key.
 		out[fullKey] = store.EncodeConfigValue(v)
 	}
 }
 
 // dualWriteSettingKV writes the flattened KV pairs to configs_kv alongside
-// the legacy configs table write. Called by SaveSetting to keep both tables
-// in sync during migration.
-func dualWriteSettingKV(ctx context.Context, st store.KVStore, userID, agentID, namespace string, data map[string]interface{}) error {
+// the legacy configs table write. Called by SaveSettingState to keep both
+// tables in sync during migration.
+//
+// The marker is written for every row state, including the empty one: the
+// marker is the row registry that carries the enabled decision, so a disabled
+// row with no payload is a row the mirror must still be able to answer for.
+// Only a row that is going away has its marker removed, and the caller does
+// that (SaveSettingState's delete branch) because "the row is gone" is the
+// caller's decision, not the flattener's.
+func dualWriteSettingKV(ctx context.Context, st store.KVStore, userID, agentID, namespace string, data map[string]interface{}, enabled bool) error {
 	sc, sid := kvScopeFromOwnership(userID, agentID)
 	kvPrefix := store.ConfigsKVPrefixFor(store.KindSetting, namespace)
-	// The prefix delete runs in both branches: writing {} means "this
-	// namespace is empty now", which has to clear the rows it used to have.
+	// The prefix delete runs for every write: re-writing a namespace has to
+	// clear the leaves it used to have.
 	if err := st.DeleteConfigPrefix(ctx, store.KindSetting, sc, sid, kvPrefix); err != nil {
 		return fmt.Errorf("scope: clear configs_kv prefix %q: %w", kvPrefix, err)
-	}
-	if len(data) == 0 {
-		// No leaves left: drop the marker too, so a stale one can never
-		// certify the empty (or a later, different) mirror.
-		return st.DeleteConfigMirror(ctx, store.KindSetting, sc, sid, namespace)
 	}
 	flat := map[string]store.ConfigValue{}
 	flattenJSONToKV(kvPrefix, data, flat)
@@ -1230,10 +1273,10 @@ func dualWriteSettingKV(ctx context.Context, st store.KVStore, userID, agentID, 
 			return fmt.Errorf("scope: mirror setting %q: %w", name, err)
 		}
 	}
-	// A row written through SaveSetting is "use this value", so its enabled
-	// decision is true — the marker records it so a mirror-first reader can
-	// answer the veto question without the blob.
-	return saveMirror(ctx, st, store.KindSetting, sc, sid, namespace, kvPrefix, true, flat)
+	// The marker records the caller's enabled decision so a mirror-first
+	// reader can answer the veto question without the blob — the same contract
+	// dualWriteProviderKV implements.
+	return saveMirror(ctx, st, store.KindSetting, sc, sid, namespace, kvPrefix, enabled, flat)
 }
 
 // saveMirror records the completeness marker for a mirror that was just

@@ -1,6 +1,12 @@
 # FastAgent configs 设计决策 — 保留 configs_kv，继续演进
 
 > 状态：已决策（2026-08-25 维持现状；**2026-09-13 追加：保留并继续演进**）。
+> **2026-09-13 后续状态**：演进的下一阶段（阶段 3，翻转权威）已落地，
+> `scope.configsReadAuthority = configsKVFirst` 且 dev / prod 同值；详见
+> `configs-kv-scope-adaptation.md` 的「复核第六轮」。本记录里「blob 权威」的
+> 描述读作「未认证的行由 blob 作答」——翻转后权威是**逐行按标记**决定的。
+> 同时 146 → 165 行：dev 闸门重跑为 165 examined / 165 certified / 0 gap。
+>
 > 本记录归档「是否全盘纠偏 fork 的 configs_kv 双列 + 4 层 scope 设计、回退到
 > 上游 fastclaw 单列方案」的完整讨论，并在 2026-09-13 用「删掉 configs_kv 的
 > 影响面复核」收口：**不删，且沿演进路线继续**（见下节）。
