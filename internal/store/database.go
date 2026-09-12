@@ -225,6 +225,13 @@ func (d *DBStore) Migrate(ctx context.Context) error {
 	if err := d.migrateConfigsKvValueKind(ctx); err != nil {
 		return fmt.Errorf("migrate configs_kv value_kind: %w", err)
 	}
+	// Same reason, one column over: every marker write names the enabled
+	// column, so a configs_mirror table created without it has to be
+	// retrofitted before any of them runs (the backfill below writes markers
+	// itself).
+	if err := d.migrateConfigsMirrorEnabled(ctx); err != nil {
+		return fmt.Errorf("migrate configs_mirror enabled: %w", err)
+	}
 	if err := d.migrateConfigsToKV(ctx); err != nil {
 		return fmt.Errorf("migrate configs to kv: %w", err)
 	}
@@ -262,6 +269,41 @@ func (d *DBStore) migrateConfigsKvValueKind(ctx context.Context) error {
 	}
 	_, err = d.handle().ExecContext(ctx,
 		`ALTER TABLE configs_kv ADD COLUMN value_kind TEXT NOT NULL DEFAULT ''`)
+	return err
+}
+
+// migrateConfigsMirrorEnabled retrofits the enabled column onto a
+// configs_mirror table created before it existed (CREATE TABLE IF NOT EXISTS
+// leaves an existing table alone, so the column in the schema literal only
+// reaches fresh databases).
+//
+// The column is nullable and existing rows keep NULL, which is not "disabled" —
+// it is "this marker predates the column and therefore recorded no decision".
+// ConfigMirror.Enabled is a pointer for the same reason and
+// VerifyConfigMirror rejects a NULL, so an old marker goes uncertified instead
+// of certifying an enabled state nobody wrote down. There is deliberately no
+// default: unlike value_kind, where the information was destroyed at write
+// time, the answer could be read back out of configs.enabled — but a marker is
+// a statement about what a writer recorded, and back-filling it would turn a
+// missing record into an assertion. Re-running store.ReconcileConfigMirrors
+// (or any dual-write) records it for real.
+func (d *DBStore) migrateConfigsMirrorEnabled(ctx context.Context) error {
+	exists, err := d.tableExists(ctx, "configs_mirror")
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+	has, err := d.tableHasColumn(ctx, "configs_mirror", "enabled")
+	if err != nil {
+		return err
+	}
+	if has {
+		return nil
+	}
+	_, err = d.handle().ExecContext(ctx,
+		`ALTER TABLE configs_mirror ADD COLUMN enabled BOOLEAN`)
 	return err
 }
 
@@ -1994,6 +2036,14 @@ func migrationSQLForDialect(dialect string) []string {
 		// "the mirror is complete" a recorded fact instead of something a
 		// reader has to infer, which is the precondition for ever letting the
 		// mirror take over as the authoritative read source.
+		//
+		// enabled is the row's on/off decision — the one part of a row's read
+		// state that is not a leaf (a disabled row erases outer layers and
+		// blocks the fallback). Without it the marker would certify a
+		// projection a reader still could not resolve, and a disabled row with
+		// no leaves would have no representation here at all. It is nullable
+		// on purpose: NULL is the marker written before the column existed,
+		// which recorded no decision (see migrateConfigsMirrorEnabled).
 		`CREATE TABLE IF NOT EXISTS configs_mirror (
 			kind TEXT NOT NULL,
 			scope TEXT NOT NULL,
@@ -2002,6 +2052,7 @@ func migrationSQLForDialect(dialect string) []string {
 			prefix TEXT NOT NULL DEFAULT '',
 			key_count INTEGER NOT NULL DEFAULT 0,
 			fingerprint TEXT NOT NULL DEFAULT '',
+			enabled BOOLEAN,
 			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			PRIMARY KEY (kind, scope, scope_id, name)
 		)`,
@@ -3948,20 +3999,21 @@ func (d *DBStore) SaveConfigMirror(ctx context.Context, kind, scope, scopeID, na
 	now := time.Now().UTC()
 	if d.dialect == "postgres" {
 		_, err := d.handle().ExecContext(ctx,
-			`INSERT INTO configs_mirror (kind, scope, scope_id, name, prefix, key_count, fingerprint, updated_at)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			`INSERT INTO configs_mirror (kind, scope, scope_id, name, prefix, key_count, fingerprint, enabled, updated_at)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 				ON CONFLICT (kind, scope, scope_id, name) DO UPDATE SET
-				  prefix=$5, key_count=$6, fingerprint=$7, updated_at=$8`,
-			kind, scope, scopeID, name, m.Prefix, m.KeyCount, m.Fingerprint, now)
+				  prefix=$5, key_count=$6, fingerprint=$7, enabled=$8, updated_at=$9`,
+			kind, scope, scopeID, name, m.Prefix, m.KeyCount, m.Fingerprint, m.Enabled, now)
 		return err
 	}
 	_, err := d.handle().ExecContext(ctx,
-		`INSERT INTO configs_mirror (kind, scope, scope_id, name, prefix, key_count, fingerprint, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO configs_mirror (kind, scope, scope_id, name, prefix, key_count, fingerprint, enabled, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT (kind, scope, scope_id, name) DO UPDATE SET
 			  prefix=excluded.prefix, key_count=excluded.key_count,
-			  fingerprint=excluded.fingerprint, updated_at=excluded.updated_at`,
-		kind, scope, scopeID, name, m.Prefix, m.KeyCount, m.Fingerprint, now)
+			  fingerprint=excluded.fingerprint, enabled=excluded.enabled,
+			  updated_at=excluded.updated_at`,
+		kind, scope, scopeID, name, m.Prefix, m.KeyCount, m.Fingerprint, m.Enabled, now)
 	return err
 }
 
@@ -3971,9 +4023,9 @@ func (d *DBStore) SaveConfigMirror(ctx context.Context, kind, scope, scopeID, na
 func (d *DBStore) GetConfigMirror(ctx context.Context, kind, scope, scopeID, name string) (ConfigMirror, bool, error) {
 	var m ConfigMirror
 	err := d.handle().QueryRowContext(ctx,
-		fmt.Sprintf(`SELECT prefix, key_count, fingerprint FROM configs_mirror WHERE kind = %s AND scope = %s AND scope_id = %s AND name = %s`,
+		fmt.Sprintf(`SELECT prefix, key_count, fingerprint, enabled FROM configs_mirror WHERE kind = %s AND scope = %s AND scope_id = %s AND name = %s`,
 			d.ph(1), d.ph(2), d.ph(3), d.ph(4)),
-		kind, scope, scopeID, name).Scan(&m.Prefix, &m.KeyCount, &m.Fingerprint)
+		kind, scope, scopeID, name).Scan(&m.Prefix, &m.KeyCount, &m.Fingerprint, &m.Enabled)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ConfigMirror{}, false, nil
 	}
@@ -4044,19 +4096,19 @@ func (d *DBStore) ReconcileConfigMirrors(ctx context.Context, repair bool) (Conf
 		if err != nil {
 			return rep, err
 		}
-		if len(want) == 0 && len(got) == 0 {
-			// An empty projection is the dual-write's "no marker" case; keep
-			// the two consistent so a reader sees the same shape either way.
-			if err := d.DeleteConfigMirror(ctx, cfg.Kind, scope, scopeID, cfg.Name); err != nil {
-				return rep, err
-			}
-			continue
-		}
+		// No special case for an empty projection: a configs row with no
+		// leaves still has an enabled decision, and the marker is the row
+		// registry — it is where that decision lives once the mirror is the
+		// read source. (An empty projection also classifies as exact, so it
+		// falls out of the same switch as everything else. This used to
+		// delete the marker instead, which left the row uncertified and made
+		// "gap zero" satisfiable while a row the mirror would have to serve
+		// had nothing vouching for it.)
 		delta, untagged := classifyConfigMirror(want, got)
 		switch delta {
 		case mirrorExact:
 			if err := d.SaveConfigMirror(ctx, cfg.Kind, scope, scopeID, cfg.Name,
-				NewConfigMirror(prefix, got)); err != nil {
+				NewConfigMirror(prefix, cfg.Enabled, got)); err != nil {
 				return rep, err
 			}
 			rep.Certified++
@@ -4071,7 +4123,7 @@ func (d *DBStore) ReconcileConfigMirrors(ctx context.Context, repair bool) (Conf
 				}
 			}
 			if err := d.SaveConfigMirror(ctx, cfg.Kind, scope, scopeID, cfg.Name,
-				NewConfigMirror(prefix, want)); err != nil {
+				NewConfigMirror(prefix, cfg.Enabled, want)); err != nil {
 				return rep, err
 			}
 			rep.Certified++
@@ -4094,7 +4146,7 @@ func (d *DBStore) ReconcileConfigMirrors(ctx context.Context, repair bool) (Conf
 					}
 				}
 				if err := d.SaveConfigMirror(ctx, cfg.Kind, scope, scopeID, cfg.Name,
-					NewConfigMirror(prefix, want)); err != nil {
+					NewConfigMirror(prefix, cfg.Enabled, want)); err != nil {
 					return rep, err
 				}
 				rep.Certified++
@@ -4521,7 +4573,7 @@ func (d *DBStore) migrateConfigsToKV(ctx context.Context) error {
 		// The backfill projects the whole blob, so it can certify its own
 		// output: the marker lets a mirror-authorized reader trust a
 		// backfilled row exactly as it trusts a freshly dual-written one.
-		if err := d.SaveConfigMirror(ctx, cfg.Kind, kvScope, kvScopeID, cfg.Name, NewConfigMirror(kvPrefix, flat)); err != nil {
+		if err := d.SaveConfigMirror(ctx, cfg.Kind, kvScope, kvScopeID, cfg.Name, NewConfigMirror(kvPrefix, cfg.Enabled, flat)); err != nil {
 			slog.Warn("migrate config mirror marker failed",
 				"kind", cfg.Kind, "scope", kvScope, "scope_id", kvScopeID,
 				"name", cfg.Name, "error", err)

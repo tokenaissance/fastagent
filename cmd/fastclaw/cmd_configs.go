@@ -40,7 +40,12 @@ configs_kv leaves are cleared and rewritten from the projection, then certified.
 The blob is authoritative until the mirror takes over, so that is the only
 correct direction; use it to catch up a mirror written by an older build (a
 collapsed nested map, an ALL_CAPS data key folded to snake_case). Either way the
-pass is safe to re-run.`,
+pass is safe to re-run.
+
+--strict is the pre-flip acceptance gate and it checks two things, not one: no
+row may diverge from the blob *and* every examined row must end up certified. A
+gap alone is not enough to fail on — a row with no marker is a row the mirror
+could not serve either.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			st, err := openStoreFromEnv()
 			if err != nil {
@@ -72,11 +77,15 @@ pass is safe to re-run.`,
 			if strict && len(rep.Gaps) > 0 {
 				return fmt.Errorf("%d row(s) are not a complete mirror", len(rep.Gaps))
 			}
+			if strict && rep.Certified != rep.Examined {
+				return fmt.Errorf("%d of %d row(s) are not certified: a row the mirror would have to serve has nothing vouching for it",
+					rep.Examined-rep.Certified, rep.Examined)
+			}
 			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&strict, "strict", false,
-		"exit non-zero if any row is not a complete mirror")
+		"exit non-zero unless every examined row is certified (no gaps and nothing left unmarked)")
 	cmd.Flags().BoolVar(&repair, "repair", false,
 		"re-project diverged rows from the blob instead of only reporting them")
 	return cmd

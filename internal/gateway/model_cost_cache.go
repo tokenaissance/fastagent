@@ -2,12 +2,12 @@ package gateway
 
 import (
 	"context"
-	"encoding/json"
 	"log"
 	"sync"
 	"time"
 
 	"github.com/fastclaw-ai/fastclaw/internal/config"
+	"github.com/fastclaw-ai/fastclaw/internal/scope"
 	"github.com/fastclaw-ai/fastclaw/internal/store"
 )
 
@@ -44,26 +44,17 @@ func (c *modelCostCache) getModelCost(provider, model string) *config.ModelCost 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	configRec, err := c.store.GetConfigByName(ctx, store.KindProvider, "", "", provider)
+	// System-scope provider, resolved through the read model rather than the
+	// configs table: the resolver answers both "is it in the blob or the
+	// mirror" and "is this scope offering it at all" (a disabled row is not).
+	providerCfg, _, enabled, err := scope.ProviderStateAt(ctx, c.store, provider, "", "")
 	if err != nil {
 		log.Printf("[ModelCostCache] Failed to get provider config: provider=%s error=%v", provider, err)
 		return nil
 	}
 
-	if configRec == nil || !configRec.Enabled {
+	if !enabled {
 		log.Printf("[ModelCostCache] Provider not found or disabled: %s", provider)
-		return nil
-	}
-
-	var providerCfg config.ProviderConfig
-	dataJSON, err := json.Marshal(configRec.Data)
-	if err != nil {
-		log.Printf("[ModelCostCache] Failed to marshal provider data: %v", err)
-		return nil
-	}
-
-	if err := json.Unmarshal(dataJSON, &providerCfg); err != nil {
-		log.Printf("[ModelCostCache] Failed to unmarshal provider config: %v", err)
 		return nil
 	}
 

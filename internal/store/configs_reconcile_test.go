@@ -59,7 +59,7 @@ func TestReconcileConfigMirrors(t *testing.T) {
 		t.Fatalf("seed prefs mirror: %v", err)
 	}
 	if err := db.SaveConfigMirror(ctx, KindSetting, "user", "u1", "prefs",
-		NewConfigMirror("prefs.", map[string]ConfigValue{"prefs.timezone": StringValue("UTC")})); err != nil {
+		NewConfigMirror("prefs.", true, map[string]ConfigValue{"prefs.timezone": StringValue("UTC")})); err != nil {
 		t.Fatalf("seed stale marker: %v", err)
 	}
 
@@ -73,7 +73,7 @@ func TestReconcileConfigMirrors(t *testing.T) {
 
 	// openai certified with a verifying marker.
 	openaiLeaves := map[string]ConfigValue{"openai.api_key": StringValue("sk-1"), "openai.api_base": StringValue("https://x")}
-	if m, ok, _ := db.GetConfigMirror(ctx, KindProvider, "user", "u1", "openai"); !ok || !VerifyConfigMirror(m, openaiLeaves) {
+	if m, ok, _ := db.GetConfigMirror(ctx, KindProvider, "user", "u1", "openai"); !ok || !VerifyConfigMirror(m, true, openaiLeaves) {
 		t.Fatalf("openai marker = %+v ok=%v", m, ok)
 	}
 	// legacy retagged: the stored kind is now filled, and its marker verifies.
@@ -85,7 +85,7 @@ func TestReconcileConfigMirrors(t *testing.T) {
 		t.Fatalf("legacy row = %+v, want value sk-9 tagged string", got)
 	}
 	legacyLeaves := map[string]ConfigValue{"legacy.api_key": StringValue("sk-9")}
-	if m, ok, _ := db.GetConfigMirror(ctx, KindProvider, "user", "u1", "legacy"); !ok || !VerifyConfigMirror(m, legacyLeaves) {
+	if m, ok, _ := db.GetConfigMirror(ctx, KindProvider, "user", "u1", "legacy"); !ok || !VerifyConfigMirror(m, true, legacyLeaves) {
 		t.Fatalf("legacy marker = %+v ok=%v", m, ok)
 	}
 
@@ -242,7 +242,7 @@ func TestReconcileRepairReprojectsDiverged(t *testing.T) {
 		if err != nil {
 			t.Fatalf("leaves %s: %v", c.name, err)
 		}
-		if !VerifyConfigMirror(m, leaves) {
+		if !VerifyConfigMirror(m, true, leaves) {
 			t.Fatalf("marker %s/%s does not verify", c.scope, c.scopeID)
 		}
 	}

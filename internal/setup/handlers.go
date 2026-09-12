@@ -104,12 +104,13 @@ func loadAgentSkillEntriesForUser(ctx context.Context, st store.Store, userID st
 		return nil, nil
 	}
 
-	// Batch query: 1 call replaces N GetConfigByName calls.
+	// One batched agent-scope read through the scope layer's read model,
+	// instead of N point lookups.
 	agentIDs := make([]string, len(agents))
 	for i, ar := range agents {
 		agentIDs[i] = ar.ID
 	}
-	configs, err := st.BatchGetConfigsByAgentIDs(ctx, store.KindSetting, "skills.entries", agentIDs)
+	configs, err := scope.AgentScopeRows(ctx, st, "skills.entries", agentIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -602,14 +603,13 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	// Compute the system-only resolution of agents.defaults so the
 	// dashboard can tell apart "inheriting from system" vs "overriding
-	// at my user scope". Use GetConfigByName directly (1 query) instead
-	// of scope.SettingInto which would resolve multiple levels.
+	// at my user scope". ExactSetting resolves one scope (1 query); the
+	// merged SettingInto would walk all four layers.
 	sysDefaults := config.AgentsConfig{}.Defaults
 	if s.dataStore != nil {
-		if rec, err := s.dataStore.GetConfigByName(r.Context(), store.KindSetting, "", "", "agents.defaults"); err == nil && rec != nil {
-			blob, _ := json.Marshal(rec.Data)
-			_ = json.Unmarshal(blob, &sysDefaults)
-		}
+		// Through the resolver, so "which table holds it" is not this
+		// handler's decision.
+		_ = scope.ExactSetting(r.Context(), s.dataStore, "agents.defaults", "", "", &sysDefaults)
 	}
 	serverTimezone := time.Local.String()
 	// Marshal-then-extend keeps the response shape compatible (existing

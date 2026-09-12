@@ -70,12 +70,16 @@ func makeSetPreference(st store.Store, r *Registry) ToolFunc {
 			return "", fmt.Errorf("no agent identity — cannot persist preference")
 		}
 
-		// Read existing prefs at user-agent scope, merge the new key.
-		data := map[string]interface{}{}
-		if rec, err := st.GetConfigByName(ctx, store.KindSetting, chatterUID, agentID, scope.PrefsNamespace); err == nil && rec != nil {
-			for k, v := range rec.Data {
-				data[k] = v
-			}
+		// Read existing prefs at user-agent scope through the resolver, merge
+		// the new key. Failing loudly beats the alternative: swallowing the
+		// read error and saving anyway would write a one-key row over whatever
+		// the chatter already had.
+		data, err := scope.SettingAt(ctx, st, scope.PrefsNamespace, chatterUID, agentID)
+		if err != nil {
+			return "", fmt.Errorf("read existing preferences: %w", err)
+		}
+		if data == nil {
+			data = map[string]interface{}{}
 		}
 		data[args.Key] = args.Value
 

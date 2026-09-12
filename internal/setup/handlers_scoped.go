@@ -122,20 +122,16 @@ func (s *Server) authorizeScope(w http.ResponseWriter, r *http.Request, sc, scop
 	}
 }
 
-// listConfigsByScope is the HTTP-side bridge to store.ListConfigs:
-// translates the (scope, scopeID) URL idiom into (userID, agentID).
-// New code should call store.ListConfigs directly with explicit
-// ownership; this helper exists so the dashboard's scope-keyed routes
-// don't have to inline the conversion at every call site.
+// listConfigsByScope is the HTTP-side bridge to the configs domain's
+// row-level read model: it translates the (scope, scopeID) URL idiom into
+// (userID, agentID) and hands the question to scope.RowsAt, which owns the
+// decision of which table the rows come from. The dashboard's scope-keyed
+// routes read "the rows of this scope" — unmerged, and by design without a
+// mirror fallback, because the editor addresses them by id / updatedAt (see
+// scope.RowsAt).
 func (s *Server) listConfigsByScope(ctx context.Context, kind, sc, scopeID string) ([]store.ConfigRecord, error) {
 	uid, aid := scope.OwnershipFromScope(sc, scopeID)
-	return s.dataStore.ListConfigs(ctx, kind, uid, aid)
-}
-
-// getConfigByNameScope is the GetConfigByName variant of the same bridge.
-func (s *Server) getConfigByNameScope(ctx context.Context, kind, sc, scopeID, name string) (*store.ConfigRecord, error) {
-	uid, aid := scope.OwnershipFromScope(sc, scopeID)
-	return s.dataStore.GetConfigByName(ctx, kind, uid, aid, name)
+	return scope.RowsAt(ctx, s.dataStore, kind, uid, aid)
 }
 
 // scopeFromQuery reads the scope/scopeId query parameters with sensible

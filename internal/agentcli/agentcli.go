@@ -143,11 +143,15 @@ func Init(ctx context.Context, st store.Store, name string, opts InitOptions) (*
 		}
 		res.ProviderSaved = true
 		if fullModel != "" {
-			data := map[string]interface{}{}
-			if cur, err := st.GetConfigByName(ctx, store.KindSetting, "", rec.ID, "agents.defaults"); err == nil && cur != nil && cur.Data != nil {
-				data = cur.Data
-			} else if err != nil && !errors.Is(err, store.ErrNotFound) {
+			// Read-modify-write through the resolver: the rest of the agent's
+			// agents.defaults row has to survive, so this is the resolved row
+			// (blob or mirror) plus the one key being set, not a fresh row.
+			data, err := scope.SettingAt(ctx, st, "agents.defaults", "", rec.ID)
+			if err != nil {
 				return nil, err
+			}
+			if data == nil {
+				data = map[string]interface{}{}
 			}
 			data["model"] = fullModel
 			if err := scope.SaveSetting(ctx, st, "", rec.ID, "agents.defaults", data); err != nil {
@@ -411,11 +415,12 @@ func SetConfig(ctx context.Context, st store.Store, agentID, key, rawValue strin
 		}
 		return scope.SaveSetting(ctx, st, uid, aid, namespace, obj)
 	}
-	data := map[string]interface{}{}
-	if rec, err := st.GetConfigByName(ctx, store.KindSetting, uid, aid, namespace); err == nil && rec != nil && rec.Data != nil {
-		data = rec.Data
-	} else if err != nil && !errors.Is(err, store.ErrNotFound) {
+	data, err := scope.SettingAt(ctx, st, namespace, uid, aid)
+	if err != nil {
 		return err
+	}
+	if data == nil {
+		data = map[string]interface{}{}
 	}
 	setNested(data, path, parseValue(rawValue))
 	// No sandbox post-processing here: `sandbox` maps to agent scope, and
@@ -443,17 +448,20 @@ func GetConfig(ctx context.Context, st store.Store, agentID, key string) (interf
 	if isAgentScope {
 		aid = agentID
 	}
-	rec, err := st.GetConfigByName(ctx, store.KindSetting, uid, aid, namespace)
-	if errors.Is(err, store.ErrNotFound) {
-		return nil, nil
-	}
+	data, err := scope.SettingAt(ctx, st, namespace, uid, aid)
 	if err != nil {
 		return nil, err
 	}
-	if len(path) == 0 {
-		return rec.Data, nil
+	if len(data) == 0 {
+		// Nothing here: answer with a nil interface, not a nil-typed map, so
+		// "unset" stays distinguishable from "an empty object" for callers
+		// that compare against nil.
+		return nil, nil
 	}
-	return getNested(rec.Data, path), nil
+	if len(path) == 0 {
+		return data, nil
+	}
+	return getNested(data, path), nil
 }
 
 // PutFile writes a system file to the agent's row in the agent_files table.
@@ -516,11 +524,15 @@ func normalizeProviderModel(providerName, model string) (string, string, string,
 
 func providerConfigFromOptions(ctx context.Context, st store.Store, providerName, modelID string, opts InitOptions) (config.ProviderConfig, error) {
 	preset := providerPreset(providerName)
-	existing := config.ProviderConfig{}
-	if rec, err := st.GetConfigByName(ctx, store.KindProvider, "", "", providerName); err == nil && rec != nil {
-		blob, _ := json.Marshal(rec.Data)
-		_ = json.Unmarshal(blob, &existing)
-	} else if err != nil && !errors.Is(err, store.ErrNotFound) {
+	// System-scope provider through the resolver: the existing row is the base
+	// the options are layered onto, and "which table holds it" is not this
+	// command's decision. The payload is reused even when the row is disabled
+	// (present=true, enabled=false): init is read-modify-write, so falling back
+	// to the preset on a disabled row would silently drop fields the row still
+	// holds. A truly absent provider leaves the zero value, which is what the
+	// preset fallbacks below are for.
+	existing, _, _, err := scope.ProviderStateAt(ctx, st, providerName, "", "")
+	if err != nil {
 		return config.ProviderConfig{}, err
 	}
 	apiBase := firstNonEmpty(opts.APIBase, existing.APIBase, preset.apiBase)
@@ -596,13 +608,16 @@ func setProviderField(ctx context.Context, st store.Store, key, rawValue string)
 		return errors.New("provider config key must look like provider.<name>.<field>")
 	}
 	name, field := parts[0], parts[1]
-	pc := config.ProviderConfig{}
-	if rec, err := st.GetConfigByName(ctx, store.KindProvider, "", "", name); err == nil && rec != nil {
-		blob, _ := json.Marshal(rec.Data)
-		_ = json.Unmarshal(blob, &pc)
-	} else if err != nil && !errors.Is(err, store.ErrNotFound) {
+	pc, present, _, err := scope.ProviderStateAt(ctx, st, name, "", "")
+	if err != nil {
 		return err
-	} else {
+	}
+	if !present {
+		// No system row at all: start from the preset, which is what "set one
+		// field on a provider that does not exist yet" means. A row that exists
+		// but is disabled still has a payload to edit (present, enabled=false),
+		// so it is deliberately not reset to the preset — that is the
+		// read-modify-write half of the present/enabled split.
 		preset := providerPreset(name)
 		pc = config.ProviderConfig{APIBase: preset.apiBase, APIType: preset.apiType, AuthType: preset.authType}
 	}
@@ -641,14 +656,17 @@ func getProviderField(ctx context.Context, st store.Store, key string) (interfac
 	if len(parts) != 2 {
 		return nil, errors.New("provider config key must look like provider.<name>.<field>")
 	}
-	rec, err := st.GetConfigByName(ctx, store.KindProvider, "", "", parts[0])
-	if errors.Is(err, store.ErrNotFound) {
-		return nil, nil
-	}
+	pc, _, enabled, err := scope.ProviderStateAt(ctx, st, parts[0], "", "")
 	if err != nil {
 		return nil, err
 	}
-	return redactProviderData(rec.Data)[parts[1]], nil
+	if !enabled {
+		// Get is the runtime's view of what this scope uses, and the resolver
+		// skips disabled rows: a switched-off provider reads as absent here even
+		// though its payload still exists for the set path above.
+		return nil, nil
+	}
+	return redactProviderData(store.ValueToMap(pc))[parts[1]], nil
 }
 
 func appendModel(models []config.ModelEntry, id string) []config.ModelEntry {
@@ -755,42 +773,48 @@ func configDump(ctx context.Context, st store.Store, agentID string) (map[string
 
 	agentSettings := map[string]interface{}{}
 	for _, ns := range []string{"agents.defaults", "sandbox"} {
-		rec, err := st.GetConfigByName(ctx, store.KindSetting, "", agentID, ns)
-		if errors.Is(err, store.ErrNotFound) || rec == nil {
-			continue
-		}
+		data, err := scope.SettingAt(ctx, st, ns, "", agentID)
 		if err != nil {
 			return nil, err
 		}
-		agentSettings[ns] = rec.Data
+		if len(data) == 0 {
+			continue
+		}
+		agentSettings[ns] = data
 	}
 	if len(agentSettings) > 0 {
 		out["agentScope"] = agentSettings
 	}
 
-	sysSettings := map[string]interface{}{}
-	settings, err := st.ListConfigs(ctx, store.KindSetting, "", "")
+	sysSettings, err := scope.SettingNamesAt(ctx, st, "", "")
 	if err != nil {
 		return nil, err
 	}
-	for _, rec := range settings {
-		sysSettings[rec.Name] = rec.Data
-	}
 	if len(sysSettings) > 0 {
-		out["system"] = sysSettings
+		out["system"] = anyMap(sysSettings)
 	}
-	providers, err := st.ListConfigs(ctx, store.KindProvider, "", "")
+	providers, err := scope.ProvidersAt(ctx, st, "", "")
 	if err != nil {
 		return nil, err
 	}
 	if len(providers) > 0 {
 		provOut := map[string]interface{}{}
-		for _, rec := range providers {
-			provOut[rec.Name] = redactProviderData(rec.Data)
+		for name, pc := range providers {
+			provOut[name] = redactProviderData(store.ValueToMap(pc))
 		}
 		out["providers"] = provOut
 	}
 	return out, nil
+}
+
+// anyMap re-keys a name → object map as name → any so it can be dropped into
+// the dump's map[string]interface{} without a per-entry loop at the call site.
+func anyMap(m map[string]map[string]interface{}) map[string]interface{} {
+	out := make(map[string]interface{}, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
 }
 
 func redactProviderData(data map[string]interface{}) map[string]interface{} {

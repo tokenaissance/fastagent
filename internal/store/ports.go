@@ -28,10 +28,16 @@ import "context"
 // (ListConfigValues). Both tables belong in this port because every reader in
 // the system resolves the same way — blob first, mirror as the fallback — so
 // a reader that could only see one of them would be wrong, not narrow.
+//
+// BatchGetConfigsByAgentIDs is the batched form of ListConfigs restricted to
+// the agent layer; it is here rather than in its own port because it answers
+// the same question (resolve a namespace at some scope) with a different
+// access shape, and every caller of it is a caller of the other three.
 type ConfigReader interface {
 	GetConfigByName(ctx context.Context, kind, userID, agentID, name string) (*ConfigRecord, error)
 	ListConfigs(ctx context.Context, kind, userID, agentID string) ([]ConfigRecord, error)
 	ListConfigValues(ctx context.Context, kind, scope, scopeID, namePrefix string) (map[string]ConfigValue, error)
+	BatchGetConfigsByAgentIDs(ctx context.Context, kind, name string, agentIDs []string) ([]ConfigRecord, error)
 }
 
 // ConfigWriter is the write half of the configs domain. Writers need both
