@@ -640,6 +640,23 @@ type ProjectRuntimeRecord struct {
 	UpdatedAt time.Time `json:"updatedAt"`
 }
 
+// Txer is implemented by stores that can run a group of writes as one
+// transaction. Callers should use the WithTx helper rather than a type
+// assertion: a store without transaction support (a test double, another
+// backend) still has to work, it just gets no atomicity.
+type Txer interface {
+	WithTx(ctx context.Context, fn func(Store) error) error
+}
+
+// WithTx runs fn in a transaction when st supports one, and calls fn(st)
+// directly otherwise. fn must use the store it is handed.
+func WithTx(ctx context.Context, st Store, fn func(Store) error) error {
+	if txer, ok := st.(Txer); ok {
+		return txer.WithTx(ctx, fn)
+	}
+	return fn(st)
+}
+
 // Kinds for ConfigRecord.
 const (
 	KindProvider = "provider"

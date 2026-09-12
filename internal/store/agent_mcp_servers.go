@@ -20,7 +20,7 @@ import (
 // ListMCPServers returns every declared MCP server for the agent as the
 // typed map the runtime consumes (rc.MCPServers shape).
 func (d *DBStore) ListMCPServers(ctx context.Context, agentID string) (map[string]config.MCPServerConfig, error) {
-	rows, err := d.db.QueryContext(ctx,
+	rows, err := d.handle().QueryContext(ctx,
 		fmt.Sprintf(`SELECT server_name, config FROM agent_mcp_servers WHERE agent_id = %s ORDER BY server_name`, d.ph(1)),
 		agentID)
 	if err != nil {
@@ -54,7 +54,7 @@ func (d *DBStore) AddMCPServer(ctx context.Context, agentID, serverName string, 
 		return err
 	}
 	now := time.Now().UTC()
-	res, err := d.db.ExecContext(ctx,
+	res, err := d.handle().ExecContext(ctx,
 		fmt.Sprintf(`INSERT INTO agent_mcp_servers (agent_id, server_name, config, created_at, updated_at)
 			VALUES (%s, %s, %s, %s, %s)
 			ON CONFLICT (agent_id, server_name) DO NOTHING`,
@@ -76,7 +76,7 @@ func (d *DBStore) DeleteMCPServer(ctx context.Context, agentID, serverName strin
 	if agentID == "" || serverName == "" {
 		return errors.New("store: agentID and serverName are required")
 	}
-	res, err := d.db.ExecContext(ctx,
+	res, err := d.handle().ExecContext(ctx,
 		fmt.Sprintf(`DELETE FROM agent_mcp_servers WHERE agent_id = %s AND server_name = %s`, d.ph(1), d.ph(2)),
 		agentID, serverName)
 	if err != nil {
