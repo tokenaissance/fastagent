@@ -1,8 +1,129 @@
-# configs_kv：per-(user, agent) 独立 scope 适配（给上游 PR 的文档）
+# configs 数据域：blob / configs_kv 双写与四层 scope 适配
 
-> 状态：fork 已落地（commit `ce6f2b1`）。本文档用于向**上游 fastclaw** 提交 PR，
-> 说明 fork 对 configs_kv 四层 scope 模型的适配理由与最小改动。若上游采纳，
-> 请把代码 diff + 本文档的「PR 提案」章节一起提交。
+> 状态：fork 已落地。本文档是这个数据域的**设计记录 + 实现对照**：第一节
+> 「现状」描述当前代码实际在做的事（改代码先改这一节），后面按时间保留每轮
+> review 的推理过程，最后一节是给**上游 fastclaw** 的 PR 提案。历史小节里的
+> 结论如果与「现状」冲突，以「现状」为准。
+
+## 现状：实现对照（权威）
+
+### 四层映射与依赖方向
+
+| 层 | 本仓库的落点 | 谁依赖它 |
+|---|---|---|
+| Entities | `internal/config` 的 typed 结构体（`Config` / `ProviderConfig` / `ChannelConfig` / `AgentDefaults` …）与四层所有权语义 | 被所有层依赖，自己不依赖任何 IO |
+| Use Cases | `internal/scope`：解析与合并（`Setting` / `ExactSetting` / `Providers` / `Channels` / `GetValues` / `SettingInto`）——「哪一层的行胜出、值怎么投影」 | `setup` / `gateway` / `agentcli` |
+| Interface Adapters | `internal/kvkeys`（键形状编解码）、`store.ConfigValue`（value + value_kind 编解码）、`store.JSONToMap`（blob 解码）、`scope.Save*` 的双写编排、`setup` 的 `scope` 字符串 ↔ `(user_id, agent_id)` 转换 | `scope` / `setup` |
+| Frameworks & Drivers | `internal/store/database.go` 的 SQLite / PostgreSQL、表结构、迁移；HTTP / CLI 入口 | 最外层，随时可换 |
+
+依赖方向只有向内一条：`setup → scope → store → database/sql`，`config` 在最里
+层不依赖任何人。**store 不 import scope**（否则成环），所以「所有权 → KV
+scope」这条映射规则放在 store（`store.KVScopeFromOwnership`），由 scope 复用。
+
+### 存储面
+
+```
+configs             id, kind, scope(标签), user_id, agent_id, name,
+                    enabled, credential_key, data(TEXT/JSON), 时间戳
+                    UNIQUE(kind, user_id, agent_id, name)
+                    INDEX(kind, user_id, agent_id), INDEX(kind, credential_key)
+
+configs_kv          kind, scope, scope_id, name, value(TEXT), value_kind(TEXT)
+                    PRIMARY KEY(kind, scope, scope_id, name)
+                    INDEX(kind, scope, scope_id)
+```
+
+- **kinds**：`provider` / `setting` / `channel` / `plugin_enabled`（`store.KindPluginEnabled`）。
+- **scopes**：`system` / `user` / `agent` / `user-agent`；`scope_id` 分别是
+  `""` / `userID` / `agentID` / `"<userID>/<agentID>"`。格式由
+  `store.KVUserAgentScopeID` 定义——删除路径用 `<user>/%` 与 `%/<agent>` 的
+  LIKE 模式匹配它，所以分隔符是存储契约。
+- **谁进 configs_kv**：`provider`、`setting`、`plugin_enabled` 双写；
+  **`channel` 不进**（它有自己的 `channels` 表，`migrateChannelsFromConfigs`
+  负责搬迁）。迁移 `migrateConfigsToKV` 只回填 `provider` + `setting`。
+
+### 写路径
+
+```
+SaveSetting / SaveProvider / SaveAgentPluginEnabled       ← 唯一写入口
+  ├─ blob 侧：ConfigRecord{Data map[string]interface{}} → SaveConfig → configs.data
+  └─ KV 侧：flattenJSONToKV → store.EncodeConfigValue(leaf) → SetConfigValue
+              └─ 先 DeleteConfigPrefix，再逐行 UPSERT（非事务）
+```
+
+值的类型在**写侧唯一确定一次**（`EncodeConfigValue`），此后读侧不再推断：
+
+```go
+// 写：Go 值 → (文本, tag)。数字保持字面量（json.Number）而不是 float64。
+case json.Number: return ConfigValue{Value: t.String(), Kind: ValueKindNumber}
+case float64:     return encodeFloat(t, 64)   // json.Marshal 的字节，不是 %g
+
+// 读：tag → JSON 值，数字还原成 json.Number，由最后一跳按目标字段解析。
+case ValueKindNumber: return json.Number(v.Value)
+```
+
+blob 侧同理走 `store.JSONToMap` / `store.ValueToMap`（`Decoder.UseNumber()`），
+所以 `configs.data` 里的数字在 map 里也是字面量。两条路径的保真度因此一致。
+
+### 读路径
+
+**优先级：blob 权威，KV 兜底。** 只有当链路上四层都没有 blob 行时，才去读
+镜像（镜像可能被直接写过、也可能是历史行）。
+
+| 入口 | 合并层 | KV 兜底 |
+|---|---|---|
+| `Setting` → `SettingInto` | system → user → agent → user-agent，顶层 key 字段级合并 | 有（`GetValues` + `kvToSettingMap`，规则 = `ConfigValue.Decode`） |
+| `ExactSetting` / `UserScopeSetting` | 单层，不合并 | 有（同上） |
+| `Providers` | 四层，内层整行替换 | 有（`kvValsToProviders`，规则 = `kvFieldMap`） |
+| `AgentScopeProviders` / `UserScopeProviders` | 单层 | 有 |
+| `AgentPluginEnabled` | agent 层单行 | 有 |
+| `BatchSettings` | 仅 system + user 两层的 blob | **无**（面板专用，N 个 namespace 合并成 2 次查询） |
+| `Channels` | 四层，disabled 行擦除外层 | **无**（channel 不进 KV） |
+
+未标注行（`value_kind = ''`，即 value_kind 之前写下的历史行）在两条读路径上
+的规则**不同**，这是历史行为，不是遗漏：
+
+| 读路径 | 未标注行的规则 | 为什么 |
+|---|---|---|
+| settings（`kvToSettingMap`） | `ConfigValue.Decode` → `decodeLegacyValue`：整串数字→number、`true/false`→bool、`{…}`/`[…]`→结构 | 沿用 tag 之前的猜测，行为与改动前一致 |
+| providers（`kvFieldMap`） | `ConfigValue.DecodeLegacyStructure`：只解 `{…}`/`[…]` 结构，标量一律按文本 | provider 字段更常是自由文本（全数字的 `api_key` 猜成 number 会让字段消失） |
+
+带 tag 的行两条路径都只认 tag，不再猜测。
+
+### key 正确性
+
+`configs_kv` 的行名是「命名空间前缀 + 点号段」，段分两类，规则集中在
+`internal/kvkeys`：
+
+- **结构体字段段**：写 snake_case、读 camelCase（`memory.auto_persist` ↔
+  `memory.autoPersist`）。这对转换只对字段名成立。
+- **数据 key 段**（分类 id、provider 名、skill id、team id、env 变量名）：两个
+  方向都原样保留。两条机制覆盖它们：`dataPaths` 精确匹配一段
+  （`tools.categories.*`、`tools.providers.*`、`skills.entries.*`、
+  `plugins.entries.*`、`plugins.enabled.*`、`teams.*`），`openPaths` 是前缀规则、
+  任意深度（`tools.providers.*.options`、`skills.entries.*.env`、
+  `plugins.entries.*.config` 之下的所有段）。后者必需：精确表只能覆盖第一层，
+  嵌套的 `{"headers":{"X_API_Key":…}}` 会被折叠成 `xAPIKey`。
+
+前缀约定：provider 行是 `<provider 名>.`，setting 是 `<namespace>.`，唯一的
+例外是 `agents.defaults` → `agent.`（历史遗留，`kvPrefixForNamespace` 是唯一
+定义处）。所有前缀匹配走 `likePrefixPattern`（转义 `\`、`%`、`_` + `ESCAPE '\'`）
+——`_` 在 LIKE 里是通配符，provider 名里的下划线曾扫到别人的行。
+
+`kvValsToProviders` 用**第一个点**切 provider 名，所以带点的 provider 名会被
+切错（见残留风险）。
+
+### 不变式
+
+1. 值类型在写侧确定一次；读侧不猜（未标注行除外，规则见上表）。
+2. blob 是权威、KV 是兜底；任一读入口只有在链条上没有 blob 行时才碰镜像。
+3. 数据 key 段两个方向都不转换，`kvkeys` 是唯一规则来源。
+4. 四层所有权 → (scope, scope_id) 只有 `store.KVScopeFromOwnership` 一处定义。
+5. 新写入的 configs_kv 行必带 `value_kind`（生产路径只经 `EncodeConfigValue`）。
+
+违反 1 的症状是「值变形/丢字段」，违反 2 的症状是「面板正常、运行时不生效」，
+违反 3 的症状是「配置写进去了但运行时查不到」（`web_search` 事件），
+违反 4 的症状是「另一个 agent 读到了别人的 key」。四类都各有一组回归测试。
 
 ## 背景：fork 的四层 scope 模型
 
@@ -72,41 +193,57 @@ const (
 
 ### 2. `kvScopeFromOwnership` 加第四层
 
+上游那个函数在 fork 里搬进了 store 并改名 `KVScopeFromOwnership`（迁移要用，
+而 store 不能 import scope），`scope.kvScopeFromOwnership` 现在只是转发：
+
 ```go
-func kvScopeFromOwnership(userID, agentID string) (scope, scopeID string) {
+func KVScopeFromOwnership(userID, agentID string) (scope, scopeID string) {
     switch {
     case userID != "" && agentID != "":
-        return UserAgent, userID + "/" + agentID   // 新增，不再折叠
+        return "user-agent", KVUserAgentScopeID(userID, agentID) // 新增，不再折叠
     case userID != "":
-        return User, userID
+        return "user", userID
     case agentID != "":
-        return Agent, agentID
+        return "agent", agentID
     default:
-        return System, ""
+        return "system", ""
     }
 }
 ```
 
 ### 3. 读路径加最内层
 
-`GetValue`（单值）与 `GetValues`（前缀扫描）在 `agent` 层之后、`user` 层之内
-增加 per-(user,agent) 层查询；`GetValue` 语义 = innermost wins：
+`GetValues`（前缀扫描）在 `agent` 层之后、`user` 层之内增加 per-(user,agent)
+层查询，语义 = innermost wins。当时还有一个单值的 `GetValue` 做同样的四层
+点查，它后来随「blob 权威」那一轮退场了（现在四层点查走 `GetConfigByName`，
+前缀扫描走 `GetValues`；见「现状」的读路径表）：
 
 ```go
-// GetValue：tryGet 顺序 system → user → agent → user-agent（最内层覆盖）
+// GetValues：system → user → agent → user-agent，后者覆盖前者的同名行
 if userID != "" && agentID != "" {
-    if err := tryGet(UserAgent, userID+"/"+agentID); err != nil {
-        return "", true, nil
+    if err := merge(UserAgent, store.KVUserAgentScopeID(userID, agentID)); err != nil {
+        return nil, err
     }
 }
 ```
 
 ### 4. 迁移映射 `internal/store/database.go`
 
+这一层映射现在只有一处定义（`store.KVScopeFromOwnership`，`scope` 与迁移共用）：
+
 ```go
-case cfg.UserID != "" && cfg.AgentID != "":
-    kvScope   = "user-agent"
-    kvScopeID = cfg.UserID + "/" + cfg.AgentID   // 不再折叠到 user 层
+func KVScopeFromOwnership(userID, agentID string) (scope, scopeID string) {
+    switch {
+    case userID != "" && agentID != "":
+        return "user-agent", KVUserAgentScopeID(userID, agentID) // 不再折叠到 user 层
+    case userID != "":
+        return "user", userID
+    case agentID != "":
+        return "agent", agentID
+    default:
+        return "system", ""
+    }
+}
 ```
 
 ## 回归护栏（测试）
@@ -120,25 +257,28 @@ case cfg.UserID != "" && cfg.AgentID != "":
 
 ## key 形状规则（数据 key vs 结构体字段）
 
-`camelToSnake`（写）只把 camelCase 折成 snake_case，已经是 snake_case 的 key
-原样保留；但 `snakeToCamel`（读）对这类 key **不是它的逆**：`camelToSnake("webSearch")`
-和 `camelToSnake("web_search")` 都落到 `web_search`。因此两个方向都不能对每个
+写侧 `kvkeys.CamelToSnake` 只把 camelCase 折成 snake_case，已经是 snake_case 的
+key 原样保留；但读侧 `kvkeys.SnakeToCamel` 对这类 key **不是它的逆**：
+`CamelToSnake("webSearch")` 和 `CamelToSnake("web_search")` 都落到 `web_search`。
+因此两个方向都不能对每个
 点号段一律转换，否则会改写「数据 key」（分类 id、provider 名、skill id、team id、
 env 变量名），而改写后的 key 静默失配运行时查询 ——
 `gateway.registerAgentToolChains` 查 `cfg.Tools["web_search"]` 查不到，就只是
 **不注册 web_search 工具**，全程没有任何报错。
 
 规则集中在 `internal/kvkeys`（读 `RestoredSegment`、写 `StoredSegment`、
-白名单 `dataPaths`），`scope.dualWriteSettingKV` / `scope.kvToSettingMap` /
-`store.migrateConfigsToKV` 共用同一份，不再各持一份 `camelToSnake` 实现：
+白名单 `dataPaths` + 任意深度前缀规则 `openPaths`），
+`scope.dualWriteSettingKV` / `scope.kvToSettingMap` /
+`store.migrateConfigsToKV` 共用同一份，不再各持一份实现：
 
 - 结构体字段段（`memory.auto_persist` → `memory.autoPersist`、
   `objectstore.s3.access_key` → `.accessKey`）继续 snake_case→camelCase；
-- 数据 key 段按 `dataPaths` 白名单**两个方向都原样保留**（`*` 匹配一段）：
-  `tools.categories.*`、`tools.providers.*`、`tools.providers.*.options.*`、
-  `skills.entries.*`、`skills.entries.*.env.*`、`plugins.entries.*`、
-  `plugins.entries.*.config.*`、`plugins.enabled.*`（每 agent 的插件开关行）、
-  `teams.*`。
+- 数据 key 段**两个方向都原样保留**，由两条机制覆盖：`dataPaths` 精确匹配一段
+  （`tools.categories.*`、`tools.providers.*`、`skills.entries.*`、
+  `plugins.entries.*`、`plugins.enabled.*`（每 agent 的插件开关行）、`teams.*`），
+  `openPaths` 是前缀规则、覆盖任意深度
+  （`tools.providers.*.options`、`skills.entries.*.env`、
+  `plugins.entries.*.config` 之下）。
 
 白名单需与带 map 字段的 config 结构体同步（`config.Config` /
 `ToolProviderCfg.Options` / `SkillEntryCfg.Env` / `PluginsCfg.Entries` /
@@ -208,7 +348,7 @@ web_search，模型只能回 “Unknown tool: web_search”，而 owner 自己�
    + `ESCAPE '\'`。回归测试：`internal/store/configs_kv_test.go` →
    `TestConfigsKVLIKEUnderscoreIsLiteral`。
 
-## 读源优先级：blob 权威，configs_kv 兜底（本次变更）
+## 读源优先级：blob 权威，configs_kv 兜底（51780fa）
 
 原来的读路径是 **configs_kv 优先、blob 兜底**，这条规则把所有投影缺陷都
 放大成了线上故障：投影会重新推断类型（`"123"` → number）、会改写嵌套数据 key、
@@ -224,16 +364,19 @@ KV 没覆盖到的那些 key。`web_search` 事件正是这条链路的产物。
 涉及函数：`scope.Setting`、`scope.UserScopeSetting`、`scope.Providers`、
 `scope.AgentScopeProviders`、`scope.UserScopeProviders`。
 依赖 KV 数值优先的旧契约 `TestProvidersDualWriteReadsFromKV` 已按新语义
-重写为 `TestProvidersDualWriteReadsFromBlob`（生产代码里没有任何「只写 KV」的
-路径，唯一的 `SetConfigValue` 调用点是双写本身和 mcp undo 游标）。
+重写为 `TestProvidersDualWriteReadsFromBlob`。生产代码里没有任何「只写 KV」的
+业务路径：`SetConfigValue` 的调用点只有双写本身（setting / provider /
+plugin_enabled 三处）、`migrateConfigsToKV` 的回填，以及 mcp undo 游标。
 
 投影侧同时补了两处：`kvkeys` 对「自由 map 容器」（`options` / `env` / `config`）
-改用前缀规则，任意深度都算数据 key；provider 投影不再吞掉
-`json.Unmarshal` 错误，且未标注的标量一律按存储字符串还原（`kvFieldMap`）。
+改用前缀规则，任意深度都算数据 key；provider 投影不再吞掉 `json.Unmarshal`
+错误，且未标注的行走保守规则（`kvFieldMap`）：结构照解，标量按存储字符串还原。
 带 `value_kind` 的行不走这条保守规则——写侧已经说明了类型，读侧直接采信
-（见下文「值保真」）。
+（见下文「值保真」与「现状」的未标注行对照表）。这里的「结构照解」在当时被
+漏掉了（只保留标量那半条），`TestProvidersMirrorFallbackKeepsLegacyStructure`
+现在钉住它。
 
-## review 第二轮修复：agent 层可写但没人读 / plugins.enabled 形状（本次变更）
+## review 第二轮修复：agent 层可写但没人读 / plugins.enabled 形状（752e9d0）
 
 上一节把读源翻成 blob 权威之后，又顺着「配置在 DB 里，运行时却说没有」这条线
 做了一轮同类排查，修掉三处同因问题（P1/P2/P3）。
@@ -320,7 +463,7 @@ per-agent 行不可见 + base 不被改写）、`TestEnsureAgentHonorsAgentScope
 `TestPluginsNamespaceIgnoresAgentOptIns`（含 KV fallback 路径）；
 `store` → `TestMigratePluginEnabledKind`；`kvkeys` → `plugins.enabled.*` 正负例。
 
-## 值保真：`configs_kv.value_kind`（本次变更）
+## 值保真：`configs_kv.value_kind`（db043cd）
 
 前三轮修的是「key 写丢了」「分区撞车」「代理层没人读」。这一轮修的是最后一层：
 **值写进去的时候类型就丢了**。
@@ -370,8 +513,11 @@ func StringValue(s string) ConfigValue                 // 不透明文本的简�
 ```
 
 `Store` 的 KV 接口改为收发 `ConfigValue` 而不是裸 `string`：
-`GetConfigValue` / `SetConfigValue` / `ListConfigValues`。**写不出未标注的行**，
-所以这个迁移不会在代码里悄悄退化。
+`GetConfigValue` / `SetConfigValue` / `ListConfigValues`。生产写路径只经
+`EncodeConfigValue`，它**总是**带 tag，所以这个迁移不会在代码里悄悄退化；
+接口本身并不禁止 `ConfigValue{Value: "x"}`（Kind 为空），那是给测试与历史行
+留的口子——「未标注」必须仍然可表达，否则读不到迁移之前写下的数据。
+未标注行的两条读规则见「现状」。
 
 ### 迁移与向后兼容
 
@@ -435,6 +581,8 @@ tag 补不回来（`TestConfigValueNumberFloat64Boundary` 钉住这条边界）�
 投影出 `int64` / `string "123"` / `bool` / 空串，未加 tag 时该测试失败）、
 `TestGetValuesScopePrecedence`（内层同时替换值与 tag）、
 `TestProvidersMirrorFallbackKeepsNumericKey`（标注行与未标注行各一例）、
+`TestProvidersMirrorFallbackKeepsLegacyStructure`（未标注的 `models` 数组行必须
+解回结构——db043cd 把这条漏掉了，provider 会整个消失）、
 `TestSettingLargeIntThroughKVOnlyPath`（1e6 以上的 int 端到端）。
 
 ### 顺带删掉的
@@ -442,8 +590,11 @@ tag 补不回来（`TestConfigValueNumberFloat64Boundary` 钉住这条边界）�
 `store.camelToSnake` 失去了最后一个生产调用者（`flattenJSON` 改用
 `EncodeConfigValue`），连同只测这个薄别名的 `TestCamelToSnakeAllCaps` 一起删除——
 实现与测试都在 `kvkeys`，留着就是第二份会漂移的副本。
+`scope.camelToSnake` 在后续 review 里因为同样的理由删除（它已经没有生产调用者，
+只剩测试在用）；`scope.snakeToCamel` 保留，`kvFieldMap` 仍在用。
+「所有权 → KV scope」的映射也从两处合并为 `store.KVScopeFromOwnership`。
 
-## 写侧保真：JSON 文本列不再经过 `float64`
+## 写侧保真：JSON 文本列不再经过 `float64`（963b71e）
 
 上一节解决的是「KV 里的值带着类型」。这一节解决它的前提：**值在写进来之前
 就已经被压成 `float64` 了**。
@@ -502,9 +653,10 @@ plugin / skills manifest 的解码。它们不参与 config 往返，需要时�
 ## 残留风险
 
 1. **未标注行仍靠猜测**：新写入的值都带 `value_kind`，但改动之前写下的行没有
-   （信息本来就不在），读它们仍走 `decodeLegacyValue` 猜——`"123"` 与数字 `123`
-   不可分。这些行只在被重新写入时获得 tag。回填被刻意排除：那是把猜测写成事实。
-   排查这类行可用 `SELECT ... WHERE value_kind = ''`。
+   （信息本来就不在），读它们只能按路径各自的旧规则来（settings 走
+   `decodeLegacyValue` 猜标量，providers 只解结构、标量保持文本）——`"123"` 与
+   数字 `123` 在列里本就不可分。这些行只在被重新写入时获得 tag。回填被刻意
+   排除：那是把猜测写成事实。排查这类行可用 `SELECT ... WHERE value_kind = ''`。
 2. **KV 镜像本身仍可能不完整**：非事务的双写、历史行、手写行都会留下子集。
    现在只表现为「镜像与 blob 不一致」，不再影响读取；如果以后要把 KV 提升为
    权威读源，需要先给它加完整性标记并事务化写入。
@@ -518,6 +670,16 @@ plugin / skills manifest 的解码。它们不参与 config 往返，需要时�
    `plugins` 等「仅系统层可读」的 namespace（当前 CLI/HTTP 都不产生这种行）。
    约定：新增一个 agent 层可写的 namespace 时，必须同时让 runtime 读它，或者
    像 sandbox 一样在写侧拒绝——两者都没有就是这次的 bug 类。
+6. **provider 名里的点会切错 key**：`kvValsToProviders` 用第一个 `.` 切
+   provider 名，而 `handleCreateProvider` 只校验非空。名字叫 `my.provider`
+   时镜像投影会把 `my.provider.api_key` 切成 `my` + `provider.api_key`，
+   `ProviderConfig` 解不出来 → 得到一个空 provider。只在「读镜像」时出现
+   （blob 权威），修法是写侧加字符白名单（推荐，名字进 URL/CLI 也用得上）
+   或换一个不会出现在名字里的分隔符。
+7. **两个读入口没有 KV 兜底**：`BatchSettings`（面板，2 次查询换 N 个
+   namespace）与 `Channels`（channel 本来就不进 KV）。前者是刻意的性能取舍，
+   但它意味着「只写在镜像里的 namespace」在面板上看不到——如果将来真的出现
+   只写 KV 的路径，这里要么补兜底、要么把它排除在「KV 兜底」的承诺之外。
 
 ## 对上游的 PR 提案
 
@@ -528,7 +690,9 @@ plugin / skills manifest 的解码。它们不参与 config 往返，需要时�
    a. 同用户多 agent 时，per-(user,A) 的 provider key 泄漏给该用户的其他 agent（数据泄露）；
    b. 迁移 `migrateConfigsToKV` 时同用户多 agent 的 key 撞到 `(user, X)` 同一行，last-write-wins 静默丢数据。
 2. 改动：`configs_kv` 增加第四层 scope `user-agent`，`scope_id = userID/agentID`；
-   `GetValue`/`GetValues` 读路径加最内层；迁移映射不再折叠。
+   前缀扫描 `GetValues` 的读路径加最内层（四层点查走 `GetConfigByName`）；
+   所有权→scope 的映射收敛成一个函数（fork 实现在 `store.KVScopeFromOwnership`），
+   迁移与读路径共用，不再各写一份。
 3. 破坏性：无。`user-agent` 是新 scope 值，存量数据要么没有该层、要么迁移前已折叠
    （可重跑迁移恢复）。写路径上游本身只在 3 层内产生数据，此改动只影响
    **既有 per-(user,agent) 行**的读写，属修复性增强。
