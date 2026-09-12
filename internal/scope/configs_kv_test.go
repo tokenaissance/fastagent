@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"math"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/fastclaw-ai/fastclaw/internal/config"
@@ -20,6 +21,21 @@ func openScopeDB(t *testing.T) *store.DBStore {
 	}
 	if err := db.Migrate(context.Background()); err != nil {
 		t.Fatalf("migrate: %v", err)
+	}
+	return db
+}
+
+// openScopeDBNamed opens a store on its own in-memory database. The unnamed
+// DSN above is shared by every test in this package (an empty name is one
+// database), so a test that seeds rows another test also reads needs its own.
+func openScopeDBNamed(t *testing.T, name string) *store.DBStore {
+	t.Helper()
+	db, err := store.NewDBStore("sqlite", "file:"+name+"?mode=memory&cache=shared")
+	if err != nil {
+		t.Fatalf("open store %s: %v", name, err)
+	}
+	if err := db.Migrate(context.Background()); err != nil {
+		t.Fatalf("migrate %s: %v", name, err)
 	}
 	return db
 }
@@ -134,6 +150,111 @@ func TestProvidersMirrorFallbackKeepsLegacyStructure(t *testing.T) {
 	}
 	if len(got.Models) != 1 || got.Models[0].ID != "gpt-5.5" || got.Models[0].ContextWindow != 128000 {
 		t.Fatalf("Models = %#v, want the stored array decoded", got.Models)
+	}
+}
+
+// TestValidateProviderName pins the charset rule that keeps a provider name
+// representable in both places it is used: as the configs_kv key prefix
+// ("<name>.<field>", split at the first dot) and as the left half of a
+// "provider/model" reference.
+func TestValidateProviderName(t *testing.T) {
+	valid := []string{"openai", "azure-openai", "my_provider", "a", "A1", "x9_-y"}
+	for _, name := range valid {
+		if err := ValidateProviderName(name); err != nil {
+			t.Errorf("ValidateProviderName(%q) = %v, want nil", name, err)
+		}
+	}
+	invalid := []string{"", "my.provider", "a/b", "-lead", "_lead", "sp ace", "名字", "p:", strings.Repeat("a", 65)}
+	for _, name := range invalid {
+		if err := ValidateProviderName(name); err == nil {
+			t.Errorf("ValidateProviderName(%q) = nil, want an error", name)
+		}
+	}
+	// The write path is the choke point: HTTP create/update, the admin API,
+	// onboarding and the CLI all reach storage through SaveProvider.
+	if err := SaveProvider(context.Background(), openScopeDB(t), "", "", "my.provider", config.ProviderConfig{}); err == nil {
+		t.Fatal("SaveProvider accepted a dotted name")
+	}
+}
+
+// TestBatchSettingsFallsBackToMirror pins the read-path promise for the one
+// reader that did not implement it: a namespace with no blob row anywhere is
+// served from configs_kv, exactly as Setting would.
+func TestBatchSettingsFallsBackToMirror(t *testing.T) {
+	// Its own database, not openScopeDB's: that DSN names the *same* in-memory
+	// database for every test in this package, and this test writes a "prefs"
+	// row that the timezone tests read.
+	db := openScopeDBNamed(t, "batchmirror")
+	defer db.Close()
+	ctx := context.Background()
+
+	// One namespace with a blob row, one that exists only in the mirror.
+	if err := SaveSetting(ctx, db, "", "", "prefs", map[string]interface{}{"timezone": "Asia/Shanghai"}); err != nil {
+		t.Fatalf("SaveSetting: %v", err)
+	}
+	if err := db.SetConfigValue(ctx, store.KindSetting, System, "", "probe.enabled",
+		store.EncodeConfigValue(true)); err != nil {
+		t.Fatalf("SetConfigValue: %v", err)
+	}
+	if err := db.SetConfigValue(ctx, store.KindSetting, System, "", "probe.name",
+		store.EncodeConfigValue("123")); err != nil {
+		t.Fatalf("SetConfigValue: %v", err)
+	}
+
+	got, err := BatchSettings(ctx, db, []string{"prefs", "probe"}, "", "")
+	if err != nil {
+		t.Fatalf("BatchSettings: %v", err)
+	}
+	if v := got["prefs"]["timezone"]; v != "Asia/Shanghai" {
+		t.Errorf("prefs.timezone = %#v, want the blob value", v)
+	}
+	if v := got["probe"]["enabled"]; v != true {
+		t.Errorf("probe.enabled = %#v, want the mirror value", v)
+	}
+	if v := got["probe"]["name"]; v != "123" {
+		t.Errorf("probe.name = %#v, want the tagged string \"123\"", v)
+	}
+
+	// A namespace nobody wrote stays absent rather than becoming an empty map.
+	got, err = BatchSettings(ctx, db, []string{"nothing-here"}, "", "")
+	if err != nil {
+		t.Fatalf("BatchSettings: %v", err)
+	}
+	if _, ok := got["nothing-here"]; ok {
+		t.Errorf("unwritten namespace present in the result: %#v", got)
+	}
+}
+
+// TestChannelsAreNotMirroredInKV pins the documented exception instead of
+// leaving it as an unstated asymmetry. configs_kv holds provider, setting and
+// plugin_enabled rows; a channel lives in the configs blob plus the channels
+// table, so Channels() has nothing to fall back to — and that is safe only
+// while no code path writes channel rows into the mirror. If someone adds a
+// partial dual-write, this fails and points at the reader that must learn the
+// fallback first.
+func TestChannelsAreNotMirroredInKV(t *testing.T) {
+	db := openScopeDB(t)
+	defer db.Close()
+	ctx := context.Background()
+
+	if err := SaveChannel(ctx, db, "user-a", "", "telegram", "bot-1", true,
+		config.ChannelConfig{BotToken: "t-1"}); err != nil {
+		t.Fatalf("SaveChannel: %v", err)
+	}
+	rows, err := db.ListConfigValues(ctx, store.KindChannel, User, "user-a", "")
+	if err != nil {
+		t.Fatalf("ListConfigValues: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("channel rows leaked into configs_kv: %#v", rows)
+	}
+
+	chans, err := Channels(ctx, db, "user-a", "")
+	if err != nil {
+		t.Fatalf("Channels: %v", err)
+	}
+	if got := chans["telegram"].BotToken; got != "t-1" {
+		t.Fatalf("telegram.BotToken = %q, want the blob value", got)
 	}
 }
 

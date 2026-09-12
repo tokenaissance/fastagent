@@ -12,6 +12,43 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/store"
 )
 
+// TestCreateProvider_RejectsAmbiguousName is the HTTP edge of the provider
+// name rule. The name is both the configs_kv key prefix and the left half of
+// a "provider/model" reference, so a '.' or '/' in it makes the stored value
+// unreadable (mirror) or the model reference ambiguous. The handler has to
+// answer 400 with the reason: it used to check only for non-empty, and
+// SaveProvider's generic 500 path would have buried it.
+func TestCreateProvider_RejectsAmbiguousName(t *testing.T) {
+	s, uid, _ := setupFileUploadTest(t)
+
+	create := func(name string) (int, string) {
+		t.Helper()
+		body := strings.NewReader(`{"name":"` + name + `","apiKey":"sk-x"}`)
+		req := httptest.NewRequest(http.MethodPost, "/api/providers?scope="+scope.User+"&scopeId="+uid, body)
+		req.Header.Set("Content-Type", "application/json")
+		req = stampAuthAndUserID(req, uid)
+		rec := httptest.NewRecorder()
+		s.handleCreateProvider(rec, req)
+		var resp map[string]any
+		_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+		msg, _ := resp["error"].(string)
+		return rec.Code, msg
+	}
+
+	for _, name := range []string{"my.provider", "a/b", "-lead"} {
+		code, msg := create(name)
+		if code != http.StatusBadRequest {
+			t.Errorf("create(%q) status = %d, want 400", name, code)
+		}
+		if !strings.Contains(msg, "invalid provider name") {
+			t.Errorf("create(%q) error = %q, want the name rule spelled out", name, msg)
+		}
+	}
+	if code, msg := create("azure-openai"); code != http.StatusOK {
+		t.Fatalf("create(azure-openai) = %d %q, want 200", code, msg)
+	}
+}
+
 // TestProviders_CloudPathE2E drives the configs_kv lifecycle through the
 // real scoped provider handlers (the Cloud proxy path: POST/GET/DELETE
 // /api/providers?scope=...) and asserts the dual-write contract holds:
