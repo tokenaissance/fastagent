@@ -113,6 +113,9 @@ func TestConfigValueNumberFloat64Boundary(t *testing.T) {
 func TestConfigValueFloatFormatIsValidJSON(t *testing.T) {
 	for _, f := range []float64{
 		0, -0, 1, -1, 0.1, 1e-7, 1e21, 1e-21, 1234567890123456789, math.MaxFloat64, math.SmallestNonzeroFloat64,
+		// The exponent-form boundary: strconv.FormatFloat('g', -1, 64)
+		// switches to "1e+06" at 1e6, encoding/json only at 1e21.
+		1e6, 1e7, 1e15, 1e20, 1e-5,
 	} {
 		v := EncodeConfigValue(f)
 		if _, err := json.Marshal(v.Decode()); err != nil {
@@ -122,6 +125,74 @@ func TestConfigValueFloatFormatIsValidJSON(t *testing.T) {
 		if err := json.Unmarshal([]byte(v.Value), &back); err != nil || back != f {
 			t.Fatalf("float64 %v encoded as %q, decoded to %v (err=%v)", f, v.Value, back, err)
 		}
+	}
+}
+
+// TestConfigValueIntegralFloatKeepsJSONIntForm is the second half of the
+// precision story. A float64 whose value is integral still has to reach an
+// int field on the way back — every settings write goes through
+// setup.toMap (struct → marshal → map[string]interface{}), and
+// encoding/json decodes numbers there as float64, so this is the normal
+// path, not a corner case. contextWindow: 1000000 is a real Gemini entry.
+//
+// strconv.FormatFloat('g', -1, 64) wrote that as "1e+06", which is a valid
+// JSON number but not an integer literal: jsonInto then failed with
+// "cannot unmarshal number 1e+06 into Go value of type int64" and the whole
+// namespace fell back. The stored text must be what encoding/json itself
+// writes, so the tag keeps the value *and* its integer form.
+func TestConfigValueIntegralFloatKeepsJSONIntForm(t *testing.T) {
+	for _, f := range []float64{1e6, 1e7, 1e15, 1e18, 1.5e7} {
+		v := EncodeConfigValue(f)
+		if v.Kind != ValueKindNumber {
+			t.Fatalf("EncodeConfigValue(%v).Kind = %q, want %q", f, v.Kind, ValueKindNumber)
+		}
+		want, err := json.Marshal(f)
+		if err != nil {
+			t.Fatalf("marshal %v: %v", f, err)
+		}
+		if v.Value != string(want) {
+			t.Fatalf("EncodeConfigValue(%v).Value = %q, want %q", f, v.Value, want)
+		}
+
+		// The hop that actually broke: jsonInto marshals the rebuilt map and
+		// unmarshals it onto the typed struct.
+		blob, err := json.Marshal(map[string]interface{}{"contextWindow": v.Decode()})
+		if err != nil {
+			t.Fatalf("marshal rebuilt map for %v: %v", f, err)
+		}
+		var dst struct {
+			ContextWindow int `json:"contextWindow"`
+		}
+		if err := json.Unmarshal(blob, &dst); err != nil {
+			t.Fatalf("float64 %v stored as %q does not project onto an int field: %v", f, v.Value, err)
+		}
+		if float64(dst.ContextWindow) != f {
+			t.Fatalf("projected %d, want %v", dst.ContextWindow, f)
+		}
+	}
+}
+
+// TestConfigValueNestedNumbersKeepTheirDigits pins that the tag's promise
+// holds below the top level too. Decode of an object/array used plain
+// json.Unmarshal, which hands back float64 for every nested number — so a
+// 19-digit id inside {"id": …} came back with its low digits replaced by
+// zeros even though the row text was exact.
+func TestConfigValueNestedNumbersKeepTheirDigits(t *testing.T) {
+	const literal = "9223372036854775807" // math.MaxInt64
+	v := ConfigValue{Value: `{"id":` + literal + `}`, Kind: ValueKindObject}
+
+	blob, err := json.Marshal(v.Decode())
+	if err != nil {
+		t.Fatalf("marshal decoded object: %v", err)
+	}
+	var dst struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(blob, &dst); err != nil {
+		t.Fatalf("unmarshal %s into int64: %v", blob, err)
+	}
+	if dst.ID != math.MaxInt64 {
+		t.Fatalf("nested int64 = %d (text %s), want %d", dst.ID, blob, int64(math.MaxInt64))
 	}
 }
 
