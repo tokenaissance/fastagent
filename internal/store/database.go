@@ -4003,14 +4003,21 @@ func (d *DBStore) DeleteConfigMirror(ctx context.Context, kind, scope, scopeID, 
 // mirror-first reader may trust them). A row that matches on names and values
 // but predates value_kind is retagged — its type is stated by the blob, so
 // filling the tag records a fact rather than guessing one — and then certified.
-// Rows that genuinely diverge are left uncertified and reported, and any stale
-// marker on them is dropped so nothing vouches for a wrong projection.
+// Rows that genuinely diverge (a wrong key, a missing/extra leaf, a value or a
+// tag that contradicts the blob) are left uncertified and reported, and any
+// stale marker on them is dropped so nothing vouches for a wrong projection.
+//
+// With repair set, a diverged row is instead re-projected from the blob: the
+// namespace's configs_kv leaves are cleared and rewritten from the projection,
+// then certified. That is the only correct direction while the blob is still
+// authoritative, and it is what makes a mirror written by an older build (a
+// collapsed nested map, an ALL_CAPS data key folded to snake_case) catch up.
+// It overwrites the mirror, so it is opt-in: the default pass reports the
+// divergence and leaves the decision to a human.
 //
 // It is idempotent and safe to re-run: a second pass over an already
-// reconciled database reports the same certification and no new gaps. It does
-// not repair anything — a mismatch is data that needs a decision, not a value
-// this function should silently pick.
-func (d *DBStore) ReconcileConfigMirrors(ctx context.Context) (ConfigMirrorReconcile, error) {
+// reconciled database reports the same certification and no new gaps.
+func (d *DBStore) ReconcileConfigMirrors(ctx context.Context, repair bool) (ConfigMirrorReconcile, error) {
 	var rep ConfigMirrorReconcile
 	rows, err := d.handle().QueryContext(ctx,
 		fmt.Sprintf(`SELECT `+configSelectCols+` FROM configs WHERE kind IN (%s, %s, %s) ORDER BY kind, user_id, agent_id, name`,
@@ -4071,6 +4078,30 @@ func (d *DBStore) ReconcileConfigMirrors(ctx context.Context) (ConfigMirrorRecon
 			rep.Untyped++
 			rep.Retagged += len(untagged)
 		default:
+			if repair {
+				// Re-project from the blob. Clear the whole namespace first —
+				// the stale key is part of what is wrong, and SetConfigValue
+				// alone would leave it behind (e.g. `tools.providers.searxng`
+				// survives a write of `...searxng.endpoint`). This is the same
+				// delete-then-write the dual-write itself performs, so the
+				// result is the projection, not a third shape.
+				if err := d.DeleteConfigPrefix(ctx, cfg.Kind, scope, scopeID, prefix); err != nil {
+					return rep, err
+				}
+				for k, v := range want {
+					if err := d.SetConfigValue(ctx, cfg.Kind, scope, scopeID, k, v); err != nil {
+						return rep, err
+					}
+				}
+				if err := d.SaveConfigMirror(ctx, cfg.Kind, scope, scopeID, cfg.Name,
+					NewConfigMirror(prefix, want)); err != nil {
+					return rep, err
+				}
+				rep.Certified++
+				rep.Repaired++
+				rep.Rewritten += len(want)
+				continue
+			}
 			if err := d.DeleteConfigMirror(ctx, cfg.Kind, scope, scopeID, cfg.Name); err != nil {
 				return rep, err
 			}
@@ -4418,10 +4449,14 @@ func flattenJSON(prefix string, data map[string]interface{}, out map[string]Conf
 	for k, v := range data {
 		seg := kvkeys.StoredSegment(prefixPath, k)
 		fullKey := prefix + seg
-		// Nested maps keep descending; everything else is a leaf. A nil leaf
-		// is now written as a tagged null row rather than skipped, so
-		// {"a":null} and {} stop looking the same in the mirror.
-		if nested, ok := v.(map[string]interface{}); ok {
+		// Anything that is still a JSON object keeps descending; everything
+		// else is a leaf. The test is structural (JSONObjectOf) rather than
+		// `v.(map[string]interface{})`: a nested map[string]string or a struct
+		// is a JSON object too, and folding it into one leaf is exactly the
+		// collapse reconcile reports as a gap. A nil leaf is written as a
+		// tagged null row rather than skipped, so {"a":null} and {} stop
+		// looking the same in the mirror.
+		if nested, ok := JSONObjectOf(v); ok {
 			flattenJSON(fullKey+".", nested, out)
 			continue
 		}

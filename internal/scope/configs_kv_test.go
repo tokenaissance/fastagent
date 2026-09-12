@@ -3,8 +3,10 @@ package scope
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"math"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
@@ -1129,5 +1131,54 @@ func TestMirrorFallbackRestoresValueTypes(t *testing.T) {
 	}
 	if v, err := db.GetConfigValue(ctx, store.KindSetting, System, "", "probe.big"); err != nil || v.Value != bigLiteral {
 		t.Fatalf("probe.big row = %+v err=%v, want the literal %s", v, err, bigLiteral)
+	}
+}
+
+// TestFlattenDescendsIntoAnyJSONObject pins the collapse fix: the flattener
+// picks the leaf boundary by structure, not by concrete Go type. An earlier
+// version tested `v.(map[string]interface{})`, so a nested map[string]string,
+// a map[string]SomeCfg or a plain struct was stored as one object-valued leaf
+// — `tools.providers.searxng` where the projection (flattenJSON) expects
+// `tools.providers.searxng.endpoint`. That is the row reconcile reported as a
+// gap on dev, and the same shape prod has as
+// `skills.entries.<id>.env.app_i_d` for AppID.
+func TestFlattenDescendsIntoAnyJSONObject(t *testing.T) {
+	type providerCfg struct {
+		Endpoint string `json:"endpoint"`
+	}
+	cases := []struct {
+		name string
+		data map[string]interface{}
+		want []string
+	}{
+		{"nested map[string]string",
+			map[string]interface{}{"searxng": map[string]string{"endpoint": "https://x"}},
+			[]string{"tools.providers.searxng.endpoint"}},
+		{"nested struct",
+			map[string]interface{}{"searxng": providerCfg{Endpoint: "https://x"}},
+			[]string{"tools.providers.searxng.endpoint"}},
+		{"nested map of map",
+			map[string]interface{}{"searxng": map[string]map[string]interface{}{"default": {"endpoint": "https://x"}}},
+			[]string{"tools.providers.searxng.default.endpoint"}},
+	}
+	for i, c := range cases {
+		db := openScopeDBNamed(t, fmt.Sprintf("flattendepth%d", i))
+		if err := SaveSetting(context.Background(), db, "", "", "tools.providers", c.data); err != nil {
+			t.Fatalf("%s: SaveSetting: %v", c.name, err)
+		}
+		kv, err := GetValues(context.Background(), db, store.KindSetting, "tools.providers.", "", "")
+		if err != nil {
+			t.Fatalf("%s: GetValues: %v", c.name, err)
+		}
+		got := make([]string, 0, len(kv))
+		for k := range kv {
+			got = append(got, k)
+		}
+		sort.Strings(got)
+		sort.Strings(c.want)
+		if !reflect.DeepEqual(got, c.want) {
+			t.Fatalf("%s: leaves = %v, want %v", c.name, got, c.want)
+		}
+		db.Close()
 	}
 }

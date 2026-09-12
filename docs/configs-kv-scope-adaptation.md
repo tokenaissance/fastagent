@@ -70,7 +70,7 @@ KV 是镜像」，这是**迁移期的临时不变式**，不是终点。翻转�
 |---|---|---|
 | 0 | typed encoding：值域能表达「这是 string / number / bool…」，不靠读侧猜 | **已做**：`configs_kv.value_kind`（数字保字面量，`json.Number`） |
 | 1 | 事务化双写：blob 与镜像不会「写一半」 | **已做**：`store.WithConfigTx`（`9dbccd9`） |
-| 2 | 完整性标记：能判定「镜像 = blob 的完整投影」，而不只是抽样一致 | **已做**：`configs_mirror` 表 + `store.ConfigMirror`（prefix / key_count / fingerprint）；双写与回填写标记，`store.VerifyConfigMirror` 判定；存量行由 `store.ReconcileConfigMirrors`（CLI `fastagent configs reconcile-mirror [--strict]`）做 blob↔镜像核对并回填标记 |
+| 2 | 完整性标记：能判定「镜像 = blob 的完整投影」，而不只是抽样一致 | **已做**：`configs_mirror` 表 + `store.ConfigMirror`（prefix / key_count / fingerprint）；双写与回填写标记，`store.VerifyConfigMirror` 判定；存量行由 `store.ReconcileConfigMirrors`（CLI `fastagent configs reconcile-mirror [--strict] [--repair]`）做 blob↔镜像核对、回填标记，`--repair` 时按 blob 重投影 diverged 行 |
 | 3 | 翻转权威：读路径改 KV 优先、blob 变兜底 | **未做** |
 | 4 | 下掉 blob：迁移完成后删除 `configs` 的 blob 列与相关读代码 | **未做** |
 
@@ -84,15 +84,29 @@ gap 归零**。新写入与回填自动认证；存量行由这次核对认证�
 - **untyped**（名字和值都对，只是行早于 `value_kind`、没有标注）→ **就地补标注**
   再认证。这是刻意的例外：类型由权威的 blob 明确给出，补的是「已知的事实」而不是
   猜一个值，`value` 一个字节都不动；
-- **diverged**（缺叶子 / 多叶子 / 值不同 / 存的类型与 blob 矛盾）→ 报告 gap，并确保
-  没有标记为它背书。
+- **diverged**（缺叶子 / 多叶子 / 名字被改写 / 值不同 / 存的类型与 blob 矛盾）→
+  默认只报告 gap，并确保没有标记为它背书；加 `--repair` 则**按 blob 重投影该
+  namespace**（删掉它的全部 configs_kv 叶子 → 写投影 → 认证）。
 
 所以闸门是**「gap 归零」**，untyped 允许存在但会被补掉。没有这一步，翻转权威等于
 把「镜像可能不全」从潜伏变成正式语义。
 
-核对被设计成**可重跑**的：它只做「认证 + 报告 + 补标注」这一件事，**绝不改
-diverged 行的值**（不一致是需要人决策的数据，不是一个函数该替你选的值），所以重复
-跑结果稳定（第二次 untyped=0），适合放进发布前检查。
+核对被设计成**可重跑**的：默认那次只做「认证 + 报告 + 补标注」，**绝不改 diverged
+行的值**（不一致是需要人决策的数据，不是一个函数该替你选的值），所以重复跑结果
+稳定（第二次 untyped=0），适合放进发布前检查。
+
+`--repair` 是那个「人已经决策过」的动作，方向是**唯一的**：blob 权威，所以 diverged
+行按 blob 重投影，而不是反过来把 blob 改成镜像的样子。它修的是**旧构建写出来的
+形态**，不是「blob 与镜像谁对」的争议——两个已知来源：
+
+- **塌陷**：更早的 flattener 只对**恰好** `map[string]interface{}` 下钻，于是
+  `map[string]string`、`map[string]SomeCfg`、struct 都被当成一个 object 叶子写下去
+  （`tools.providers.searxng` 而非 `tools.providers.searxng.endpoint`）。现在两侧
+  flattener 都用 `store.JSONObjectOf` 按**结构**判断，任何 JSON object 都继续下钻。
+- **数据 key 被折叠**：`skills.entries.*.env`、`tools.providers.*.options` 这类
+  openPath 下的 key 是用户数据，必须原样保留；旧构建把它们当 struct 字段 snake 化
+  （`AppID` → `app_i_d`）。`kvkeys` 的 `dataPaths` / `openPaths` 已经修好写入侧，但
+  旧行要靠 `--repair` 才能追上来。
 
 ### 写路径
 

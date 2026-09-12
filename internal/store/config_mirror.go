@@ -135,6 +135,11 @@ type ConfigMirrorReconcile struct {
 	Untyped int
 	// Retagged is how many leaves gained a value_kind during the pass.
 	Retagged int
+	// Repaired is how many diverged rows --repair re-projected from the blob.
+	// Zero unless repair was requested.
+	Repaired int
+	// Rewritten is how many leaves --repair wrote while re-projecting.
+	Rewritten int
 	// Gaps are rows whose mirror does not match the blob. They are left (or
 	// made) uncertified, so a mirror-first reader falls back to the blob.
 	Gaps []ConfigMirrorGap

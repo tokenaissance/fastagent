@@ -54,3 +54,29 @@ func ValueToMap(v interface{}) map[string]interface{} {
 	}
 	return m
 }
+
+// JSONObjectOf reports whether v is a JSON object — a map or struct that
+// marshals to `{...}` — and hands it back as the map[string]interface{} the
+// mirror flatteners descend into. Numbers come back as json.Number literals,
+// same as every other decode in this package.
+//
+// The flatteners decide where a leaf boundary is by *structure*, not by
+// concrete Go type. An earlier version asserted `v.(map[string]interface{})`,
+// so anything else that is still a JSON object — a map[string]string, a
+// map[string]SomeCfg, a plain struct — was not descended into and went to disk
+// as one object-valued leaf. That is the "collapse" that put
+// `tools.providers.searxng` in configs_kv where the projection expects
+// `tools.providers.searxng.endpoint`. Both flatteners (the write side in
+// internal/scope and the projection used by reconcile) call this, so they
+// cannot disagree about where a leaf boundary is.
+//
+// Returns false for scalars, arrays and nil; those stay leaves.
+func JSONObjectOf(v interface{}) (map[string]interface{}, bool) {
+	// Already-decoded JSON objects (the common case, and the only shape the
+	// projection side ever sees) skip the marshal/unmarshal round trip.
+	if m, ok := v.(map[string]interface{}); ok {
+		return m, true
+	}
+	m := ValueToMap(v)
+	return m, m != nil
+}

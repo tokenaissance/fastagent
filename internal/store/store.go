@@ -307,8 +307,10 @@ type Store interface {
 	DeleteConfigMirror(ctx context.Context, kind, scope, scopeID, name string) error
 	// ReconcileConfigMirrors re-projects every configs row and certifies the
 	// ones whose mirror matches the blob, reporting the rest (see
-	// DBStore.ReconcileConfigMirrors). It is the pre-flip acceptance pass.
-	ReconcileConfigMirrors(ctx context.Context) (ConfigMirrorReconcile, error)
+	// DBStore.ReconcileConfigMirrors). With repair set it re-projects the
+	// diverged rows from the blob instead of only reporting them. It is the
+	// pre-flip acceptance pass.
+	ReconcileConfigMirrors(ctx context.Context, repair bool) (ConfigMirrorReconcile, error)
 
 	// --- Channels (IM bot bindings) ---
 	ListChannels(ctx context.Context, userID, agentID string) ([]ChannelRecord, error)

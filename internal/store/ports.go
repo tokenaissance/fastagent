@@ -72,7 +72,9 @@ type ConfigMirrorStore interface {
 // ConfigMirrorStore because it is an operator action, not something a request
 // path should ever reach for.
 type ConfigMirrorReconciler interface {
-	ReconcileConfigMirrors(ctx context.Context) (ConfigMirrorReconcile, error)
+	// repair re-projects diverged rows from the blob instead of only
+	// reporting them. See DBStore.ReconcileConfigMirrors.
+	ReconcileConfigMirrors(ctx context.Context, repair bool) (ConfigMirrorReconcile, error)
 }
 
 // ConfigStore is what a caller needs to read and write the configs domain.

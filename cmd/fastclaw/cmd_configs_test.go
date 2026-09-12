@@ -21,6 +21,14 @@ func TestConfigsReconcileMirrorCmd_Structure(t *testing.T) {
 		if strict.DefValue != "false" {
 			t.Errorf("--strict default = %q, want false", strict.DefValue)
 		}
+		// --repair overwrites configs_kv, so it must stay opt-in.
+		repair := sub.Flags().Lookup("repair")
+		if repair == nil {
+			t.Fatal("missing --repair flag")
+		}
+		if repair.DefValue != "false" {
+			t.Errorf("--repair default = %q, want false", repair.DefValue)
+		}
 	}
 	if !found {
 		t.Fatal("missing reconcile-mirror subcommand")
