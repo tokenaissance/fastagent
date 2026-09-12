@@ -103,7 +103,7 @@ func ScopeFromOwnership(userID, agentID string) (scope, scopeID string) {
 // Providers returns the merged map of LLM provider configs for a given
 // (user, agent). Pass agentID="" to get only the user-level view. Pass
 // both empty to get system-only.
-func Providers(ctx context.Context, st store.Store, userID, agentID string) (map[string]config.ProviderConfig, error) {
+func Providers(ctx context.Context, st store.ConfigReader, userID, agentID string) (map[string]config.ProviderConfig, error) {
 	if st == nil {
 		return nil, errors.New("scope.Providers: store is required")
 	}
@@ -169,7 +169,7 @@ func Providers(ctx context.Context, st store.Store, userID, agentID string) (map
 // providersFromKV reads all provider KV values with scope merge and
 // reconstructs them into ProviderConfig structs. The caller merges the
 // result per provider name, keeping names the blob already decided.
-func providersFromKV(ctx context.Context, st store.Store, userID, agentID string) (map[string]config.ProviderConfig, error) {
+func providersFromKV(ctx context.Context, st store.ConfigReader, userID, agentID string) (map[string]config.ProviderConfig, error) {
 	kvVals, err := GetValues(ctx, st, store.KindProvider, "", userID, agentID)
 	if err != nil || len(kvVals) == 0 {
 		return nil, err
@@ -248,7 +248,7 @@ func kvFieldMap(fields map[string]store.ConfigValue) map[string]interface{} {
 // already system+user-merged view: re-running the full Providers walk
 // would re-apply outer layers and silently clobber any user-scope
 // override the caller already merged in.
-func AgentScopeProviders(ctx context.Context, st store.Store, agentID string) (map[string]config.ProviderConfig, error) {
+func AgentScopeProviders(ctx context.Context, st store.ConfigReader, agentID string) (map[string]config.ProviderConfig, error) {
 	if st == nil {
 		return nil, errors.New("scope.AgentScopeProviders: store is required")
 	}
@@ -286,7 +286,7 @@ func AgentScopeProviders(ctx context.Context, st store.Store, agentID string) (m
 // provider credentials without dragging the owner's full merged view
 // (which would re-apply system rows on top of the viewer's already-
 // merged set).
-func UserScopeProviders(ctx context.Context, st store.Store, userID string) (map[string]config.ProviderConfig, error) {
+func UserScopeProviders(ctx context.Context, st store.ConfigReader, userID string) (map[string]config.ProviderConfig, error) {
 	if st == nil {
 		return nil, errors.New("scope.UserScopeProviders: store is required")
 	}
@@ -339,7 +339,7 @@ func kvPrefixForNamespace(namespace string) string {
 // when no blob row exists.
 //
 // Missing row is not an error: dst is left untouched.
-func ExactSetting(ctx context.Context, st store.Store, namespace, userID, agentID string, dst interface{}) error {
+func ExactSetting(ctx context.Context, st store.ConfigReader, namespace, userID, agentID string, dst interface{}) error {
 	if st == nil {
 		return errors.New("scope.ExactSetting: store is required")
 	}
@@ -369,7 +369,7 @@ func ExactSetting(ctx context.Context, st store.Store, namespace, userID, agentI
 // UserScopeSetting loads one setting namespace at (user=X, agent='') only —
 // the user's personal row, without the system layer merged in. Thin wrapper
 // over ExactSetting kept for the callers that express "the user layer".
-func UserScopeSetting(ctx context.Context, st store.Store, namespace, userID string, dst interface{}) error {
+func UserScopeSetting(ctx context.Context, st store.ConfigReader, namespace, userID string, dst interface{}) error {
 	if st == nil {
 		return errors.New("scope.UserScopeSetting: store is required")
 	}
@@ -381,7 +381,7 @@ func UserScopeSetting(ctx context.Context, st store.Store, namespace, userID str
 
 // Channels returns the merged channel map. Disabled rows in an inner
 // scope erase the outer entry.
-func Channels(ctx context.Context, st store.Store, userID, agentID string) (map[string]config.ChannelConfig, error) {
+func Channels(ctx context.Context, st store.ConfigReader, userID, agentID string) (map[string]config.ChannelConfig, error) {
 	if st == nil {
 		return nil, errors.New("scope.Channels: store is required")
 	}
@@ -437,7 +437,7 @@ func Channels(ctx context.Context, st store.Store, userID, agentID string) (map[
 // namespaces that silently lost every key the mirror happened not to carry,
 // and (via parseKVValue) string fields holding number-like values. The mirror
 // is consulted only when the blob has no row at all.
-func Setting(ctx context.Context, st store.Store, namespace, userID, agentID string) (map[string]interface{}, error) {
+func Setting(ctx context.Context, st store.ConfigReader, namespace, userID, agentID string) (map[string]interface{}, error) {
 	if st == nil {
 		return nil, errors.New("scope.Setting: store is required")
 	}
@@ -577,7 +577,7 @@ func snakeToCamel(s string) string { return kvkeys.SnakeToCamel(s) }
 
 // SettingInto resolves Setting and unmarshals the merged JSON into dst.
 // Convenience for callers that want a typed config block.
-func SettingInto(ctx context.Context, st store.Store, namespace, userID, agentID string, dst interface{}) error {
+func SettingInto(ctx context.Context, st store.ConfigReader, namespace, userID, agentID string, dst interface{}) error {
 	merged, err := Setting(ctx, st, namespace, userID, agentID)
 	if err != nil {
 		return err
@@ -629,7 +629,7 @@ func jsonInto(v interface{}, dst interface{}) error {
 // must not be able to disagree. TestBatchSettings_MatchesSetting pins that.
 func BatchSettings(
 	ctx context.Context,
-	st store.Store,
+	st store.ConfigReader,
 	namespaces []string,
 	userID, agentID string,
 ) (map[string]map[string]interface{}, error) {
@@ -709,18 +709,18 @@ func BatchSettings(
 // SaveSettingByScope is the legacy (scope, scopeID) form kept for the
 // HTTP layer, which still emits scope strings in URL params and JSON.
 // New callers should use SaveSetting with explicit (userID, agentID).
-func SaveSettingByScope(ctx context.Context, st store.Store, sc, scopeID, namespace string, data map[string]interface{}) error {
+func SaveSettingByScope(ctx context.Context, st store.ConfigStore, sc, scopeID, namespace string, data map[string]interface{}) error {
 	uid, aid := OwnershipFromScope(sc, scopeID)
 	return SaveSetting(ctx, st, uid, aid, namespace, data)
 }
 
 // SaveProviderByScope / SaveChannelByScope mirror the same legacy bridge.
-func SaveProviderByScope(ctx context.Context, st store.Store, sc, scopeID, name string, p config.ProviderConfig) error {
+func SaveProviderByScope(ctx context.Context, st store.ConfigStore, sc, scopeID, name string, p config.ProviderConfig) error {
 	uid, aid := OwnershipFromScope(sc, scopeID)
 	return SaveProvider(ctx, st, uid, aid, name, p)
 }
 
-func SaveChannelByScope(ctx context.Context, st store.Store, sc, scopeID, channelType, credentialKey string, enabled bool, c config.ChannelConfig) error {
+func SaveChannelByScope(ctx context.Context, st store.ConfigRowWriter, sc, scopeID, channelType, credentialKey string, enabled bool, c config.ChannelConfig) error {
 	uid, aid := OwnershipFromScope(sc, scopeID)
 	return SaveChannel(ctx, st, uid, aid, channelType, credentialKey, enabled, c)
 }
@@ -759,7 +759,7 @@ func rejectUnreadableAgentScope(namespace, userID, agentID string) error {
 // SaveSetting upserts a single namespace at the given (user, agent)
 // ownership. Pass nil/empty data to delete the row instead of writing
 // {}. Pass empty userID/agentID for system-level.
-func SaveSetting(ctx context.Context, st store.Store, userID, agentID, namespace string, data map[string]interface{}) error {
+func SaveSetting(ctx context.Context, st store.ConfigStore, userID, agentID, namespace string, data map[string]interface{}) error {
 	if st == nil {
 		return errors.New("scope.SaveSetting: store is required")
 	}
@@ -770,7 +770,7 @@ func SaveSetting(ctx context.Context, st store.Store, userID, agentID, namespace
 	// blob, and a half-applied pair is exactly the state the readers then
 	// have to defend against (blob authoritative, mirror fallback). Failing
 	// loudly here is what keeps "both or neither" true.
-	return store.WithTx(ctx, st, func(tx store.Store) error {
+	return store.WithConfigTx(ctx, st, func(tx store.ConfigStore) error {
 		if err := dualWriteSettingKV(ctx, tx, userID, agentID, namespace, data); err != nil {
 			return err
 		}
@@ -808,7 +808,7 @@ const PluginEnabledNamespace = "plugins.enabled"
 // ((user_id, agent_id) = ("", Y)), or nil when no row exists. Missing keys
 // fall through to the system-wide plugin state; callers treat nil as
 // "no overrides".
-func AgentPluginEnabled(ctx context.Context, st store.Store, agentID string) (map[string]bool, error) {
+func AgentPluginEnabled(ctx context.Context, st store.ConfigReader, agentID string) (map[string]bool, error) {
 	if st == nil {
 		return nil, errors.New("scope.AgentPluginEnabled: store is required")
 	}
@@ -846,7 +846,7 @@ func AgentPluginEnabled(ctx context.Context, st store.Store, agentID string) (ma
 // SaveAgentPluginEnabled writes (or, for an empty map, deletes) the
 // per-agent plugin opt-in row. The configs_kv mirror is kept in step under
 // the same kind.
-func SaveAgentPluginEnabled(ctx context.Context, st store.Store, agentID string, enabled map[string]bool) error {
+func SaveAgentPluginEnabled(ctx context.Context, st store.ConfigStore, agentID string, enabled map[string]bool) error {
 	if st == nil {
 		return errors.New("scope.SaveAgentPluginEnabled: store is required")
 	}
@@ -858,7 +858,7 @@ func SaveAgentPluginEnabled(ctx context.Context, st store.Store, agentID string,
 		data[k] = v
 	}
 	// Both tables in one transaction — see SaveSetting.
-	return store.WithTx(ctx, st, func(tx store.Store) error {
+	return store.WithConfigTx(ctx, st, func(tx store.ConfigStore) error {
 		if err := dualWritePluginEnabledKV(ctx, tx, agentID, data); err != nil {
 			return err
 		}
@@ -899,7 +899,7 @@ func boolMapFromData(data map[string]interface{}) map[string]bool {
 // dualWritePluginEnabledKV mirrors the opt-in map into configs_kv. The keys
 // below the row name are plugin ids (data keys), so the shared flattening
 // rule keeps them verbatim.
-func dualWritePluginEnabledKV(ctx context.Context, st store.Store, agentID string, data map[string]interface{}) error {
+func dualWritePluginEnabledKV(ctx context.Context, st store.KVStore, agentID string, data map[string]interface{}) error {
 	kvPrefix := PluginEnabledNamespace + "."
 	if err := st.DeleteConfigPrefix(ctx, store.KindPluginEnabled, Agent, agentID, kvPrefix); err != nil {
 		return fmt.Errorf("scope: clear configs_kv prefix %q: %w", kvPrefix, err)
@@ -946,7 +946,7 @@ func ValidateProviderName(name string) error {
 // ownership, marking it enabled — "create/update this provider and use it".
 // Callers that rewrite an existing row must use SaveProviderState and pass
 // that row's flag, or editing a disabled provider silently re-enables it.
-func SaveProvider(ctx context.Context, st store.Store, userID, agentID, name string, p config.ProviderConfig) error {
+func SaveProvider(ctx context.Context, st store.ConfigStore, userID, agentID, name string, p config.ProviderConfig) error {
 	return SaveProviderState(ctx, st, userID, agentID, name, p, true)
 }
 
@@ -954,14 +954,14 @@ func SaveProvider(ctx context.Context, st store.Store, userID, agentID, name str
 // is the write half of the enabled contract (see the package doc): false
 // means this scope switches the provider off, which also erases the outer
 // entries of the same name on read.
-func SaveProviderState(ctx context.Context, st store.Store, userID, agentID, name string, p config.ProviderConfig, enabled bool) error {
+func SaveProviderState(ctx context.Context, st store.ConfigStore, userID, agentID, name string, p config.ProviderConfig, enabled bool) error {
 	// Single choke point: HTTP create/update, the admin API, onboarding and
 	// the CLI all land here, so the rule cannot be bypassed by a new caller.
 	if err := ValidateProviderName(name); err != nil {
 		return err
 	}
 	// Both tables in one transaction — see SaveSetting.
-	return store.WithTx(ctx, st, func(tx store.Store) error {
+	return store.WithConfigTx(ctx, st, func(tx store.ConfigStore) error {
 		if err := dualWriteProviderKV(ctx, tx, userID, agentID, name, p); err != nil {
 			return err
 		}
@@ -980,7 +980,7 @@ func SaveProviderState(ctx context.Context, st store.Store, userID, agentID, nam
 // SaveChannel upserts a kind="channel" row at the given (user, agent)
 // ownership. credentialKey is the stable lookup handle for inbound
 // dispatch (bot token tail, app id).
-func SaveChannel(ctx context.Context, st store.Store, userID, agentID, channelType, credentialKey string, enabled bool, c config.ChannelConfig) error {
+func SaveChannel(ctx context.Context, st store.ConfigRowWriter, userID, agentID, channelType, credentialKey string, enabled bool, c config.ChannelConfig) error {
 	rec := &store.ConfigRecord{
 		Kind:          store.KindChannel,
 		UserID:        userID,
@@ -1040,7 +1040,7 @@ func kvScopeFromOwnership(userID, agentID string) (scope, scopeID string) {
 // The values stay tagged (store.ConfigValue) rather than being pre-decoded:
 // the caller knows which keys are data keys and which are struct fields, and
 // Decode is what turns a tag into a Go value.
-func GetValues(ctx context.Context, st store.Store, kind, prefix, userID, agentID string) (map[string]store.ConfigValue, error) {
+func GetValues(ctx context.Context, st store.ConfigReader, kind, prefix, userID, agentID string) (map[string]store.ConfigValue, error) {
 	if st == nil {
 		return nil, errors.New("scope.GetValues: store is required")
 	}
@@ -1106,7 +1106,7 @@ func flattenJSONToKV(prefix string, data map[string]interface{}, out map[string]
 // dualWriteSettingKV writes the flattened KV pairs to configs_kv alongside
 // the legacy configs table write. Called by SaveSetting to keep both tables
 // in sync during migration.
-func dualWriteSettingKV(ctx context.Context, st store.Store, userID, agentID, namespace string, data map[string]interface{}) error {
+func dualWriteSettingKV(ctx context.Context, st store.KVStore, userID, agentID, namespace string, data map[string]interface{}) error {
 	sc, sid := kvScopeFromOwnership(userID, agentID)
 	// Determine the KV name prefix.
 	kvPrefix := namespace + "."
@@ -1132,7 +1132,7 @@ func dualWriteSettingKV(ctx context.Context, st store.Store, userID, agentID, na
 }
 
 // dualWriteProviderKV writes the flattened provider config to configs_kv.
-func dualWriteProviderKV(ctx context.Context, st store.Store, userID, agentID, providerName string, p config.ProviderConfig) error {
+func dualWriteProviderKV(ctx context.Context, st store.KVStore, userID, agentID, providerName string, p config.ProviderConfig) error {
 	sc, sid := kvScopeFromOwnership(userID, agentID)
 	kvPrefix := providerName + "."
 	data := providerToData(p)
@@ -1150,7 +1150,7 @@ func dualWriteProviderKV(ctx context.Context, st store.Store, userID, agentID, p
 }
 
 // DualDeleteProviderKV removes all KV entries for a provider.
-func DualDeleteProviderKV(ctx context.Context, st store.Store, userID, agentID, providerName string) {
+func DualDeleteProviderKV(ctx context.Context, st store.KVStore, userID, agentID, providerName string) {
 	sc, sid := kvScopeFromOwnership(userID, agentID)
 	_ = st.DeleteConfigPrefix(ctx, store.KindProvider, sc, sid, providerName+".")
 }
