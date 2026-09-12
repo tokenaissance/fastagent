@@ -56,12 +56,24 @@ type ConfigRowWriter interface {
 	SaveConfig(ctx context.Context, c *ConfigRecord) error
 }
 
+// ConfigMirrorStore is the completeness-marker capability for the configs_kv
+// mirror (see ConfigMirror). It is its own port because a marker is metadata
+// about a projection rather than a leaf of it: a consumer that only reads or
+// writes mirror rows has no business deciding whether the mirror is certified,
+// and the dual-write is the only thing that should be writing markers.
+type ConfigMirrorStore interface {
+	SaveConfigMirror(ctx context.Context, kind, scope, scopeID, name string, m ConfigMirror) error
+	GetConfigMirror(ctx context.Context, kind, scope, scopeID, name string) (ConfigMirror, bool, error)
+	DeleteConfigMirror(ctx context.Context, kind, scope, scopeID, name string) error
+}
+
 // ConfigStore is what a caller needs to read and write the configs domain.
 // It is deliberately not Store: a handler that resolves settings has no
 // business creating users or querying sessions.
 type ConfigStore interface {
 	ConfigReader
 	ConfigWriter
+	ConfigMirrorStore
 }
 
 // KVStore is the configs_kv-only slice — one value per row, addressed by a
@@ -74,6 +86,9 @@ type KVStore interface {
 	SetConfigValue(ctx context.Context, kind, scope, scopeID, name string, value ConfigValue) error
 	DeleteConfigValue(ctx context.Context, kind, scope, scopeID, name string) error
 	DeleteConfigPrefix(ctx context.Context, kind, scope, scopeID, namePrefix string) error
+	// The mirror writers record completeness in the same transaction as the
+	// rows they certify, so a KVStore-only caller needs this half too.
+	ConfigMirrorStore
 }
 
 // Store is a superset of every port above. These assertions are the contract:
@@ -81,11 +96,12 @@ type KVStore interface {
 // parameter to a configs method without updating the port is a compile error
 // at this line.
 var (
-	_ ConfigReader    = (Store)(nil)
-	_ ConfigWriter    = (Store)(nil)
-	_ ConfigRowWriter = (Store)(nil)
-	_ ConfigStore     = (Store)(nil)
-	_ KVStore         = (Store)(nil)
+	_ ConfigReader      = (Store)(nil)
+	_ ConfigWriter      = (Store)(nil)
+	_ ConfigRowWriter   = (Store)(nil)
+	_ ConfigMirrorStore = (Store)(nil)
+	_ ConfigStore       = (Store)(nil)
+	_ KVStore           = (Store)(nil)
 )
 
 // WithConfigTx is store.WithTx for a caller that typed its store as a port

@@ -905,7 +905,7 @@ func dualWritePluginEnabledKV(ctx context.Context, st store.KVStore, agentID str
 		return fmt.Errorf("scope: clear configs_kv prefix %q: %w", kvPrefix, err)
 	}
 	if len(data) == 0 {
-		return nil
+		return st.DeleteConfigMirror(ctx, store.KindPluginEnabled, Agent, agentID, PluginEnabledNamespace)
 	}
 	flat := map[string]store.ConfigValue{}
 	flattenJSONToKV(kvPrefix, data, flat)
@@ -914,7 +914,7 @@ func dualWritePluginEnabledKV(ctx context.Context, st store.KVStore, agentID str
 			return fmt.Errorf("scope: mirror plugin opt-in %q: %w", name, err)
 		}
 	}
-	return nil
+	return saveMirror(ctx, st, store.KindPluginEnabled, Agent, agentID, PluginEnabledNamespace, kvPrefix, flat)
 }
 
 // providerNamePattern is the charset a provider name may use.
@@ -1108,18 +1108,16 @@ func flattenJSONToKV(prefix string, data map[string]interface{}, out map[string]
 // in sync during migration.
 func dualWriteSettingKV(ctx context.Context, st store.KVStore, userID, agentID, namespace string, data map[string]interface{}) error {
 	sc, sid := kvScopeFromOwnership(userID, agentID)
-	// Determine the KV name prefix.
-	kvPrefix := namespace + "."
-	if namespace == "agents.defaults" {
-		kvPrefix = "agent."
-	}
+	kvPrefix := settingKVPrefix(namespace)
 	// The prefix delete runs in both branches: writing {} means "this
 	// namespace is empty now", which has to clear the rows it used to have.
 	if err := st.DeleteConfigPrefix(ctx, store.KindSetting, sc, sid, kvPrefix); err != nil {
 		return fmt.Errorf("scope: clear configs_kv prefix %q: %w", kvPrefix, err)
 	}
 	if len(data) == 0 {
-		return nil
+		// No leaves left: drop the marker too, so a stale one can never
+		// certify the empty (or a later, different) projection.
+		return st.DeleteConfigMirror(ctx, store.KindSetting, sc, sid, namespace)
 	}
 	flat := map[string]store.ConfigValue{}
 	flattenJSONToKV(kvPrefix, data, flat)
@@ -1127,6 +1125,26 @@ func dualWriteSettingKV(ctx context.Context, st store.KVStore, userID, agentID, 
 		if err := st.SetConfigValue(ctx, store.KindSetting, sc, sid, name, value); err != nil {
 			return fmt.Errorf("scope: mirror setting %q: %w", name, err)
 		}
+	}
+	return saveMirror(ctx, st, store.KindSetting, sc, sid, namespace, kvPrefix, flat)
+}
+
+// settingKVPrefix maps a settings row name to the configs_kv prefix its leaves
+// live under. "agents.defaults" is the one rename: the blob row keeps the
+// dotted namespace, its mirror lives under "agent.".
+func settingKVPrefix(namespace string) string {
+	if namespace == "agents.defaults" {
+		return "agent."
+	}
+	return namespace + "."
+}
+
+// saveMirror records the completeness marker for a projection that was just
+// written. flat is the exact leaf set that went into configs_kv, so the marker
+// fingerprints what is on disk rather than what was intended.
+func saveMirror(ctx context.Context, st store.ConfigMirrorStore, kind, sc, sid, name, prefix string, flat map[string]store.ConfigValue) error {
+	if err := st.SaveConfigMirror(ctx, kind, sc, sid, name, store.NewConfigMirror(prefix, flat)); err != nil {
+		return fmt.Errorf("scope: mirror marker for %q: %w", name, err)
 	}
 	return nil
 }
@@ -1146,11 +1164,12 @@ func dualWriteProviderKV(ctx context.Context, st store.KVStore, userID, agentID,
 			return fmt.Errorf("scope: mirror provider %q: %w", name, err)
 		}
 	}
-	return nil
+	return saveMirror(ctx, st, store.KindProvider, sc, sid, providerName, kvPrefix, flat)
 }
 
 // DualDeleteProviderKV removes all KV entries for a provider.
 func DualDeleteProviderKV(ctx context.Context, st store.KVStore, userID, agentID, providerName string) {
 	sc, sid := kvScopeFromOwnership(userID, agentID)
 	_ = st.DeleteConfigPrefix(ctx, store.KindProvider, sc, sid, providerName+".")
+	_ = st.DeleteConfigMirror(ctx, store.KindProvider, sc, sid, providerName)
 }
