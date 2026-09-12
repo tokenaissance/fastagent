@@ -49,11 +49,11 @@ type ConfigReader interface {
 // write one — so a read view can take this without also depending on marker
 // writes.
 type MirrorReader interface {
-	GetConfigMirror(ctx context.Context, kind, scope, scopeID, name string) (ConfigMirror, bool, error)
+	GetConfigMirror(ctx context.Context, kind, scope, scopeID, name string) (ConfigProjectionMarker, bool, error)
 	// ListConfigMirrors is the batched form: every marker at one scope, keyed by
 	// row name, so a reader that certifies many rows issues one query instead of
 	// one per row (see providersLayerAt, BatchSettings).
-	ListConfigMirrors(ctx context.Context, kind, scope, scopeID string) (map[string]ConfigMirror, error)
+	ListConfigMirrors(ctx context.Context, kind, scope, scopeID string) (map[string]ConfigProjectionMarker, error)
 }
 
 // ConfigReadStore is the view a resolver needs once it must decide whether a
@@ -63,7 +63,7 @@ type MirrorReader interface {
 //
 // Reading the marker is a read concern in its own right — a mirror-first reader
 // loads the leaves and the marker and serves the leaves only if the marker
-// certifies them (see ConfigMirror, MirrorSelfConsistent) — so it has to be
+// certifies them (see ConfigProjectionMarker, MirrorSelfConsistent) — so it has to be
 // part of the port such a reader takes. It is a separate composite rather than
 // a widening of ConfigReader so that a caller which only reads rows, and never
 // certifies them, still depends on four methods: the migration-phase read path
@@ -96,13 +96,13 @@ type ConfigRowWriter interface {
 }
 
 // ConfigMirrorStore is the completeness-marker capability for the configs_kv
-// mirror (see ConfigMirror). It is its own port because a marker is metadata
+// mirror (see ConfigProjectionMarker). It is its own port because a marker is metadata
 // about a projection rather than a leaf of it: a consumer that only reads or
 // writes mirror rows has no business deciding whether the mirror is certified,
 // and the dual-write is the only thing that should be writing markers.
 type ConfigMirrorStore interface {
-	SaveConfigMirror(ctx context.Context, kind, scope, scopeID, name string, m ConfigMirror) error
-	GetConfigMirror(ctx context.Context, kind, scope, scopeID, name string) (ConfigMirror, bool, error)
+	SaveConfigMirror(ctx context.Context, kind, scope, scopeID, name string, m ConfigProjectionMarker) error
+	GetConfigMirror(ctx context.Context, kind, scope, scopeID, name string) (ConfigProjectionMarker, bool, error)
 	DeleteConfigMirror(ctx context.Context, kind, scope, scopeID, name string) error
 }
 

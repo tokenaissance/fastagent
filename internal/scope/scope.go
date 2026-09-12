@@ -706,7 +706,7 @@ func batchSettingsMirrorFirst(
 	layers := settingLayerIDs(userID, agentID)
 	blobAt := make([]map[string]*store.ConfigRecord, len(layers))
 	leavesAt := make([]map[string]map[string]store.ConfigValue, len(layers))
-	markersAt := make([]map[string]store.ConfigMirror, len(layers))
+	markersAt := make([]map[string]store.ConfigProjectionMarker, len(layers))
 	for i, l := range layers {
 		uid, aid := l[0], l[1]
 		rows, err := st.ListConfigs(ctx, store.KindSetting, uid, aid)
@@ -1242,7 +1242,7 @@ func dualWriteSettingKV(ctx context.Context, st store.KVStore, userID, agentID, 
 // decision the paired blob row carries, so the marker records the row's whole
 // read state (leaves + on/off) and not just its payload.
 func saveMirror(ctx context.Context, st store.ConfigMirrorStore, kind, sc, sid, name, prefix string, enabled bool, flat map[string]store.ConfigValue) error {
-	if err := st.SaveConfigMirror(ctx, kind, sc, sid, name, store.NewConfigMirror(prefix, enabled, flat)); err != nil {
+	if err := st.SaveConfigMirror(ctx, kind, sc, sid, name, store.NewConfigProjectionMarker(prefix, enabled, flat)); err != nil {
 		return fmt.Errorf("scope: mirror marker for %q: %w", name, err)
 	}
 	return nil
@@ -1253,7 +1253,7 @@ func saveMirror(ctx context.Context, st store.ConfigMirrorStore, kind, sc, sid, 
 // The leaves are written whether or not the row is enabled: disabling a
 // provider is a row decision (it erases the outer entries, it does not erase
 // the payload), and the paired blob write records that decision. The marker
-// therefore has to carry it too — see ConfigMirror.Enabled.
+// therefore has to carry it too — see ConfigProjectionMarker.Enabled.
 func dualWriteProviderKV(ctx context.Context, st store.KVStore, userID, agentID, providerName string, p config.ProviderConfig, enabled bool) error {
 	sc, sid := kvScopeFromOwnership(userID, agentID)
 	kvPrefix := store.MirrorPrefixFor(store.KindProvider, providerName)

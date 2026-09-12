@@ -59,7 +59,7 @@ func TestReconcileConfigMirrors(t *testing.T) {
 		t.Fatalf("seed prefs mirror: %v", err)
 	}
 	if err := db.SaveConfigMirror(ctx, KindSetting, "user", "u1", "prefs",
-		NewConfigMirror("prefs.", true, map[string]ConfigValue{"prefs.timezone": StringValue("UTC")})); err != nil {
+		NewConfigProjectionMarker("prefs.", true, map[string]ConfigValue{"prefs.timezone": StringValue("UTC")})); err != nil {
 		t.Fatalf("seed stale marker: %v", err)
 	}
 
