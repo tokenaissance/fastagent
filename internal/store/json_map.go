@@ -71,12 +71,23 @@ func ValueToMap(v interface{}) map[string]interface{} {
 // cannot disagree about where a leaf boundary is.
 //
 // Returns false for scalars, arrays and nil; those stay leaves.
+//
+// An EMPTY object is one of those leaves, and that is the subtle half of the
+// rule. Descending into `{}` yields no leaf at all, so `{"config":{}}` and a
+// map with no "config" key would flatten to the same row set — the empty
+// object is *unrepresentable*, and a mirror-first read would answer "no such
+// key" for a key the blob holds. Writing `{}` as one object-valued leaf keeps
+// the two distinguishable: `{}` and absent stop being the same mirror. (An
+// empty array never had this problem — arrays were always leaves.)
 func JSONObjectOf(v interface{}) (map[string]interface{}, bool) {
 	// Already-decoded JSON objects (the common case, and the only shape the
 	// mirror side ever sees) skip the marshal/unmarshal round trip.
-	if m, ok := v.(map[string]interface{}); ok {
-		return m, true
+	m, ok := v.(map[string]interface{})
+	if !ok {
+		m = ValueToMap(v)
 	}
-	m := ValueToMap(v)
-	return m, m != nil
+	if len(m) == 0 {
+		return nil, false
+	}
+	return m, true
 }

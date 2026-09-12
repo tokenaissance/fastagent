@@ -4533,7 +4533,10 @@ func flattenJSON(prefix string, data map[string]interface{}, out map[string]Conf
 		// is a JSON object too, and folding it into one leaf is exactly the
 		// collapse reconcile reports as a gap. A nil leaf is written as a
 		// tagged null row rather than skipped, so {"a":null} and {} stop
-		// looking the same in the mirror.
+		// looking the same in the mirror. An empty object is written as one
+		// object-valued leaf, not descended into, for the same reason: with no
+		// leaf the key would vanish and `{"config":{}}` would be
+		// indistinguishable from a map without "config" (see JSONObjectOf).
 		if nested, ok := JSONObjectOf(v); ok {
 			flattenJSON(fullKey+".", nested, out)
 			continue

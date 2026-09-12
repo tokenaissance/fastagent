@@ -2,10 +2,18 @@ package scope
 
 // These tests cover the read-authority lever and the per-row certification
 // guard that make the configs -> configs_kv flip a one-name change instead of a
-// rewrite of every reader. The migration stays on the blob until the reconcile
-// gate is green, so the lever defaults to blobFirst; turning it to configsKVFirst
-// must (a) let a certified mirror win, and (b) never serve a mirror the
-// marker does not certify — the web_search shape.
+// rewrite of every reader. The lever defaults to configsKVFirst — the dev
+// reconcile gate went green (165/165 certified, 0 gap) — and that must
+// (a) let a certified mirror win, and (b) never serve a mirror the marker does
+// not certify, which is the web_search shape. The guard is what carries the
+// weight: the default only decides which order a *certified* row is answered in.
+//
+// There is deliberately no per-environment switch. The flip is safe because it
+// is *per row*: a row the marker does not certify falls back to the blob in
+// every process, so a database with no markers at all (a fresh prod) reads
+// exactly as it does today and is converted row by row by reconcile-mirror.
+// Two defaults would put dev and prod on two read paths — the divergence class
+// this mechanism exists to catch.
 
 import (
 	"context"
@@ -25,12 +33,19 @@ func withReadAuthority(t *testing.T, a readAuthority) {
 	t.Cleanup(func() { configsReadAuthority = prev })
 }
 
-// The default must stay blobFirst: the flip is gated on
-// `reconcile-mirror --strict`, and a build that silently shipped configsKVFirst
-// would be the outage this whole mechanism exists to prevent.
-func TestReadAuthorityDefaultsToBlobFirst(t *testing.T) {
-	if configsReadAuthority != blobFirst {
-		t.Fatalf("configsReadAuthority = %v, want blobFirst (the flip must wait for the reconcile gate)", configsReadAuthority)
+// The default is configsKVFirst, uniformly: one read model for every
+// environment. This test exists so the flip stays a deliberate, reviewed act —
+// if the default ever moves again, it moves here in the same commit as the gate
+// evidence, not by accident — and to fail loudly if someone later reintroduces
+// an environment-dependent default.
+//
+// The suite must not, however, depend on the default for correctness: the
+// certification guard is tested at both orders below, and the blob still
+// answers every row the marker does not certify (TestSettingAtConfigsKVFirst-
+// FallsBackOnUncertifiedRow and friends pass under either value).
+func TestReadAuthorityDefaultsToConfigsKVFirst(t *testing.T) {
+	if configsReadAuthority != configsKVFirst {
+		t.Fatalf("configsReadAuthority = %v, want configsKVFirst — one read model for every environment (roll back to blobFirst only with the reconcile gate evidence in hand)", configsReadAuthority)
 	}
 }
 
@@ -437,6 +452,112 @@ func TestBatchSettingsMatchesSettingUnderConfigsKVFirst(t *testing.T) {
 			if !reflect.DeepEqual(got, single) {
 				t.Fatalf("%v: BatchSettings[%s] = %#v but Setting = %#v", auth, ns, got, single)
 			}
+		}
+	}
+}
+
+// The settings veto has to survive the flip: a namespace the inner layer
+// switched off must read as "nothing here" in both orders, and the mirror has
+// to be able to answer that on its own — otherwise the flip would resurrect a
+// vetoed namespace from a stale certified marker. SaveSettingState is the
+// writer that makes the veto representable (the readers always had the rule;
+// nothing could record it), so this test drives the writer, not the internals.
+func TestSaveSettingStateVetoesTheSameWayInBothOrders(t *testing.T) {
+	db := openScopeDBNamed(t, "readauth_setting_veto")
+	defer db.Close()
+	ctx := context.Background()
+
+	if err := SaveSetting(ctx, db, "", "", "agents.defaults",
+		map[string]interface{}{"model": "sys-model"}); err != nil {
+		t.Fatalf("seed system layer: %v", err)
+	}
+	if err := SaveSetting(ctx, db, "u1", "", "agents.defaults",
+		map[string]interface{}{"model": "user-model"}); err != nil {
+		t.Fatalf("seed user layer: %v", err)
+	}
+	// The inner layer switches the namespace off. Payload erased, decision
+	// recorded — the shape a disabled provider already has.
+	if err := SaveSettingState(ctx, db, "u1", "", "agents.defaults", nil, false); err != nil {
+		t.Fatalf("SaveSettingState(veto): %v", err)
+	}
+
+	for _, auth := range []readAuthority{blobFirst, configsKVFirst} {
+		withReadAuthority(t, auth)
+		got, err := Setting(ctx, db, "agents.defaults", "u1", "")
+		if err != nil {
+			t.Fatalf("Setting(%v): %v", auth, err)
+		}
+		if len(got) != 0 {
+			t.Fatalf("%v: vetoed namespace came back as %#v; the mirror's stale enabled=true won", auth, got)
+		}
+	}
+
+	// The marker carries the decision, so the mirror alone can answer the
+	// veto — that is what configsKVFirst relies on.
+	m, ok, err := db.GetConfigMirror(ctx, store.KindSetting, User, "u1", "agents.defaults")
+	if err != nil || !ok {
+		t.Fatalf("GetConfigMirror = (%+v, %v, %v), want a marker", m, ok, err)
+	}
+	if m.Enabled == nil || *m.Enabled {
+		t.Fatalf("marker enabled = %v, want an explicit false", m.Enabled)
+	}
+	if m.KeyCount != 0 {
+		t.Fatalf("marker key_count = %d, want 0 (the payload is gone)", m.KeyCount)
+	}
+
+	// And reconcile agrees with the dual-write: the vetoed row is a complete
+	// mirror of the blob (both empty), certified, and not a gap. The old
+	// dual-write deleted the marker here instead, so the row was uncertified
+	// while reconcile kept re-certifying it — two writers, two answers.
+	rep, err := db.ReconcileConfigMirrors(ctx, false)
+	if err != nil {
+		t.Fatalf("ReconcileConfigMirrors: %v", err)
+	}
+	if len(rep.Gaps) != 0 {
+		t.Fatalf("reconcile reported %d gap(s): %+v", len(rep.Gaps), rep.Gaps)
+	}
+	if rep.Certified != rep.Examined {
+		t.Fatalf("certified %d of %d examined; the vetoed row cannot be served by the mirror", rep.Certified, rep.Examined)
+	}
+}
+
+// An empty object is a value, not an absence, and the flip must not lose it.
+// `{"config":{}}` flattening to no rows would make a mirror-first read answer
+// nothing for a key the blob holds — the plugin-config case, where the field
+// is `{}` and the reader has to hand back an empty object rather than a nil.
+func TestEmptyObjectSurvivesTheMirrorUnderBothOrders(t *testing.T) {
+	db := openScopeDBNamed(t, "readauth_empty_object")
+	defer db.Close()
+	ctx := context.Background()
+
+	if err := SaveSetting(ctx, db, "", "", "plugins", map[string]interface{}{
+		"entries": map[string]interface{}{
+			"empty-hook": map[string]interface{}{"config": map[string]interface{}{}},
+		},
+	}); err != nil {
+		t.Fatalf("SaveSetting: %v", err)
+	}
+
+	// On disk the key is one object-valued leaf, not a missing row.
+	v, err := db.GetConfigValue(ctx, store.KindSetting, System, "", "plugins.entries.empty-hook.config")
+	if err != nil {
+		t.Fatalf("the empty-object key has no row: %v", err)
+	}
+	if v.Kind != store.ValueKindObject || v.Value != "{}" {
+		t.Fatalf("empty-object row = %+v, want the tagged literal {}", v)
+	}
+
+	for _, auth := range []readAuthority{blobFirst, configsKVFirst} {
+		withReadAuthority(t, auth)
+		got, err := Setting(ctx, db, "plugins", "", "")
+		if err != nil {
+			t.Fatalf("Setting(%v): %v", auth, err)
+		}
+		entries, _ := got["entries"].(map[string]interface{})
+		hook, _ := entries["empty-hook"].(map[string]interface{})
+		cfg, ok := hook["config"].(map[string]interface{})
+		if !ok || cfg == nil || len(cfg) != 0 {
+			t.Fatalf("%v: config = %#v, want an empty object (absent and {} are different values)", auth, hook["config"])
 		}
 	}
 }

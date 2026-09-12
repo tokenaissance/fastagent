@@ -41,6 +41,13 @@ const prefsTimezoneKey = "timezone"
 // loop to cover it. Blob is authoritative only during the configs -> configs_kv
 // migration; when authority flips to KV, this reader flips with it as a whole
 // (KV first), it is not patched one branch at a time.
+//
+// The authority lever has since flipped to configsKVFirst, and this reader is
+// deliberately unchanged by it: the blob is still written for every prefs row
+// (dual-write), and every mirror-first reader falls back to the blob for a row
+// its marker does not certify, so the answer here is byte-for-byte the answer a
+// certified-mirror read would give. What it flips *with* is the end of the
+// dual-write — the phase where the blob stops carrying rows — not the lever.
 func Timezone(ctx context.Context, st store.ConfigReader, chatterUID, agentID string) string {
 	if st == nil {
 		return ""

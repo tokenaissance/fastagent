@@ -120,3 +120,32 @@ func TestJSONToMapNestedNumbers(t *testing.T) {
 		t.Fatalf("round trip = %s, want the input unchanged", blob)
 	}
 }
+
+// TestJSONObjectOfEmptyObjectIsALeaf pins the rule that keeps an empty object
+// representable in a flat mirror. Descending into `{}` emits no leaf, so
+// `{"config":{}}` and a map with no "config" key would flatten to the same
+// rows — the empty object would be indistinguishable from "no such key", and a
+// mirror-first read would answer `nil` for a key the blob holds as `{}`.
+//
+// Everything that is a JSON object *and carries keys* is still a node to
+// descend into; only the empty one is a leaf.
+func TestJSONObjectOfEmptyObjectIsALeaf(t *testing.T) {
+	if m, ok := JSONObjectOf(map[string]interface{}{}); ok {
+		t.Fatalf("JSONObjectOf({}) = (%v, true), want a leaf so the key survives", m)
+	}
+	if m, ok := JSONObjectOf(map[string]string{}); ok {
+		t.Fatalf("JSONObjectOf(map[string]string{}) = (%v, true), want a leaf", m)
+	}
+	if m, ok := JSONObjectOf(struct{}{}); ok {
+		t.Fatalf("JSONObjectOf(struct{}{}) = (%v, true), want a leaf", m)
+	}
+	if m, ok := JSONObjectOf(map[string]interface{}{"a": nil}); !ok || len(m) != 1 {
+		t.Fatalf("JSONObjectOf({\"a\":null}) = (%v, %v), want a one-key node", m, ok)
+	}
+	// Scalars, arrays and nil were already leaves; unchanged.
+	for _, v := range []interface{}{nil, "s", 1, true, []interface{}{}} {
+		if m, ok := JSONObjectOf(v); ok {
+			t.Fatalf("JSONObjectOf(%#v) = (%v, true), want a leaf", v, m)
+		}
+	}
+}

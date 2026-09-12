@@ -49,9 +49,15 @@ import (
 // It is a package variable, not a per-call argument, because the decision is
 // process-global and belongs to this one layer: every read site above funnels
 // through this file, so the flip is this one name and never reaches into a
-// caller. The value stays blobFirst until the reconcile gate is green
-// (fastagent configs reconcile-mirror --strict), which is the last acceptance
-// before the flip.
+// caller. The value is configsKVFirst, and it is the same value in every
+// environment — deliberately. The flip is safe because it is per *row*: a row
+// the marker does not certify still falls back to the blob, so a database that
+// has no markers yet (a freshly migrated prod) reads exactly as it did before
+// the flip, and reconcile-mirror converts it one certified row at a time.
+// Making the value environment-dependent would instead put dev and prod on two
+// read paths, which is the silent divergence this whole mechanism exists to
+// catch. The guard, not this name, is what keeps the flip safe; rolling back
+// is this one name.
 type readAuthority int
 
 const (
@@ -59,7 +65,7 @@ const (
 	configsKVFirst
 )
 
-var configsReadAuthority = blobFirst
+var configsReadAuthority = configsKVFirst
 
 // certifiedMirror returns the row's completeness marker when it certifies
 // exactly these leaves, judged against the marker alone.
@@ -479,17 +485,26 @@ func RowsAt(ctx context.Context, st store.ConfigReader, kind, userID, agentID st
 // It returns rows rather than a merged map because the callers select ownership
 // layers themselves: the tool overlay needs the agent's own row (user_id="")
 // *and* the caller's per-(caller, agent) row out of the same batch, and applies
-// them in an order the query cannot express. Only enabled rows come back, which
-// is the same rule the resolvers apply to a disabled row (it contributes
-// nothing) — so a caller applying these in layer order lands on the same answer
-// as Setting.
+// them in an order the query cannot express. Only enabled rows come back.
 //
 // The batching is why this is not N calls to SettingAt: loadUserSpace runs it
 // for every agent of a user. That is also why the mirror fallback is not here
 // yet — the blob batch is the whole point of the call shape, and these four
 // namespaces are always written through the dual-write, so a page of agents
-// with no blob row at all does not occur in practice. When the flip lands this
-// is the function that grows the fallback, not its callers.
+// with no blob row at all does not occur in practice.
+//
+// Two things this view therefore cannot answer, both of which the merged
+// resolvers can — so it must not be used as if it were Setting:
+//
+//   - A row that exists only in the mirror (no blob row) is invisible here.
+//     Unreachable for these four namespaces as long as every writer goes
+//     through SaveSetting, which dual-writes both tables in one transaction.
+//   - A row that exists but is switched OFF is filtered out by the query's
+//     `enabled = true`, so "off" and "no row" look alike. The resolvers keep
+//     them apart: a disabled row is a veto that clears the outer layers, an
+//     absent row lets them through. A caller that needs that distinction has
+//     to resolve the namespace with Setting / BatchSettings instead of
+//     overlaying these rows itself.
 func AgentScopeRows(ctx context.Context, st store.ConfigReader, namespace string, agentIDs []string) ([]store.ConfigRecord, error) {
 	if st == nil {
 		return nil, errors.New("scope.AgentScopeRows: store is required")

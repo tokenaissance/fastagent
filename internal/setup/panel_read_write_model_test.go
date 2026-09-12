@@ -127,10 +127,10 @@ func TestPanelReadModelMatchesRuntimeResolver(t *testing.T) {
 		{"user layer vetoes a namespace", func(t *testing.T, s *Server, uid string) {
 			seedSystemView(t, s, uid)
 			// A disabled row is the layer's decision that the namespace is
-			// empty — the outer layer's sys-model must not come back.
-			if err := s.dataStore.SaveConfig(context.Background(), &store.ConfigRecord{
-				Kind: store.KindSetting, UserID: uid, Name: "agents.defaults", Enabled: false,
-			}); err != nil {
+			// empty — the outer layer's sys-model must not come back. Written
+			// through the dual-write so the marker carries the decision, the
+			// way a real caller writes it.
+			if err := scope.SaveSettingState(context.Background(), s.dataStore, uid, "", "agents.defaults", nil, false); err != nil {
 				t.Fatalf("veto agents.defaults: %v", err)
 			}
 		}, func(t *testing.T, panel map[string]any) {
@@ -496,10 +496,13 @@ func TestPanelConfigMatchesRuntimeResolver(t *testing.T) {
 
 	// Now veto the namespace at the user layer: the panel must show the same
 	// empty answer the runtime would resolve.
-	if err := s.dataStore.SaveConfig(ctx, &store.ConfigRecord{
-		Kind: store.KindSetting, UserID: uid, Name: "agents.defaults",
-		Enabled: false, Data: nil,
-	}); err != nil {
+	//
+	// The veto goes through the same dual-write every other settings write
+	// uses, not a bare SaveConfig: a row written straight into the blob leaves
+	// the mirror's marker certifying the old leaves, and once reads prefer the
+	// mirror that stale "enabled=true" is what answers. Writing it the way a
+	// real caller would is the point of the assertion.
+	if err := scope.SaveSettingState(ctx, s.dataStore, uid, "", "agents.defaults", nil, false); err != nil {
 		t.Fatalf("veto: %v", err)
 	}
 	want, err = scope.Setting(ctx, s.dataStore, "agents.defaults", uid, "")
