@@ -1,13 +1,41 @@
-# FastAgent configs 设计决策 — 维持现状，不纠偏
+# FastAgent configs 设计决策 — 保留 configs_kv，继续演进
 
-> 状态：已决策（2026-08-25）。本记录归档「是否全盘纠偏 fork 的 configs_kv
-> 双列 + 4 层 scope 设计、回退到上游 fastclaw 单列方案」的完整讨论，供后续
-> 重启纠偏时复用调研结论。
+> 状态：已决策（2026-08-25 维持现状；**2026-09-13 追加：保留并继续演进**）。
+> 本记录归档「是否全盘纠偏 fork 的 configs_kv 双列 + 4 层 scope 设计、回退到
+> 上游 fastclaw 单列方案」的完整讨论，并在 2026-09-13 用「删掉 configs_kv 的
+> 影响面复核」收口：**不删，且沿演进路线继续**（见下节）。
 
-## 决策
+## 决策（2026-08-25）
 
 **不改变任何代码。** fork 的 `configs_kv` + `user_id/agent_id` 双列 + 4 层
 scope 设计**全部保留**。如需后续再评估再提。
+
+## 追加决策（2026-09-13）：保留 configs_kv，并沿「演进到 configs_kv」继续
+
+2026-09-12/13 把「删掉 `configs_kv`」重新摆上台面复核了一遍（问题：删表会不会
+丢数据、影响面多大）。结论是**不删**，而且方向从「维持现状」升级为「继续演进」：
+
+- **数据侧无损**：当前不变式是「blob 权威、`configs_kv` 是可验证投影」——
+  provider / setting / plugin_enabled 行在 blob 里都有本体，写/删成对、读路径
+  blob 优先、dev reconcile 146/146 认证。删表对这三类**不丢任何东西**。
+- **唯一的损失面**是两个**只写在 `configs_kv`、blob 没有**的命名空间：
+  `mcp_undo`（per agent+session 的 undo 游标）与 `mcp_oauth_reload`（per user 的
+  reload epoch）。两者都是可再生的协调态，不是业务数据——最坏是「一次 undo 失效
+  + 每个用户强制全量 reload 一次」。
+- **代码侧成本高**：要拆掉 9 个 store 方法、3 个能力端口、3 个迁移、`kvkeys` /
+  `value_kind` / `configs_mirror` / reconciler / `reconcile-mirror` CLI，以及
+  29 个测试文件（约 142 个测试函数）；还得先给上面两个 kv-only 命名空间找新家。
+- **方向侧是决定性的**：删表**等于放弃阶段 3–4**（翻转权威 → 下掉 blob）。既然
+  目标形态就是 `configs_kv`，删掉它等于把阶段 0–2 已经建好的迁移基础设施一并拆掉。
+- **删表本身是"安全方向"**（不像翻转会复活 disabled 行 / 截断 namespace），所以
+  这不是"不敢删"，而是"没有理由删"。
+
+配套钉下的**用户模型分层**决策（同一次复核的产物）写在
+`configs-kv-scope-adaptation.md`「现状 · 用户模型分层」：第 4 层 scope 的 `user`
+是**发起人**（principal）——agent 级 overlay 用调用方账号（`UserSpace.UserID`），
+`prefs`（timezone / `set_preference`）用消息发起人（`chatterUID`）；`UserSpace`
+的 key 是调用方账号，两者不必然相等。它不是固定的 owner，这正是 `scope_id` 不能
+折成单列标量的原因。
 
 ## Context（为什么曾考虑纠偏）
 

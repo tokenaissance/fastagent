@@ -11,6 +11,14 @@
 > 投影」是**迁移期的临时不变式**，不是终点契约；它有明确的退出条件（见「现状 ·
 > 目标形态与迁移阶段」）：typed encoding → 事务化双写 → 完整性标记 → 翻转权威 →
 > 下掉 blob。不会发生的是「删掉镜像」——镜像就是终点；会发生的是删掉 blob 表。
+>
+> **决策（2026-09-13）：保留 `configs_kv`，不回退到上游的 JSON blob + `scope_id`
+> 单列。** 「删掉 configs_kv / 全盘对齐上游」这条路线被明确否决（影响面与理由见
+> `configs-kv-scope-decision.md`）：当前不变式是 blob 权威、镜像是可验证投影，删表
+> 本身安全，但代价是拆掉阶段 0–2 的全部基础设施、并放弃阶段 3–4，所以不删。沿
+> 「演进到 `configs_kv`」的路线继续：阶段 3 = 翻转权威，阶段 4 = 下掉 blob。
+> 同一条决策钉下**用户模型分层**：第 4 层 scope 的 `user` 是**发起人**
+> （principal），不是固定的 owner —— 见「现状 · 用户模型分层」。
 
 ## 现状：实现对照（权威）
 
@@ -30,6 +38,34 @@ scope」这条映射规则放在 store（`store.KVScopeFromOwnership`），由 s
 任何 `internal/scope` / `internal/store` 之外的包用 `GetConfigByName` /
 `ListConfigs` / `ListConfigsByUser` / `BatchGetConfigsByAgentIDs` 读**带镜像的
 kind**（setting / provider / plugin_enabled）即失败。
+
+### 用户模型分层：第 4 层 scope 的 `user` 是发起人
+
+这个系统里的「用户」是分层的，**第 4 层 scope（`user-agent`）里的 `user` 不是
+固定的 owner**，而是这次读的**发起人（principal）**。`scope_id` 一律是
+`<user>/<agent>`（`store.KVUserAgentScopeID`），变的只是那个 `user` 的所指：
+
+| 读入口 | 第 4 层的 `user` 指谁 | 来源 |
+|---|---|---|
+| `agents.defaults` / `tools.*` / `skills.entries`（agent 级 overlay） | **调用方账号**（`UserSpace.UserID`） | 自己的 UserSpace |
+| 跨 UserSpace 访客的 owner-fallback | **agent owner**（`rec.UserID`） | owner 的 user-scope 行，受 `shareModelConfig` 门控；访客自己显式的 `agents.defaults.model` 最后再钉一次 |
+| `prefs`（timezone / `set_preference`） | **消息发起人**（`chatterUID`） | 会话里说话的人；IM 里是 channel owner 名下铸出的 app_user |
+
+两个锚点必须分开记，因为它们不必然相等：
+
+- **`UserSpace` 的 key 是调用方账号**（`loadUserSpace(userID)` / `UserSpace.UserID`）。
+  owner 自己的 agent 就是 owner；**foreign agent**（超管 / 公开链接访客 /
+  apikey 共享用户）则路由到访客自己的 UserSpace，owner 的行是作为 overlay 叠上去的。
+- **`prefs` 的 key 是消息发起人**。群聊里消息统一进 channel owner 的 UserSpace，
+  但 `set_preference` / `timezone` 落在 (该成员, agent) 上——这行的 `user`
+  逃出了 `UserSpace` 的 key。
+
+这不是 bug，是刻意的分层：同一份「用户配置」要同时表达「这台 bot 是谁的」和
+「这次说话的人是谁」。**它也正是 `scope_id` 不能折成单列标量的原因**——上游把
+`(X, Y)` 折成 `(user, X)`，同时丢掉双维归属并造成跨 agent key 泄漏（见「问题：
+上游 configs_kv 只实现三层」）；fork 保留显式双列 + 第 4 层 scope，就是为了容纳
+这两个锚点。`Timezone` 的读层序 `(chatter, agent) → (chatter,'') → ('',agent) →
+('','')` 是这条规则最直白的体现。
 
 ### 存储面
 
@@ -350,6 +386,9 @@ ports.go 编译失败，而不是在某个无关调用点爆掉。事务的窄�
 9. 「读哪张表」只在 `internal/scope` 里决定：adapter 只用读模型，不出现整行读
    方法 + 带镜像 kind 的组合（`read_routing_test.go` 扫源码钉住）。
 10. `configs_mirror` 的标记描述一个行的**完整读状态**：叶子集合 + `enabled` 决策。
+11. 第 4 层 scope 的 `user` 是**发起人**：overlay 用调用方账号（`UserSpace.UserID`），
+    `prefs` 用消息发起人（`chatterUID`）。`UserSpace` 的 key 是调用方账号，两者
+    不必然相等——那把 `user` 想成固定的 owner 就是把两把 key 当成一把。
 
 违反 1 的症状是「值变形/丢字段」，违反 2 的症状是「面板正常、运行时不生效」，
 违反 3 的症状是「配置写进去了但运行时查不到」（`web_search` 事件），
@@ -357,7 +396,8 @@ ports.go 编译失败，而不是在某个无关调用点爆掉。事务的窄�
 互相矛盾且说不清是谁写的」，违反 8 的症状是「面板看着对、跑起来不对」。每类都
 有一组回归测试。违反 9 的症状是「翻转权威时要改 N 个调用点、漏一个就静默不生效」，
 违反 10 的症状是「翻转后 disabled 行复活」（一条被禁用的 provider/channel 在镜像
-读路径上重新出现）。
+读路径上重新出现）。违反 11 的症状是「两把 key 被当成一把」——群聊成员的个人偏好
+写进/读成 owner 的行（或反过来，owner 的行被当成某个成员的）。
 
 ## 背景：fork 的四层 scope 模型
 
@@ -988,6 +1028,8 @@ provider 名同时是两样东西：`configs_kv` 的 key 前缀（`<名>.<字段
    历史行与直接写镜像的路径仍会留下子集（迁移回填、手工 SQL、以后可能出现的
    KV-only writer）。现在只表现为「镜像与 blob 不一致」，不影响读取，因为 blob
    仍是权威。方向是 `configs` 演进成 `configs_kv`（见「目标形态与迁移阶段」），
+   **2026-09-13 复核确认保留 `configs_kv` 并沿这条路线继续**（见
+   `configs-kv-scope-decision.md`「追加决策」）；
    镜像必须是对 blob 的忠实投影——但这是**迁移期的临时不变式**，服务于阶段 3 的
    翻转，不是终点契约。**这个风险现在可判定了**：`configs_mirror` 的标记让
    「这一行被完整投影过」成为记录下来的事实，`store.VerifyConfigMirror` 同时挡住

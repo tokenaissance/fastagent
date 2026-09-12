@@ -526,6 +526,12 @@ authorized ──> logout ──> 删本地（可选远端）
 - agent 实例 actor = owner → 门控通过；
 - 群里任何成员触发 MCP 工具都带 owner 的 Bearer token。
 
+> **同一根轴的存储侧记录**：配置层的「第 4 层 scope 的 `user` 是发起人」已作为正式
+> 决策归档在 `configs-kv-scope-adaptation.md`「现状 · 用户模型分层」（2026-09-13）：
+> agent 级 overlay 用调用方账号、`prefs` 用消息发起人，`UserSpace` 的 key 是调用方
+> 账号且两者不必然相等。本节下面的「IM owner 身份来源」是它在 IM 门控上的待办，
+> 不是另立一套用户模型。
+
 一般协作产品的最佳实践是：**把「聊天所在的空间（tenant）」与「触发操作的个人（principal）」解耦**；个人账户类工具（Quandora 属此类：个人数据 + 个人配额）默认只代表发起人本人，否则显式拒绝——不能隐式借用 bot owner 的账户。
 
 **目标语义（严格 A）**：`(user, agent, server)` 凭证只允许**等价于 agent owner 本人的消息发起人**触发；owner 频道内的其他成员（tenant-chatter）与跨租户访客（foreign）一律拒绝。
