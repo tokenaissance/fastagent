@@ -213,6 +213,24 @@ func (v ConfigValue) Decode() interface{} {
 	}
 }
 
+// DecodeLegacyStructure is the conservative read for an untagged row, kept
+// for the callers that must not guess scalars: object/array text comes back
+// as a map/slice, everything else stays the literal text that was stored.
+//
+// There is nothing to guess about structure — the text starts with { or [ and
+// either parses as JSON or does not — while guessing a scalar is exactly what
+// loses data (an all-digit api_key became a number and vanished on
+// projection). Decode's legacy branch guesses scalars too, and that is the
+// rule the settings projection has always used; the two are separate
+// operations because the two readers made opposite choices before value_kind
+// existed, and untagged rows have to keep the reading they were written for.
+func (v ConfigValue) DecodeLegacyStructure() interface{} {
+	if len(v.Value) > 0 && (v.Value[0] == '{' || v.Value[0] == '[') {
+		return decodeLegacyValue(v.Value)
+	}
+	return v.Value
+}
+
 // decodeLegacyValue is the pre-value_kind guesser, kept byte-for-byte so
 // untagged rows behave exactly as they always have. It is a guess: the column
 // alone cannot tell the string "123" from the number 123, so it gets some

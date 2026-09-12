@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/fastclaw-ai/fastclaw/internal/config"
+	"github.com/fastclaw-ai/fastclaw/internal/kvkeys"
 	"github.com/fastclaw-ai/fastclaw/internal/store"
 )
 
@@ -89,6 +90,50 @@ func TestSettingLargeIntThroughKVOnlyPath(t *testing.T) {
 	}
 	if got.MaxTokens != 2_000_000 {
 		t.Fatalf("MaxTokens = %d, want 2000000", got.MaxTokens)
+	}
+}
+
+// TestProvidersMirrorFallbackKeepsLegacyStructure is the other half of the
+// N2 rule. The provider projection must not guess *scalars* from an untagged
+// row (an all-digit api_key would become a number and vanish), but the
+// pre-tag code did decode *structure* — an object/array row came back as a
+// map/slice, because there is nothing to guess: the text starts with { or [
+// and either parses as JSON or does not.
+//
+// Dropping that half turned every legacy "models" row into the raw string
+// `[{...}]`, which then failed to unmarshal into []config.ModelEntry and took
+// the whole provider down with it (slog.Warn + skip), even though the row was
+// intact in the mirror.
+func TestProvidersMirrorFallbackKeepsLegacyStructure(t *testing.T) {
+	db := openScopeDB(t)
+	defer db.Close()
+	ctx := context.Background()
+
+	// A pre-tag provider: no value_kind anywhere, the array stored as one row
+	// of JSON text.
+	legacy := map[string]store.ConfigValue{
+		"legacy.api_key": store.ConfigValue{Value: "sk-legacy"},
+		"legacy.models":  store.ConfigValue{Value: `[{"id":"gpt-5.5","contextWindow":128000}]`},
+	}
+	for name, v := range legacy {
+		if err := db.SetConfigValue(ctx, store.KindProvider, User, "user-a", name, v); err != nil {
+			t.Fatalf("SetConfigValue(%s): %v", name, err)
+		}
+	}
+
+	provs, err := Providers(ctx, db, "user-a", "")
+	if err != nil {
+		t.Fatalf("Providers: %v", err)
+	}
+	got, ok := provs["legacy"]
+	if !ok {
+		t.Fatalf("legacy provider missing from the mirror projection: %#v", provs)
+	}
+	if got.APIKey != "sk-legacy" {
+		t.Fatalf("APIKey = %q, want sk-legacy", got.APIKey)
+	}
+	if len(got.Models) != 1 || got.Models[0].ID != "gpt-5.5" || got.Models[0].ContextWindow != 128000 {
+		t.Fatalf("Models = %#v, want the stored array decoded", got.Models)
 	}
 }
 
@@ -297,7 +342,9 @@ func TestSnakeCamelRoundTrip(t *testing.T) {
 		{"authType", "auth_type"},
 		{"model", "model"},
 	} {
-		if got := camelToSnake(c.camel); got != c.snake {
+		// The write direction has no local alias any more: it belongs to
+		// kvkeys, and the scope package only borrows the read direction.
+		if got := kvkeys.CamelToSnake(c.camel); got != c.snake {
 			t.Fatalf("camelToSnake(%q) = %q, want %q", c.camel, got, c.snake)
 		}
 		if got := snakeToCamel(c.snake); got != c.camel {

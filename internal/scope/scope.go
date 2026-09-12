@@ -193,13 +193,13 @@ func kvValsToProviders(kvVals map[string]store.ConfigValue) map[string]config.Pr
 // kvFieldMap rebuilds the camelCase JSON object for one config entry from its
 // flat KV field rows.
 //
-// A tagged row is decoded by its tag. An untagged (legacy) row keeps the old
-// conservative rule: only JSON-looking text is decoded, everything else
-// passes through as the raw string it was stored as. That rule exists because
-// the legacy guesser is lossy in a way the KV table could not express — a
-// stored "123" is indistinguishable from the string "123", and guessing
-// wrong dropped the field on projection. Tagged rows do not need the
-// workaround: the writer said what the value was.
+// A tagged row is decoded by its tag. An untagged (legacy) row keeps the
+// conservative rule this reader has always used: object/array text is decoded
+// (a "models" row came back as a slice) and every scalar passes through as the
+// raw text, because a stored "123" is indistinguishable from the string "123"
+// and guessing wrong dropped the field on projection — an all-digit api_key
+// read back empty. Tagged rows do not need the workaround: the writer said
+// what the value was.
 func kvFieldMap(fields map[string]store.ConfigValue) map[string]interface{} {
 	m := make(map[string]interface{}, len(fields))
 	for storedKey, value := range fields {
@@ -208,7 +208,7 @@ func kvFieldMap(fields map[string]store.ConfigValue) map[string]interface{} {
 			m[camelKey] = value.Decode()
 			continue
 		}
-		m[camelKey] = value.Value
+		m[camelKey] = value.DecodeLegacyStructure()
 	}
 	return m
 }
@@ -436,10 +436,7 @@ func Setting(ctx context.Context, st store.Store, namespace, userID, agentID str
 	}
 	// No blob row anywhere in the chain: serve the mirror (rows written
 	// straight into configs_kv have no blob counterpart).
-	kvPrefix := namespace + "."
-	if namespace == "agents.defaults" {
-		kvPrefix = "agent."
-	}
+	kvPrefix := kvPrefixForNamespace(namespace)
 	if kvVals, err := GetValues(ctx, st, store.KindSetting, kvPrefix, userID, agentID); err == nil && len(kvVals) > 0 {
 		return kvToSettingMap(kvPrefix, kvVals), nil
 	}
@@ -904,16 +901,7 @@ func channelToData(c config.ChannelConfig) map[string]interface{} {
 // bound at per-(user, agent) scope would be flattened to the user layer
 // and leak across the user's agents.
 func kvScopeFromOwnership(userID, agentID string) (scope, scopeID string) {
-	switch {
-	case userID != "" && agentID != "":
-		return UserAgent, userID + "/" + agentID
-	case userID != "":
-		return User, userID
-	case agentID != "":
-		return Agent, agentID
-	default:
-		return System, ""
-	}
+	return store.KVScopeFromOwnership(userID, agentID)
 }
 
 // GetValues reads all values matching a prefix with scope merge.
@@ -952,18 +940,12 @@ func GetValues(ctx context.Context, st store.Store, kind, prefix, userID, agentI
 		}
 	}
 	if userID != "" && agentID != "" {
-		if err := merge(UserAgent, userID+"/"+agentID); err != nil {
+		if err := merge(UserAgent, store.KVUserAgentScopeID(userID, agentID)); err != nil {
 			return nil, err
 		}
 	}
 	return out, nil
 }
-
-// camelToSnake converts a camelCase string to snake_case. Thin alias for
-// kvkeys.CamelToSnake — the implementation (and the data-key exception) lives
-// in one place now, so the dual-write path and store.flattenJSON can no longer
-// drift apart the way the two historical copies did.
-func camelToSnake(s string) string { return kvkeys.CamelToSnake(s) }
 
 // flattenJSONToKV flattens a map into dotted-key → store.ConfigValue pairs,
 // used for dual-writing to configs_kv. Same logic as store.flattenJSON.
