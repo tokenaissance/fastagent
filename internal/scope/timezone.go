@@ -38,7 +38,9 @@ const prefsTimezoneKey = "timezone"
 // not project — widening it to serve a row the authoritative table does not have
 // would let a non-authoritative row change a user-visible time. If a KV-only
 // prefs writer ever appears, that writer owes the blob row; do not widen this
-// loop to cover it.
+// loop to cover it. Blob is authoritative only during the configs -> configs_kv
+// migration; when authority flips to KV, this reader flips with it as a whole
+// (KV first), it is not patched one branch at a time.
 func Timezone(ctx context.Context, st store.ConfigReader, chatterUID, agentID string) string {
 	if st == nil {
 		return ""
