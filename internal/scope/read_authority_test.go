@@ -9,6 +9,7 @@ package scope
 
 import (
 	"context"
+	"reflect"
 	"testing"
 
 	"github.com/fastclaw-ai/fastclaw/internal/config"
@@ -217,5 +218,212 @@ func TestAgentPluginEnabledMirrorFirstServesCertifiedMirror(t *testing.T) {
 	}
 	if !got["demo"] {
 		t.Fatalf("AgentPluginEnabled = %#v, want demo=true", got)
+	}
+}
+
+// The merged resolver walks four layers; under mirrorFirst each layer is judged
+// on its own marker, so a certified layer overrides its blob row while the walk
+// still merges across layers.
+func TestSettingMirrorFirstCertifiesEachLayer(t *testing.T) {
+	db := openScopeDBNamed(t, "readauth_merged_setting")
+	defer db.Close()
+	ctx := context.Background()
+
+	if err := SaveSetting(ctx, db, "", "", "agents.defaults",
+		map[string]interface{}{"model": "mirror-sys"}); err != nil {
+		t.Fatalf("SaveSetting: %v", err)
+	}
+	// Change the blob alone; the marker still certifies the mirror leaves.
+	if err := db.SaveConfig(ctx, &store.ConfigRecord{
+		Kind: store.KindSetting, Name: "agents.defaults",
+		Enabled: true, Data: map[string]interface{}{"model": "blob-sys"},
+	}); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+
+	withReadAuthority(t, blobFirst)
+	blob, err := Setting(ctx, db, "agents.defaults", "", "")
+	if err != nil {
+		t.Fatalf("Setting(blobFirst): %v", err)
+	}
+	if blob["model"] != "blob-sys" {
+		t.Fatalf("blobFirst model = %v, want blob-sys", blob["model"])
+	}
+
+	withReadAuthority(t, mirrorFirst)
+	mirror, err := Setting(ctx, db, "agents.defaults", "", "")
+	if err != nil {
+		t.Fatalf("Setting(mirrorFirst): %v", err)
+	}
+	if mirror["model"] != "mirror-sys" {
+		t.Fatalf("mirrorFirst model = %v, want mirror-sys", mirror["model"])
+	}
+}
+
+// The merged walk still merges outer and inner certified layers under
+// mirrorFirst — the flip changes which table each layer is read from, not the
+// precedence between layers.
+func TestSettingMirrorFirstMergesAcrossLayers(t *testing.T) {
+	db := openScopeDBNamed(t, "readauth_merged_layers")
+	defer db.Close()
+	ctx := context.Background()
+
+	if err := SaveSetting(ctx, db, "", "", "agents.defaults",
+		map[string]interface{}{"model": "sys", "promptMode": "natural"}); err != nil {
+		t.Fatalf("SaveSetting system: %v", err)
+	}
+	if err := SaveSetting(ctx, db, "u1", "", "agents.defaults",
+		map[string]interface{}{"model": "user"}); err != nil {
+		t.Fatalf("SaveSetting user: %v", err)
+	}
+
+	for _, auth := range []readAuthority{blobFirst, mirrorFirst} {
+		withReadAuthority(t, auth)
+		got, err := Setting(ctx, db, "agents.defaults", "u1", "")
+		if err != nil {
+			t.Fatalf("Setting(%v): %v", auth, err)
+		}
+		if got["model"] != "user" || got["promptMode"] != "natural" {
+			t.Fatalf("Setting(%v) = %#v, want model=user promptMode=natural", auth, got)
+		}
+	}
+}
+
+// An uncertified layer row (mirror leaves with no marker) is not trusted:
+// mirrorFirst falls back to the blob for that layer, exactly as the single
+// scope resolvers do.
+func TestSettingMirrorFirstFallsBackPerLayerOnUncertified(t *testing.T) {
+	db := openScopeDBNamed(t, "readauth_merged_uncertified")
+	defer db.Close()
+	ctx := context.Background()
+
+	if err := db.SaveConfig(ctx, &store.ConfigRecord{
+		Kind: store.KindSetting, Name: "agents.defaults",
+		Enabled: true, Data: map[string]interface{}{"model": "blob-sys"},
+	}); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+	if err := db.SetConfigValue(ctx, store.KindSetting, System, "",
+		"agent.model", store.StringValue("mirror-sys")); err != nil {
+		t.Fatalf("SetConfigValue: %v", err)
+	}
+
+	withReadAuthority(t, mirrorFirst)
+	got, err := Setting(ctx, db, "agents.defaults", "", "")
+	if err != nil {
+		t.Fatalf("Setting: %v", err)
+	}
+	if got["model"] != "blob-sys" {
+		t.Fatalf("mirrorFirst model = %v, want blob-sys (uncertified layer must not be served)", got["model"])
+	}
+}
+
+// Providers is the merged provider resolver; a certified layer overrides its
+// blob row under mirrorFirst, and the blob answers under blobFirst.
+func TestProvidersMirrorFirstCertifiedOverridesBlob(t *testing.T) {
+	db := openScopeDBNamed(t, "readauth_merged_providers")
+	defer db.Close()
+	ctx := context.Background()
+
+	if err := SaveProvider(ctx, db, "", "", "openai",
+		config.ProviderConfig{APIKey: "sk-mir"}); err != nil {
+		t.Fatalf("SaveProvider: %v", err)
+	}
+	if err := db.SaveConfig(ctx, &store.ConfigRecord{
+		Kind: store.KindProvider, Name: "openai",
+		Enabled: true, Data: map[string]interface{}{"apiKey": "sk-blob"},
+	}); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+
+	withReadAuthority(t, blobFirst)
+	blob, err := Providers(ctx, db, "", "")
+	if err != nil {
+		t.Fatalf("Providers(blobFirst): %v", err)
+	}
+	if blob["openai"].APIKey != "sk-blob" {
+		t.Fatalf("blobFirst apiKey = %q, want sk-blob", blob["openai"].APIKey)
+	}
+
+	withReadAuthority(t, mirrorFirst)
+	mirror, err := Providers(ctx, db, "", "")
+	if err != nil {
+		t.Fatalf("Providers(mirrorFirst): %v", err)
+	}
+	if mirror["openai"].APIKey != "sk-mir" {
+		t.Fatalf("mirrorFirst apiKey = %q, want sk-mir", mirror["openai"].APIKey)
+	}
+}
+
+// Providers honours a marker's veto under mirrorFirst: with the blob row gone,
+// blobFirst can only see the payload, while mirrorFirst reads the "off"
+// decision out of the marker and drops the name.
+func TestProvidersMirrorFirstHonoursTheMarkerVeto(t *testing.T) {
+	db := openScopeDBNamed(t, "readauth_merged_provider_veto")
+	defer db.Close()
+	ctx := context.Background()
+
+	if err := SaveProviderState(ctx, db, "", "", "openai",
+		config.ProviderConfig{APIKey: "sk-mir"}, false); err != nil {
+		t.Fatalf("SaveProviderState: %v", err)
+	}
+	rec, err := db.GetConfigByName(ctx, store.KindProvider, "", "", "openai")
+	if err != nil || rec == nil {
+		t.Fatalf("GetConfigByName: rec=%+v err=%v", rec, err)
+	}
+	if err := db.DeleteConfig(ctx, rec.ID); err != nil {
+		t.Fatalf("DeleteConfig: %v", err)
+	}
+
+	withReadAuthority(t, mirrorFirst)
+	got, err := Providers(ctx, db, "", "")
+	if err != nil {
+		t.Fatalf("Providers: %v", err)
+	}
+	if _, ok := got["openai"]; ok {
+		t.Fatalf("mirrorFirst served a disabled provider: %#v", got)
+	}
+}
+
+// BatchSettings must not be able to disagree with Setting in either mode — the
+// batch form exists only to replace the per-namespace queries.
+func TestBatchSettingsMatchesSettingUnderMirrorFirst(t *testing.T) {
+	db := openScopeDBNamed(t, "readauth_merged_batch")
+	defer db.Close()
+	ctx := context.Background()
+
+	if err := SaveSetting(ctx, db, "u1", "", "agents.defaults",
+		map[string]interface{}{"model": "certified"}); err != nil {
+		t.Fatalf("SaveSetting: %v", err)
+	}
+	if err := db.SaveConfig(ctx, &store.ConfigRecord{
+		Kind: store.KindSetting, UserID: "u1", Name: "tools.categories",
+		Enabled: true, Data: map[string]interface{}{"search": true},
+	}); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+	namespaces := []string{"agents.defaults", "tools.categories", "tools.providers"}
+
+	for _, auth := range []readAuthority{blobFirst, mirrorFirst} {
+		withReadAuthority(t, auth)
+		batch, err := BatchSettings(ctx, db, namespaces, "u1", "")
+		if err != nil {
+			t.Fatalf("BatchSettings(%v): %v", auth, err)
+		}
+		for _, ns := range namespaces {
+			single, err := Setting(ctx, db, ns, "u1", "")
+			if err != nil {
+				t.Fatalf("Setting(%v, %s): %v", auth, ns, err)
+			}
+			// BatchSettings omits an empty namespace; Setting returns an empty
+			// map. Normalize before comparing, as the parity test does.
+			got := batch[ns]
+			if got == nil {
+				got = map[string]interface{}{}
+			}
+			if !reflect.DeepEqual(got, single) {
+				t.Fatalf("%v: BatchSettings[%s] = %#v but Setting = %#v", auth, ns, got, single)
+			}
+		}
 	}
 }
