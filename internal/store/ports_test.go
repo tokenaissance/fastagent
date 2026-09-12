@@ -34,6 +34,7 @@ func TestPortMethodSets(t *testing.T) {
 		{(*ConfigMirrorStore)(nil), []string{
 			"DeleteConfigMirror", "GetConfigMirror", "SaveConfigMirror",
 		}},
+		{(*ConfigMirrorReconciler)(nil), []string{"ReconcileConfigMirrors"}},
 		{(*KVStore)(nil), []string{
 			"DeleteConfigMirror", "DeleteConfigPrefix", "DeleteConfigValue",
 			"GetConfigMirror", "ListConfigValues",
@@ -81,6 +82,7 @@ func TestPortsExcludeOtherDomains(t *testing.T) {
 		"SaveConfig": true, "DeleteConfig": true,
 		"SetConfigValue": true, "DeleteConfigValue": true, "DeleteConfigPrefix": true,
 		"SaveConfigMirror": true, "GetConfigMirror": true, "DeleteConfigMirror": true,
+		"ReconcileConfigMirrors": true,
 	}
 	for _, port := range []reflect.Type{
 		reflect.TypeOf((*ConfigReader)(nil)).Elem(),
@@ -89,6 +91,7 @@ func TestPortsExcludeOtherDomains(t *testing.T) {
 		reflect.TypeOf((*ConfigStore)(nil)).Elem(),
 		reflect.TypeOf((*KVStore)(nil)).Elem(),
 		reflect.TypeOf((*ConfigMirrorStore)(nil)).Elem(),
+		reflect.TypeOf((*ConfigMirrorReconciler)(nil)).Elem(),
 	} {
 		for i := 0; i < port.NumMethod(); i++ {
 			name := port.Method(i).Name

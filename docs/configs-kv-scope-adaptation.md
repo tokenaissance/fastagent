@@ -70,15 +70,19 @@ KV 是镜像」，这是**迁移期的临时不变式**，不是终点。翻转�
 |---|---|---|
 | 0 | typed encoding：值域能表达「这是 string / number / bool…」，不靠读侧猜 | **已做**：`configs_kv.value_kind`（数字保字面量，`json.Number`） |
 | 1 | 事务化双写：blob 与镜像不会「写一半」 | **已做**：`store.WithConfigTx`（`9dbccd9`） |
-| 2 | 完整性标记：能判定「镜像 = blob 的完整投影」，而不只是抽样一致 | **已做（写入侧）**：`configs_mirror` 表 + `store.ConfigMirror`（prefix / key_count / fingerprint），`store.VerifyConfigMirror` 判定；双写与回填都写标记。**剩余**：对存量行做一次 blob↔镜像核对以回填标记（见残留风险 2） |
+| 2 | 完整性标记：能判定「镜像 = blob 的完整投影」，而不只是抽样一致 | **已做**：`configs_mirror` 表 + `store.ConfigMirror`（prefix / key_count / fingerprint）；双写与回填写标记，`store.VerifyConfigMirror` 判定；存量行由 `store.ReconcileConfigMirrors`（CLI `fastagent configs reconcile-mirror [--strict]`）做 blob↔镜像核对并回填标记 |
 | 3 | 翻转权威：读路径改 KV 优先、blob 变兜底 | **未做** |
 | 4 | 下掉 blob：迁移完成后删除 `configs` 的 blob 列与相关读代码 | **未做** |
 
 在阶段 3 到来之前，**blob 权威**；镜像必须是对 blob 的忠实投影，这不是终点契约，
 而是「让阶段 3 安全着陆」的前置条件。阶段 2 的标记机制已经就位，阶段 3 的准入
-条件因此收窄成一条：**每个将被镜像服务的行都必须先被标记认证**——新写入与回填
-已经自动认证，剩下的就是存量行。没有这一步，翻转权威等于把「镜像可能不全」从
-潜伏变成正式语义。
+条件因此收窄成一条可执行的验收：**跑一次 `fastagent configs reconcile-mirror`，
+gap 归零**。新写入与回填自动认证；存量行由这次核对认证（重新投影每一行、与实际
+镜像逐叶子比对，一致才写标记，不一致则报告并确保没有标记为它背书）。没有这一步，
+翻转权威等于把「镜像可能不全」从潜伏变成正式语义。
+
+核对是被设计成**可重跑**的：它不修数据（不一致是需要人决策的数据，不是一个函数
+该替你选的值），只认证 + 报告，所以重复跑的结果稳定，适合放进发布前检查。
 
 ### 写路径
 
@@ -909,10 +913,10 @@ provider 名同时是两样东西：`configs_kv` 的 key 前缀（`<名>.<字段
    翻转，不是终点契约。**这个风险现在可判定了**：`configs_mirror` 的标记让
    「这一行被完整投影过」成为记录下来的事实，`store.VerifyConfigMirror` 同时挡住
    「标记之后行又被改过」（手工 SQL 删一个叶子就会被抓到）。因此翻转之前剩下的
-   只有一步——**给存量行回填标记**（存量行没有标记 = 未认证 = 翻转后必须回落
-   blob），回填需要对每行做一次 blob↔镜像核对。在那之前，新增写入路径要么双写
-   （收在同一个 `Save*` 入口里，自动带标记），要么明确登记为 KV-only 并同时补上
-   读侧与编辑器的可见性。
+   只有一步——**跑 `fastagent configs reconcile-mirror`，gap 归零**（存量行没有
+   标记 = 未认证 = 翻转后必须回落 blob；核对一致才回填标记，不一致的行留作待决策）。
+   在那之前，新增写入路径要么双写（收在同一个 `Save*` 入口里，自动带标记），要么
+   明确登记为 KV-only 并同时补上读侧与编辑器的可见性。
 3. **空 map 只在读侧恢复**：`flattenJSONToKV` 仍然不为 `{}` 产出行，所以镜像里
    没有这个 key（读 blob 时正确返回空对象）。
 4. **LIKE 转义只覆盖已发现的位置**：`configs_kv` 的 name/scope_id 前缀匹配都已

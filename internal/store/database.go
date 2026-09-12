@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"sort"
 	"strings"
 	"time"
@@ -3994,6 +3995,71 @@ func (d *DBStore) DeleteConfigMirror(ctx context.Context, kind, scope, scopeID, 
 	return err
 }
 
+// ReconcileConfigMirrors is the certification pass that has to run before the
+// mirror may take over as the authoritative read source.
+//
+// It walks every configs row with a KV projection, re-projects the blob the
+// same way the dual-write does, and compares that against what is actually in
+// configs_kv. Rows that match are certified (a marker is written, so a
+// mirror-first reader may trust them); rows that do not are left uncertified
+// and reported, and any stale marker on them is dropped so nothing vouches for
+// a wrong projection.
+//
+// It is idempotent and safe to re-run: a second pass over an already
+// reconciled database reports the same certification and no new gaps. It does
+// not repair anything — a mismatch is data that needs a decision, not a value
+// this function should silently pick.
+func (d *DBStore) ReconcileConfigMirrors(ctx context.Context) (ConfigMirrorReconcile, error) {
+	var rep ConfigMirrorReconcile
+	rows, err := d.handle().QueryContext(ctx,
+		fmt.Sprintf(`SELECT `+configSelectCols+` FROM configs WHERE kind IN (%s, %s, %s) ORDER BY kind, user_id, agent_id, name`,
+			d.ph(1), d.ph(2), d.ph(3)),
+		KindProvider, KindSetting, KindPluginEnabled)
+	if err != nil {
+		return rep, err
+	}
+	configs, err := scanConfigs(rows)
+	rows.Close()
+	if err != nil {
+		return rep, err
+	}
+	for i := range configs {
+		cfg := &configs[i]
+		rep.Examined++
+		scope, scopeID := KVScopeFromOwnership(cfg.UserID, cfg.AgentID)
+		prefix := MirrorPrefixFor(cfg.Kind, cfg.Name)
+		want := map[string]ConfigValue{}
+		if len(cfg.Data) > 0 {
+			flattenJSON(prefix, cfg.Data, want)
+		}
+		got, err := d.ListConfigValues(ctx, cfg.Kind, scope, scopeID, prefix)
+		if err != nil {
+			return rep, err
+		}
+		if len(want) == 0 && len(got) == 0 {
+			// An empty projection is the dual-write's "no marker" case; keep
+			// the two consistent so a reader sees the same shape either way.
+			if err := d.DeleteConfigMirror(ctx, cfg.Kind, scope, scopeID, cfg.Name); err != nil {
+				return rep, err
+			}
+			continue
+		}
+		if maps.Equal(want, got) {
+			if err := d.SaveConfigMirror(ctx, cfg.Kind, scope, scopeID, cfg.Name,
+				NewConfigMirror(prefix, got)); err != nil {
+				return rep, err
+			}
+			rep.Certified++
+			continue
+		}
+		if err := d.DeleteConfigMirror(ctx, cfg.Kind, scope, scopeID, cfg.Name); err != nil {
+			return rep, err
+		}
+		rep.Gaps = append(rep.Gaps, mirrorGap(cfg.Kind, scope, scopeID, cfg.Name, want, got))
+	}
+	return rep, nil
+}
+
 // likePrefixPattern turns a literal KV name prefix into a LIKE pattern that
 // matches only that prefix. The metacharacters matter: "_" matches any single
 // character, so the unescaped pattern built from a provider called
@@ -4384,10 +4450,7 @@ func (d *DBStore) migrateConfigsToKV(ctx context.Context) error {
 		// The mirror prefix: a provider name or a settings namespace becomes
 		// the "<name>." prefix its leaves live under. agents.defaults is the
 		// one rename — its leaves live under "agent.".
-		kvPrefix := cfg.Name + "."
-		if cfg.Kind == KindSetting && cfg.Name == "agents.defaults" {
-			kvPrefix = "agent."
-		}
+		kvPrefix := MirrorPrefixFor(cfg.Kind, cfg.Name)
 		// Flatten JSON data into typed key-value pairs.
 		flat := map[string]ConfigValue{}
 		flattenJSON(kvPrefix, cfg.Data, flat)

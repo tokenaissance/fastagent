@@ -137,6 +137,7 @@ func main() {
 	rootCmd.AddCommand(toolsCmd())
 	rootCmd.AddCommand(usageCmd())
 	rootCmd.AddCommand(projectsCmd())
+	rootCmd.AddCommand(configsCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
