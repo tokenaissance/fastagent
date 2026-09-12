@@ -284,7 +284,12 @@ func (s *Server) handleUpdateProvider(w http.ResponseWriter, r *http.Request) {
 	if req.Models != nil {
 		pc.Models = req.Models
 	}
-	if err := scope.SaveProviderByScope(r.Context(), s.dataStore, rec.LegacyScope(), rec.LegacyScopeID(), rec.Name, pc); err != nil {
+	// SaveProviderState, not SaveProvider: an edit must not silently
+	// re-enable a row the operator switched off (enabled=false is a veto —
+	// see scope's package doc). There is no enable/disable endpoint yet, so
+	// the flag only ever travels from the existing row.
+	uid, aid := scope.OwnershipFromScope(rec.LegacyScope(), rec.LegacyScopeID())
+	if err := scope.SaveProviderState(r.Context(), s.dataStore, uid, aid, rec.Name, pc, rec.Enabled); err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}

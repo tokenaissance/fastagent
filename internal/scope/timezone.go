@@ -51,6 +51,12 @@ func Timezone(ctx context.Context, st store.Store, chatterUID, agentID string) s
 		if err != nil || rec == nil {
 			continue
 		}
+		// Same rule as every other reader: a disabled row is this layer's
+		// decision that the name is off, so the less specific layers below
+		// it must not answer instead.
+		if !rec.Enabled {
+			return ""
+		}
 		if tz, ok := rec.Data[prefsTimezoneKey].(string); ok && tz != "" {
 			return tz
 		}

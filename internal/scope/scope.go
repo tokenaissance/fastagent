@@ -21,6 +21,24 @@
 // kind="setting":  name is the namespace ("agents.defaults", "sandbox", …).
 //
 //	Top-level keys merge field-wise; inner-scope keys win.
+//
+// The `enabled` column is part of the resolution model, not a leftover of
+// the channels table: a row with Enabled=false is this layer's decision
+// that the name does not exist. It contributes no value AND it vetoes every
+// outer layer's entry of the same name, so an inner layer can switch a
+// name off instead of silently falling through to the operator's value.
+// Inner layers may re-enable it again.
+//
+// That veto is what makes "disable" mean something in each kind:
+//
+//   - kind="provider"/"channel" merge by whole entry, so a disabled inner
+//     row removes the outer entry (a user opting out of a system-wide bot
+//     or credential must not get it back).
+//   - kind="setting" merges field-wise, so a disabled inner row drops the
+//     fields the outer layers contributed for that namespace.
+//
+// A disabled row is still a row: it also blocks the configs_kv fallback,
+// which is only consulted when no blob row for the name exists at all.
 package scope
 
 import (
@@ -91,11 +109,20 @@ func Providers(ctx context.Context, st store.Store, userID, agentID string) (map
 	}
 	// The legacy blob is authoritative — it keeps exact JSON types and the
 	// complete key set, while configs_kv is a derived projection that can be
-	// partial or lossy (see Setting). KV is the fallback, for rows that exist
-	// only in the mirror.
+	// partial or lossy (see Setting). KV is the fallback, per provider name:
+	// a name that any blob row covers (including a disabled one, which is a
+	// decision to drop it) is decided by the blob. Deciding per name instead
+	// of per chain is what keeps a provider that exists only in the mirror
+	// visible next to blob-backed siblings.
 	out := map[string]config.ProviderConfig{}
+	inBlob := map[string]bool{}
 	apply := func(rows []store.ConfigRecord) {
 		for _, r := range rows {
+			inBlob[r.Name] = true
+			if !r.Enabled {
+				delete(out, r.Name)
+				continue
+			}
 			out[r.Name] = providerToConfig(r)
 		}
 	}
@@ -129,18 +156,19 @@ func Providers(ctx context.Context, st store.Store, userID, agentID string) (map
 			apply(rows)
 		}
 	}
-	if len(out) > 0 {
-		return out, nil
-	}
-	if kvProvs, err := providersFromKV(ctx, st, userID, agentID); err == nil && len(kvProvs) > 0 {
-		return kvProvs, nil
+	if kvProvs, err := providersFromKV(ctx, st, userID, agentID); err == nil {
+		for name, pc := range kvProvs {
+			if !inBlob[name] {
+				out[name] = pc
+			}
+		}
 	}
 	return out, nil
 }
 
 // providersFromKV reads all provider KV values with scope merge and
-// reconstructs them into ProviderConfig structs. Only reachable when the
-// (authoritative) configs blob holds no provider rows at all.
+// reconstructs them into ProviderConfig structs. The caller merges the
+// result per provider name, keeping names the blob already decided.
 func providersFromKV(ctx context.Context, st store.Store, userID, agentID string) (map[string]config.ProviderConfig, error) {
 	kvVals, err := GetValues(ctx, st, store.KindProvider, "", userID, agentID)
 	if err != nil || len(kvVals) == 0 {
@@ -227,20 +255,27 @@ func AgentScopeProviders(ctx context.Context, st store.Store, agentID string) (m
 	if agentID == "" {
 		return map[string]config.ProviderConfig{}, nil
 	}
-	// Blob first (authoritative), mirror only for blob-less rows.
+	// Blob first (authoritative), mirror only for names with no blob row —
+	// see Providers.
 	rows, err := st.ListConfigs(ctx, store.KindProvider, "", agentID)
 	if err != nil {
 		return nil, err
 	}
 	out := make(map[string]config.ProviderConfig, len(rows))
+	inBlob := make(map[string]bool, len(rows))
 	for _, r := range rows {
+		inBlob[r.Name] = true
+		if !r.Enabled {
+			continue
+		}
 		out[r.Name] = providerToConfig(r)
 	}
-	if len(out) > 0 {
-		return out, nil
-	}
 	if kvVals, err := st.ListConfigValues(ctx, store.KindProvider, Agent, agentID, ""); err == nil && len(kvVals) > 0 {
-		return kvValsToProviders(kvVals), nil
+		for name, pc := range kvValsToProviders(kvVals) {
+			if !inBlob[name] {
+				out[name] = pc
+			}
+		}
 	}
 	return out, nil
 }
@@ -258,20 +293,27 @@ func UserScopeProviders(ctx context.Context, st store.Store, userID string) (map
 	if userID == "" {
 		return map[string]config.ProviderConfig{}, nil
 	}
-	// Blob first (authoritative), mirror only for blob-less rows.
+	// Blob first (authoritative), mirror only for names with no blob row —
+	// see Providers.
 	rows, err := st.ListConfigs(ctx, store.KindProvider, userID, "")
 	if err != nil {
 		return nil, err
 	}
 	out := make(map[string]config.ProviderConfig, len(rows))
+	inBlob := make(map[string]bool, len(rows))
 	for _, r := range rows {
+		inBlob[r.Name] = true
+		if !r.Enabled {
+			continue
+		}
 		out[r.Name] = providerToConfig(r)
 	}
-	if len(out) > 0 {
-		return out, nil
-	}
 	if kvVals, err := st.ListConfigValues(ctx, store.KindProvider, User, userID, ""); err == nil && len(kvVals) > 0 {
-		return kvValsToProviders(kvVals), nil
+		for name, pc := range kvValsToProviders(kvVals) {
+			if !inBlob[name] {
+				out[name] = pc
+			}
+		}
 	}
 	return out, nil
 }
@@ -308,7 +350,12 @@ func ExactSetting(ctx context.Context, st store.Store, namespace, userID, agentI
 		if !errors.Is(err, store.ErrNotFound) {
 			return err
 		}
-	} else if rec != nil && len(rec.Data) > 0 {
+	} else if rec != nil {
+		// The blob owns this (user, agent); a disabled row means "nothing
+		// here", and the mirror must not resurrect it (see the package doc).
+		if !rec.Enabled || len(rec.Data) == 0 {
+			return nil
+		}
 		return jsonInto(rec.Data, dst)
 	}
 	// No blob row — the row exists only in the mirror.
@@ -396,8 +443,19 @@ func Setting(ctx context.Context, st store.Store, namespace, userID, agentID str
 	}
 
 	out := map[string]interface{}{}
-	merge := func(layer map[string]interface{}) {
-		for k, v := range layer {
+	// sawRow records that some layer owns this namespace. A row that says
+	// "disabled" is still an owner: it vetoes the outer layers and, like any
+	// other blob row, keeps the mirror out of the answer.
+	sawRow := false
+	apply := func(rec *store.ConfigRecord) {
+		sawRow = true
+		if !rec.Enabled {
+			// Veto: whatever the outer layers contributed for this namespace
+			// does not survive. An inner layer can still re-enable it.
+			out = map[string]interface{}{}
+			return
+		}
+		for k, v := range rec.Data {
 			out[k] = v
 		}
 	}
@@ -410,7 +468,7 @@ func Setting(ctx context.Context, st store.Store, namespace, userID, agentID str
 			return err
 		}
 		if rec != nil {
-			merge(rec.Data)
+			apply(rec)
 		}
 		return nil
 	}
@@ -432,7 +490,7 @@ func Setting(ctx context.Context, st store.Store, namespace, userID, agentID str
 			return nil, err
 		}
 	}
-	if len(out) > 0 {
+	if sawRow {
 		return out, nil
 	}
 	// No blob row anywhere in the chain: serve the mirror (rows written
@@ -564,12 +622,11 @@ func jsonInto(v interface{}, dst interface{}) error {
 	return json.Unmarshal(blob, dst)
 }
 
-// BatchSettings resolves multiple namespaces in 2 ListConfigs calls instead
-// of N×2 GetConfigByName calls. It merges system-level and user-level rows
-// field-wise (user wins), matching the semantics of calling Setting() for
-// each namespace individually.
-//
-// agentID is passed through to ListConfigs — for loadUserConfig it's always "".
+// BatchSettings resolves multiple namespaces in one ListConfigs call per
+// ownership layer instead of N point lookups. It walks the same layers, in
+// the same order, and applies the same enabled/veto rule as Setting — the
+// batch form exists only to replace the per-namespace queries, and the two
+// must not be able to disagree. TestBatchSettings_MatchesSetting pins that.
 func BatchSettings(
 	ctx context.Context,
 	st store.Store,
@@ -580,108 +637,73 @@ func BatchSettings(
 		return nil, errors.New("scope.BatchSettings: store is required")
 	}
 
-	// 1 query: system-level rows (user_id="", agent_id=agentID)
-	systemRows, err := st.ListConfigs(ctx, store.KindSetting, "", agentID)
-	if err != nil {
-		return nil, fmt.Errorf("scope.BatchSettings: load system configs: %w", err)
-	}
-
-	// 1 query: user-level rows (user_id=X, agent_id=agentID)
-	var userRows []store.ConfigRecord
-	if userID != "" {
-		userRows, err = st.ListConfigs(ctx, store.KindSetting, userID, agentID)
-		if err != nil {
-			return nil, fmt.Errorf("scope.BatchSettings: load user configs: %w", err)
-		}
-	}
-
-	merged := mergeByNamespace(systemRows, userRows, namespaces)
-
-	// Every other reader serves a blob-less namespace from the mirror; this
-	// one used to return nothing for it, so a namespace that exists only in
-	// configs_kv was invisible to the dashboard while the runtime resolved it
-	// fine — the "面板显示正常、运行时不生效" failure with the two sides
-	// swapped. Only namespaces with no blob row anywhere pay for the extra
-	// lookups, so the batch fast path is unchanged in the common case.
-	//
-	// Setting() is the resolver that defines this contract (the docstring
-	// above already promises "the semantics of calling Setting() for each
-	// namespace individually"); the batch path is an optimization of it, and
-	// for the only production caller (loadUserConfig, agentID == "") the two
-	// walk exactly the same layers.
-	//
-	// "Blob-less" is decided by the rows, not by the merged result: a row that
-	// exists but is disabled is a decision to ignore that namespace, and
-	// mergeByNamespace already left it out. Reading the mirror for it would
-	// resurrect a value the row was switched off.
-	present := make(map[string]bool, len(systemRows)+len(userRows))
-	for _, row := range systemRows {
-		present[row.Name] = true
-	}
-	for _, row := range userRows {
-		present[row.Name] = true
-	}
-	for _, ns := range namespaces {
-		if present[ns] {
-			continue
-		}
-		fromMirror, err := Setting(ctx, st, ns, userID, agentID)
-		if err != nil {
-			return nil, fmt.Errorf("scope.BatchSettings: resolve %q: %w", ns, err)
-		}
-		if len(fromMirror) > 0 {
-			merged[ns] = fromMirror
-		}
-	}
-	return merged, nil
-}
-
-// mergeByNamespace groups config rows by name and merges field-wise.
-// User-level values override system-level values (same semantics as Setting).
-func mergeByNamespace(
-	systemRows, userRows []store.ConfigRecord,
-	namespaces []string,
-) map[string]map[string]interface{} {
 	nsSet := make(map[string]struct{}, len(namespaces))
 	for _, ns := range namespaces {
 		nsSet[ns] = struct{}{}
 	}
 
-	result := make(map[string]map[string]interface{}, len(namespaces))
+	// One query per ownership layer, outer→inner — the same four layers
+	// Setting walks, so the two resolvers cannot drift apart again.
+	layers := [][2]string{{"", ""}}
+	if userID != "" {
+		layers = append(layers, [2]string{userID, ""})
+	}
+	if agentID != "" {
+		layers = append(layers, [2]string{"", agentID})
+	}
+	if userID != "" && agentID != "" {
+		layers = append(layers, [2]string{userID, agentID})
+	}
 
-	// Apply system layer first
-	for _, row := range systemRows {
-		if !row.Enabled {
-			continue
+	merged := make(map[string]map[string]interface{}, len(namespaces))
+	seen := make(map[string]bool, len(namespaces))
+	for _, layer := range layers {
+		rows, err := st.ListConfigs(ctx, store.KindSetting, layer[0], layer[1])
+		if err != nil {
+			return nil, fmt.Errorf("scope.BatchSettings: load %q/%q configs: %w", layer[0], layer[1], err)
 		}
-		if _, ok := nsSet[row.Name]; !ok {
-			continue
-		}
-		if result[row.Name] == nil {
-			result[row.Name] = make(map[string]interface{})
-		}
-		for k, v := range row.Data {
-			result[row.Name][k] = v
+		for _, row := range rows {
+			if _, ok := nsSet[row.Name]; !ok {
+				continue
+			}
+			seen[row.Name] = true
+			if !row.Enabled {
+				// Veto: drop what the outer layers contributed, and drop the
+				// row's own data — a disabled row carries no payload.
+				merged[row.Name] = map[string]interface{}{}
+				continue
+			}
+			if merged[row.Name] == nil {
+				merged[row.Name] = map[string]interface{}{}
+			}
+			for k, v := range row.Data {
+				merged[row.Name][k] = v
+			}
 		}
 	}
 
-	// Apply user layer (overrides system)
-	for _, row := range userRows {
-		if !row.Enabled {
+	out := make(map[string]map[string]interface{}, len(namespaces))
+	for _, ns := range namespaces {
+		if seen[ns] {
+			// The chain owns this namespace. An empty map here is the veto /
+			// empty-row outcome, and the mirror must not resurrect it.
+			if len(merged[ns]) > 0 {
+				out[ns] = merged[ns]
+			}
 			continue
 		}
-		if _, ok := nsSet[row.Name]; !ok {
-			continue
+		// No blob row anywhere: serve the mirror (rows written straight into
+		// configs_kv have no blob counterpart). Setting is the definition of
+		// this contract, so reuse it rather than re-deriving the rule.
+		fromMirror, err := Setting(ctx, st, ns, userID, agentID)
+		if err != nil {
+			return nil, fmt.Errorf("scope.BatchSettings: resolve %q: %w", ns, err)
 		}
-		if result[row.Name] == nil {
-			result[row.Name] = make(map[string]interface{})
-		}
-		for k, v := range row.Data {
-			result[row.Name][k] = v
+		if len(fromMirror) > 0 {
+			out[ns] = fromMirror
 		}
 	}
-
-	return result
+	return out, nil
 }
 
 // SaveSettingByScope is the legacy (scope, scopeID) form kept for the
@@ -790,7 +812,11 @@ func AgentPluginEnabled(ctx context.Context, st store.Store, agentID string) (ma
 		if !errors.Is(err, store.ErrNotFound) {
 			return nil, err
 		}
-	} else if rec != nil && len(rec.Data) > 0 {
+	} else if rec != nil {
+		// A disabled row means "no overrides at all" and blocks the mirror.
+		if !rec.Enabled {
+			return nil, nil
+		}
 		return boolMapFromData(rec.Data), nil
 	}
 	kvPrefix := PluginEnabledNamespace + "."
@@ -897,8 +923,18 @@ func ValidateProviderName(name string) error {
 }
 
 // SaveProvider upserts a kind="provider" row at the given (user, agent)
-// ownership.
+// ownership, marking it enabled — "create/update this provider and use it".
+// Callers that rewrite an existing row must use SaveProviderState and pass
+// that row's flag, or editing a disabled provider silently re-enables it.
 func SaveProvider(ctx context.Context, st store.Store, userID, agentID, name string, p config.ProviderConfig) error {
+	return SaveProviderState(ctx, st, userID, agentID, name, p, true)
+}
+
+// SaveProviderState is SaveProvider with an explicit enabled flag. The flag
+// is the write half of the enabled contract (see the package doc): false
+// means this scope switches the provider off, which also erases the outer
+// entries of the same name on read.
+func SaveProviderState(ctx context.Context, st store.Store, userID, agentID, name string, p config.ProviderConfig, enabled bool) error {
 	// Single choke point: HTTP create/update, the admin API, onboarding and
 	// the CLI all land here, so the rule cannot be bypassed by a new caller.
 	if err := ValidateProviderName(name); err != nil {
@@ -911,7 +947,7 @@ func SaveProvider(ctx context.Context, st store.Store, userID, agentID, name str
 		UserID:  userID,
 		AgentID: agentID,
 		Name:    name,
-		Enabled: true,
+		Enabled: enabled,
 		Data:    providerToData(p),
 	}
 	return st.SaveConfig(ctx, rec)
