@@ -45,8 +45,8 @@ is safe to re-run.`,
 				return err
 			}
 			out := cmd.OutOrStdout()
-			fmt.Fprintf(out, "examined %d row(s): %d certified, %d gap(s)\n",
-				rep.Examined, rep.Certified, len(rep.Gaps))
+			fmt.Fprintf(out, "examined %d row(s): %d certified (%d needed a value_kind backfill, %d leaves retagged), %d gap(s)\n",
+				rep.Examined, rep.Certified, rep.Untyped, rep.Retagged, len(rep.Gaps))
 			for _, g := range rep.Gaps {
 				fmt.Fprintf(out, "  gap %s/%s/%s/%s: blob=%d mirror=%d",
 					g.Kind, g.Scope, g.ScopeID, g.Name, g.WantKeys, g.GotKeys)
