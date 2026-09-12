@@ -324,10 +324,7 @@ func UserScopeProviders(ctx context.Context, st store.ConfigReader, userID strin
 // dualWriteSettingKV and by the configs→kv migration), so every reader and
 // writer must agree on it.
 func kvPrefixForNamespace(namespace string) string {
-	if namespace == "agents.defaults" {
-		return "agent."
-	}
-	return namespace + "."
+	return store.MirrorPrefixFor(store.KindSetting, namespace)
 }
 
 // ExactSetting reads one setting namespace at exactly one (userID, agentID)
@@ -829,7 +826,7 @@ func AgentPluginEnabled(ctx context.Context, st store.ConfigReader, agentID stri
 		}
 		return boolMapFromData(rec.Data), nil
 	}
-	kvPrefix := PluginEnabledNamespace + "."
+	kvPrefix := store.MirrorPrefixFor(store.KindPluginEnabled, PluginEnabledNamespace)
 	if kvVals, err := st.ListConfigValues(ctx, store.KindPluginEnabled, Agent, agentID, kvPrefix); err == nil && len(kvVals) > 0 {
 		// kvToSettingMap restores map-key segments verbatim (kvkeys.dataPaths
 		// carries {"plugins","enabled","*"}), so plugin ids come back with
@@ -900,7 +897,7 @@ func boolMapFromData(data map[string]interface{}) map[string]bool {
 // below the row name are plugin ids (data keys), so the shared flattening
 // rule keeps them verbatim.
 func dualWritePluginEnabledKV(ctx context.Context, st store.KVStore, agentID string, data map[string]interface{}) error {
-	kvPrefix := PluginEnabledNamespace + "."
+	kvPrefix := store.MirrorPrefixFor(store.KindPluginEnabled, PluginEnabledNamespace)
 	if err := st.DeleteConfigPrefix(ctx, store.KindPluginEnabled, Agent, agentID, kvPrefix); err != nil {
 		return fmt.Errorf("scope: clear configs_kv prefix %q: %w", kvPrefix, err)
 	}
@@ -1108,7 +1105,7 @@ func flattenJSONToKV(prefix string, data map[string]interface{}, out map[string]
 // in sync during migration.
 func dualWriteSettingKV(ctx context.Context, st store.KVStore, userID, agentID, namespace string, data map[string]interface{}) error {
 	sc, sid := kvScopeFromOwnership(userID, agentID)
-	kvPrefix := settingKVPrefix(namespace)
+	kvPrefix := store.MirrorPrefixFor(store.KindSetting, namespace)
 	// The prefix delete runs in both branches: writing {} means "this
 	// namespace is empty now", which has to clear the rows it used to have.
 	if err := st.DeleteConfigPrefix(ctx, store.KindSetting, sc, sid, kvPrefix); err != nil {
@@ -1129,16 +1126,6 @@ func dualWriteSettingKV(ctx context.Context, st store.KVStore, userID, agentID, 
 	return saveMirror(ctx, st, store.KindSetting, sc, sid, namespace, kvPrefix, flat)
 }
 
-// settingKVPrefix maps a settings row name to the configs_kv prefix its leaves
-// live under. "agents.defaults" is the one rename: the blob row keeps the
-// dotted namespace, its mirror lives under "agent.".
-func settingKVPrefix(namespace string) string {
-	if namespace == "agents.defaults" {
-		return "agent."
-	}
-	return namespace + "."
-}
-
 // saveMirror records the completeness marker for a projection that was just
 // written. flat is the exact leaf set that went into configs_kv, so the marker
 // fingerprints what is on disk rather than what was intended.
@@ -1152,7 +1139,7 @@ func saveMirror(ctx context.Context, st store.ConfigMirrorStore, kind, sc, sid, 
 // dualWriteProviderKV writes the flattened provider config to configs_kv.
 func dualWriteProviderKV(ctx context.Context, st store.KVStore, userID, agentID, providerName string, p config.ProviderConfig) error {
 	sc, sid := kvScopeFromOwnership(userID, agentID)
-	kvPrefix := providerName + "."
+	kvPrefix := store.MirrorPrefixFor(store.KindProvider, providerName)
 	data := providerToData(p)
 	flat := map[string]store.ConfigValue{}
 	flattenJSONToKV(kvPrefix, data, flat)
@@ -1170,6 +1157,6 @@ func dualWriteProviderKV(ctx context.Context, st store.KVStore, userID, agentID,
 // DualDeleteProviderKV removes all KV entries for a provider.
 func DualDeleteProviderKV(ctx context.Context, st store.KVStore, userID, agentID, providerName string) {
 	sc, sid := kvScopeFromOwnership(userID, agentID)
-	_ = st.DeleteConfigPrefix(ctx, store.KindProvider, sc, sid, providerName+".")
+	_ = st.DeleteConfigPrefix(ctx, store.KindProvider, sc, sid, store.MirrorPrefixFor(store.KindProvider, providerName))
 	_ = st.DeleteConfigMirror(ctx, store.KindProvider, sc, sid, providerName)
 }

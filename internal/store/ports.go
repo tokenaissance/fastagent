@@ -67,6 +67,14 @@ type ConfigMirrorStore interface {
 	DeleteConfigMirror(ctx context.Context, kind, scope, scopeID, name string) error
 }
 
+// ConfigMirrorReconciler is the one-shot certification pass over the whole
+// configs table (see DBStore.ReconcileConfigMirrors). It is separate from
+// ConfigMirrorStore because it is an operator action, not something a request
+// path should ever reach for.
+type ConfigMirrorReconciler interface {
+	ReconcileConfigMirrors(ctx context.Context) (ConfigMirrorReconcile, error)
+}
+
 // ConfigStore is what a caller needs to read and write the configs domain.
 // It is deliberately not Store: a handler that resolves settings has no
 // business creating users or querying sessions.
@@ -96,12 +104,13 @@ type KVStore interface {
 // parameter to a configs method without updating the port is a compile error
 // at this line.
 var (
-	_ ConfigReader      = (Store)(nil)
-	_ ConfigWriter      = (Store)(nil)
-	_ ConfigRowWriter   = (Store)(nil)
-	_ ConfigMirrorStore = (Store)(nil)
-	_ ConfigStore       = (Store)(nil)
-	_ KVStore           = (Store)(nil)
+	_ ConfigReader           = (Store)(nil)
+	_ ConfigWriter           = (Store)(nil)
+	_ ConfigRowWriter        = (Store)(nil)
+	_ ConfigMirrorStore      = (Store)(nil)
+	_ ConfigMirrorReconciler = (Store)(nil)
+	_ ConfigStore            = (Store)(nil)
+	_ KVStore                = (Store)(nil)
 )
 
 // WithConfigTx is store.WithTx for a caller that typed its store as a port

@@ -88,3 +88,85 @@ func VerifyConfigMirror(m ConfigMirror, leaves map[string]ConfigValue) bool {
 	}
 	return m.KeyCount == len(leaves) && m.Fingerprint == MirrorFingerprint(leaves)
 }
+
+// MirrorPrefixFor maps a configs row (kind, name) to the configs_kv name prefix
+// its leaves live under. It is the storage-layout contract the dual-write, the
+// backfill and the reconciler all share, defined once so the three cannot
+// drift. agents.defaults is the single rename: the blob row keeps its dotted
+// namespace, its mirror lives under "agent.".
+func MirrorPrefixFor(kind, name string) string {
+	if kind == KindSetting && name == "agents.defaults" {
+		return "agent."
+	}
+	return name + "."
+}
+
+// mirrorGapKeys is how many differing leaf names a gap report keeps per list —
+// enough to diagnose one row, not enough to drown a log line.
+const mirrorGapKeys = 8
+
+// ConfigMirrorGap is one configs row whose configs_kv projection is not a
+// complete, unmodified mirror of the blob.
+type ConfigMirrorGap struct {
+	Kind     string
+	Scope    string
+	ScopeID  string
+	Name     string
+	WantKeys int
+	GotKeys  int
+	// Missing is in the blob projection but not the mirror; Extra is the other
+	// way round; Changed is present in both but differs in value or value_kind.
+	// Each is capped at mirrorGapKeys.
+	Missing []string
+	Extra   []string
+	Changed []string
+}
+
+// ConfigMirrorReconcile is the outcome of ReconcileConfigMirrors.
+type ConfigMirrorReconcile struct {
+	// Examined is how many configs rows have a KV projection (provider /
+	// setting / plugin_enabled).
+	Examined int
+	// Certified is how many of those matched the blob and are now marked.
+	Certified int
+	// Gaps are rows whose mirror does not match the blob. They are left (or
+	// made) uncertified, so a mirror-first reader falls back to the blob.
+	Gaps []ConfigMirrorGap
+}
+
+// mirrorGap builds the diagnostic for one mismatched row and caps the leaf-name
+// lists so a single bad namespace cannot flood the report.
+func mirrorGap(kind, scope, scopeID, name string, want, got map[string]ConfigValue) ConfigMirrorGap {
+	g := ConfigMirrorGap{
+		Kind: kind, Scope: scope, ScopeID: scopeID, Name: name,
+		WantKeys: len(want), GotKeys: len(got),
+	}
+	for k, wv := range want {
+		gv, ok := got[k]
+		switch {
+		case !ok:
+			g.Missing = append(g.Missing, k)
+		case gv != wv:
+			g.Changed = append(g.Changed, k)
+		}
+	}
+	for k := range got {
+		if _, ok := want[k]; !ok {
+			g.Extra = append(g.Extra, k)
+		}
+	}
+	sort.Strings(g.Missing)
+	sort.Strings(g.Extra)
+	sort.Strings(g.Changed)
+	g.Missing = capKeys(g.Missing)
+	g.Extra = capKeys(g.Extra)
+	g.Changed = capKeys(g.Changed)
+	return g
+}
+
+func capKeys(keys []string) []string {
+	if len(keys) > mirrorGapKeys {
+		return keys[:mirrorGapKeys]
+	}
+	return keys
+}

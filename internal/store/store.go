@@ -305,6 +305,10 @@ type Store interface {
 	SaveConfigMirror(ctx context.Context, kind, scope, scopeID, name string, m ConfigMirror) error
 	GetConfigMirror(ctx context.Context, kind, scope, scopeID, name string) (ConfigMirror, bool, error)
 	DeleteConfigMirror(ctx context.Context, kind, scope, scopeID, name string) error
+	// ReconcileConfigMirrors re-projects every configs row and certifies the
+	// ones whose mirror matches the blob, reporting the rest (see
+	// DBStore.ReconcileConfigMirrors). It is the pre-flip acceptance pass.
+	ReconcileConfigMirrors(ctx context.Context) (ConfigMirrorReconcile, error)
 
 	// --- Channels (IM bot bindings) ---
 	ListChannels(ctx context.Context, userID, agentID string) ([]ChannelRecord, error)
