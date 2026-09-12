@@ -28,14 +28,22 @@ import "strings"
 //
 // These name the first key of every map that a config struct exposes —
 // config.Config.Tools (keyed by category id), config.ToolProviders,
-// config.Skills.Entries, config.Plugins.Entries, config.Teams. Fields *below*
-// such a key are struct fields again and convert normally; the free-form maps
-// (see openPaths) are handled by the prefix rule instead.
+// config.Skills.Entries, config.Plugins.Entries, config.Teams, and the
+// per-agent plugin opt-in map (configs row name "plugins.enabled"). Fields
+// *below* such a key are struct fields again and convert normally; the
+// free-form maps (see openPaths) are handled by the prefix rule instead.
 var dataPaths = [][]string{
 	{"tools", "categories", "*"},
 	{"tools", "providers", "*"},
 	{"skills", "entries", "*"},
 	{"plugins", "entries", "*"},
+	// The per-agent plugin opt-in row is keyed by plugin id
+	// ({"<pluginID>": bool}) and shares neither shape nor kind with the
+	// "plugins" settings namespace — see store.KindPluginEnabled. Without
+	// this entry a camelCase or ALL_CAPS plugin id was folded on the way
+	// into configs_kv (browserUse → browser_use), the same failure mode as
+	// the original web_search incident.
+	{"plugins", "enabled", "*"},
 	{"teams", "*"},
 }
 

@@ -641,6 +641,20 @@ const (
 	KindProvider = "provider"
 	KindChannel  = "channel"
 	KindSetting  = "setting"
+	// KindPluginEnabled holds the per-agent plugin opt-in map:
+	// name="plugins.enabled", user_id="", agent_id=<agent>,
+	// data={"<pluginID>": true|false}.
+	//
+	// It is deliberately NOT KindSetting. The row is an agent-scoped
+	// override, not a settings namespace, and sharing the "setting" KV
+	// partition put its mirror rows in the same bucket as the "plugins"
+	// settings namespace, where the agent's "plugins.enabled.<pluginID>"
+	// keys collided with that namespace's own scalar "plugins.enabled" key
+	// (PluginsCfg.Enabled). A fallback read of namespace "plugins" could
+	// then see "enabled" as either a bool or a map depending on map
+	// iteration order. A distinct kind keeps the two mirror partitions
+	// disjoint — see scope.PluginEnabledNamespace.
+	KindPluginEnabled = "plugin_enabled"
 )
 
 // ConfigRecord is one row of the configs table — the unified

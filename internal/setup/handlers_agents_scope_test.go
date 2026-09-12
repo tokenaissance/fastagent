@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/fastclaw-ai/fastclaw/internal/scope"
 	"github.com/fastclaw-ai/fastclaw/internal/store"
 )
 
@@ -372,20 +373,17 @@ func TestAgentScopePlugins_Found(t *testing.T) {
 	s := setupTestServer(t)
 	ctx := context.Background()
 
-	rec := &store.ConfigRecord{
-		ID:      "cfg_plugins_1",
-		Kind:    store.KindSetting,
-		UserID:  "",
-		AgentID: "agt_plugins",
-		Name:    "plugins.enabled",
-		Enabled: true,
-		Data: map[string]interface{}{
-			"web_search": true,
-			"code_exec":  false,
-		},
-	}
-	if err := s.dataStore.SaveConfig(ctx, rec); err != nil {
+	// Written through the scope helper: the row lives under its own kind
+	// (not kind=setting), which is what keeps its mirror keys out of the
+	// "plugins" settings namespace.
+	if err := scope.SaveAgentPluginEnabled(ctx, s.dataStore, "agt_plugins", map[string]bool{
+		"web_search": true,
+		"code_exec":  false,
+	}); err != nil {
 		t.Fatalf("save config: %v", err)
+	}
+	if rec, err := s.dataStore.GetConfigByName(ctx, store.KindPluginEnabled, "", "agt_plugins", "plugins.enabled"); err != nil || rec == nil {
+		t.Fatalf("row not stored under KindPluginEnabled: %v %v", rec, err)
 	}
 
 	got := s.agentScopePlugins(dummyRequest(), "agt_plugins")

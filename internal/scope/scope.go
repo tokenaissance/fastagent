@@ -270,27 +270,34 @@ func UserScopeProviders(ctx context.Context, st store.Store, userID string) (map
 	return out, nil
 }
 
-// UserScopeSetting loads one setting namespace at (user=X, agent='') only —
-// the user's personal row, without the system layer merged in. It is the
-// settings-side counterpart of UserScopeProviders, for callers that overlay
-// an inner layer on top of an already-merged view (gateway.EnsureAgent pulls
-// the agent owner's tools.* rows this way). Precedence matches Setting: the
-// legacy configs blob first, configs_kv only when no blob row exists.
+// kvPrefixForNamespace maps a settings namespace onto the configs_kv name
+// prefix its rows are flattened under. Only agents.defaults differs: its
+// rows have always been written under the shorter "agent." prefix (both by
+// dualWriteSettingKV and by the configs→kv migration), so every reader and
+// writer must agree on it.
+func kvPrefixForNamespace(namespace string) string {
+	if namespace == "agents.defaults" {
+		return "agent."
+	}
+	return namespace + "."
+}
+
+// ExactSetting reads one setting namespace at exactly one (userID, agentID)
+// scope — no layer merge. It is the settings-side counterpart of
+// AgentScopeProviders / UserScopeProviders, for callers that overlay an
+// inner layer on top of an already-merged view (the gateway overlays the
+// agent layer and the per-(caller,agent) layer of tools.* this way).
+// Precedence matches Setting: the legacy configs blob first, configs_kv only
+// when no blob row exists.
 //
 // Missing row is not an error: dst is left untouched.
-func UserScopeSetting(ctx context.Context, st store.Store, namespace, userID string, dst interface{}) error {
+func ExactSetting(ctx context.Context, st store.Store, namespace, userID, agentID string, dst interface{}) error {
 	if st == nil {
-		return errors.New("scope.UserScopeSetting: store is required")
+		return errors.New("scope.ExactSetting: store is required")
 	}
-	if userID == "" {
-		return nil
-	}
-	kvPrefix := namespace + "."
-	if namespace == "agents.defaults" {
-		kvPrefix = "agent."
-	}
+	kvPrefix := kvPrefixForNamespace(namespace)
 	// Blob first — exact JSON types, complete key set (see Setting).
-	rec, err := st.GetConfigByName(ctx, store.KindSetting, userID, "", namespace)
+	rec, err := st.GetConfigByName(ctx, store.KindSetting, userID, agentID, namespace)
 	if err != nil {
 		if !errors.Is(err, store.ErrNotFound) {
 			return err
@@ -299,10 +306,24 @@ func UserScopeSetting(ctx context.Context, st store.Store, namespace, userID str
 		return jsonInto(rec.Data, dst)
 	}
 	// No blob row — the row exists only in the mirror.
-	if kvVals, err := st.ListConfigValues(ctx, store.KindSetting, User, userID, kvPrefix); err == nil && len(kvVals) > 0 {
+	sc, sid := kvScopeFromOwnership(userID, agentID)
+	if kvVals, err := st.ListConfigValues(ctx, store.KindSetting, sc, sid, kvPrefix); err == nil && len(kvVals) > 0 {
 		return jsonInto(kvToSettingMap(kvPrefix, kvVals), dst)
 	}
 	return nil
+}
+
+// UserScopeSetting loads one setting namespace at (user=X, agent='') only —
+// the user's personal row, without the system layer merged in. Thin wrapper
+// over ExactSetting kept for the callers that express "the user layer".
+func UserScopeSetting(ctx context.Context, st store.Store, namespace, userID string, dst interface{}) error {
+	if st == nil {
+		return errors.New("scope.UserScopeSetting: store is required")
+	}
+	if userID == "" {
+		return nil
+	}
+	return ExactSetting(ctx, st, namespace, userID, "", dst)
 }
 
 // Channels returns the merged channel map. Disabled rows in an inner
@@ -657,12 +678,46 @@ func SaveChannelByScope(ctx context.Context, st store.Store, sc, scopeID, channe
 	return SaveChannel(ctx, st, uid, aid, channelType, credentialKey, enabled, c)
 }
 
+// SandboxNamespace is the settings namespace holding SandboxCfg.
+const SandboxNamespace = "sandbox"
+
+// rejectUnreadableAgentScope refuses agent-scope writes to namespaces the
+// runtime cannot read, so the mistake surfaces at the write instead of
+// silently doing nothing ("I configured it, but the agent says it's not
+// there" — the web_search incident class).
+//
+// Today only one namespace qualifies: sandbox. The executor pool is built
+// once from the SYSTEM-scope sandbox row (gateway.buildSystemSandboxPool)
+// and handed to every agent, and ResolvedAgent.Sandbox is only ever filled
+// from the system/user layers — nothing reads a sandbox row at agent scope.
+// Writing one produced an agent that believes sandbox is required while no
+// executor exists, which the runtime surfaces as "sandbox required but no
+// executor available".
+//
+// Agent-scope tools.providers / tools.categories used to be in the same
+// boat; those are now honored (gateway.toolConfigForAgent overlays the agent
+// and per-(user,agent) layers), so they are deliberately absent here.
+func rejectUnreadableAgentScope(namespace, userID, agentID string) error {
+	if agentID == "" {
+		return nil
+	}
+	if namespace == SandboxNamespace {
+		return fmt.Errorf(
+			"scope.SaveSetting: sandbox is a system/user-scope setting (the sandbox executor pool is built once from the system row); an agent-scope sandbox row is never read by the runtime — write it at system or user scope instead (namespace=%q agent=%q user=%q)",
+			namespace, agentID, userID)
+	}
+	return nil
+}
+
 // SaveSetting upserts a single namespace at the given (user, agent)
 // ownership. Pass nil/empty data to delete the row instead of writing
 // {}. Pass empty userID/agentID for system-level.
 func SaveSetting(ctx context.Context, st store.Store, userID, agentID, namespace string, data map[string]interface{}) error {
 	if st == nil {
 		return errors.New("scope.SaveSetting: store is required")
+	}
+	if err := rejectUnreadableAgentScope(namespace, userID, agentID); err != nil {
+		return err
 	}
 	// Dual-write to configs_kv.
 	dualWriteSettingKV(ctx, st, userID, agentID, namespace, data)
@@ -682,6 +737,113 @@ func SaveSetting(ctx context.Context, st store.Store, userID, agentID, namespace
 		Data:    data,
 	}
 	return st.SaveConfig(ctx, rec)
+}
+
+// PluginEnabledNamespace is the row name that holds a per-agent plugin
+// opt-in map: data = {"<pluginID>": true|false}. Missing key / missing row
+// means "no override — use the system-wide plugin state".
+//
+// Rows live under store.KindPluginEnabled, not KindSetting: see the kind's
+// doc comment for why sharing the "setting" partition was a bug.
+const PluginEnabledNamespace = "plugins.enabled"
+
+// AgentPluginEnabled returns the per-agent plugin opt-in map for agentID
+// ((user_id, agent_id) = ("", Y)), or nil when no row exists. Missing keys
+// fall through to the system-wide plugin state; callers treat nil as
+// "no overrides".
+func AgentPluginEnabled(ctx context.Context, st store.Store, agentID string) (map[string]bool, error) {
+	if st == nil {
+		return nil, errors.New("scope.AgentPluginEnabled: store is required")
+	}
+	if agentID == "" {
+		return nil, nil
+	}
+	// Blob first (authoritative), mirror only for blob-less rows — same
+	// contract as every other read in this package.
+	rec, err := st.GetConfigByName(ctx, store.KindPluginEnabled, "", agentID, PluginEnabledNamespace)
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			return nil, err
+		}
+	} else if rec != nil && len(rec.Data) > 0 {
+		return boolMapFromData(rec.Data), nil
+	}
+	kvPrefix := PluginEnabledNamespace + "."
+	if kvVals, err := st.ListConfigValues(ctx, store.KindPluginEnabled, Agent, agentID, kvPrefix); err == nil && len(kvVals) > 0 {
+		// kvToSettingMap restores map-key segments verbatim (kvkeys.dataPaths
+		// carries {"plugins","enabled","*"}), so plugin ids come back with
+		// their original spelling. The prefix already names the row, so the
+		// result is flat: plugin id → bool.
+		data := kvToSettingMap(kvPrefix, kvVals)
+		if len(data) > 0 {
+			return boolMapFromData(data), nil
+		}
+	}
+	return nil, nil
+}
+
+// SaveAgentPluginEnabled writes (or, for an empty map, deletes) the
+// per-agent plugin opt-in row. The configs_kv mirror is kept in step under
+// the same kind.
+func SaveAgentPluginEnabled(ctx context.Context, st store.Store, agentID string, enabled map[string]bool) error {
+	if st == nil {
+		return errors.New("scope.SaveAgentPluginEnabled: store is required")
+	}
+	if agentID == "" {
+		return errors.New("scope.SaveAgentPluginEnabled: agentID is required")
+	}
+	data := make(map[string]interface{}, len(enabled))
+	for k, v := range enabled {
+		data[k] = v
+	}
+	dualWritePluginEnabledKV(ctx, st, agentID, data)
+	if len(data) == 0 {
+		// Idempotent: missing row is a no-op, so "reset" can be replayed.
+		if rec, err := st.GetConfigByName(ctx, store.KindPluginEnabled, "", agentID, PluginEnabledNamespace); err == nil && rec != nil {
+			return st.DeleteConfig(ctx, rec.ID)
+		}
+		return nil
+	}
+	return st.SaveConfig(ctx, &store.ConfigRecord{
+		Kind:    store.KindPluginEnabled,
+		UserID:  "",
+		AgentID: agentID,
+		Name:    PluginEnabledNamespace,
+		Enabled: true,
+		Data:    data,
+	})
+}
+
+// boolMapFromData projects {"<id>": true|false, ...} onto map[string]bool,
+// dropping values that aren't booleans (a hand-edited row can't crash a
+// caller).
+func boolMapFromData(data map[string]interface{}) map[string]bool {
+	out := make(map[string]bool, len(data))
+	for k, v := range data {
+		if b, ok := v.(bool); ok {
+			out[k] = b
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// dualWritePluginEnabledKV mirrors the opt-in map into configs_kv. The keys
+// below the row name are plugin ids (data keys), so the shared flattening
+// rule keeps them verbatim.
+func dualWritePluginEnabledKV(ctx context.Context, st store.Store, agentID string, data map[string]interface{}) {
+	kvPrefix := PluginEnabledNamespace + "."
+	_ = st.DeleteConfigPrefix(ctx, store.KindPluginEnabled, Agent, agentID, kvPrefix)
+	if len(data) == 0 {
+		return
+	}
+	flat := map[string]string{}
+	flattenJSONToKV(kvPrefix, data, flat)
+	for name, value := range flat {
+		_ = st.SetConfigValue(ctx, store.KindPluginEnabled, Agent, agentID, name, value)
+	}
 }
 
 // SaveProvider upserts a kind="provider" row at the given (user, agent)

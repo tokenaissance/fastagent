@@ -301,17 +301,20 @@ func TestSetGetConfigAgentScope(t *testing.T) {
 	if err := SetConfig(context.Background(), st, res.Agent.ID, "temperature", "0.42"); err != nil {
 		t.Fatalf("set temp: %v", err)
 	}
-	if err := SetConfig(context.Background(), st, res.Agent.ID, "sandbox.enabled", "true"); err != nil {
-		t.Fatalf("set sandbox.enabled: %v", err)
+	// sandbox is system/user-scope: the executor pool is built once from the
+	// system row, so an agent-scope write is refused loudly instead of being
+	// stored and never read (that silence is the bug class this guards).
+	err = SetConfig(context.Background(), st, res.Agent.ID, "sandbox.enabled", "true")
+	if err == nil || !strings.Contains(err.Error(), "system/user-scope") {
+		t.Fatalf("agent-scope sandbox write should be rejected, got %v", err)
 	}
 	temp, _ := GetConfig(context.Background(), st, res.Agent.ID, "temperature")
 	if got, ok := temp.(float64); !ok || got != 0.42 {
 		t.Fatalf("temperature round-trip: %#v", temp)
 	}
-	box, _ := GetConfig(context.Background(), st, res.Agent.ID, "sandbox")
-	m, _ := box.(map[string]interface{})
-	if m["enabled"] != true || m["backend"] != "docker" {
-		t.Fatalf("sandbox auto-default-backend missing: %#v", m)
+	// Nothing was written for the rejected key.
+	if box, _ := GetConfig(context.Background(), st, res.Agent.ID, "sandbox"); box != nil {
+		t.Fatalf("rejected sandbox write still readable: %#v", box)
 	}
 	// Different agent doesn't see this scope.
 	res2, _ := Init(context.Background(), st, "beta", InitOptions{})
