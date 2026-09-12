@@ -30,7 +30,7 @@ const prefsTimezoneKey = "timezone"
 // setting (follows them across agents), then the agent's default, then
 // the system default. Returns "" when nothing is set — callers fall
 // back to server-local time.
-func Timezone(ctx context.Context, st store.Store, chatterUID, agentID string) string {
+func Timezone(ctx context.Context, st store.ConfigReader, chatterUID, agentID string) string {
 	if st == nil {
 		return ""
 	}
@@ -83,7 +83,7 @@ func LoadLocationOrLocal(name string) *time.Location {
 // they talk to. Other keys already present in the user's prefs row are
 // preserved. tz must be a valid IANA name — validate with
 // time.LoadLocation before calling.
-func SaveUserTimezone(ctx context.Context, st store.Store, userID, tz string) error {
+func SaveUserTimezone(ctx context.Context, st store.ConfigStore, userID, tz string) error {
 	if st == nil {
 		return errors.New("scope.SaveUserTimezone: store is required")
 	}
