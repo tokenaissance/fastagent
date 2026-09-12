@@ -1090,7 +1090,15 @@ func flattenJSONToKV(prefix string, data map[string]interface{}, out map[string]
 	for k, v := range data {
 		seg := kvkeys.StoredSegment(prefixPath, k)
 		fullKey := prefix + seg
-		if nested, ok := v.(map[string]interface{}); ok {
+		// Descend by structure, not by concrete type: a nested
+		// map[string]string, a map[string]SomeCfg or a plain struct is a JSON
+		// object too. Asserting `v.(map[string]interface{})` let those become
+		// one object-valued leaf — the collapse that shows up as a reconcile
+		// gap (`tools.providers.searxng` where the projection says
+		// `tools.providers.searxng.endpoint`). The projection side
+		// (store.flattenJSON) uses the same check, so the two agree on the
+		// leaf boundary.
+		if nested, ok := store.JSONObjectOf(v); ok {
 			flattenJSONToKV(fullKey+".", nested, out)
 			continue
 		}
