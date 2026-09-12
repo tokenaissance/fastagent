@@ -240,8 +240,5 @@ func structMap(v interface{}) map[string]interface{} {
 	if v == nil {
 		return nil
 	}
-	blob, _ := json.Marshal(v)
-	var out map[string]interface{}
-	_ = json.Unmarshal(blob, &out)
-	return out
+	return store.ValueToMap(v)
 }

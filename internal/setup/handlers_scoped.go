@@ -414,9 +414,7 @@ func (s *Server) handleCreateScopedChannel(w http.ResponseWriter, r *http.Reques
 			Enabled:   req.Enabled,
 			BotToken:  cc.BotToken,
 		}
-		chData, _ := json.Marshal(cc)
-		var dm map[string]interface{}
-		_ = json.Unmarshal(chData, &dm)
+		dm := store.ValueToMap(cc)
 		delete(dm, "enabled")
 		ch.Data = dm
 		_ = s.dataStore.SaveChannel(r.Context(), ch)
@@ -480,9 +478,7 @@ func (s *Server) handleUpdateScopedChannel(w http.ResponseWriter, r *http.Reques
 			Enabled:   enabled,
 			BotToken:  cc.BotToken,
 		}
-		chData, _ := json.Marshal(cc)
-		var dm map[string]interface{}
-		_ = json.Unmarshal(chData, &dm)
+		dm := store.ValueToMap(cc)
 		delete(dm, "enabled")
 		ch.Data = dm
 		_ = s.dataStore.SaveChannel(r.Context(), ch)

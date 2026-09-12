@@ -1355,11 +1355,10 @@ func (s *Server) saveChannelRecord(ctx context.Context, userID, agentID, channel
 }
 
 // channelConfigToData converts a ChannelConfig to a JSON data map,
-// mirroring scope.channelToData but without the import cycle.
+// mirroring scope.channelToData (both go through store.ValueToMap, which
+// keeps numbers as json.Number literals) without the import cycle.
 func channelConfigToData(c config.ChannelConfig) map[string]interface{} {
-	blob, _ := json.Marshal(c)
-	var m map[string]interface{}
-	_ = json.Unmarshal(blob, &m)
+	m := store.ValueToMap(c)
 	delete(m, "enabled")
 	return m
 }
