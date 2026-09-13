@@ -98,7 +98,10 @@ type sseUsage struct {
 // wrong position. Either case used to surface as the corresponding
 // provider error. We strip orphan tool_calls AND dangling tool replies
 // at wire-build time so the request goes through — the session keeps
-// its historical record untouched.
+// its historical record untouched. The third shape, one tool_call_id
+// answered twice (the synthetic "stopped" pad plus the real result),
+// is collapsed to a single reply for the same reason: the provider
+// rejects the second answer because that tool call is no longer open.
 func toAPIMessages(msgs []Message) []json.RawMessage {
 	orphanAssistant, orphanTool := findOrphanToolCalls(msgs)
 	out := make([]json.RawMessage, 0, len(msgs))
@@ -214,6 +217,28 @@ func findOrphanToolCalls(msgs []Message) (orphanAssistant, orphanTool map[int]bo
 			orphanTool[i] = true
 		}
 	}
+	// Exactly one reply per tool_call_id. A tool_use answered twice — e.g.
+	// the synthetic "stopped" pad written when a turn died with a tool in
+	// flight, followed by that tool's real result — passes both scans
+	// above (the second reply also sits inside its declaring assistant's
+	// run), but OpenAI-compatible validators only accept a `tool` message
+	// while its tool call is still OPEN: the duplicate is rejected with
+	// "Messages with role 'tool' must be a response to a preceding message
+	// with 'tool_calls'". That single poisoned pair used to 400 every later
+	// request on the session (cron ticks included) until the history was
+	// repaired by hand. Keep the first reply — the one paired with the
+	// declaring assistant — and drop the rest.
+	answered := map[string]bool{}
+	for i, m := range msgs {
+		if m.Role != "tool" || orphanTool[i] || m.ToolCallID == "" {
+			continue
+		}
+		if answered[m.ToolCallID] {
+			orphanTool[i] = true
+			continue
+		}
+		answered[m.ToolCallID] = true
+	}
 	return
 }
 
@@ -222,26 +247,12 @@ func findOrphanToolCalls(msgs []Message) (orphanAssistant, orphanTool map[int]bo
 // embedded in the raw JSON (older sessions that streamed the message
 // only carry the IDs inside RawAssistant).
 func assistantToolCallIDs(m Message) []string {
-	if len(m.ToolCalls) > 0 {
-		ids := make([]string, 0, len(m.ToolCalls))
-		for _, tc := range m.ToolCalls {
-			ids = append(ids, tc.ID)
-		}
-		return ids
-	}
-	if len(m.RawAssistant) == 0 {
+	calls := m.EffectiveToolCalls()
+	if len(calls) == 0 {
 		return nil
 	}
-	var raw struct {
-		ToolCalls []struct {
-			ID string `json:"id"`
-		} `json:"tool_calls"`
-	}
-	if err := json.Unmarshal(m.RawAssistant, &raw); err != nil || len(raw.ToolCalls) == 0 {
-		return nil
-	}
-	ids := make([]string, 0, len(raw.ToolCalls))
-	for _, tc := range raw.ToolCalls {
+	ids := make([]string, 0, len(calls))
+	for _, tc := range calls {
 		ids = append(ids, tc.ID)
 	}
 	return ids
