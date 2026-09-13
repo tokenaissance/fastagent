@@ -206,3 +206,42 @@ func TestScrubLeakedToolCallContentForDisplay(t *testing.T) {
 		t.Fatalf("scrubbed display content = %q; want preamble only", got)
 	}
 }
+
+// Two turns that recover the same leaked tool-call XML must not mint the same
+// synthetic id. A repeated tool_call_id reads downstream as "one call answered
+// twice": the wire builder collapses it (so the provider accepts the request)
+// but the later turn's recovered call and its result silently leave the
+// model's context. Production had five such sessions before this was fixed
+// (docs/session-turn-integrity.md, clause P).
+func TestRecoveredToolCallIDsAreUniqueAcrossTurns(t *testing.T) {
+	content := `<invoke name="exec">
+  <parameter name="command" string="true">ls /workspace</parameter>
+</invoke>`
+
+	first, _ := recoverToolCallsFromContent(content)
+	second, _ := recoverToolCallsFromContent(content)
+	if len(first) != 1 || len(second) != 1 {
+		t.Fatalf("expected one recovered call per pass; got %d and %d", len(first), len(second))
+	}
+	if first[0].ID == second[0].ID {
+		t.Fatalf("recovered id %q reused across turns", first[0].ID)
+	}
+
+	// Two calls in ONE response must also differ from each other.
+	two, _ := recoverToolCallsFromContent(content + content)
+	if len(two) != 2 {
+		t.Fatalf("expected two recovered calls from two invokes; got %d", len(two))
+	}
+	if two[0].ID == two[1].ID {
+		t.Fatalf("recovered ids collide within one response: %q", two[0].ID)
+	}
+
+	for _, id := range []string{first[0].ID, second[0].ID, two[0].ID, two[1].ID} {
+		if !strings.HasPrefix(id, "recovered_") {
+			t.Errorf("synthetic id = %q; want the recovered_ prefix the wire path expects", id)
+		}
+		if strings.ContainsAny(id, " \t\n") {
+			t.Errorf("synthetic id = %q; must stay a single whitespace-free token", id)
+		}
+	}
+}
