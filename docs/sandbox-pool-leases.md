@@ -130,9 +130,23 @@ modes each map to a test in the failure-semantics table below.
   That keeps an ordinary expiry off the failure path: without it the same event
   arrives as `502 sandbox not found` and costs a create, a re-hydrate and an
   identity re-publication. The rest of that redesign is staged below.
-- **Unverified:** whether the `envd_token` in a row is still valid for a
-  paused→resumed instance. If it is not, adopting a paused sandbox must
-  `connect` first and refresh the row's token — check before relying on it.
+- **The row's `envd_token` is empty in our configuration, and whether that
+  should change is a security decision, not a detail.** `envdAccessToken` is
+  issued only for sandboxes created with `secure: true`; otherwise it is null
+  and "envd endpoints work without auth", while `network.allowPublicTraffic`
+  defaults to true ([create-sandbox](https://docs.e2b.dev/api-reference/sandboxes/create-sandbox.md)).
+  Our create body sets neither, so the token in every lease row is empty by
+  construction — which is also why the pause/resume question is moot for the
+  current configuration — and anyone who holds a sandbox id can reach envd
+  (port 49983) without authenticating. The id is not a secret we keep: the
+  runtime mints preview URLs from it (`ExposePort`), stores it in the row and
+  logs it. If we move to `secure: true`, the token to store is the one from the
+  most recent create/connect/resume response (all three return the `Sandbox`
+  schema), and adopting a resumed sandbox must refresh it.
+  `e2b_token_probe_test.go` (build tag `manual`, credentials required) settles
+  the remaining empirical half: whether the create-time token still
+  authenticates after a pause+resume — i.e. whether that refresh is mandatory or
+  merely tidy.
 - **Idle eviction puts a sandbox to sleep.** When the backend can pause
   (`ScopeSleeper`, implemented by the E2B pool), the idle sweep pauses the
   instance and renews the row instead of releasing it, so the scope keeps the
@@ -531,6 +545,11 @@ external dependencies.
   that outlives `idleTTL` must not have its sandbox reclaimed underneath it,
   and a sandbox that cannot be slept must survive (only "nothing to sleep"
   falls through to release).
+  `e2b_token_probe_test.go` is credential-gated (`-tags=manual`): it creates a
+  sandbox both ways, checks the schema's claim that only `secure: true` yields
+  an `envdAccessToken`, then pauses and resumes a secure one to see whether the
+  create-time token still authenticates or has to be replaced by the one
+  `connect` returns.
 - **Adapter (store package)** — `sandbox_leases_test.go` runs `DBStore`
   through `sandbox.SandboxLeaseStore` against real sqlite: renew CAS miss,
   stale/missing release no-ops, monotonic epoch. `sandbox_leases_postgres_test.go`
