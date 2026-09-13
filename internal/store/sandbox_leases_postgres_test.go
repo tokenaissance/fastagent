@@ -148,3 +148,110 @@ func TestSandboxLeaseMigrateIdempotentPostgres(t *testing.T) {
 		t.Fatalf("lease table unusable after second Migrate: %v", err)
 	}
 }
+
+// TestSandboxLeaseStatePostgres runs the running/paused write path on the
+// production dialect. The sqlite versions of these assertions cannot stand in:
+// the retrofit reads information_schema there, the ALTER runs through a
+// different planner, and the placeholder style differs. Production is Postgres,
+// so this is where the new columns have to be proven.
+func TestSandboxLeaseStatePostgres(t *testing.T) {
+	db := newTestSandboxLeasePostgresDB(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	var st sandbox.SandboxLeaseStore = db
+	scope := fmt.Sprintf("agt_pg_state:s:sess_%d", time.Now().UnixNano())
+	ttl := time.Minute
+
+	rec, acquired, err := st.AcquireSandboxLease(ctx, scope, "pod-a", "sb-a", "tok-a", "tpl", ttl)
+	if err != nil || !acquired {
+		t.Fatalf("acquire: acquired=%v err=%v", acquired, err)
+	}
+	if rec.State != "running" || rec.PausedAt != 0 {
+		t.Fatalf("fresh lease = %q/%d, want running/0", rec.State, rec.PausedAt)
+	}
+
+	pausedAt := time.Now().Unix()
+	if err := st.SetSandboxLeaseState(ctx, scope, "pod-a", "paused"); err != nil {
+		t.Fatalf("pause annotation: %v", err)
+	}
+	got, err := st.GetSandboxLease(ctx, scope)
+	if err != nil || got == nil {
+		t.Fatalf("GetSandboxLease: rec=%+v err=%v", got, err)
+	}
+	if got.State != "paused" || got.PausedAt < pausedAt {
+		t.Fatalf("state = %q/%d, want paused with a timestamp", got.State, got.PausedAt)
+	}
+	if err := st.SetSandboxLeaseState(ctx, scope, "pod-b", "running"); err != nil {
+		t.Fatalf("foreign annotation: %v", err)
+	}
+	if got, _ := st.GetSandboxLease(ctx, scope); got.State != "paused" {
+		t.Fatalf("a foreign owner changed the state to %q", got.State)
+	}
+
+	// Replace (a rebuild) resets the annotation: the row now describes a new
+	// instance.
+	if _, err := st.ReplaceSandboxLease(ctx, scope, "pod-a", "sb-b", "tok-b", "tpl", ttl); err != nil {
+		t.Fatalf("replace: %v", err)
+	}
+	if got, _ := st.GetSandboxLease(ctx, scope); got.State != "running" || got.PausedAt != 0 {
+		t.Fatalf("state after replace = %q/%d, want running/0", got.State, got.PausedAt)
+	}
+}
+
+// The retrofit has to work on a table that predates the columns — production is
+// exactly that table.
+func TestSandboxLeaseStateMigrationPostgres(t *testing.T) {
+	db := newTestSandboxLeasePostgresDB(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// Rebuild the table in its pre-state shape, so the retrofit runs against a
+	// real pre-existing table rather than a fresh one that already has the
+	// columns (which would only exercise the early return).
+	if _, err := db.db.ExecContext(ctx, `DROP TABLE sandbox_leases`); err != nil {
+		t.Fatalf("drop: %v", err)
+	}
+	if _, err := db.db.ExecContext(ctx, `CREATE TABLE sandbox_leases (
+		scope_key TEXT PRIMARY KEY,
+		owner TEXT NOT NULL,
+		sandbox_id TEXT NOT NULL,
+		envd_token TEXT NOT NULL,
+		template TEXT NOT NULL DEFAULT '',
+		expires_at BIGINT NOT NULL,
+		epoch BIGINT NOT NULL DEFAULT 0,
+		updated_at BIGINT NOT NULL
+	)`); err != nil {
+		t.Fatalf("create old shape: %v", err)
+	}
+	for _, col := range []string{"state", "paused_at"} {
+		if has, err := db.tableHasColumn(ctx, "sandbox_leases", col); err != nil || has {
+			t.Fatalf("pre-state table unexpectedly has %s: has=%v err=%v", col, has, err)
+		}
+	}
+	// Running it again must stay a no-op rather than erroring on an existing
+	// column (Postgres ALTER TABLE ADD COLUMN has no IF NOT EXISTS fallback in
+	// our DDL, so the guard is the lookup).
+	for i := 0; i < 2; i++ {
+		if err := db.migrateSandboxLeasesAddState(ctx); err != nil {
+			t.Fatalf("retrofit run %d: %v", i+1, err)
+		}
+	}
+	for _, col := range []string{"state", "paused_at"} {
+		has, err := db.tableHasColumn(ctx, "sandbox_leases", col)
+		if err != nil || !has {
+			t.Fatalf("column %s after retrofit: has=%v err=%v", col, has, err)
+		}
+	}
+	// And the migrated table takes the new writes.
+	var st sandbox.SandboxLeaseStore = db
+	scope := fmt.Sprintf("agt_pg_mig:s:sess_%d", time.Now().UnixNano())
+	if _, _, err := st.AcquireSandboxLease(ctx, scope, "pod-a", "sb-a", "tok", "tpl", time.Minute); err != nil {
+		t.Fatalf("acquire on retrofitted table: %v", err)
+	}
+	if err := st.SetSandboxLeaseState(ctx, scope, "pod-a", "paused"); err != nil {
+		t.Fatalf("state write on retrofitted table: %v", err)
+	}
+	if got, _ := st.GetSandboxLease(ctx, scope); got == nil || got.State != "paused" {
+		t.Fatalf("retrofitted row = %+v, want state paused", got)
+	}
+}

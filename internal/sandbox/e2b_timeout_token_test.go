@@ -36,6 +36,40 @@ func TestE2BExtendTimeoutMovesTheExpiry(t *testing.T) {
 	}
 }
 
+// Two clocks, not one. Moving only the instance's expiry leaves the lease row
+// expiring mid-operation, and a sibling replica that acquires the lapsed scope
+// starts a second sandbox while the first is still working.
+func TestExtendScopeMovesTheLeaseClockToo(t *testing.T) {
+	store := &fakeLeaseStore{}
+	pool := newLeasePool(t, store, "pod-a") // leaseTTL = 1 minute
+	envd := &fakeEnvdTransport{}
+	ex := testExecutor(&leaseCloseRecorder{}, "sb-1", "tok-1")
+	ex.client = &http.Client{Transport: envd}
+	pool.executors[rebuildScopeKey] = ex
+	pool.leaseEpochs[rebuildScopeKey] = 3
+
+	// A 10-minute operation: longer than the lease TTL above.
+	if err := pool.ExtendScope(context.Background(), "agt_1", "", "chat_1", 10*time.Minute); err != nil {
+		t.Fatalf("ExtendScope: %v", err)
+	}
+	if got := store.renewTTL(0); got != 10*time.Minute {
+		t.Fatalf("lease renewed for %s, want the operation's budget", got)
+	}
+	if calls := envd.controlCalls(); len(calls) != 1 || !strings.Contains(calls[0], "/timeout") {
+		t.Fatalf("control calls = %v, want one timeout extension", calls)
+	}
+
+	// A budget shorter than the pool's own TTL must not shorten the lease.
+	// (The lifecycle layer's own 60s threshold means this is only reachable by a
+	// direct call, which is exactly why the guard belongs in the pool.)
+	if err := pool.ExtendScope(context.Background(), "agt_1", "", "chat_1", 30*time.Second); err != nil {
+		t.Fatalf("ExtendScope: %v", err)
+	}
+	if got := store.renewTTL(1); got != time.Minute {
+		t.Fatalf("lease renewed for %s, want the pool TTL (never shorten)", got)
+	}
+}
+
 // scopeExtendingPool records the extension requests the lifecycle layer makes.
 type scopeExtendingPool struct {
 	fakePool

@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -126,9 +127,14 @@ func TestEncryptedSandboxLeaseStorePostgres(t *testing.T) {
 	oldStore := &EncryptedSandboxLeaseStore{Inner: db, Crypt: key1}
 	newStore := &EncryptedSandboxLeaseStore{Inner: db, Crypt: key2}
 
-	const scope = "agt_pg_crypto:s:sess_crypto"
 	const oldToken = "pg-token-old"
 	const newToken = "pg-token-new"
+	// Unique per run: this test leaves a row with a one-minute TTL behind, and a
+	// fixed scope key makes the NEXT run (within that minute, against a
+	// persistent Postgres) lose its opening acquire because the row is still
+	// unexpired — a flake that only shows up when the suite runs twice in quick
+	// succession, which CI does whenever two pushes land close together.
+	scope := fmt.Sprintf("agt_pg_crypto:s:sess_%d", time.Now().UnixNano())
 	if _, acquired, err := oldStore.AcquireSandboxLease(
 		ctx, scope, "pod-a", "sb-a", oldToken, "tpl", time.Second); err != nil || !acquired {
 		t.Fatalf("old-key acquire: acquired=%v err=%v", acquired, err)
