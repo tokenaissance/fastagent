@@ -2094,7 +2094,7 @@ func (a *Agent) handlePlanMode(ctx context.Context, msg bus.InboundMessage) stri
 	// (review the plan, then reply to execute).
 	sess.BeginTurn()
 	defer a.flushLeftoverSteer(sess)
-	defer padOrphanToolResults(sess)
+	defer padOrphanToolResults(sess, nil)
 
 	// Mirror the regular path's user-message construction so multimodal
 	// + IM-bridge payloads (PhotoURL / PhotoURLs) land in session
@@ -2361,7 +2361,15 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	// rendering as a forever-spinning "running" entry on history
 	// rebuild and the next turn's API call gets a 400 from Anthropic
 	// for orphaned tool_use ids.
-	defer padOrphanToolResults(sess)
+	//
+	// Scoped to this turn's own tool_use ids: a concurrent turn on the same
+	// session can still have a tool in flight, and padding its ids would
+	// double-answer them (see padOrphanToolResults).
+	//
+	// turnToolCallIDs collects the tool_use ids THIS turn's assistant
+	// messages declare, so the pad settles only those.
+	var turnToolCallIDs []string
+	defer func() { padOrphanToolResults(sess, turnToolCallIDs) }()
 
 	// Reset per-turn tool failure tracking. The web_fetch (and any
 	// future tool that opts in) consults the registry's
@@ -2393,7 +2401,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 
 	// Context compaction: check if session messages are too large
 	sessionMsgs := sess.GetMessages()
-	compactResult, err := CompactMessages(sessionMsgs, a.homePath, a.provider, a.model)
+	compactResult, err := CompactMessages(ctx, sessionMsgs, a.homePath, a.provider, a.model)
 	if err != nil {
 		slog.Warn("compaction error", "agent", a.name, "error", err)
 	}
@@ -2576,6 +2584,11 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		}
 		sess.Append(assistantMsg)
 		messages = append(messages, assistantMsg)
+		for _, tc := range resp.ToolCalls {
+			if tc.ID != "" {
+				turnToolCallIDs = append(turnToolCallIDs, tc.ID)
+			}
+		}
 
 		// Loop detection: check before executing
 		loopDetected := false
@@ -2904,48 +2917,62 @@ func firstNonEmptyLine(s string) string {
 	return ""
 }
 
-// padOrphanToolResults walks the session and appends a synthetic
-// tool_result for any tool_use id from the latest assistant message that
-// doesn't already have a matching tool_result. Earlier rounds aren't
-// scanned — once the loop has moved past them they're already
-// well-formed, otherwise the previous turn's API call would have failed.
+// padOrphanToolResults appends a synthetic tool_result for every tool_use id
+// THIS TURN appended that never got one — the client clicked Stop, the
+// task-queue timeout fired, the loop detector broke out before executing the
+// tools, or the SDK returned no response for a call. Triggered from each
+// turn's defer so a premature exit can't leave the conversation in a state
+// where the next API call 400s on orphan tool_use ids and the UI keeps
+// spinning a "Running tools" entry that will never resolve.
 //
-// Triggered by HandleMessage's defer so a client-side Stop (or any other
-// premature exit) can't leave the conversation in a state where the next
-// turn's API call gets a 400 for orphan tool_use ids and the UI keeps
-// spinning a "Running tools" indicator that will never resolve.
-func padOrphanToolResults(sess *session.Session) {
-	msgs := sess.GetMessages()
-	// Walk back to the latest assistant message; if it has no tool_calls
-	// or all tool_calls already have results after it, nothing to do.
-	lastAssistantIdx := -1
-	for i := len(msgs) - 1; i >= 0; i-- {
-		if msgs[i].Role == "assistant" && len(msgs[i].ToolCalls) > 0 {
-			lastAssistantIdx = i
-			break
-		}
-	}
-	if lastAssistantIdx < 0 {
+// turnToolCallIDs MUST be the ids of the assistant messages this turn
+// appended (nil when it reported none). It is deliberately NOT a scan of the
+// session: an earlier turn's tool_use can still be in flight — the dashboard
+// chat POST path and bus-fired cron/continuation turns are not serialized
+// against each other — and padding those ids writes a SECOND reply for a
+// tool_call_id whose real result lands moments later. That duplicate is what
+// DeepSeek rejects with "Messages with role 'tool' must be a response to a
+// preceding message with 'tool_calls'" (Anthropic tolerates it), and once
+// written it 400s every later turn on that session, cron ticks included.
+func padOrphanToolResults(sess *session.Session, turnToolCallIDs []string) {
+	if len(turnToolCallIDs) == 0 {
 		return
 	}
+	msgs := sess.GetMessages()
+	// Any tool reply already in the session settles its id — including one
+	// another concurrent turn just wrote.
 	resolved := make(map[string]bool)
-	for _, m := range msgs[lastAssistantIdx+1:] {
+	for _, m := range msgs {
 		if m.Role == "tool" && m.ToolCallID != "" {
 			resolved[m.ToolCallID] = true
 		}
 	}
-	for _, tc := range msgs[lastAssistantIdx].ToolCalls {
-		if resolved[tc.ID] {
+	// Tool names ride along so the pad carries the same shape a real result
+	// would. Names come from the assistant messages; missing ones are fine.
+	names := make(map[string]string, len(turnToolCallIDs))
+	for i := len(msgs) - 1; i >= 0 && len(names) < len(turnToolCallIDs); i-- {
+		if msgs[i].Role != "assistant" {
+			continue
+		}
+		for _, tc := range msgs[i].ToolCalls {
+			if _, ok := names[tc.ID]; !ok && tc.ID != "" {
+				names[tc.ID] = tc.Function.Name
+			}
+		}
+	}
+	for _, id := range turnToolCallIDs {
+		if id == "" || resolved[id] {
 			continue
 		}
 		slog.Warn("padding orphan tool_use with stopped result",
-			"toolCallID", tc.ID, "tool", tc.Function.Name)
+			"toolCallID", id, "tool", names[id])
 		sess.Append(provider.Message{
 			Role:       "tool",
-			ToolCallID: tc.ID,
-			Name:       tc.Function.Name,
-			Content:    "(stopped — execution was interrupted before the tool returned)",
+			ToolCallID: id,
+			Name:       names[id],
+			Content:    provider.StoppedToolResult,
 		})
+		resolved[id] = true
 	}
 }
 
@@ -3114,7 +3141,11 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 	// turn's API request — especially against Anthropic-compat endpoints
 	// like DeepSeek's /anthropic — then 400s with "tool_use ids were found
 	// without tool_result blocks immediately after".
-	defer padOrphanToolResults(sess)
+	// turnToolCallIDs collects the tool_use ids THIS turn's assistant
+	// messages declare, so the pad settles only those (never a concurrent
+	// turn's in-flight tool calls).
+	var turnToolCallIDs []string
+	defer func() { padOrphanToolResults(sess, turnToolCallIDs) }()
 
 	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: BeforeSystemPrompt, UserID: a.ownerUserID})
 	chatterMem := a.memory.WithUserID(chatterUID)
@@ -3130,7 +3161,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 	sess.Append(userMsg)
 
 	sessionMsgs := sess.GetMessages()
-	compactResult, err := CompactMessages(sessionMsgs, a.homePath, a.provider, a.model)
+	compactResult, err := CompactMessages(ctx, sessionMsgs, a.homePath, a.provider, a.model)
 	if err != nil {
 		slog.Warn("compaction error", "agent", a.name, "error", err)
 	}
@@ -3282,6 +3313,11 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 		}
 		sess.Append(assistantMsg)
 		messages = append(messages, assistantMsg)
+		for _, tc := range resp.ToolCalls {
+			if tc.ID != "" {
+				turnToolCallIDs = append(turnToolCallIDs, tc.ID)
+			}
+		}
 
 		// Loop detection
 		loopDetected := false
