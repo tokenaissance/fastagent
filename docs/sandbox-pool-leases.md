@@ -488,8 +488,7 @@ path:
   usable and nothing shared is destroyed.
 - **Pod crash**: its lease expires within TTL (default 15 min) and another
   pod reclaims the scope. The orphaned E2B instance is never destroyed by the
-  registry: it runs out its provider timeout, pauses there and stays paused
-  (nothing collects it — see "Orphan reaping").
+  registry — it becomes one of the residues catalogued in "Orphan reaping".
 - **E2B provider failure during create/adopt**: create/hydrate/verify
   failures tear the new sandbox down so callers retry loudly; adopt-renew
   errors keep the adopted executor usable but unregistered; warmup errors
@@ -564,11 +563,10 @@ Threat model and controls:
   the row is overwritten it adopts the same `sandbox_id`, and with `autoPause`
   that instance is merely paused: the takeover resumes it instead of building a
   replacement. A takeover that wins `Acquire` *after* the row was replaced
-  leaves the old instance paused, unreferenced and permanent — it is not billed
-  and does not count toward the concurrency limit, so the cost is bookkeeping
-  rather than money. Reaping those was built and withdrawn (see "Orphan reaping"
-  above): until a measurement says otherwise, nothing collects them, and the only
-  bound is an explicit `kill`.
+  leaves the old instance paused, unreferenced and permanent — unbilled and
+  outside the concurrency limit, so the cost is bookkeeping rather than money.
+  Nothing collects it today; "Orphan reaping" above is the full account, the
+  queries that measure it, and the trigger that would change that.
 - Adoption races are benign for correctness of destruction (owner check), but
   two pods briefly sharing one sandbox is expected during takeover windows.
 - In the rare double-race where a creator loses `Acquire` and the subsequent
