@@ -14,6 +14,10 @@ refresh tokens). This runbook covers rotating that secret.
 - **Stale rows are reclaimed by TTL**: the next `AcquireSandboxLease` can
   only replace an expired row (default TTL 15 min), so the old rows are
   replaced within TTL or removed on release.
+- **A rebuild re-keys its own row**: when a replica replaces a sandbox whose
+  row it still owns, `ReplaceSandboxLease` rewrites `envd_token` under the
+  current secret. Such rows become readable again without waiting for TTL;
+  the rest still age out as above.
 - **Orphaned E2B instances** created before rotation live until their
   provider timeout (~30 min). They are not destroyed by this runbook.
 - **MCP OAuth is affected too**: the same secret encrypts stored OAuth
@@ -61,6 +65,9 @@ refresh tokens). This runbook covers rotating that secret.
 
 - `TestEncryptedSandboxLeaseStoreRotation` (sqlite): old-key row unreadable,
   new key reclaims after TTL expiry.
+- `TestEncryptedSandboxLeaseStoreReplaceSandbox` (sqlite): the rebuild write
+  encrypts the replacement token — the raw row holds ciphertext, and the
+  decorator decrypts it back.
 - `TestEncryptedSandboxLeaseStorePostgres` (Postgres, gated by
   `FASTAGENT_TEST_PG_DSN`): same semantics on the production dialect plus a
   raw-row plaintext check.
