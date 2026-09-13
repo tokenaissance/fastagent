@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"io"
@@ -48,6 +49,13 @@ type fakeEnvdTransport struct {
 	// not found" before succeeding — the gap between create returning an id and
 	// the edge being able to route it.
 	routableAfter int
+	// truncateFirstN makes the first N exec attempts answer 200 with a single
+	// start frame and no exit-status trailer — a stream the sandbox cut while it
+	// was still coming up.
+	truncateFirstN int
+	// trailerError, when set, is returned as a Connect end-stream trailer
+	// holding {"error":{...}} — where the protocol carries a server-side error.
+	trailerError string
 
 	mu           sync.Mutex
 	commands     []string
@@ -76,9 +84,22 @@ func (f *fakeEnvdTransport) RoundTrip(req *http.Request) (*http.Response, error)
 		f.execAttempts++
 		attempt := f.execAttempts
 		f.mu.Unlock()
+		if f.trailerError != "" {
+			// A real end-stream trailer: flags 0x02. connectEnvelope hardcodes
+			// data frames, so a plain envelope here would exercise the raw-body
+			// fallback instead of the trailer parser.
+			body, _ := json.Marshal(map[string]any{"error": map[string]any{
+				"code": "internal", "message": f.trailerError}})
+			return envdResponse(req, http.StatusOK, connectTrailer(body)), nil
+		}
 		if f.routableAfter > 0 && attempt <= f.routableAfter {
 			return envdResponse(req, http.StatusBadGateway,
 				[]byte(`{"sandboxId":"sb-x","message":"The sandbox was not found","code":502}`)), nil
+		}
+		if f.truncateFirstN > 0 && attempt <= f.truncateFirstN {
+			start, _ := json.Marshal(map[string]any{"event": map[string]any{
+				"start": map[string]any{"pid": 42}}})
+			return envdResponse(req, http.StatusOK, connectEnvelope(start)), nil
 		}
 	}
 	for _, id := range f.deadSandboxIDs {
@@ -135,6 +156,17 @@ func envdResponse(req *http.Request, status int, body []byte) *http.Response {
 		Body:       io.NopCloser(bytes.NewReader(body)),
 		Request:    req,
 	}
+}
+
+// connectTrailer frames a payload as an end-stream (trailer) message: flags
+// 0x02 rather than connectEnvelope's 0x00. That is where Connect carries a
+// server-side error, and where the production code used to look away.
+func connectTrailer(payload []byte) []byte {
+	buf := make([]byte, 5+len(payload))
+	buf[0] = 0x02
+	binary.BigEndian.PutUint32(buf[1:5], uint32(len(payload)))
+	copy(buf[5:], payload)
+	return buf
 }
 
 // execCommandFrom unwraps the Connect envelope of a Start request and returns

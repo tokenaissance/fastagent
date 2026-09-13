@@ -145,6 +145,7 @@ sandbox, even if that means leaking one until TTL/expiry.
 | Rebuild with no shared lease (single pod / docker) | Nothing to publish; `recreate()` behaves exactly as before | `TestE2BPoolRebuildWithoutLeaseStoreIsInert` |
 | Rebuild whose hydrate/verify fails | Destroys the unusable replacement, restores the previous identity, surfaces the error; nothing is published and the next reconcile does not adopt the dead sandbox back | `TestE2BExecutorFailedRebuildRestoresIdentityAndDestroysReplacement` |
 | Create accepted but the edge cannot route the id yet | `waitUntilRoutable` retries while envd answers 502/404 (1.5s interval, 60s bound) and fails creation naming the sandbox if it never comes up; a verdict that is not "gone" (401 from a stale token, 500 inside the sandbox) fails immediately without retrying; an instance that never becomes routable is destroyed rather than leaked | `TestE2BWaitUntilRoutable` |
+| Hydrate hits a cut stream or a 502 right after create | Retries the network steps up to 3 times, 1.5s apart — a container that was created moments ago can cut one stream while it finishes booting. Only "not routable yet" is retried: a 401 or a permission error is a verdict and fails immediately. The bundle is built once, outside the loop | `TestHydrateRetriesATruncatedStream`, `TestHydrateDoesNotRetryAVerdict` |
 | Parallel rebuilds on one executor | The first caller replaces the sandbox; the rest observe the new identity and retry on it without creating anything — exactly one instance per dead sandbox | `TestE2BExecutorConcurrentRebuildMintsOneSandbox` |
 | envd failure that is **not** 502/404 (500 inside the sandbox, 401 from a stale token) | Surfaces to the caller; no rebuild — a rebuild cannot fix it and would cost an instance | `TestE2BExecDoesNotRebuildOnNonGoneFailures` |
 | Destroy answer: 2xx / 404 / anything else | 2xx and 404 succeed (a 404 means the instance is already gone, which is the goal); any other status is returned as an error naming the sandbox, so a "released" sandbox cannot keep running unnoticed | `TestE2BCloseReadsTheAnswer` |
@@ -462,6 +463,11 @@ external dependencies.
   id and the edge being able to route it: ready on the first try, retried until
   routable, given up on with the sandbox and the bound named, and never retried
   for a verdict a rebuild cannot fix.
+  `e2b_hydrate_retry_test.go` covers the other half of that window — a stream a
+  fresh container cut while booting — and the diagnostics that make such a
+  failure actionable: the Connect **trailer** is parsed instead of discarded
+  (it is where the protocol carries a server-side error) and the frames that
+  did arrive are named in the error, so "truncated" is never the whole story.
 - **Adapter (store package)** — `sandbox_leases_test.go` runs `DBStore`
   through `sandbox.SandboxLeaseStore` against real sqlite: renew CAS miss,
   stale/missing release no-ops, monotonic epoch. `sandbox_leases_postgres_test.go`
