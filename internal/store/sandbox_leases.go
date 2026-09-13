@@ -126,6 +126,41 @@ func (d *DBStore) RenewSandboxLease(
 	return epoch, err
 }
 
+// ReplaceSandboxLease implements sandbox.SandboxLeaseStore.
+//
+// Overwrites the scope's sandbox identity in place. The WHERE clause is the
+// whole safety argument: `owner` proves this pod still holds the scope, so a
+// pod that lost it (another replica adopted in the meantime) cannot write its
+// replacement over the winner's row. epoch is bumped so any destroy request
+// carrying the previous epoch fails closed. Returns 0 when the CAS missed.
+func (d *DBStore) ReplaceSandboxLease(
+	ctx context.Context,
+	scopeKey, owner, sandboxID, envdToken, template string,
+	ttl time.Duration,
+) (int64, error) {
+	if scopeKey == "" || owner == "" || sandboxID == "" {
+		return 0, nil
+	}
+	now := time.Now().Unix()
+	expires := now + int64(ttl/time.Second)
+	if expires <= now {
+		expires = now + 1
+	}
+	var epoch int64
+	err := d.handle().QueryRowContext(ctx,
+		fmt.Sprintf(`UPDATE sandbox_leases
+			SET sandbox_id = %s, envd_token = %s, template = %s,
+			    expires_at = %s, epoch = epoch + 1, updated_at = %s
+			WHERE scope_key = %s AND owner = %s AND expires_at > %s
+			RETURNING epoch`,
+			d.ph(1), d.ph(2), d.ph(3), d.ph(4), d.ph(5), d.ph(6), d.ph(7), d.ph(8)),
+		sandboxID, envdToken, template, expires, now, scopeKey, owner, now).Scan(&epoch)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	return epoch, err
+}
+
 // ReleaseSandboxLease implements sandbox.SandboxLeaseStore.
 func (d *DBStore) ReleaseSandboxLease(ctx context.Context, scopeKey, owner string, epoch int64) (bool, error) {
 	if scopeKey == "" || owner == "" {
@@ -195,6 +230,23 @@ func (e *EncryptedSandboxLeaseStore) RenewSandboxLease(
 	ttl time.Duration,
 ) (int64, error) {
 	return e.Inner.RenewSandboxLease(ctx, scopeKey, owner, sandboxID, ttl)
+}
+
+// ReplaceSandboxLease encrypts the replacement token like every other write:
+// a rebuild produces a fresh envd_token, and it must never land in the row as
+// plaintext. The token is not returned to the caller (only the epoch is), so
+// there is nothing to decrypt on the way back.
+func (e *EncryptedSandboxLeaseStore) ReplaceSandboxLease(
+	ctx context.Context,
+	scopeKey, owner, sandboxID, envdToken, template string,
+	ttl time.Duration,
+) (int64, error) {
+	enc, err := e.encryptToken(ctx, envdToken)
+	if err != nil {
+		return 0, fmt.Errorf("store: encrypt sandbox lease token: %w", err)
+	}
+	return e.Inner.ReplaceSandboxLease(
+		ctx, scopeKey, owner, sandboxID, enc, template, ttl)
 }
 
 func (e *EncryptedSandboxLeaseStore) ReleaseSandboxLease(ctx context.Context, scopeKey, owner string, epoch int64) (bool, error) {

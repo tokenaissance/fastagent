@@ -74,7 +74,7 @@ func TestE2BReproWithRealWorkspace(t *testing.T) {
 		t.Fatalf("pool.Get returned error: %v", err)
 	}
 	ex := exIfc.(*E2BExecutor)
-	t.Logf("got healthy sandbox %s", ex.sandboxID)
+	t.Logf("got healthy sandbox %s", ex.identSnapshot().id)
 
 	// Repeat the write_file the user was attempting.
 	out, err := ex.WriteFile(ctx, "/workspace/fib.py", "print('hi')\n")

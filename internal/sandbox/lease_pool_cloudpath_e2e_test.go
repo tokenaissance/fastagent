@@ -143,3 +143,114 @@ func TestE2BPoolCrossPodAdoption(t *testing.T) {
 		t.Fatalf("marker lost after stale pod-A release: out=%q err=%v", outC, err)
 	}
 }
+
+// TestE2BPoolCrossPodRebuild covers the rebuild half of the lease contract
+// against a real e2b account. A sandbox that dies must be replaced in place,
+// and the lease — not the dead instance — is what every replica uses after
+// that. Without the fix, the row kept the dead sandbox_id and the next
+// reconcile read its own stale row as a takeover: it adopted the corpse back
+// and closed the healthy replacement, once per call, forever.
+//
+// The death is staged by destroying the instance out of band while the pool
+// still holds its handle; e2b answers envd for a destroyed sandbox with
+// `502 sandbox not found`, which is the same signal a provider-side timeout
+// produces in production.
+func TestE2BPoolCrossPodRebuild(t *testing.T) {
+	apiKey := os.Getenv("E2B_API_KEY")
+	template := os.Getenv("E2B_TEMPLATE")
+	if apiKey == "" || template == "" {
+		if os.Getenv("CI") != "" {
+			t.Fatal("TestE2BPoolCrossPodRebuild requires E2B_API_KEY and E2B_TEMPLATE in CI")
+		}
+		t.Skip("set E2B_API_KEY and E2B_TEMPLATE env vars to run the live rebuild e2e")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	dbA, dbB := newE2ELeaseStores(t, ctx)
+	newPool := func(owner string, db *store.DBStore) *sandbox.E2BExecutorPool {
+		return sandbox.NewE2BExecutorPool(apiKey, template, "", 10*time.Minute,
+			sandbox.WithSandboxLeases(sandbox.E2BLeaseOptions{
+				Store:    db,
+				Owner:    owner,
+				LeaseTTL: 5 * time.Minute,
+			}))
+	}
+	poolA := newPool("pod-a", dbA)
+	poolB := newPool("pod-b", dbB)
+	defer func() {
+		poolB.CloseAll()
+		poolA.CloseAll()
+	}()
+
+	const scope = "agt-rebuild:s:sess-rebuild"
+	exAAny, err := poolA.Get(ctx, "agt-rebuild", "", "sess-rebuild")
+	if err != nil {
+		t.Fatalf("pool A Get: %v", err)
+	}
+	exA := exAAny.(*sandbox.E2BExecutor)
+	rec1, err := dbA.GetSandboxLease(ctx, scope)
+	if err != nil || rec1 == nil {
+		t.Fatalf("lease after A create: rec=%+v err=%v", rec1, err)
+	}
+
+	// Destroy the instance behind the pool's back: the handle stays cached,
+	// so the next exec is what discovers the loss.
+	if err := exA.Close(); err != nil {
+		t.Fatalf("destroy sandbox %s: %v", rec1.SandboxID, err)
+	}
+	if _, err := exA.Exec(ctx, "echo rebuilt-ok", 60*time.Second); err != nil {
+		t.Fatalf("exec after sandbox loss (expected a transparent rebuild): %v", err)
+	}
+
+	// The next Get is where the pool republishes the replacement.
+	if _, err := poolA.Get(ctx, "agt-rebuild", "", "sess-rebuild"); err != nil {
+		t.Fatalf("pool A Get after rebuild: %v", err)
+	}
+	rec2, err := dbA.GetSandboxLease(ctx, scope)
+	if err != nil || rec2 == nil {
+		t.Fatalf("lease after rebuild: rec=%+v err=%v", rec2, err)
+	}
+	if rec2.SandboxID == rec1.SandboxID {
+		t.Fatalf("lease still names the destroyed sandbox %s: the rebuild was never published", rec1.SandboxID)
+	}
+
+	// Write a marker into the rebuilt instance, then serve again — the lease
+	// must keep pointing at that same instance instead of minting a new one
+	// per call.
+	marker := fmt.Sprintf("rebuild-e2e-marker-%d", time.Now().UnixNano())
+	writeCmd := fmt.Sprintf("printf '%%s' %q > /workspace/rebuild-e2e-marker && cat /workspace/rebuild-e2e-marker", marker)
+	if out, err := exA.Exec(ctx, writeCmd, 30*time.Second); err != nil || !strings.Contains(out, marker) {
+		t.Fatalf("marker write after rebuild: out=%q err=%v", out, err)
+	}
+	if _, err := poolA.Get(ctx, "agt-rebuild", "", "sess-rebuild"); err != nil {
+		t.Fatalf("pool A Get (reuse): %v", err)
+	}
+	rec3, err := dbA.GetSandboxLease(ctx, scope)
+	if err != nil || rec3 == nil {
+		t.Fatalf("lease after reuse: rec=%+v err=%v", rec3, err)
+	}
+	if rec3.SandboxID != rec2.SandboxID {
+		t.Fatalf("pool mints a new sandbox per call: %s -> %s", rec2.SandboxID, rec3.SandboxID)
+	}
+
+	// Replica B adopts the rebuilt instance (not the destroyed one) and must
+	// read the marker A wrote after its rebuild — same sandbox, no duplicate.
+	exBAny, err := poolB.Get(ctx, "agt-rebuild", "", "sess-rebuild")
+	if err != nil {
+		t.Fatalf("pool B Get: %v", err)
+	}
+	exB := exBAny.(*sandbox.E2BExecutor)
+	outB, err := exB.Exec(ctx, "cat /workspace/rebuild-e2e-marker", 30*time.Second)
+	if err != nil || !strings.Contains(outB, marker) {
+		t.Fatalf("pod B is not on pod A's rebuilt sandbox: out=%q err=%v", outB, err)
+	}
+	rec4, err := dbB.GetSandboxLease(ctx, scope)
+	if err != nil || rec4 == nil {
+		t.Fatalf("lease after B adopt: rec=%+v err=%v", rec4, err)
+	}
+	if rec4.SandboxID != rec2.SandboxID {
+		t.Fatalf("adoption moved the lease to a different sandbox: %s -> %s", rec2.SandboxID, rec4.SandboxID)
+	}
+}

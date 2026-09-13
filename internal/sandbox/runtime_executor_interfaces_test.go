@@ -125,7 +125,7 @@ func TestBoxliteExecutor_Capabilities(t *testing.T) {
 // in the preview: https://<port>-<sandboxID>.e2b.app, with a hard error
 // when the sandbox hasn't been created yet.
 func TestE2BExecutor_ExposePortURL(t *testing.T) {
-	e := &E2BExecutor{sandboxID: "sb-test-123"}
+	e := &E2BExecutor{ident: sandboxIdent{id: "sb-test-123"}}
 	url, err := e.ExposePort(context.Background(), 3000)
 	if err != nil {
 		t.Fatalf("ExposePort: %v", err)

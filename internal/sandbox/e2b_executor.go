@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"log/slog"
 	"mime/multipart"
@@ -31,18 +32,53 @@ import (
 const e2bBaseURL = "https://api.e2b.dev"
 const e2bEnvdPort = "49983"
 
+// sandboxIdent is the pair every envd request authenticates against: the
+// instance id (it selects the endpoint) and that instance's access token.
+//
+// The two travel as one value because a rebuild swaps them together. Reading
+// them separately lets a request be assembled from a new id and the old token
+// (or the reverse), which envd answers as an opaque 401/502 — indistinguishable
+// from the sandbox being gone, so it would trigger yet another rebuild.
+//
+// rebuilt rides along in the same value: it means "this identity has not
+// reached the shared lease yet". Keeping it in the snapshot means the flag is
+// always read with the identity it describes, and the pool's clear step can be
+// conditional on that identity (see clearRebuild).
+type sandboxIdent struct {
+	id      string
+	token   string
+	rebuilt bool
+}
+
 // E2BExecutor implements Executor using E2B hosted sandboxes.
 type E2BExecutor struct {
-	apiKey      string
-	sandboxID   string
-	accessToken string
-	client      *http.Client
-	template    string        // remembered for recreate() so the new sandbox uses the same template
-	timeout     time.Duration // remembered for recreate()
-	// closeFn overrides the HTTP DELETE used by Close(). Test-only seam so
-	// pool unit tests can assert an evicted/adopted-away sandbox was closed
-	// without calling the real e2b API. Nil keeps the production behavior.
-	closeFn func() error
+	apiKey string
+	// stateMu guards ident. Critical sections are a few field reads — never
+	// I/O — so a request building its URL cannot be held up by a rebuild, and
+	// a rebuild cannot be observed half-applied.
+	stateMu  sync.Mutex
+	ident    sandboxIdent
+	client   *http.Client
+	template string        // remembered for recreate() so the new sandbox uses the same template; immutable once handed out by the pool
+	timeout  time.Duration // remembered for recreate()
+	// rebuildMu serialises recreate(). Parallel tool calls share one executor
+	// (the agent loop fans tool calls out concurrently and only exec itself is
+	// not serialised), so several goroutines can observe the same dead sandbox
+	// and all decide to replace it. Without this lock each one mints its own
+	// instance and every instance but the last is stranded: no lease row names
+	// it and nothing ever closes it.
+	rebuildMu sync.Mutex
+	// closeSandboxFn overrides the HTTP DELETE used to destroy a sandbox.
+	// Test-only seam so pool unit tests can assert an evicted/adopted-away
+	// sandbox was closed without calling the real e2b API. Nil keeps the
+	// production behavior.
+	closeSandboxFn func(sandboxID string) error
+	// createFn mints the replacement sandbox inside recreate(). Defaults to
+	// newE2BExecutor; a field (rather than a direct call) so the whole rebuild
+	// path — create → hydrate → verify → mark rebuilt — is exercisable offline,
+	// and so a pool that injected its own create seam gets it honored on
+	// rebuild too instead of silently falling back to the package function.
+	createFn func(ctx context.Context, apiKey, template string, timeout time.Duration) (*E2BExecutor, error)
 	// hydrate sources — set by the pool after creation so recreate()
 	// can rebuild /skills + /workspace without reaching back into the
 	// pool. Workspace store is optional; skill dirs may be empty.
@@ -51,6 +87,44 @@ type E2BExecutor struct {
 	agentID   string
 	projectID string
 	sessionID string
+}
+
+// identSnapshot returns a consistent view of the identity a request must use.
+func (e *E2BExecutor) identSnapshot() sandboxIdent {
+	e.stateMu.Lock()
+	defer e.stateMu.Unlock()
+	return e.ident
+}
+
+// setIdent publishes a new identity. rebuilt must stay false while the
+// replacement is still being hydrated: the pool may route sibling pods to
+// whatever the row names, and a half-built sandbox is worse than a dead one.
+func (e *E2BExecutor) setIdent(id, token string, rebuilt bool) {
+	e.stateMu.Lock()
+	defer e.stateMu.Unlock()
+	e.ident = sandboxIdent{id: id, token: token, rebuilt: rebuilt}
+}
+
+// pendingPublish reports the identity that still has to reach the shared
+// lease, if any. See E2BExecutorPool.reconcileLocalLeaseLocked.
+func (e *E2BExecutor) pendingPublish() (sandboxIdent, bool) {
+	e.stateMu.Lock()
+	defer e.stateMu.Unlock()
+	return e.ident, e.ident.rebuilt
+}
+
+// clearRebuild drops the pending bit — but only when the executor still holds
+// the identity that was just published. If a newer rebuild landed while the
+// write was in flight, its own bit survives, so the next reconcile moves the
+// row again instead of letting it drift from the executor.
+func (e *E2BExecutor) clearRebuild(seen sandboxIdent) bool {
+	e.stateMu.Lock()
+	defer e.stateMu.Unlock()
+	if e.ident.id != seen.id || e.ident.token != seen.token || !e.ident.rebuilt {
+		return false
+	}
+	e.ident.rebuilt = false
+	return true
 }
 
 func newE2BExecutor(ctx context.Context, apiKey, template string, timeout time.Duration) (*E2BExecutor, error) {
@@ -114,32 +188,54 @@ func newE2BExecutor(ctx context.Context, apiKey, template string, timeout time.D
 	slog.Info("e2b sandbox created", "sandboxID", result.SandboxID, "template", template)
 
 	return &E2BExecutor{
-		apiKey:      apiKey,
-		sandboxID:   result.SandboxID,
-		accessToken: result.EnvdAccessToken,
-		client:      client,
-		template:    template,
-		timeout:     timeout,
+		apiKey:   apiKey,
+		ident:    sandboxIdent{id: result.SandboxID, token: result.EnvdAccessToken},
+		client:   client,
+		template: template,
+		timeout:  timeout,
+		createFn: newE2BExecutor,
 	}, nil
 }
 
-func (e *E2BExecutor) envdURL() string {
-	return fmt.Sprintf("https://%s-%s.e2b.app", e2bEnvdPort, e.sandboxID)
+func (e *E2BExecutor) envdURLFor(sandboxID string) string {
+	return fmt.Sprintf("https://%s-%s.e2b.app", e2bEnvdPort, sandboxID)
 }
 
-// recreate destroys the current sandbox and creates a new one. The same
+// recreateIfCurrent replaces the sandbox the caller observed failing. The same
 // template / timeout the executor was originally built with are reused —
-// hardcoding "base" here would silently demote a custom-template sandbox
-// once it idled out. The full hydrate (skills + workspace) is replayed so
+// hardcoding "base" here would silently demote a custom-template sandbox once
+// it idled out. The full hydrate (skills + workspace) is replayed so
 // /skills/<name>/ and /workspace/ stay populated across recreations.
-func (e *E2BExecutor) recreate(ctx context.Context) error {
-	slog.Info("e2b sandbox expired, recreating", "oldSandboxID", e.sandboxID)
-	newEx, err := newE2BExecutor(ctx, e.apiKey, e.template, e.timeout)
+//
+// observed is the identity the failed request actually used, which makes this
+// idempotent under concurrency: parallel calls that all watched the same
+// sandbox die queue on rebuildMu, and every waiter but the first finds the
+// executor already pointing somewhere else and returns without creating
+// anything.
+func (e *E2BExecutor) recreateIfCurrent(ctx context.Context, observed sandboxIdent) error {
+	e.rebuildMu.Lock()
+	defer e.rebuildMu.Unlock()
+
+	if cur := e.identSnapshot(); cur.id != observed.id {
+		slog.Info("e2b rebuild already performed by a parallel call",
+			"observedSandboxID", observed.id, "currentSandboxID", cur.id)
+		return nil
+	}
+	create := e.createFn
+	if create == nil {
+		create = newE2BExecutor
+	}
+	slog.Info("e2b sandbox expired, recreating", "oldSandboxID", observed.id)
+	newEx, err := create(ctx, e.apiKey, e.template, e.timeout)
 	if err != nil {
 		return err
 	}
-	e.sandboxID = newEx.sandboxID
-	e.accessToken = newEx.accessToken
+	// Swap the identity before hydrating (the hydrate calls must land on the
+	// replacement) but leave the pending bit clear: the pool may only publish
+	// this identity once the sandbox below is proven usable.
+	replacement := newEx.identSnapshot()
+	e.setIdent(replacement.id, replacement.token, false)
+
 	// Hydrate is mandatory for the same reason it is in Get() — it's
 	// the only step that makes /workspace writable to the exec user.
 	// If we just warn-log a failure here, the recreated sandbox is
@@ -147,12 +243,38 @@ func (e *E2BExecutor) recreate(ctx context.Context) error {
 	// fails with Permission denied, and the bytes get stranded in
 	// /tmp where they evaporate at the next eviction.
 	if err := e.Hydrate(ctx); err != nil {
-		return fmt.Errorf("hydrate after recreate (sandboxID=%s): %w", e.sandboxID, err)
+		return e.abandonRebuild(observed, replacement.id,
+			fmt.Errorf("hydrate after recreate (sandboxID=%s): %w", replacement.id, err))
 	}
 	if err := verifyWorkspaceWritable(ctx, e); err != nil {
-		return fmt.Errorf("recreated sandbox unusable (sandboxID=%s): %w", e.sandboxID, err)
+		return e.abandonRebuild(observed, replacement.id,
+			fmt.Errorf("recreated sandbox unusable (sandboxID=%s): %w", replacement.id, err))
 	}
+	// The shared lease still names the sandbox that just died. Mark the
+	// executor so the pool moves the row onto this replacement at the next Get
+	// (reconcileLocalLeaseLocked) — the pool owns the lease, so the executor
+	// only records the fact and stays free of SQL and scope bookkeeping.
+	e.setIdent(replacement.id, replacement.token, true)
 	return nil
+}
+
+// abandonRebuild undoes a replacement that was created but never became
+// usable. Without it the executor keeps a sandbox that cannot serve while the
+// lease row still names the dead one, so the next reconcile reads the mismatch
+// as "another replica took over", adopts the corpse back and closes the
+// replacement — a create + close cycle on every call.
+//
+// Restoring the previous identity keeps memory and row agreeing, and
+// destroying the replacement keeps a failed rebuild from leaking an instance
+// nothing references. The cause is returned unchanged so callers still see
+// why the rebuild failed; the next call retries from a consistent state.
+func (e *E2BExecutor) abandonRebuild(prev sandboxIdent, failedSandboxID string, cause error) error {
+	e.setIdent(prev.id, prev.token, false)
+	if cerr := e.closeSandboxByID(failedSandboxID); cerr != nil {
+		slog.Warn("e2b could not destroy the unusable replacement sandbox",
+			"sandboxID", failedSandboxID, "error", cerr)
+	}
+	return cause
 }
 
 // SetHydrationSources records the inputs Hydrate() should pull from on
@@ -304,11 +426,11 @@ func (e *E2BExecutor) Hydrate(ctx context.Context) error {
 	cmd := strings.Join(cmdParts, "; ")
 	out, err := e.execOnce(ctx, cmd, 60*time.Second)
 	if err != nil {
-		slog.Warn("e2b hydrate extract failed", "sandboxID", e.sandboxID, "error", err, "out", out)
+		slog.Warn("e2b hydrate extract failed", "sandboxID", e.identSnapshot().id, "error", err, "out", out)
 		return fmt.Errorf("hydrate sandbox dirs: %w (output: %s)", err, out)
 	}
 	slog.Info("e2b sandbox hydrated",
-		"sandboxID", e.sandboxID,
+		"sandboxID", e.identSnapshot().id,
 		"skills", skillCount,
 		"skillFiles", skillFileCount,
 		"workspaceFiles", workspaceCount,
@@ -404,9 +526,20 @@ func (b *tarBundle) close() error {
 	return b.gw.Close()
 }
 
-// isSandboxGone checks if the error indicates the sandbox was destroyed.
+// isSandboxGone checks if a status code means the sandbox itself is gone:
+// e2b answers 502 for an instance it has already reaped and 404 for one it
+// never had.
 func isSandboxGone(statusCode int) bool {
-	return statusCode == 502 || statusCode == 404
+	return statusCode == http.StatusBadGateway || statusCode == http.StatusNotFound
+}
+
+// sandboxGone reports whether err says the instance no longer exists — the
+// only failure a rebuild can cure. Anything else (a 401 from a stale token, a
+// 500 inside the sandbox) must surface to the caller instead of costing a
+// sandbox.
+func sandboxGone(err error) bool {
+	status, ok := statusCodeOf(err)
+	return ok && isSandboxGone(status)
 }
 
 // connectEnvelope wraps JSON payload in Connect protocol envelope framing.
@@ -451,9 +584,10 @@ func (e *E2BExecutor) Exec(ctx context.Context, command string, timeout time.Dur
 	// recreate() re-hydrates after a sandbox replacement, so `cd` is
 	// guaranteed to succeed here.
 	wrapped := "cd /workspace && " + command
-	result, err := e.execOnce(ctx, wrapped, timeout)
-	if err != nil && strings.Contains(err.Error(), "HTTP 502") || strings.Contains(fmt.Sprint(err), "HTTP 404") {
-		if rerr := e.recreate(ctx); rerr != nil {
+	observed := e.identSnapshot()
+	result, err := e.execOn(ctx, observed, wrapped, timeout)
+	if sandboxGone(err) {
+		if rerr := e.recreateIfCurrent(ctx, observed); rerr != nil {
 			return "", fmt.Errorf("sandbox recreate failed: %w (original: %v)", rerr, err)
 		}
 		return e.execOnce(ctx, wrapped, timeout)
@@ -462,6 +596,13 @@ func (e *E2BExecutor) Exec(ctx context.Context, command string, timeout time.Dur
 }
 
 func (e *E2BExecutor) execOnce(ctx context.Context, command string, timeout time.Duration) (string, error) {
+	return e.execOn(ctx, e.identSnapshot(), command, timeout)
+}
+
+// execOn runs one command against an explicit identity. Callers that may want
+// to rebuild afterwards use this form so the identity they report as "the one
+// that just died" is exactly the one the request went to.
+func (e *E2BExecutor) execOn(ctx context.Context, id sandboxIdent, command string, timeout time.Duration) (string, error) {
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
@@ -483,7 +624,7 @@ func (e *E2BExecutor) execOnce(ctx context.Context, command string, timeout time
 	execCtx, cancelExec := context.WithTimeout(ctx, timeout+30*time.Second)
 	defer cancelExec()
 
-	reqURL := e.envdURL() + "/process.Process/Start"
+	reqURL := e.envdURLFor(id.id) + "/process.Process/Start"
 	req, err := http.NewRequestWithContext(execCtx, "POST", reqURL, bytes.NewReader(enveloped))
 	if err != nil {
 		return "", err
@@ -491,8 +632,8 @@ func (e *E2BExecutor) execOnce(ctx context.Context, command string, timeout time
 	req.Header.Set("Content-Type", "application/connect+json")
 	req.Header.Set("Connect-Protocol-Version", "1")
 	req.Header.Set("Connect-Timeout-Ms", fmt.Sprintf("%d", int(timeout.Milliseconds())))
-	if e.accessToken != "" {
-		req.Header.Set("X-Access-Token", e.accessToken)
+	if id.token != "" {
+		req.Header.Set("X-Access-Token", id.token)
 	}
 
 	resp, err := e.client.Do(req)
@@ -514,7 +655,7 @@ func (e *E2BExecutor) execOnce(ctx context.Context, command string, timeout time
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("e2b exec HTTP %d: %s", resp.StatusCode, string(body))
+		return "", &sandboxHTTPError{op: "e2b exec", status: resp.StatusCode, body: string(body)}
 	}
 
 	// Parse Connect streaming response frames
@@ -574,7 +715,7 @@ func (e *E2BExecutor) execOnce(ctx context.Context, command string, timeout time
 	}
 	output = strings.TrimSpace(output)
 
-	slog.Info("e2b exec completed", "sandboxID", e.sandboxID, "exitCode", exitCode, "exited", exited, "outputLen", len(output), "frames", len(frames), "bodyBytes", len(body))
+	slog.Info("e2b exec completed", "sandboxID", id.id, "exitCode", exitCode, "exited", exited, "outputLen", len(output), "frames", len(frames), "bodyBytes", len(body))
 
 	// Reject a stream that didn't deliver a proper "End/exited=true" trailer.
 	// Why this matters: when the request payload pushes envd past some
@@ -602,9 +743,10 @@ func (e *E2BExecutor) execOnce(ctx context.Context, command string, timeout time
 }
 
 func (e *E2BExecutor) ReadFile(ctx context.Context, path string) (string, error) {
-	result, err := e.readFileOnce(ctx, path)
-	if err != nil && (strings.Contains(err.Error(), "HTTP 502") || strings.Contains(err.Error(), "HTTP 404")) {
-		if rerr := e.recreate(ctx); rerr != nil {
+	observed := e.identSnapshot()
+	result, err := e.readFileOn(ctx, observed, path)
+	if sandboxGone(err) {
+		if rerr := e.recreateIfCurrent(ctx, observed); rerr != nil {
 			return "", rerr
 		}
 		return e.readFileOnce(ctx, path)
@@ -613,13 +755,17 @@ func (e *E2BExecutor) ReadFile(ctx context.Context, path string) (string, error)
 }
 
 func (e *E2BExecutor) readFileOnce(ctx context.Context, path string) (string, error) {
-	reqURL := fmt.Sprintf("%s/files?path=%s&username=user", e.envdURL(), url.QueryEscape(path))
+	return e.readFileOn(ctx, e.identSnapshot(), path)
+}
+
+func (e *E2BExecutor) readFileOn(ctx context.Context, id sandboxIdent, path string) (string, error) {
+	reqURL := fmt.Sprintf("%s/files?path=%s&username=user", e.envdURLFor(id.id), url.QueryEscape(path))
 	req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
 	if err != nil {
 		return "", err
 	}
-	if e.accessToken != "" {
-		req.Header.Set("X-Access-Token", e.accessToken)
+	if id.token != "" {
+		req.Header.Set("X-Access-Token", id.token)
 	}
 
 	resp, err := e.client.Do(req)
@@ -630,15 +776,16 @@ func (e *E2BExecutor) readFileOnce(ctx context.Context, path string) (string, er
 	body, _ := io.ReadAll(resp.Body)
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("e2b read HTTP %d: %s", resp.StatusCode, string(body))
+		return "", &sandboxHTTPError{op: "e2b read", status: resp.StatusCode, body: string(body)}
 	}
 	return string(body), nil
 }
 
 func (e *E2BExecutor) WriteFile(ctx context.Context, path, content string) (string, error) {
-	result, err := e.writeFileOnce(ctx, path, content)
-	if err != nil && (strings.Contains(err.Error(), "HTTP 502") || strings.Contains(err.Error(), "HTTP 404")) {
-		if rerr := e.recreate(ctx); rerr != nil {
+	observed := e.identSnapshot()
+	result, err := e.writeFileOn(ctx, observed, path, content)
+	if sandboxGone(err) {
+		if rerr := e.recreateIfCurrent(ctx, observed); rerr != nil {
 			return "", rerr
 		}
 		return e.writeFileOnce(ctx, path, content)
@@ -647,7 +794,11 @@ func (e *E2BExecutor) WriteFile(ctx context.Context, path, content string) (stri
 }
 
 func (e *E2BExecutor) writeFileOnce(ctx context.Context, filePath, content string) (string, error) {
-	if err := e.uploadBytes(ctx, filePath, []byte(content)); err != nil {
+	return e.writeFileOn(ctx, e.identSnapshot(), filePath, content)
+}
+
+func (e *E2BExecutor) writeFileOn(ctx context.Context, id sandboxIdent, filePath, content string) (string, error) {
+	if err := e.uploadBytesOn(ctx, id, filePath, []byte(content)); err != nil {
 		return "", err
 	}
 	return fmt.Sprintf("Wrote %d bytes to %s", len(content), filePath), nil
@@ -661,13 +812,17 @@ func (e *E2BExecutor) writeFileOnce(ctx context.Context, filePath, content strin
 // stream at ~80KB and leaves the sandbox half-hydrated; see the comment
 // on the Hydrate caller).
 func (e *E2BExecutor) uploadBytes(ctx context.Context, sandboxPath string, data []byte) error {
+	return e.uploadBytesOn(ctx, e.identSnapshot(), sandboxPath, data)
+}
+
+func (e *E2BExecutor) uploadBytesOn(ctx context.Context, id sandboxIdent, sandboxPath string, data []byte) error {
 	// E2B envd's POST /files expects multipart/form-data with a `file`
 	// field, NOT a raw octet-stream body. The earlier raw-body version
 	// returned 200 OK but silently dropped the upload, leaving the file
 	// non-existent inside the sandbox — caught when uploaded skills
 	// failed with "No such file or directory" at exec time.
 	reqURL := fmt.Sprintf("%s/files?path=%s&username=user",
-		e.envdURL(), url.QueryEscape(sandboxPath))
+		e.envdURLFor(id.id), url.QueryEscape(sandboxPath))
 
 	// envd: the destination path comes from the `path` query param;
 	// the multipart `filename` is just metadata, so basename is fine.
@@ -689,8 +844,8 @@ func (e *E2BExecutor) uploadBytes(ctx context.Context, sandboxPath string, data 
 		return err
 	}
 	req.Header.Set("Content-Type", mw.FormDataContentType())
-	if e.accessToken != "" {
-		req.Header.Set("X-Access-Token", e.accessToken)
+	if id.token != "" {
+		req.Header.Set("X-Access-Token", id.token)
 	}
 
 	resp, err := e.client.Do(req)
@@ -701,7 +856,7 @@ func (e *E2BExecutor) uploadBytes(ctx context.Context, sandboxPath string, data 
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("e2b upload HTTP %d: %s", resp.StatusCode, string(body))
+		return &sandboxHTTPError{op: "e2b upload", status: resp.StatusCode, body: string(body)}
 	}
 	return nil
 }
@@ -721,10 +876,11 @@ func (e *E2BExecutor) IsRemoteWorkspace() {}
 // envdURL uses for the control port), so the dev server bound to 0.0.0.0
 // is reachable the moment it listens.
 func (e *E2BExecutor) ExposePort(_ context.Context, port int) (string, error) {
-	if e.sandboxID == "" {
+	sandboxID := e.identSnapshot().id
+	if sandboxID == "" {
 		return "", fmt.Errorf("e2b: sandbox not created")
 	}
-	return fmt.Sprintf("https://%d-%s.e2b.app", port, e.sandboxID), nil
+	return fmt.Sprintf("https://%d-%s.e2b.app", port, sandboxID), nil
 }
 
 // ProvisionDir implements TemplateProvisioner: tar localDir (skipping the
@@ -901,18 +1057,49 @@ func verifyWorkspaceWritable(ctx context.Context, ex *E2BExecutor) error {
 }
 
 func (e *E2BExecutor) Close() error {
-	if e.closeFn != nil {
-		return e.closeFn()
+	return e.closeSandboxByID(e.identSnapshot().id)
+}
+
+// closeSandboxByID destroys one instance. Pulled out of Close so a failed
+// rebuild can destroy the replacement it is abandoning by id, without having
+// to pretend the executor's current identity switched to it.
+//
+// The answer is checked rather than assumed. Reporting success on a rejected
+// DELETE is how a "released" sandbox keeps running: its lease row is already
+// gone, so nothing points at it any more and nothing will ever close it. A 404
+// is success — the instance is not running, which is the whole point.
+//
+// The call is bounded because one caller (Get's post-create failure path) runs
+// it while holding the pool mutex: an unanswered DELETE must not stall every
+// other agent's sandbox binding.
+func (e *E2BExecutor) closeSandboxByID(sandboxID string) error {
+	if e.closeSandboxFn != nil {
+		return e.closeSandboxFn(sandboxID)
 	}
-	req, _ := http.NewRequest("DELETE",
-		fmt.Sprintf("%s/sandboxes/%s", e2bBaseURL, e.sandboxID), nil)
-	req.Header.Set("X-API-Key", e.apiKey)
-	resp, err := e.client.Do(req)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "DELETE",
+		fmt.Sprintf("%s/sandboxes/%s", e2bBaseURL, sandboxID), nil)
 	if err != nil {
 		return err
 	}
-	resp.Body.Close()
-	slog.Info("e2b sandbox closed", "sandboxID", e.sandboxID)
+	req.Header.Set("X-API-Key", e.apiKey)
+	resp, err := e.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("e2b close sandbox %s: %w", sandboxID, err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusNotFound {
+		// Already reaped — by the provider's timeout, or a sibling pod that
+		// won the destroy race. Either way it is not running.
+		slog.Info("e2b sandbox already gone", "sandboxID", sandboxID)
+		return nil
+	}
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return fmt.Errorf("e2b close sandbox %s: HTTP %d: %s", sandboxID, resp.StatusCode, string(body))
+	}
+	slog.Info("e2b sandbox closed", "sandboxID", sandboxID)
 	return nil
 }
 
@@ -932,11 +1119,17 @@ type E2BExecutorPool struct {
 	// received for the scope. Destroy passes it to ReleaseSandboxLease so a
 	// stale eviction can never win against a newer renew/adopt.
 	leaseEpochs map[string]int64
-	apiKey      string
-	template    string
-	timeout     time.Duration
-	home        string          // workspace root used to resolve per-agent skill dirs
-	workspace   workspace.Store // optional — when set, /workspace is hydrated alongside /skills
+	// scopeLocks serialize the whole Get/Release path per scope, striped by
+	// key (see scopeLock). Striped rather than one mutex per key: a map of
+	// locks needs refcounting to avoid leaking an entry per session ever
+	// served, and two scopes sharing a stripe only queue behind each other —
+	// they never break each other's correctness.
+	scopeLocks [scopeLockStripes]sync.Mutex
+	apiKey     string
+	template   string
+	timeout    time.Duration
+	home       string          // workspace root used to resolve per-agent skill dirs
+	workspace  workspace.Store // optional — when set, /workspace is hydrated alongside /skills
 
 	// Cross-pod lease coordination. When set, Get() first consults the
 	// shared store and adopts an existing sandbox for the scope instead of
@@ -984,7 +1177,19 @@ func WithSandboxLeases(o E2BLeaseOptions) func(*E2BExecutorPool) {
 // the sandbox was hydrated by its creator with the same (user, agent,
 // session) skills/workspace; skill or workspace changes take effect on the
 // next recreate, matching single-pod behavior.
-func newAdoptedE2BExecutor(sandboxID, accessToken, template string, timeout time.Duration) *E2BExecutor {
+//
+// apiKey is required even though adoption never calls create: the shared
+// lease row deliberately carries only sandbox_id + envd_token (the
+// account-level key never touches the DB), and exec/read/write authenticate
+// with the envd token alone — so an adopted executor "works" until the
+// sandbox idles out. recreate() then needs the account key to mint a
+// replacement, and Close() needs it to destroy one. An adopted executor
+// without the key therefore fails at exactly that point, and e2b reports it
+// as `401 authorization header is missing` (an empty X-API-Key header).
+// Passing it at construction keeps "every E2BExecutor can rebuild/destroy
+// itself" an invariant instead of a property callers must remember to patch
+// in afterwards.
+func newAdoptedE2BExecutor(apiKey, sandboxID, accessToken, template string, timeout time.Duration) *E2BExecutor {
 	if template == "" {
 		template = "base"
 	}
@@ -992,17 +1197,24 @@ func newAdoptedE2BExecutor(sandboxID, accessToken, template string, timeout time
 		timeout = 30 * time.Minute
 	}
 	return &E2BExecutor{
-		sandboxID:   sandboxID,
-		accessToken: accessToken,
-		client:      &http.Client{},
-		template:    template,
-		timeout:     timeout,
+		apiKey:   apiKey,
+		ident:    sandboxIdent{id: sandboxID, token: accessToken},
+		client:   &http.Client{},
+		template: template,
+		timeout:  timeout,
+		createFn: newE2BExecutor,
 	}
 }
 
 // NewE2BExecutorPool — `home` is the FASTAGENT_HOME the docker backend
 // would have used for `-v` mounts; the pool uses it to resolve which
 // skill dirs to push into each fresh sandbox.
+//
+// Locking: p.mu guards only the executor/epoch maps — every critical section
+// on it is a map lookup or assignment. Provisioning work (lease reads and
+// writes, create, hydrate, verify, warmup) runs under the per-scope lock
+// returned by scopeLock, so a slow or cold start for one scope cannot stall
+// sandbox binding for every other agent in the process.
 func NewE2BExecutorPool(apiKey, template, home string, timeout time.Duration, opts ...func(*E2BExecutorPool)) *E2BExecutorPool {
 	p := &E2BExecutorPool{
 		executors:          make(map[string]*E2BExecutor),
@@ -1035,18 +1247,77 @@ func (p *E2BExecutorPool) SetWorkspace(ws workspace.Store) {
 	p.workspace = ws
 }
 
-func (p *E2BExecutorPool) Get(ctx context.Context, agentID, projectID, sessionID string) (Executor, error) {
+// scopeLockStripes is the number of per-scope locks. Sized so unrelated scopes
+// rarely collide while the array stays cheap to hold for the pool's lifetime.
+const scopeLockStripes = 64
+
+// scopeLock returns the lock that serializes work for one scope. Same key →
+// same lock, always, which is what keeps "exactly one sandbox per scope" true
+// now that the lock is per-scope instead of process-wide.
+func (p *E2BExecutorPool) scopeLock(key string) *sync.Mutex {
+	hasher := fnv.New32a()
+	_, _ = hasher.Write([]byte(key))
+	return &p.scopeLocks[hasher.Sum32()%scopeLockStripes]
+}
+
+// cachedExecutor / registerExecutor / recordEpoch / takeExecutor are the only
+// ways the maps are touched. Keeping them tiny is the point: p.mu must never be
+// held across I/O.
+func (p *E2BExecutorPool) cachedExecutor(key string) (*E2BExecutor, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	ex, ok := p.executors[key]
+	return ex, ok
+}
+
+func (p *E2BExecutorPool) registerExecutor(key string, ex *E2BExecutor) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.executors[key] = ex
+}
+
+func (p *E2BExecutorPool) recordEpoch(key string, epoch int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.leaseEpochs[key] = epoch
+}
+
+// takeExecutor removes and returns the scope's executor together with the
+// epoch this pod last received for it.
+func (p *E2BExecutorPool) takeExecutor(key string) (*E2BExecutor, int64, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	ex, ok := p.executors[key]
+	if !ok {
+		return nil, 0, false
+	}
+	epoch := p.leaseEpochs[key]
+	delete(p.executors, key)
+	delete(p.leaseEpochs, key)
+	return ex, epoch, true
+}
+
+func (p *E2BExecutorPool) Get(ctx context.Context, agentID, projectID, sessionID string) (Executor, error) {
 	key := poolKey(agentID, projectID, sessionID)
-	if ex, ok := p.executors[key]; ok {
+
+	// Serialize per scope, not process-wide. Everything below can do network
+	// I/O — lease reads/writes, create, hydrate, verify, warmup (bounded at
+	// 120s) — and a process-wide lock across that delays sandbox binding for
+	// every other agent behind one cold scope. Same-scope callers still queue
+	// here, so "one sandbox per scope" keeps the guarantee the global lock
+	// used to provide as a side effect.
+	scope := p.scopeLock(key)
+	scope.Lock()
+	defer scope.Unlock()
+
+	if ex, ok := p.cachedExecutor(key); ok {
 		if p.leaseStore != nil {
 			// A cached executor may be stale: its lease can expire while we
 			// were idle and another pod can take over the scope with a
 			// different sandbox. Reconcile against the shared lease before
 			// blindly renewing (blind renewal would steal ownership of the
 			// wrong sandbox and orphan the real one on eviction).
-			return p.reconcileLocalLeaseLocked(ctx, key, ex, agentID, projectID, sessionID)
+			return p.reconcileLocalLease(ctx, key, ex, agentID, projectID, sessionID)
 		}
 		return ex, nil
 	}
@@ -1054,7 +1325,7 @@ func (p *E2BExecutorPool) Get(ctx context.Context, agentID, projectID, sessionID
 		if rec, err := p.leaseStore.GetSandboxLease(ctx, key); err != nil {
 			slog.Warn("e2b lease lookup failed (falling back to local create)", "scopeKey", key, "error", err)
 		} else if rec != nil {
-			if ex, ok := p.adoptFromLeaseLocked(ctx, key, rec, agentID, projectID, sessionID); ok {
+			if ex, ok := p.adoptFromLease(ctx, key, rec, agentID, projectID, sessionID); ok {
 				slog.Info("e2b sandbox adopted from shared lease",
 					"sandboxID", rec.SandboxID, "scopeKey", key, "owner", p.ownerID)
 				return ex, nil
@@ -1086,16 +1357,17 @@ func (p *E2BExecutorPool) Get(ctx context.Context, agentID, projectID, sessionID
 	}
 	p.warmupSandbox(ctx, ex)
 	if p.leaseStore != nil {
+		created := ex.identSnapshot()
 		rec, acquired, lerr := p.leaseStore.AcquireSandboxLease(
-			ctx, key, p.ownerID, ex.sandboxID, ex.accessToken, p.template, p.leaseTTL)
+			ctx, key, p.ownerID, created.id, created.token, p.template, p.leaseTTL)
 		if lerr != nil {
 			slog.Warn("e2b lease acquire failed (keeping local sandbox)", "scopeKey", key, "error", lerr)
 		} else if acquired && rec != nil {
-			p.leaseEpochs[key] = rec.Epoch
+			p.recordEpoch(key, rec.Epoch)
 		} else if !acquired && rec != nil {
 			// Another replica won the race for this scope; use its sandbox
 			// when the CAS adoption succeeds, otherwise keep our own.
-			if adopted, ok := p.adoptFromLeaseLocked(ctx, key, rec, agentID, projectID, sessionID); ok {
+			if adopted, ok := p.adoptFromLease(ctx, key, rec, agentID, projectID, sessionID); ok {
 				_ = ex.Close()
 				ex = adopted
 				slog.Info("e2b sandbox adopted after lease race",
@@ -1106,23 +1378,26 @@ func (p *E2BExecutorPool) Get(ctx context.Context, agentID, projectID, sessionID
 			}
 		}
 	}
-	p.executors[key] = ex
+	p.registerExecutor(key, ex)
 	return ex, nil
 }
 
-// adoptFromLeaseLocked builds an executor for an existing lease record and
+// adoptFromLease builds an executor for an existing lease record and
 // CAS-renews it under this pod's ownership (fencing epoch bumped). Returns
 // ok=false when the row changed between lookup and renew — callers must not
 // adopt in that case. On a registry error the executor is returned without a
 // recorded epoch (fail-open; release will not destroy the sandbox).
 // Hydration is not replayed: the creating pod hydrated the same scope.
-func (p *E2BExecutorPool) adoptFromLeaseLocked(
+//
+// Callers hold the scope lock; the maps are still guarded by p.mu inside the
+// accessors, so this must not be called with p.mu held.
+func (p *E2BExecutorPool) adoptFromLease(
 	ctx context.Context,
 	key string,
 	rec *SandboxLeaseRecord,
 	agentID, projectID, sessionID string,
 ) (*E2BExecutor, bool) {
-	ex := newAdoptedE2BExecutor(rec.SandboxID, rec.EnvdToken, rec.Template, p.timeout)
+	ex := newAdoptedE2BExecutor(p.apiKey, rec.SandboxID, rec.EnvdToken, rec.Template, p.timeout)
 	if rec.Template == "" {
 		ex.template = p.template
 	}
@@ -1131,18 +1406,18 @@ func (p *E2BExecutorPool) adoptFromLeaseLocked(
 	if err != nil {
 		slog.Warn("e2b lease renew after adopt failed; adopting without epoch",
 			"scopeKey", key, "owner", p.ownerID, "error", err)
-		p.executors[key] = ex
+		p.registerExecutor(key, ex)
 		return ex, true
 	}
 	if epoch == 0 {
 		return nil, false
 	}
-	p.leaseEpochs[key] = epoch
-	p.executors[key] = ex
+	p.recordEpoch(key, epoch)
+	p.registerExecutor(key, ex)
 	return ex, true
 }
 
-// reconcileLocalLeaseLocked checks the shared lease against a locally cached
+// reconcileLocalLease checks the shared lease against a locally cached
 // executor before every use:
 //
 //   - same sandbox → renew (owner = this pod) and keep the local executor;
@@ -1154,7 +1429,9 @@ func (p *E2BExecutorPool) adoptFromLeaseLocked(
 // Without the sandboxID check a long-idle pod would renew ownership of a
 // lease that now points at another pod's sandbox, then "own" the wrong row
 // and orphan the live sandbox when it later evicts.
-func (p *E2BExecutorPool) reconcileLocalLeaseLocked(
+//
+// Callers hold the scope lock; this must not be called with p.mu held.
+func (p *E2BExecutorPool) reconcileLocalLease(
 	ctx context.Context,
 	key string,
 	ex *E2BExecutor,
@@ -1166,23 +1443,27 @@ func (p *E2BExecutorPool) reconcileLocalLeaseLocked(
 		slog.Warn("e2b lease lookup failed (keeping local executor)", "scopeKey", key, "error", err)
 		return ex, nil
 	}
+	cur := ex.identSnapshot()
 	if rec == nil {
 		// Our lease expired while idle. Try to reclaim with the sandbox we
 		// still hold; if another pod won in the meantime, adopt theirs.
 		got, acquired, aerr := p.leaseStore.AcquireSandboxLease(
-			ctx, key, p.ownerID, ex.sandboxID, ex.accessToken, ex.template, p.leaseTTL)
+			ctx, key, p.ownerID, cur.id, cur.token, ex.template, p.leaseTTL)
 		if aerr != nil {
 			slog.Warn("e2b lease reclaim failed (keeping local executor)", "scopeKey", key, "error", aerr)
 			return ex, nil
 		}
 		if acquired {
 			if got != nil {
-				p.leaseEpochs[key] = got.Epoch
+				p.recordEpoch(key, got.Epoch)
 			}
+			// The re-acquire stamped this executor's CURRENT sandbox onto the
+			// row, so anything a rebuild left unpublished is published now.
+			ex.clearRebuild(cur)
 			return ex, nil
 		}
 		if got != nil {
-			if adopted, ok := p.adoptFromLeaseLocked(ctx, key, got, agentID, projectID, sessionID); ok {
+			if adopted, ok := p.adoptFromLease(ctx, key, got, agentID, projectID, sessionID); ok {
 				_ = ex.Close()
 				slog.Info("e2b sandbox adopted after lease expiry race",
 					"sandboxID", got.SandboxID, "scopeKey", key, "owner", p.ownerID)
@@ -1194,18 +1475,47 @@ func (p *E2BExecutorPool) reconcileLocalLeaseLocked(
 		}
 		return ex, nil
 	}
-	if rec.SandboxID == ex.sandboxID {
-		epoch, err := p.leaseStore.RenewSandboxLease(ctx, key, p.ownerID, ex.sandboxID, p.leaseTTL)
+	if rec.SandboxID == cur.id {
+		epoch, err := p.leaseStore.RenewSandboxLease(ctx, key, p.ownerID, cur.id, p.leaseTTL)
 		if err != nil {
 			slog.Warn("e2b lease renew failed", "scopeKey", key, "owner", p.ownerID, "error", err)
 		} else if epoch > 0 {
-			p.leaseEpochs[key] = epoch
+			p.recordEpoch(key, epoch)
 		}
 		return ex, nil
 	}
+	if pending, ok := ex.pendingPublish(); ok {
+		// This executor replaced its own sandbox, so the row is behind by
+		// construction. Move it onto the replacement instead of treating the
+		// mismatch as a takeover — adopting back would close the healthy
+		// replacement and hand back the instance that just died.
+		epoch, rerr := p.leaseStore.ReplaceSandboxLease(
+			ctx, key, p.ownerID, pending.id, pending.token, ex.template, p.leaseTTL)
+		if rerr != nil {
+			// Registry down: keep serving from the local sandbox and retry on
+			// the next reconcile (same fail-open rule as every other op).
+			slog.Warn("e2b rebuilt sandbox not published to lease; keeping local executor",
+				"scopeKey", key, "owner", p.ownerID, "sandboxID", pending.id, "error", rerr)
+			return ex, nil
+		}
+		if epoch > 0 {
+			p.recordEpoch(key, epoch)
+			if !ex.clearRebuild(pending) {
+				slog.Info("e2b rebuild superseded mid-publish; the newer identity publishes next",
+					"scopeKey", key, "publishedSandboxID", pending.id)
+			}
+			slog.Info("e2b rebuilt sandbox published to shared lease",
+				"scopeKey", key, "owner", p.ownerID, "sandboxID", pending.id, "epoch", epoch)
+			return ex, nil
+		}
+		// CAS missed: another replica owns the scope now. Fall through and
+		// adopt its sandbox — our replacement is closed by the adopt path.
+		slog.Info("e2b rebuilt sandbox superseded by another pod; adopting current lease",
+			"scopeKey", key, "leaseSandboxID", rec.SandboxID, "localSandboxID", pending.id)
+	}
 	// Scope was taken over by a different sandbox. Our cached instance is
 	// stale; adopt the current one and only then close our local instance.
-	if adopted, ok := p.adoptFromLeaseLocked(ctx, key, rec, agentID, projectID, sessionID); ok {
+	if adopted, ok := p.adoptFromLease(ctx, key, rec, agentID, projectID, sessionID); ok {
 		_ = ex.Close()
 		slog.Info("e2b sandbox adopted (local cache stale)",
 			"sandboxID", rec.SandboxID, "scopeKey", key, "owner", p.ownerID)
@@ -1241,27 +1551,35 @@ func warmupCamoufoxDaemon(ctx context.Context, ex *E2BExecutor) {
 	out, err := ex.execOnce(warmCtx, "cd /workspace && camoufox-cli open about:blank", 120*time.Second)
 	if err != nil {
 		slog.Warn("e2b camoufox warmup failed (first browser call will pay cold-start)",
-			"sandboxID", ex.sandboxID, "error", err, "out", strings.TrimSpace(out))
+			"sandboxID", ex.identSnapshot().id, "error", err, "out", strings.TrimSpace(out))
 		return
 	}
-	slog.Info("e2b camoufox daemon warmed", "sandboxID", ex.sandboxID)
+	slog.Info("e2b camoufox daemon warmed", "sandboxID", ex.identSnapshot().id)
 }
 
 func (p *E2BExecutorPool) Release(agentID, projectID, sessionID string) error {
-	p.mu.Lock()
 	key := poolKey(agentID, projectID, sessionID)
-	ex, ok := p.executors[key]
-	epoch := p.leaseEpochs[key]
-	delete(p.executors, key)
-	delete(p.leaseEpochs, key)
-	p.mu.Unlock()
-	if ok {
-		return p.releaseExecutor(key, ex, epoch)
+
+	// Same scope lock as Get: without it a Get provisioning this scope could
+	// register a fresh executor just after we drained the maps, and that
+	// sandbox would never be released — its lease would lapse while the
+	// instance kept running.
+	scope := p.scopeLock(key)
+	scope.Lock()
+	defer scope.Unlock()
+
+	ex, epoch, ok := p.takeExecutor(key)
+	if !ok {
+		return nil
 	}
-	return nil
+	return p.releaseExecutor(key, ex, epoch)
 }
 
 func (p *E2BExecutorPool) CloseAll() {
+	// Shutdown path: the maps are drained under p.mu and the per-scope locks
+	// are deliberately not taken. A Get racing shutdown can still register an
+	// executor after the drain; that is the pre-existing "in-flight work dies
+	// with the process" behavior, not a new hazard.
 	p.mu.Lock()
 	execs := make([]struct {
 		key   string
