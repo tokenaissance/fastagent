@@ -48,7 +48,8 @@ type Agent struct {
 	maxTokens            int
 	temperature          float64
 	maxToolIterations    int
-	maxParallelToolCalls int // 0 = unlimited
+	maxParallelToolCalls int           // 0 = unlimited
+	subagentTimeout      time.Duration // 0 = the built-in default
 	thinking             string
 	// promptMode is kept on Agent so ReloadWorkspaceFiles can re-apply it
 	// when it rebuilds ctxBuilder — without this, every skill install /
@@ -365,6 +366,7 @@ func newAgentWithActor(rc config.ResolvedAgent, prov provider.Provider, mb *bus.
 		temperature:          rc.Temperature,
 		maxToolIterations:    rc.MaxToolIterations,
 		maxParallelToolCalls: rc.MaxParallelToolCalls,
+		subagentTimeout:      time.Duration(rc.SubagentTimeoutSec) * time.Second,
 		thinking:             rc.Thinking,
 		promptMode:           rc.PromptMode,
 		homePath:             rc.Home,
@@ -3668,6 +3670,7 @@ func (a *Agent) UpdateConfig(rc config.ResolvedAgent) {
 	a.temperature = rc.Temperature
 	a.maxToolIterations = rc.MaxToolIterations
 	a.maxParallelToolCalls = rc.MaxParallelToolCalls
+	a.subagentTimeout = time.Duration(rc.SubagentTimeoutSec) * time.Second
 	// Sandbox flags drive the system prompt's "Working Directory" / "home
 	// dir" description and the sandbox-capabilities block. Without this
 	// propagation an agent that existed before sandbox was enabled keeps
