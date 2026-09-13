@@ -4,11 +4,34 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"regexp"
 	"strings"
+	"sync/atomic"
 
 	"github.com/fastclaw-ai/fastclaw/internal/provider"
 )
+
+// recoveryNonce is minted once per process and mixed into every recovered
+// tool-call id. A bare per-response index ("recovered_0", "recovered_1", …)
+// repeats in the next turn that recovers calls, and two replies for one
+// tool_call_id is exactly the shape providers reject ("Messages with role
+// 'tool' must be a response to a preceding message with 'tool_calls'") — the
+// wire builder now collapses the duplicate, but that silently drops the later
+// turn's recovered call and its result from the model's context. The nonce
+// keeps ids unique across turns and restarts while the counter keeps them
+// unique within a process.
+var (
+	recoveryNonce   = rand.Uint32()
+	recoveryCounter atomic.Uint64
+)
+
+// nextRecoveredCallID returns a synthetic id for the i-th recovered call of
+// one response. Unique per (process, response, index): the same model turning
+// the same leaked XML into calls twice must not produce the same id.
+func nextRecoveredCallID(i int) string {
+	return fmt.Sprintf("recovered_%08x_%08x_%d", recoveryNonce, recoveryCounter.Add(1), i)
+}
 
 // maybeRecoverToolCalls runs recoverToolCallsFromContent on the
 // response when the model returned no native tool_calls but did emit
@@ -135,7 +158,7 @@ func recoverToolCallsFromContent(content string) ([]provider.ToolCall, string) {
 			continue
 		}
 		calls = append(calls, provider.ToolCall{
-			ID:   fmt.Sprintf("recovered_%d", i),
+			ID:   nextRecoveredCallID(i),
 			Type: "function",
 			Function: provider.FunctionCall{
 				Name:      name,
