@@ -11,6 +11,47 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/sandbox"
 )
 
+// failingCipher stands in for a rotation: every crypto call fails.
+type failingCipher struct{}
+
+func (failingCipher) Encrypt(context.Context, []byte) ([]byte, error) {
+	return nil, fmt.Errorf("no key")
+}
+
+func (failingCipher) Decrypt(context.Context, []byte) ([]byte, error) {
+	return nil, fmt.Errorf("no key")
+}
+
+// The reaper's read must survive a key rotation. Rows written under the old key
+// are unreadable, and that is exactly when orphaned sandboxes appear — a decorator
+// that had to decrypt to answer "which instances does anybody still name?" would
+// fail closed at the worst moment, and the orphans would stay forever.
+func TestEncryptedSandboxLeaseStoreListsRefsWithoutDecrypting(t *testing.T) {
+	ctx := context.Background()
+	db := newTestSandboxLeaseDB(t)
+	// Written through the inner store on purpose: the rows are opaque to the
+	// decorator for this test, the way post-rotation rows are.
+	if _, _, err := db.AcquireSandboxLease(
+		ctx, "agt_rot:s:sess_rot", "pod-a", "sb-rot", "tok", "tpl", time.Minute); err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	enc := &EncryptedSandboxLeaseStore{Inner: db, Crypt: failingCipher{}}
+	var st sandbox.SandboxLeaseStore = enc
+
+	refs, err := st.ListSandboxLeaseRefs(ctx)
+	if err != nil {
+		t.Fatalf("ListSandboxLeaseRefs with an unusable key: %v", err)
+	}
+	if len(refs) != 1 || refs[0].SandboxID != "sb-rot" {
+		t.Fatalf("refs = %+v, want the one row", refs)
+	}
+	// And the credential read really is broken under this key, so the test is
+	// not passing because the cipher was never consulted.
+	if _, err := st.GetSandboxLease(ctx, "agt_rot:s:sess_rot"); err == nil {
+		t.Fatal("GetSandboxLease succeeded with a failing cipher; the test proves nothing")
+	}
+}
+
 // TestEncryptedSandboxLeaseStoreRoundTrip proves the gateway-assembled
 // wrapper encrypts envd_token before it reaches the database and decrypts
 // it on read, using the same AES-GCM cryptor family as MCP OAuth tokens.

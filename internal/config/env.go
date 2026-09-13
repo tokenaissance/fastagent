@@ -56,6 +56,13 @@ type EnvSandbox struct {
 	Backend         string // FASTAGENT_SANDBOX_BACKEND  — "docker", "e2b", or "boxlite"
 	Image           string // FASTAGENT_SANDBOX_IMAGE
 	E2BKey          string // E2B_API_KEY
+	// PoolTag identifies this deployment's sandboxes inside the e2b account
+	// (FASTAGENT_SANDBOX_POOL_TAG). It is written into every created sandbox's
+	// metadata; the pool reaps the paused instances carrying it that no lease
+	// row names. Empty leaves instances untagged and reaping off, which is the
+	// safe default — but on an account shared with another deployment it means
+	// orphans are never collected.
+	PoolTag         string
 	BoxliteURL      string // FASTAGENT_SANDBOX_BOXLITE_URL — full base URL e.g. https://api.boxlite.ai/v1
 	BoxliteClientID string // FASTAGENT_SANDBOX_BOXLITE_CLIENT_ID — default "default"
 	BoxliteKey      string // BOXLITE_API_KEY — apikey sent as Authorization: Bearer
@@ -132,6 +139,9 @@ func LoadEnv() *EnvConfig {
 	}
 	if v := os.Getenv("E2B_API_KEY"); v != "" {
 		cfg.Sandbox.E2BKey = v
+	}
+	if v := os.Getenv("FASTAGENT_SANDBOX_POOL_TAG"); v != "" {
+		cfg.Sandbox.PoolTag = v
 	}
 	if v := os.Getenv("FASTAGENT_SANDBOX_BOXLITE_URL"); v != "" {
 		cfg.Sandbox.BoxliteURL = v

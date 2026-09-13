@@ -191,6 +191,29 @@ func (d *DBStore) SetSandboxLeaseState(ctx context.Context, scopeKey, owner, sta
 	return err
 }
 
+// ListSandboxLeaseRefs implements the reaper's read: every row's instance and
+// expiry, with no filter and no expiry predicate. The rule for what still
+// counts as a live claim belongs to the pool (it is the grace window that
+// decides), so this stays a plain projection of the table — and a table read
+// the caller can reason about without knowing the pool's policy.
+func (d *DBStore) ListSandboxLeaseRefs(ctx context.Context) ([]sandbox.SandboxLeaseRef, error) {
+	rows, err := d.handle().QueryContext(ctx,
+		`SELECT sandbox_id, expires_at FROM sandbox_leases`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []sandbox.SandboxLeaseRef
+	for rows.Next() {
+		var ref sandbox.SandboxLeaseRef
+		if err := rows.Scan(&ref.SandboxID, &ref.ExpiresAt); err != nil {
+			return nil, err
+		}
+		out = append(out, ref)
+	}
+	return out, rows.Err()
+}
+
 // ReleaseSandboxLease implements sandbox.SandboxLeaseStore.
 func (d *DBStore) ReleaseSandboxLease(ctx context.Context, scopeKey, owner string, epoch int64) (bool, error) {
 	if scopeKey == "" || owner == "" {
@@ -287,6 +310,14 @@ func (e *EncryptedSandboxLeaseStore) ReleaseSandboxLease(ctx context.Context, sc
 // straight through.
 func (e *EncryptedSandboxLeaseStore) SetSandboxLeaseState(ctx context.Context, scopeKey, owner, state string) error {
 	return e.Inner.SetSandboxLeaseState(ctx, scopeKey, owner, state)
+}
+
+// ListSandboxLeaseRefs carries no credential either: the reaper needs the
+// instance ids and expiries, never the tokens. Passing it through also means
+// the reaper keeps working after a key rotation makes the rows unreadable —
+// which is exactly when orphaned instances appear.
+func (e *EncryptedSandboxLeaseStore) ListSandboxLeaseRefs(ctx context.Context) ([]sandbox.SandboxLeaseRef, error) {
+	return e.Inner.ListSandboxLeaseRefs(ctx)
 }
 
 // encryptToken returns the AES-GCM ciphertext as base64 so the stored value
