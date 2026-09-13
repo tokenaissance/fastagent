@@ -64,6 +64,9 @@ type fakeLeaseStore struct {
 	replaceErr   error
 	replaceMiss  bool
 	replaceIDs   []string
+	// SetSandboxLeaseState scripting: the running/paused annotation.
+	states   []string
+	stateErr error
 }
 
 func (f *fakeLeaseStore) GetSandboxLease(_ context.Context, _ string) (*SandboxLeaseRecord, error) {
@@ -159,6 +162,21 @@ func (f *fakeLeaseStore) replaceID(i int) string {
 		return ""
 	}
 	return f.replaceIDs[i]
+}
+
+func (f *fakeLeaseStore) SetSandboxLeaseState(_ context.Context, _, _, state string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.states = append(f.states, state)
+	return f.stateErr
+}
+
+func (f *fakeLeaseStore) recordedStates() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, len(f.states))
+	copy(out, f.states)
+	return out
 }
 
 func newLeasePool(t *testing.T, store SandboxLeaseStore, owner string) *E2BExecutorPool {

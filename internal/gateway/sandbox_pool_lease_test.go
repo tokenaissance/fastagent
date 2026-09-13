@@ -41,6 +41,10 @@ func (fakeLeaseStore) ReleaseSandboxLease(context.Context, string, string, int64
 	return false, nil
 }
 
+func (fakeLeaseStore) SetSandboxLeaseState(context.Context, string, string, string) error {
+	return nil
+}
+
 func TestSandboxLeaseOptsSelection(t *testing.T) {
 	const owner = "host:pid"
 	tests := []struct {

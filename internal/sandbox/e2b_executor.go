@@ -1571,6 +1571,11 @@ type E2BExecutorPool struct {
 	// override them so the create/adopt/reconcile decision paths can be
 	// exercised without network access.
 	newSandboxExecutor func(ctx context.Context, apiKey, template string, timeout time.Duration) (*E2BExecutor, error)
+	// newAdoptedExecutor builds the executor for a sandbox another pod created.
+	// Defaults to newAdoptedE2BExecutor; a seam for the same reason as the one
+	// above — adoption now touches the network (it resumes a paused instance),
+	// and that decision path should be testable without it.
+	newAdoptedExecutor func(apiKey, sandboxID, accessToken, template string, timeout time.Duration) *E2BExecutor
 	hydrateSandbox     func(ctx context.Context, ex *E2BExecutor) error
 	verifySandbox      func(ctx context.Context, ex *E2BExecutor) error
 	warmupSandbox      func(ctx context.Context, ex *E2BExecutor)
@@ -1651,6 +1656,7 @@ func NewE2BExecutorPool(apiKey, template, home string, timeout time.Duration, op
 		timeout:            timeout,
 		home:               home,
 		newSandboxExecutor: newE2BExecutor,
+		newAdoptedExecutor: newAdoptedE2BExecutor,
 		hydrateSandbox: func(ctx context.Context, ex *E2BExecutor) error {
 			return ex.Hydrate(ctx)
 		},
@@ -1833,9 +1839,36 @@ func (p *E2BExecutorPool) adoptFromLease(
 	rec *SandboxLeaseRecord,
 	agentID, projectID, sessionID string,
 ) (*E2BExecutor, bool) {
-	ex := newAdoptedE2BExecutor(p.apiKey, rec.SandboxID, rec.EnvdToken, rec.Template, p.timeout)
+	build := p.newAdoptedExecutor
+	if build == nil {
+		build = newAdoptedE2BExecutor
+	}
+	ex := build(p.apiKey, rec.SandboxID, rec.EnvdToken, rec.Template, p.timeout)
 	if rec.Template == "" {
 		ex.template = p.template
+	}
+	// A paused instance has to be woken before use, and in secure mode the row's
+	// token may have been superseded by the pause. connect does both: it resumes
+	// (a no-op when the sandbox is already running) and returns the current
+	// token. Doing it here, rather than leaning on autoResume plus the reactive
+	// 401 path, saves a failed round trip on the first call of every resumed
+	// scope.
+	if rec.State == "paused" {
+		token, cerr := ex.Connect(ctx, rec.SandboxID, p.timeout)
+		switch {
+		case cerr == nil && token != "":
+			ex.setIdent(rec.SandboxID, token, false)
+		case cerr != nil && sandboxGone(cerr):
+			// The paused instance is gone after all: let the caller create.
+			slog.Info("e2b leased sandbox is gone before adoption",
+				"sandboxID", rec.SandboxID, "scopeKey", key, "error", cerr)
+			return nil, false
+		case cerr != nil:
+			// Carry on with the stored token: if it is stale the first envd call
+			// answers 401 and that path reconnects.
+			slog.Warn("e2b could not resume a paused sandbox; using the stored token",
+				"sandboxID", rec.SandboxID, "scopeKey", key, "error", cerr)
+		}
 	}
 	ex.SetHydrationSources(skillDirsForAgent(p.home, agentID), p.workspace, agentID, projectID, sessionID)
 	epoch, err := p.leaseStore.RenewSandboxLease(ctx, key, p.ownerID, rec.SandboxID, p.leaseTTL)
@@ -1850,6 +1883,13 @@ func (p *E2BExecutorPool) adoptFromLease(
 	}
 	p.recordEpoch(key, epoch)
 	p.registerExecutor(key, ex)
+	if rec.State == "paused" {
+		// The instance is running again; keep the annotation honest for the next
+		// reader. Best-effort: nothing depends on it (it is advisory).
+		if serr := p.leaseStore.SetSandboxLeaseState(ctx, key, p.ownerID, "running"); serr != nil {
+			slog.Warn("could not mark the adopted sandbox running", "scopeKey", key, "error", serr)
+		}
+	}
 	return ex, true
 }
 
@@ -1912,6 +1952,13 @@ func (p *E2BExecutorPool) SleepScope(ctx context.Context, agentID, projectID, se
 			return false, nil
 		}
 		return false, err
+	}
+	// Record the lifecycle for the next reader (and for the future reaper).
+	// Advisory and best-effort: a failed annotation must not undo a pause that
+	// already happened.
+	if serr := p.leaseStore.SetSandboxLeaseState(ctx, key, p.ownerID, "paused"); serr != nil {
+		slog.Warn("sandbox paused but its lease state was not recorded",
+			"sandboxID", ex.identSnapshot().id, "scopeKey", key, "error", serr)
 	}
 	// The instance is free to keep (paused sandboxes are unbilled and outside
 	// the concurrency limit), so keep the row that names it alive too.

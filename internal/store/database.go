@@ -169,6 +169,9 @@ func (d *DBStore) Migrate(ctx context.Context) error {
 	if err := d.migrateAgentsAddIsPublic(ctx); err != nil {
 		return fmt.Errorf("migrate agents.is_public: %w", err)
 	}
+	if err := d.migrateSandboxLeasesAddState(ctx); err != nil {
+		return fmt.Errorf("migrate sandbox_leases state: %w", err)
+	}
 	if err := d.migrateDropAgentGrants(ctx); err != nil {
 		return fmt.Errorf("migrate drop agent_grants: %w", err)
 	}
@@ -1474,6 +1477,40 @@ func (d *DBStore) migrateAgentFilesUserID(ctx context.Context) error {
 // tableHasColumn returns true when the named column exists on the table.
 // Backend-specific: Postgres reads information_schema; SQLite uses the
 // PRAGMA table_info() pseudo-table.
+// migrateSandboxLeasesAddState retrofits the running/paused marker onto a
+// sandbox_leases table that predates it. The marker is what lets an adoption
+// recognise a paused sandbox (resume it, don't rebuild it), and what a future
+// reaper would use to find paused instances no row names.
+//
+// Idempotent, and a no-op when the table does not exist yet: a fresh install
+// gets both columns from the CREATE TABLE in migrationSQL.
+func (d *DBStore) migrateSandboxLeasesAddState(ctx context.Context) error {
+	exists, err := d.tableExists(ctx, "sandbox_leases")
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+	columns := []struct{ name, ddl string }{
+		{"state", `ALTER TABLE sandbox_leases ADD COLUMN state TEXT NOT NULL DEFAULT 'running'`},
+		{"paused_at", `ALTER TABLE sandbox_leases ADD COLUMN paused_at BIGINT NOT NULL DEFAULT 0`},
+	}
+	for _, col := range columns {
+		has, err := d.tableHasColumn(ctx, "sandbox_leases", col.name)
+		if err != nil {
+			return err
+		}
+		if has {
+			continue
+		}
+		if _, err := d.handle().ExecContext(ctx, col.ddl); err != nil {
+			return fmt.Errorf("add sandbox_leases.%s: %w", col.name, err)
+		}
+	}
+	return nil
+}
+
 func (d *DBStore) tableHasColumn(ctx context.Context, table, column string) (bool, error) {
 	if d.dialect == "postgres" {
 		row := d.handle().QueryRowContext(ctx,
@@ -1638,6 +1675,8 @@ func migrationSQLForDialect(dialect string) []string {
 			sandbox_id TEXT NOT NULL,
 			envd_token TEXT NOT NULL,
 			template TEXT NOT NULL DEFAULT '',
+			state TEXT NOT NULL DEFAULT 'running',
+			paused_at BIGINT NOT NULL DEFAULT 0,
 			expires_at BIGINT NOT NULL,
 			epoch BIGINT NOT NULL DEFAULT 0,
 			updated_at BIGINT NOT NULL
