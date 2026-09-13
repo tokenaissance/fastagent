@@ -52,13 +52,20 @@ type fakePool struct {
 	creates   int32
 	releases  int32
 	closedAll int32
-	live      map[string]*fakeExecutor
+	// liveMu guards live. The lifecycle pool sweeps on a background goroutine,
+	// so a test goroutine calling Get/Release runs concurrently with the
+	// sweeper's own Get — an unsynchronised map here is a data race, not just
+	// a hypothetical one (`go test -race` finds it).
+	liveMu sync.Mutex
+	live   map[string]*fakeExecutor
 }
 
 func newFakePool() *fakePool { return &fakePool{live: map[string]*fakeExecutor{}} }
 
 func (p *fakePool) Get(ctx context.Context, agentID, projectID, sessionID string) (Executor, error) {
 	key := poolKey(agentID, projectID, sessionID)
+	p.liveMu.Lock()
+	defer p.liveMu.Unlock()
 	if ex, ok := p.live[key]; ok {
 		return ex, nil
 	}
@@ -71,6 +78,8 @@ func (p *fakePool) Get(ctx context.Context, agentID, projectID, sessionID string
 func (p *fakePool) Release(agentID, projectID, sessionID string) error {
 	atomic.AddInt32(&p.releases, 1)
 	key := poolKey(agentID, projectID, sessionID)
+	p.liveMu.Lock()
+	defer p.liveMu.Unlock()
 	if ex, ok := p.live[key]; ok {
 		delete(p.live, key)
 		return ex.Close()
@@ -82,6 +91,8 @@ func (p *fakePool) Backend() string { return "fake" }
 
 func (p *fakePool) CloseAll() {
 	atomic.AddInt32(&p.closedAll, 1)
+	p.liveMu.Lock()
+	defer p.liveMu.Unlock()
 	for id, ex := range p.live {
 		ex.Close()
 		delete(p.live, id)
@@ -275,7 +286,9 @@ func TestLifecycle_HydrateOnCreate(t *testing.T) {
 	ex.Exec(context.Background(), "ls /workspace", time.Second)
 
 	// Grab the underlying fake executor to inspect writes.
+	inner.liveMu.Lock()
 	underlying := inner.live["dave"]
+	inner.liveMu.Unlock()
 	if underlying == nil {
 		t.Fatal("expected inner pool to hold the created executor")
 	}
@@ -343,6 +356,8 @@ func newSnappingPool(files map[string][]byte) *snappingPool {
 
 func (p *snappingPool) Get(ctx context.Context, agentID, projectID, sessionID string) (Executor, error) {
 	key := poolKey(agentID, projectID, sessionID)
+	p.fakePool.liveMu.Lock()
+	defer p.fakePool.liveMu.Unlock()
 	if _, ok := p.fakePool.live[key]; !ok {
 		atomic.AddInt32(&p.fakePool.creates, 1)
 		// Lie: stash the underlying fakeExecutor in fakePool.live so

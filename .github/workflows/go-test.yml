@@ -33,7 +33,12 @@ jobs:
       - name: Unit + adapter + Postgres concurrency tests
         env:
           FASTAGENT_TEST_PG_DSN: "postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable"
-        run: go test ./internal/sandbox/ ./internal/store/ ./internal/gateway/ -count=1
+        # -race is load-bearing here, not decoration: the sandbox pool runs a
+        # sweeper on a background goroutine and parallel tool calls share one
+        # executor, so the interesting bugs are races. The rebuild tests drive
+        # that concurrency deliberately, and the test doubles had to grow locks
+        # of their own the first time this ran.
+        run: go test ./internal/sandbox/ ./internal/store/ ./internal/gateway/ -count=1 -race
 
   sandbox-leases-e2b:
     name: Live E2B cross-pod adoption (credentials required)

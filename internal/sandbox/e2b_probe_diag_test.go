@@ -36,7 +36,7 @@ func TestE2BProbeWorkspacePerms(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create sandbox: %v", err)
 	}
-	t.Logf("sandbox: %s (template=%s)", ex.sandboxID, ex.template)
+	t.Logf("sandbox: %s (template=%s)", ex.identSnapshot().id, ex.template)
 
 	// 1. Identity + workspace state BEFORE hydrate runs anything.
 	t.Log("--- BEFORE hydrate ---")
@@ -87,7 +87,7 @@ func TestE2BProbePoolHealth(t *testing.T) {
 		t.Fatalf("Pool.Get returned error (this means health probe caught a bad sandbox or e2b is down): %v", err)
 	}
 	ex := exIfc.(*E2BExecutor)
-	t.Logf("pool returned healthy sandbox %s", ex.sandboxID)
+	t.Logf("pool returned healthy sandbox %s", ex.identSnapshot().id)
 
 	// Without any setup of our own, /workspace must be agent-writable.
 	out, err := ex.Exec(ctx, "touch deliverable.txt && ls -l deliverable.txt", 15*time.Second)

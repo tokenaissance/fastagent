@@ -31,6 +31,12 @@ func (fakeLeaseStore) RenewSandboxLease(
 	return 0, nil
 }
 
+func (fakeLeaseStore) ReplaceSandboxLease(
+	context.Context, string, string, string, string, string, time.Duration,
+) (int64, error) {
+	return 0, nil
+}
+
 func (fakeLeaseStore) ReleaseSandboxLease(context.Context, string, string, int64) (bool, error) {
 	return false, nil
 }

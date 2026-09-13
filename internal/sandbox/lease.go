@@ -26,6 +26,13 @@ type SandboxLeaseRecord struct {
 // SandboxLeaseStore is the persistence port the E2B pool uses to make
 // sandbox instances process-wide instead of per-pod. Implemented by the
 // relational store (Postgres in production, sqlite in tests).
+//
+// The port exists to uphold one contract, stated in
+// docs/sandbox-pool-leases.md as three separately falsifiable clauses:
+// U — at most one live sandbox per scope, A — a scope can be served without
+// paying a rebuild per call, I — the row names the instance the executor
+// actually holds. Each method below is one of the writes those clauses are
+// checked against, so a change here should be read against that table.
 type SandboxLeaseStore interface {
 	// GetSandboxLease returns the current valid lease for scopeKey, or nil
 	// when none exists / the existing lease has expired.
@@ -46,6 +53,22 @@ type SandboxLeaseStore interface {
 	RenewSandboxLease(
 		ctx context.Context,
 		scopeKey, owner, sandboxID string,
+		ttl time.Duration,
+	) (epoch int64, err error)
+	// ReplaceSandboxLease points the scope at a new sandbox without
+	// re-acquiring it: it overwrites sandbox_id/envd_token and bumps the
+	// epoch, but only while this pod still owns the row (CAS on owner).
+	// Returns the new epoch, or 0 when the CAS missed — the scope moved to
+	// another pod, which now owns the decision.
+	//
+	// Needed because a rebuild changes the identity the row is supposed to
+	// name, and neither existing write can express that: Renew CASes on the
+	// OLD sandbox_id (so it can only ever maintain the status quo), and
+	// Release-then-Acquire opens a window where a sibling replica sees a free
+	// scope and creates a third sandbox for it.
+	ReplaceSandboxLease(
+		ctx context.Context,
+		scopeKey, owner, sandboxID, envdToken, template string,
 		ttl time.Duration,
 	) (epoch int64, err error)
 	// ReleaseSandboxLease deletes the lease only when this pod is still the

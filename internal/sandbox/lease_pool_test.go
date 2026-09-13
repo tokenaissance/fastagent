@@ -28,9 +28,13 @@ func (r *leaseCloseRecorder) ids() []string {
 }
 
 func testExecutor(rec *leaseCloseRecorder, sandboxID, token string) *E2BExecutor {
-	ex := newAdoptedE2BExecutor(sandboxID, token, "tpl", time.Minute)
-	ex.closeFn = func() error {
-		rec.add(sandboxID)
+	ex := newAdoptedE2BExecutor("api-key", sandboxID, token, "tpl", time.Minute)
+	ex.closeSandboxFn = func(id string) error {
+		// The id arrives from the caller rather than being read off the
+		// executor: a failed rebuild destroys the replacement by id while the
+		// executor still points at the sandbox it is restoring, and which
+		// instance was destroyed is the thing under test.
+		rec.add(id)
 		return nil
 	}
 	return ex
@@ -54,6 +58,12 @@ type fakeLeaseStore struct {
 	releaseOK    bool
 	releaseErr   error
 	releaseCalls int
+	// ReplaceSandboxLease scripting: the rebuild-republish path.
+	replaceCalls int
+	replaceEpoch int64
+	replaceErr   error
+	replaceMiss  bool
+	replaceIDs   []string
 }
 
 func (f *fakeLeaseStore) GetSandboxLease(_ context.Context, _ string) (*SandboxLeaseRecord, error) {
@@ -102,6 +112,27 @@ func (f *fakeLeaseStore) ReleaseSandboxLease(_ context.Context, _, _ string, _ i
 	return f.releaseOK, f.releaseErr
 }
 
+func (f *fakeLeaseStore) ReplaceSandboxLease(
+	_ context.Context,
+	_, _, sandboxID, _, _ string,
+	_ time.Duration,
+) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.replaceCalls++
+	f.replaceIDs = append(f.replaceIDs, sandboxID)
+	if f.replaceErr != nil {
+		return 0, f.replaceErr
+	}
+	if f.replaceMiss {
+		return 0, nil
+	}
+	if f.replaceEpoch == 0 {
+		f.replaceEpoch = 9
+	}
+	return f.replaceEpoch, nil
+}
+
 func (f *fakeLeaseStore) renewCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -112,6 +143,22 @@ func (f *fakeLeaseStore) releaseCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.releaseCalls
+}
+
+func (f *fakeLeaseStore) replaceCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.replaceCalls
+}
+
+// replaceID returns the sandbox id passed to the i-th replace call.
+func (f *fakeLeaseStore) replaceID(i int) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if i >= len(f.replaceIDs) {
+		return ""
+	}
+	return f.replaceIDs[i]
 }
 
 func newLeasePool(t *testing.T, store SandboxLeaseStore, owner string) *E2BExecutorPool {
@@ -164,8 +211,8 @@ func TestE2BPoolReconcile_StaleLocalAdoptsCurrent(t *testing.T) {
 	if !ok {
 		t.Fatalf("unexpected executor type %T", got)
 	}
-	if gotEx.sandboxID != "sb-2" {
-		t.Fatalf("adopted sandbox = %q, want sb-2", gotEx.sandboxID)
+	if gotEx.identSnapshot().id != "sb-2" {
+		t.Fatalf("adopted sandbox = %q, want sb-2", gotEx.identSnapshot().id)
 	}
 	if ids := rec.ids(); len(ids) != 1 || ids[0] != "sb-1" {
 		t.Fatalf("stale sb-1 should be closed exactly once, closed=%v", ids)
@@ -215,8 +262,8 @@ func TestE2BPoolReconcile_ExpiredLostRaceAdoptsWinner(t *testing.T) {
 		t.Fatalf("Get: %v", err)
 	}
 	gotEx := got.(*E2BExecutor)
-	if gotEx.sandboxID != "sb-2" {
-		t.Fatalf("adopted sandbox = %q, want sb-2", gotEx.sandboxID)
+	if gotEx.identSnapshot().id != "sb-2" {
+		t.Fatalf("adopted sandbox = %q, want sb-2", gotEx.identSnapshot().id)
 	}
 	if ids := rec.ids(); len(ids) != 1 || ids[0] != "sb-1" {
 		t.Fatalf("lost race should close local sb-1 once, closed=%v", ids)
@@ -274,8 +321,8 @@ func TestE2BPoolCreateLostRaceAdoptsWinner(t *testing.T) {
 		t.Fatalf("Get: %v", err)
 	}
 	gotEx := got.(*E2BExecutor)
-	if gotEx.sandboxID != "sb-2" {
-		t.Fatalf("expected adopted sb-2, got %s", gotEx.sandboxID)
+	if gotEx.identSnapshot().id != "sb-2" {
+		t.Fatalf("expected adopted sb-2, got %s", gotEx.identSnapshot().id)
 	}
 	if ids := created.ids(); len(ids) != 1 || ids[0] != "sb-1" {
 		t.Fatalf("locally created sb-1 must be closed exactly once after losing the race, closed=%v", ids)
@@ -313,7 +360,7 @@ func TestE2BPoolFreshGetLeaseErrorsFailOpen(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Get: %v", err)
 		}
-		if got, ok := ex.(*E2BExecutor); !ok || got.sandboxID != "sb-1" {
+		if got, ok := ex.(*E2BExecutor); !ok || got.identSnapshot().id != "sb-1" {
 			t.Fatalf("executor = %v, want local sb-1", ex)
 		}
 		if epoch, ok := pool.leaseEpochs["agt_1:s:chat_1"]; !ok || epoch != 1 {
@@ -340,7 +387,7 @@ func TestE2BPoolFreshGetLeaseErrorsFailOpen(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Get: %v", err)
 		}
-		if got, ok := ex.(*E2BExecutor); !ok || got.sandboxID != "sb-1" {
+		if got, ok := ex.(*E2BExecutor); !ok || got.identSnapshot().id != "sb-1" {
 			t.Fatalf("executor = %v, want local sb-1", ex)
 		}
 		if _, ok := pool.leaseEpochs["agt_1:s:chat_1"]; ok {
@@ -373,7 +420,7 @@ func TestE2BPoolAdoptRenewErrorKeepsExecutorWithoutEpoch(t *testing.T) {
 		t.Fatalf("Get: %v", err)
 	}
 	gotEx, ok := ex.(*E2BExecutor)
-	if !ok || gotEx.sandboxID != "sb-2" {
+	if !ok || gotEx.identSnapshot().id != "sb-2" {
 		t.Fatalf("executor = %v, want adopted sb-2", ex)
 	}
 	if _, ok := pool.leaseEpochs["agt_1:s:chat_1"]; ok {
@@ -453,8 +500,8 @@ func TestE2BPoolCreateLostRaceAdoptMissKeepsLocalUnregistered(t *testing.T) {
 		t.Fatalf("Get: %v", err)
 	}
 	gotEx := ex.(*E2BExecutor)
-	if gotEx.sandboxID != "sb-1" {
-		t.Fatalf("expected to keep local sb-1 after double race, got %s", gotEx.sandboxID)
+	if gotEx.identSnapshot().id != "sb-1" {
+		t.Fatalf("expected to keep local sb-1 after double race, got %s", gotEx.identSnapshot().id)
 	}
 	if _, ok := pool.leaseEpochs["agt_1:s:chat_1"]; ok {
 		t.Fatal("double-race local sandbox must not carry an epoch")
@@ -520,6 +567,65 @@ func TestE2BPoolCloseAllHonorsLeaseStore(t *testing.T) {
 		}
 		if len(pool.executors) != 0 || len(pool.leaseEpochs) != 0 {
 			t.Fatal("CloseAll left stale maps")
+		}
+	})
+}
+
+// Regression: an executor adopted from a shared lease must carry the pool's
+// e2b API key. The lease row holds only sandbox_id + envd_token (the
+// account-level key deliberately never reaches the DB), so exec/read/write
+// keep working on the adopted sandbox — until it idles out. recreate() then
+// needs the key to mint a replacement, and without it posts an empty
+// X-API-Key. e2b answers `401 authorization header is missing`, which is the
+// production failure where a leased sandbox died and every rebuild attempt
+// reported the same dead sandbox id forever.
+func TestE2BPoolAdoptedExecutorCarriesAPIKey(t *testing.T) {
+	t.Run("adopt on first use", func(t *testing.T) {
+		ctx := context.Background()
+		store := &fakeLeaseStore{
+			getRec: &SandboxLeaseRecord{SandboxID: "sb-1", EnvdToken: "tok-1", Template: "tpl", Epoch: 1},
+		}
+		pool := newLeasePool(t, store, "pod-b")
+
+		got, err := pool.Get(ctx, "agt_1", "", "chat_1")
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		ex := got.(*E2BExecutor)
+		if ex.identSnapshot().id != "sb-1" {
+			t.Fatalf("expected adopted sb-1, got %q", ex.identSnapshot().id)
+		}
+		if ex.apiKey != pool.apiKey {
+			t.Fatalf("adopted executor apiKey = %q, want the pool key %q; "+
+				"recreate() would post an empty X-API-Key", ex.apiKey, pool.apiKey)
+		}
+	})
+
+	t.Run("adopt after lost create race", func(t *testing.T) {
+		ctx := context.Background()
+		store := &fakeLeaseStore{
+			getRec:     nil, // no lease yet → this pod creates
+			acquireRec: &SandboxLeaseRecord{SandboxID: "sb-2", EnvdToken: "tok-2", Template: "tpl", Epoch: 4},
+			acquired:   false, // another replica won the claim while we created
+		}
+		pool := newLeasePool(t, store, "pod-a")
+		pool.newSandboxExecutor = func(_ context.Context, _, _ string, _ time.Duration) (*E2BExecutor, error) {
+			return testExecutor(&leaseCloseRecorder{}, "sb-1", "tok-1"), nil
+		}
+		pool.hydrateSandbox = func(context.Context, *E2BExecutor) error { return nil }
+		pool.verifySandbox = func(context.Context, *E2BExecutor) error { return nil }
+		pool.warmupSandbox = func(context.Context, *E2BExecutor) {}
+
+		got, err := pool.Get(ctx, "agt_1", "", "chat_1")
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		ex := got.(*E2BExecutor)
+		if ex.identSnapshot().id != "sb-2" {
+			t.Fatalf("expected adopted sb-2, got %q", ex.identSnapshot().id)
+		}
+		if ex.apiKey != pool.apiKey {
+			t.Fatalf("adopted executor apiKey = %q, want the pool key %q", ex.apiKey, pool.apiKey)
 		}
 	})
 }
