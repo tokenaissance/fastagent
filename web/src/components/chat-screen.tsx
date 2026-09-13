@@ -6,7 +6,7 @@ import { useAgentIdFromURL } from "@/hooks/use-agent-id";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
-import { fileUrl, getAgent, getAgentKnowledgeFile, getChangedFiles, getChatHistoryWithCursor, getChatSessions, getChatTodo, getMe, getScopePreview, getScopePreviewLogs, listAgentFiles, listProjects, renameChatSession, revealAgentWorkspace, sendChatStream, steerChat, uploadAgentFiles, getSkills, type ChatHistoryMessage, type ChatStreamEvent, type KnowledgeSource, type ScopePreview, type SkillInfo, type TodoItem, type ToolResultMetadata, type WorkspaceFile } from "@/lib/api";
+import { fileUrl, getAgent, getAgentKnowledgeFile, getChangedFiles, getChatHistoryWithCursor, getChatSessions, getChatTodo, getMe, getScopePreview, getScopePreviewLogs, listAgentFiles, listProjects, renameChatSession, cancelQueuedTurn, revealAgentWorkspace, sendChatStream, steerChat, uploadAgentFiles, getSkills, type ChatHistoryMessage, type ChatStreamEvent, type KnowledgeSource, type ScopePreview, type SkillInfo, type TodoItem, type ToolResultMetadata, type WorkspaceFile } from "@/lib/api";
 import { Bot, Send, Copy, Check, Pencil, Wrench, ChevronDown, ChevronRight, Download, X, File, FileText, Folder, FolderSearch, Image as ImageIcon, FileCode, Film, Music, Puzzle, SlidersHorizontal, ShieldCheck, Paperclip, Square, FolderOpen, RefreshCw, Eye, Code2, RotateCcw, ListChecks, Terminal, ExternalLink, MoreHorizontal, PanelLeftClose, PanelLeftOpen, BookOpen } from "lucide-react";
 import Link from "next/link";
 import { ChatMarkdown } from "@/components/chat-markdown";
@@ -512,6 +512,12 @@ export function ChatScreen() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
+  // queuedTurn mirrors Codex's "Queued follow-up inputs" preview: it is set
+  // from the backend's "queued" event when this turn had to wait for the
+  // session's turn slot (another turn — a cron/goal tick or a second client —
+  // is still running), carries the text so the block can render it, and is
+  // cleared by the first real event of the turn. Position 1 = next in line.
+  const [queuedTurn, setQueuedTurn] = useState<{ position: number; text: string; turnId: string } | null>(null);
   // todo.md state for the current session — agent maintains the file,
   // we re-fetch on every write_file/edit_file event that touches
   // todo.md plus once at mount. Empty `items` hides the panel.
@@ -606,6 +612,10 @@ export function ChatScreen() {
   // AbortController for the in-flight chat stream so the Stop button can
   // cancel both the upload and the SSE connection. Reset on every new turn.
   const abortRef = useRef<AbortController | null>(null);
+  // turnIdRef identifies the current POST in the backend's pending-turn
+  // registry so a *queued* turn can be withdrawn (Codex's "edit last queued
+  // message" / interrupt equivalent). Regenerated per send.
+  const turnIdRef = useRef<string | null>(null);
 
   // Gates the EventSource effect: holds the sessionId whose history has
   // been fetched and whose `subscribeSinceRef` is now accurate. Without
@@ -1379,6 +1389,10 @@ export function ChatScreen() {
       },
     ]);
     setSending(true);
+    turnIdRef.current =
+      typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? crypto.randomUUID()
+        : `turn-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
     abortRef.current = new AbortController();
 
     // Snapshot the workspace before the turn so we can diff at `done` and
@@ -1427,6 +1441,19 @@ export function ChatScreen() {
           maxSeqRef.current = evt.seq;
         }
         switch (evt.type) {
+          case "queued": {
+            // The backend accepted this turn but the session already has a
+            // turn in flight, so it is waiting for the turn slot. Show the
+            // wait instead of an unexplained dead air; the first real event
+            // of the turn (below) flips this back to the typing indicator.
+            const position = Number(evt.data?.position ?? 1);
+            setQueuedTurn({
+              position: position > 0 ? position : 1,
+              text: fullText,
+              turnId: turnIdRef.current || "",
+            });
+            break;
+          }
           case "content_delta": {
             // Incremental token chunk from the provider. Append to the
             // in-flight assistant bubble — create one on the first
@@ -1436,6 +1463,7 @@ export function ChatScreen() {
             // intact even though deltas aren't persisted.
             const delta = evt.data?.delta || "";
             if (!delta) break;
+            setQueuedTurn(null);
             if (curCalls.length > 0 && !streamingMsgIdRef.current) {
               // Content after tool calls = new round; reset state so
               // the new bubble is its own message, not appended onto
@@ -1524,6 +1552,7 @@ export function ChatScreen() {
             break;
           }
           case "tool_call": {
+            setQueuedTurn(null);
             // The in-flight streamed bubble (if any) is about to be
             // converted into a tool-group by the existing "replace
             // last agent message" logic below. Clear the streaming
@@ -1633,6 +1662,7 @@ export function ChatScreen() {
             break;
           }
           case "steer": {
+            setQueuedTurn(null);
             // A message the user injected mid-turn was folded into the
             // running turn server-side. Render it as a user bubble
             // (reconciled against the optimistic pendingSteer bubble).
@@ -1640,6 +1670,7 @@ export function ChatScreen() {
             break;
           }
           case "error": {
+            setQueuedTurn(null);
             // Surface backend errors as a chat bubble. Without this the
             // turn just hangs — the model failed (provider 4xx/5xx,
             // serialization mismatch, etc.) and the only signal was a
@@ -1652,7 +1683,7 @@ export function ChatScreen() {
             break;
           }
         }
-      }, abortRef.current.signal, imageDataUrls, projectIdHint);
+      }, abortRef.current.signal, imageDataUrls, projectIdHint, undefined, turnIdRef.current || undefined);
       // Diff the workspace against the pre-turn snapshot so files
       // produced by *exec* (e.g. a Python script that saves PDFs) get
       // surfaced too — `turnFiles` only catches write_file tool calls
@@ -1779,7 +1810,9 @@ export function ChatScreen() {
         inFlightSendSessionRef.current = null;
       }
       abortRef.current = null;
+      turnIdRef.current = null;
       setSending(false);
+      setQueuedTurn(null);
       // Belt-and-suspenders: the subagent's done event clears this on
       // the happy path, but if a network blip drops that event we don't
       // want a stale "iteration 5/20" sitting under a finished turn.
@@ -1791,6 +1824,39 @@ export function ChatScreen() {
   const handleStop = useCallback(() => {
     abortRef.current?.abort();
   }, []);
+
+  // Withdraw a queued turn — Codex's "edit last queued message" (restore to
+  // the composer) and interrupt/Cancel equivalents. Server-side this only
+  // succeeds while the turn is still waiting for its session's turn slot; if
+  // it already started we fall back to the plain Stop behaviour (detach this
+  // client's stream; the server keeps the turn alive on purpose).
+  const handleQueuedTurnAction = useCallback(
+    async (restoreToComposer: boolean) => {
+      const queued = queuedTurn;
+      if (!queued) return;
+      setQueuedTurn(null);
+      if (queued.turnId && selectedAgent) {
+        try {
+          const outcome = await cancelQueuedTurn(selectedAgent, sessionId, queued.turnId);
+          if (outcome === "already_started") {
+            // Too late to withdraw: keep the message where it is and let the
+            // turn finish. Nothing to undo client-side.
+            return;
+          }
+        } catch {
+          // Network error withdrawing: fall through and detach this stream so
+          // the UI isn't stuck on a queue block that no longer reflects the
+          // server. The turn (if queued) still runs and lands in history.
+        }
+      }
+      if (restoreToComposer) {
+        setInput(queued.text);
+        setAttachments([]);
+      }
+      abortRef.current?.abort();
+    },
+    [queuedTurn, selectedAgent, sessionId, setInput],
+  );
 
   // handleSteer fires while a turn is streaming: it buffers the message
   // into the running turn (the agent folds it in between tool rounds and
@@ -2348,7 +2414,11 @@ export function ChatScreen() {
               }
             })()}
 
-            {sending && (
+            {/* The queued message is rendered as an input preview above the
+                composer (Codex's PendingInputPreview does the same for its
+                queued follow-up inputs), so the transcript keeps only the
+                turn that is actually producing output. */}
+            {sending && queuedTurn === null && (
               <div className="flex justify-start">
                 <div className="bg-muted rounded-2xl rounded-bl-md px-4 py-3">
                   <div className="flex items-center gap-1">
@@ -2377,6 +2447,45 @@ export function ChatScreen() {
             (6px) so the composer's edges line up with the message rows above. */}
         <div className="shrink-0 pl-4 pr-[calc(1rem+6px)] pb-6 pt-2">
           <div className="mx-auto max-w-2xl relative">
+            {/* Queued follow-up input — mirrors Codex's PendingInputPreview:
+                a bulleted section listing what is waiting, then the actions
+                ("edit last queued message" there, Edit/Cancel here). Shown
+                only while this turn is queued behind another turn's slot. */}
+            {queuedTurn && (
+              <div className="mb-2 rounded-lg border border-border bg-muted/40 px-3 py-2">
+                <div className="text-xs font-medium text-muted-foreground">
+                  • Queued follow-up inputs
+                  {queuedTurn.position > 1 && (
+                    <span className="font-normal">
+                      {" "}
+                      ({queuedTurn.position - 1} ahead)
+                    </span>
+                  )}
+                </div>
+                <div className="mt-1 truncate pl-2 text-xs italic text-muted-foreground/80">
+                  ↳ {queuedTurn.text}
+                </div>
+                <div className="mt-1 flex items-center gap-3 pl-2 text-xs">
+                  <button
+                    type="button"
+                    className="text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+                    onClick={() => void handleQueuedTurnAction(true)}
+                  >
+                    Edit queued message
+                  </button>
+                  <button
+                    type="button"
+                    className="text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+                    onClick={() => void handleQueuedTurnAction(false)}
+                  >
+                    Cancel
+                  </button>
+                  <span className="text-muted-foreground/70">
+                    starts when the current turn finishes
+                  </span>
+                </div>
+              </div>
+            )}
             {isReadOnlyChannel && (
               // The web compose path can't deliver into upstream IM
               // platforms (no reverse channel adapter, no outbound

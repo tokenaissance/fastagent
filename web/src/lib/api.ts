@@ -1088,6 +1088,27 @@ export async function steerChat(
   return data?.buffered === true;
 }
 
+// cancelQueuedTurn withdraws a turn that is still waiting for its session's
+// turn slot (the dashboard's "Edit"/"Cancel" action on a queued message).
+// Returns "canceled" when the turn was withdrawn, "already_started" when it
+// passed the point of no return (the caller falls back to a plain Stop), and
+// "not_queued" when nothing was registered for that turn id.
+export async function cancelQueuedTurn(
+  agentId: string,
+  sessionId: string,
+  turnId: string,
+): Promise<"canceled" | "already_started" | "not_queued"> {
+  const res = await apiFetch("/api/chat/cancel", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ agentId, sessionId, turnId }),
+  });
+  if (res.status === 409) return "already_started";
+  if (res.status === 404) return "not_queued";
+  if (!res.ok) throw new Error(`cancel failed: ${res.status}`);
+  return "canceled";
+}
+
 export interface ToolResultMetadata {
   sandbox?: boolean;
   knowledgeSources?: KnowledgeSource[];
@@ -1118,6 +1139,7 @@ export interface ChatStreamEvent {
     | "tool_call"
     | "tool_result"
     | "steer"
+    | "queued"
     | "error"
     | "done"
     | "subagent_progress";
@@ -1147,6 +1169,9 @@ export interface ChatStreamEvent {
     max?: number;
     phase?: "thinking" | "running" | "final-delivery" | "done";
     tools?: string[];
+    // queued payload — position 1 means "next in line" behind the turn that
+    // currently owns the session (see docs/session-turn-integrity.md).
+    position?: number;
   };
 }
 
@@ -1167,6 +1192,9 @@ export async function sendChatStream(
   // (planMode etc.) directly; unrecognized keys land in a "Client
   // Parameters" system message via renderClientParams.
   params?: Record<string, unknown>,
+  // turnId identifies this POST in the backend's pending-turn registry so the
+  // queued-message block can withdraw a turn that has not started yet.
+  turnId?: string,
 ): Promise<void> {
   const res = await apiFetch("/api/chat/stream", {
     method: "POST",
@@ -1177,6 +1205,7 @@ export async function sendChatStream(
       projectId: projectId || undefined,
       message,
       imageUrls: imageUrls ?? [],
+      turnId,
       params: params && Object.keys(params).length > 0 ? params : undefined,
     }),
     signal,

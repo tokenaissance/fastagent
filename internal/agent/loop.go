@@ -2300,6 +2300,9 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 			"agent", a.name, "channel", msg.Channel, "chat_id", msg.ChatID,
 			"waited_ms", waited.Milliseconds(), "still_queued", sess.TurnWaiters())
 	}
+	// Past this point the turn owns the session and can no longer be
+	// withdrawn from the queue (see WithAdmissionSignal).
+	signalAdmission(ctx)
 	defer sess.ReleaseTurn()
 
 	// Plan mode short-circuits the ReAct loop: tools off, the model
@@ -3162,6 +3165,9 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 			"agent", a.name, "channel", msg.Channel, "chat_id", msg.ChatID,
 			"waited_ms", waited.Milliseconds(), "still_queued", sess.TurnWaiters())
 	}
+	// Past this point the turn owns the session and can no longer be
+	// withdrawn from the queue (see WithAdmissionSignal).
+	signalAdmission(ctx)
 	defer sess.ReleaseTurn()
 
 	chatterUID := a.chatterUserID(msg)
