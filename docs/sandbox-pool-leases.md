@@ -3,12 +3,13 @@
 > **Status**: implemented, **unreleased** (feature branch
 > `feat/e2b-sandbox-leases`)
 > **Storage**: Postgres (`sandbox_leases`) in production; sqlite in tests
-> **Last updated**: 2026-09-09
+> **Last updated**: 2026-09-13
 > **Decision owner**: mengmengmengqiang@gmail.com
 > **Reviewed by**: mengmengmengqiang@gmail.com (2026-09-09)
 > **Commits**: see `feat/e2b-sandbox-leases` git log; latest doc revision
-> `85b17fa`
-> **Open follow-ups**: none — rotation runbook:
+> `85b17fa`, plus the rebuild-publish change (2026-09-13) documented below
+> **Open follow-ups**: none — every clause of the invariant below has a
+> guarding mechanism and a test. Rotation runbook:
 > [sandbox-secret-rotation.md](./sandbox-secret-rotation.md).
 
 ## Problem
@@ -29,7 +30,8 @@ sandbox_id     e2b instance id
 envd_token     short-lived e2b access token (shared so other pods can adopt)
 template       e2b template used at creation
 expires_at     unix seconds; expired ⇒ dead, next acquirer may replace
-epoch          monotonic fencing version; bumped on every renew/adopt
+epoch          fencing version; bumped on renew/adopt/replace, reset to 1
+               by a fresh acquire (monotonic within a lease cycle, not across)
 updated_at     unix seconds
 ```
 
@@ -52,6 +54,41 @@ updated_at     unix seconds
   without transactional compare-and-set; lease ownership needs CAS semantics,
   which the relational table provides.
 
+## Invariant
+
+The design serves one contract. It is written as three **separately
+falsifiable** clauses so that a violation can be attributed to a clause
+instead of argued about as a whole. "Scope" means one `poolKey` —
+`agent[:p:proj][:s:sess]`.
+
+| # | Clause | Violated when |
+|---|---|---|
+| **U** · unique | At most one **live** sandbox serves a scope | a second live instance for that scope exists |
+| **A** · available | A scope can be served without paying a rebuild on every call | the row keeps naming a dead instance, or no instance can be produced at all |
+| **I** · isomorphic | The row names the instance the serving executor actually holds | in-memory identity ≠ `sandbox_id` |
+
+Every path through the pool is one of five operations — create, adopt, rebuild,
+release, expiry — so each clause can be checked operation by operation:
+
+| Clause | Enforced by | Accepted window | Known open violators |
+|---|---|---|---|
+| U | the row is the only naming authority: single-winner `Acquire`, the loser closes its own copy, adoption is a CAS, destroy is fenced on `owner`+`epoch` **and** reads the control-plane answer (a rejected DELETE is an error, 404 is "already gone"); per-scope locks make `Get`/`Release` single-writer for a scope, and within one executor `rebuildMu` funnels parallel rebuilds into a single replacement | two pods may briefly share one instance during a takeover; a lapsed lease is reclaimable at TTL while its instance lives on until the provider timeout | none known |
+| A | per-use reconcile; rebuild only on a **status-code** 502/404 from envd (any other failure surfaces instead of costing an instance); fail-open keeps the local sandbox serving; a rebuild that cannot hydrate or verify destroys its replacement and restores the previous identity, so the executor never keeps a sandbox that cannot serve | a publish lands on the next `Get`, so the row may lag the executor by one call | none known |
+| I | the identity (`id` + token + pending-publish bit) is one value behind one mutex, swapped whole; `ReplaceSandboxLease` moves the row under an `owner` CAS; the expiry re-acquire stamps the current id | the pending bit is in-memory only: a crash before the next `Get` loses it and the row ages out via TTL | none known |
+
+Two properties keep the clauses honest rather than aspirational:
+
+- **`epoch` is monotonic within a lease cycle only** — a fresh `Acquire` resets
+  it to 1. It fences destroys inside a cycle; a delayed destroy from an earlier
+  cycle by the same owner is not covered.
+- **The lease TTL (15 min) is shorter than the e2b instance lifetime (30 min)**,
+  so "lease expired" means *unowned*, not *gone*. Both accepted windows above
+  follow from that gap.
+
+The open violators carry no test name on purpose: by construction they have
+none, which is how they stayed open. Accepted windows and registry failure
+modes each map to a test in the failure-semantics table below.
+
 ## Semantics (v1, deliberately small)
 
 - A pod handling a scope first looks up a valid lease → **adopts** the
@@ -69,6 +106,20 @@ updated_at     unix seconds
   sandbox is left alive.
 - Adoption does not replay hydration (creator hydrated the same scope);
   skill/workspace changes apply on next recreate, same as single-pod behavior.
+- **Adoption carries the account API key.** The row stores only
+  `sandbox_id` + `envd_token`, and exec/read/write authenticate with the envd
+  token alone — so an adopted sandbox serves normally while its key is absent.
+  It breaks at the first operation that needs the *account* key: `recreate()`
+  minting a replacement (e2b answers `401 authorization header is missing` for
+  an empty `X-API-Key`) and `Close()` destroying one. The key therefore travels
+  from the pool into every executor it hands out, adopted ones included.
+- **A rebuild moves the lease.** `recreate()` replaces the instance the row is
+  supposed to name, so the pool overwrites the row onto the replacement:
+  `ReplaceSandboxLease` CASes on `owner` and bumps `epoch`. This is a distinct
+  write because neither existing one can express it — `Renew` CASes on the OLD
+  `sandbox_id` (so it can only maintain the status quo), and
+  Release-then-Acquire opens a window where a sibling replica sees a free
+  scope and creates a third sandbox for it.
 
 ### Failure semantics (registry errors fail open)
 
@@ -81,7 +132,7 @@ sandbox, even if that means leaking one until TTL/expiry.
 
 | Registry condition | Pool behavior | Test |
 |---|---|---|
-| No registry failure (baseline) | Acquire/renew/adopt succeed with a fresh epoch; Release with the matching epoch deletes the row and closes the sandbox exactly once | `TestSandboxLeaseAcquireAdoptRenewRelease`, `TestE2BPoolReleaseUsesFencingEpoch` |
+| No registry failure (baseline) | Acquire/renew/adopt succeed with a fresh epoch; a rebuild moves the row onto the replacement and does not close it; Release with the matching epoch deletes the row and closes the sandbox exactly once | `TestSandboxLeasesAcquireAdoptRenewRelease`, `TestE2BPoolReleaseUsesFencingEpoch`, `TestE2BPoolReconcileRepublishesRebuiltSandbox` |
 | Token decrypt failure on read (rotated / mismatched key) | Read fails closed → pool treats it as a lookup error and creates locally; an unexpired row blocks registration until TTL | `TestEncryptedSandboxLeaseStoreRotation` |
 | Token encrypt failure before write | Refuses to persist (never writes plaintext); the error propagates to the pool's acquire-error path, which keeps the local sandbox unregistered | pool acquire-error path: `TestE2BPoolFreshGetLeaseErrorsFailOpen` |
 | Lookup error before local create | Still creates + registers locally; an acquire error keeps it unregistered | `TestE2BPoolFreshGetLeaseErrorsFailOpen` |
@@ -89,6 +140,13 @@ sandbox, even if that means leaking one until TTL/expiry.
 | Reconcile lookup error (cached) | Keeps the cached executor; no renew, no close | `TestE2BPoolReconcileRegistryErrorsKeepLocal` |
 | Reconcile reclaim acquire error | Keeps the cached executor, unregistered | `TestE2BPoolReconcileRegistryErrorsKeepLocal` |
 | Double race (Acquire lost + adoption CAS miss) | Keeps the local sandbox unregistered until the next reconcile | `TestE2BPoolCreateLostRaceAdoptMissKeepsLocalUnregistered` |
+| Rebuild publish, registry error | Keeps serving from the rebuilt sandbox; the `rebuilt` flag stays set and the next reconcile retries the publish | `TestE2BPoolRebuildPublishFailureKeepsLocalAndRetries` |
+| Rebuild publish, CAS miss (scope moved to another pod) | Does **not** overwrite the winner's row; falls through to adopting the current lease and closes its own replacement exactly once | `TestE2BPoolRebuildSupersededByAnotherPodAdoptsCurrent` |
+| Rebuild with no shared lease (single pod / docker) | Nothing to publish; `recreate()` behaves exactly as before | `TestE2BPoolRebuildWithoutLeaseStoreIsInert` |
+| Rebuild whose hydrate/verify fails | Destroys the unusable replacement, restores the previous identity, surfaces the error; nothing is published and the next reconcile does not adopt the dead sandbox back | `TestE2BExecutorFailedRebuildRestoresIdentityAndDestroysReplacement` |
+| Parallel rebuilds on one executor | The first caller replaces the sandbox; the rest observe the new identity and retry on it without creating anything — exactly one instance per dead sandbox | `TestE2BExecutorConcurrentRebuildMintsOneSandbox` |
+| envd failure that is **not** 502/404 (500 inside the sandbox, 401 from a stale token) | Surfaces to the caller; no rebuild — a rebuild cannot fix it and would cost an instance | `TestE2BExecDoesNotRebuildOnNonGoneFailures` |
+| Destroy answer: 2xx / 404 / anything else | 2xx and 404 succeed (a 404 means the instance is already gone, which is the goal); any other status is returned as an error naming the sandbox, so a "released" sandbox cannot keep running unnoticed | `TestE2BCloseReadsTheAnswer` |
 | Release / CloseAll registry error or declined delete | Drops the local reference; the sandbox stays alive | `TestE2BPoolReleaseRegistryErrorLeavesSandboxAlive`, `TestE2BPoolCloseAllHonorsLeaseStore` |
 
 ## Hardening: CAS + epoch (stage 2)
@@ -119,15 +177,99 @@ The version column makes any stale destroy request fail closed.
 | 1 | lease table + adopt/acquire/release + gateway wiring | done (`e359bf0`) |
 | 1b | per-use reconcile: cached executor vs lease sandbox_id | done (`091c579`) |
 | 2 | CAS + epoch on renew/adopt/release + race unit tests | done (`86fcac1`) |
+| 2b | rebuild republish: key travels into adopted executors; `ReplaceSandboxLease` moves the row onto a rebuilt instance | done (2026-09-13) |
 | 3–6 | heartbeat/reconciliation loop, degraded state machine, metrics, liveness GC | **not in scope** — decision: CAS + epoch is sufficient for the current release; revisit only if prod observations justify them |
+
+### Stage 2b: how a rebuild reaches the lease
+
+A sandbox that idles out is detected by an envd call returning `502`/`404`,
+and `recreate()` replaces it in place. That changes the identity the lease is
+supposed to name, so something has to move the row. The mechanism is
+deliberately small:
+
+1. `recreate()` sets an in-memory `rebuilt` flag on the executor. The pool owns
+   the lease, so the executor records only the fact — it never sees SQL, the
+   scope key, or the epoch.
+2. The next `Get` reconciles as usual. A row whose `sandbox_id` differs from
+   the executor's normally means "another replica took the scope over" and the
+   pool adopts it. The `rebuilt` flag is what separates that from "this row
+   names a sandbox I replaced myself" — the two are indistinguishable from the
+   row alone, and reading the first as the second is what closed the healthy
+   replacement and adopted the corpse back on every call.
+3. `ReplaceSandboxLease` overwrites the identity in place, CAS on `owner`, and
+   bumps `epoch`; the new epoch is recorded so a later fenced delete stays
+   valid. On a registry error the flag stays set and the next reconcile
+   retries; on a CAS miss the scope belongs to another pod and the pool
+   adopts that one instead.
+
+**Lifecycle of the flag** — set by a successful `recreate()`, cleared as soon
+as the row names the replacement, whichever route got there first:
+
+| Route | When | Write |
+|---|---|---|
+| Publish | row names a different sandbox and this pod rebuilt it | `ReplaceSandboxLease` (CAS on owner) |
+| Expiry re-acquire | row lapsed (`rec == nil`) while the pod was idle | `AcquireSandboxLease` stamps `ex.sandboxID`, so the replacement is named by construction |
+
+It is in-memory only: nothing is persisted about "a rebuild happened", so a
+pod that rebuilds and then restarts before its next `Get` leaves the row on
+the dead sandbox and the normal TTL takeover applies.
+
+**Concurrency** — parallel tool calls share one executor (the agent loop fans
+them out and only `delegate_task` is registered serial), so several goroutines
+can watch the same sandbox die. Two guards keep that from fragmenting the
+scope: `rebuildMu` serialises rebuilds and each caller reports the identity it
+saw fail, so every waiter but the first finds the replacement already in place
+and returns without creating anything; the identity itself travels as one value
+behind one mutex, so a request can never be assembled from a new sandbox id and
+the previous token.
+
+The pool adds a third, coarser one: `Get`/`Release` serialize **per scope**
+(64 striped locks), not process-wide. Everything in that path does network I/O
+— lease reads and writes, create, hydrate, verify, warmup (bounded at 120s) —
+and an earlier version held a single `p.mu` across all of it, so one cold scope
+stalled sandbox binding for every other agent. `p.mu` now guards only the
+executor/epoch maps, every critical section on it being a map lookup or
+assignment. Same-scope callers still queue on the same stripe, which is what
+preserves "one sandbox per scope"; unrelated scopes only queue when their keys
+happen to hash alike. Pinned by `TestE2BPoolProvisionsScopesConcurrently`.
+
+**A rebuild that fails** — hydrate or the `/workspace` probe can fail against a
+replacement that was created fine. The executor then destroys the unusable
+instance and restores the previous identity, and reports the error to the tool
+call. Memory and row agree again, so the next reconcile renews instead of
+reading the mismatch as a takeover and adopting the dead sandbox back. The
+visible cost when the cause is persistent (a broken workspace store, say) is
+one create + destroy per attempt, surfaced as an error each time — not silent
+churn.
+
+Alternatives rejected as heavier than the problem:
+
+- **Publish from inside `recreate()` via an output port** (a DTO + callback the
+  pool installs). Correct, and it removes the one-call window, but it adds a
+  boundary and a second code path for a case the per-use reconcile already
+  covers on the very next call.
+- **A CAS that also matches the previous `sandbox_id`.** Extra predicate, extra
+  state on the row's readers, and it doesn't buy anything here: the `owner`
+  check already fences a pod that lost the scope, and a same-pod replay can
+  only CAS from the identity it last published.
+- **Reading `owner` back from the row to make the distinction.** The column
+  exists, but the pool already knows whether *it* rebuilt the sandbox, so no
+  schema or record change is needed.
 
 ## Files
 
 - `internal/sandbox/lease.go` — port + lease record + default TTL
+  (`ReplaceSandboxLease` is the rebuild-publish write)
 - `internal/store/sandbox_leases.go` — Postgres/sqlite adapter (DBStore) +
   `EncryptedSandboxLeaseStore` (at-rest token encryption decorator)
 - `internal/cryptoutil/cipher.go` — neutral at-rest credential cipher
   contract shared with MCP OAuth (`port.Cryptor` aliases it)
+- `internal/sandbox/http_error.go` — `sandboxHTTPError`: every provider HTTP
+  failure carries its status, so both backends classify "the instance is gone"
+  by what the provider said instead of by matching message text (e2b:
+  502/404, boxlite: 502/404/410). Covered by
+  `TestE2BExecDoesNotRebuildOnNonGoneFailures` and
+  `TestIsBoxliteGoneReadsTheStatusNotTheText`.
 - `internal/sandbox/e2b_executor.go` — pool adopt/acquire/release integration
 - `internal/gateway/userspace.go` — pool wiring: per-pod owner id + lease store
 - `docs/sandbox-secret-rotation.md` — key rotation runbook
@@ -183,7 +325,9 @@ path:
   are best-effort.
 - **Race conditions**: concurrent acquire yields exactly one winner; losers
   adopt the winner; the double race (Acquire loss + CAS adoption miss) keeps
-  the local unregistered sandbox until the next reconcile.
+  the local unregistered sandbox until the next reconcile. This covers racing
+  *acquirers* only — concurrent **rebuilds** inside one executor are not
+  synchronised; see the open violators in the invariant table.
 - **Registry state corruption** (undecryptable or wrong-key row): reads fail
   closed → local create; the stale row is reclaimed at expiry and can never
   cause a destroy.
@@ -244,9 +388,11 @@ Threat model and controls:
 
 ## Known tradeoffs (accepted)
 
-- After a pod crash, its lease expires within TTL (default 15 min); another
-  pod may create a fresh sandbox for that scope while the orphan still lives
-  until e2b's own 30-min timeout.
+- Whenever a lease lapses — the pod crashed, or it simply went idle past TTL
+  (default 15 min) — another pod may create a fresh sandbox for that scope
+  while the old instance still lives until e2b's own 30-min timeout. The
+  holder that comes back adopts the newer sandbox and closes its own, so the
+  duplicate is bounded by the TTL↔timeout gap, not permanent.
 - Adoption races are benign for correctness of destruction (owner check), but
   two pods briefly sharing one sandbox is expected during takeover windows.
 - In the rare double-race where a creator loses `Acquire` and the subsequent
@@ -254,6 +400,23 @@ Threat model and controls:
   the next reconcile; because no epoch was recorded, its later release will
   not destroy it and it lives until the e2b timeout. Logged as a warning;
   accepted for v1.
+- A rebuild is published on the **next** `Get`, not from inside `recreate()`.
+  The window is one call wide and only matters to a sibling replica that hits
+  the same scope inside it: that replica adopts the dead instance, pays one
+  rebuild of its own, and converges on the same identity. Publishing
+  immediately would remove the window at the cost of a second code path; the
+  reconcile already runs before every use, so v1 accepts the window.
+- The `rebuilt` flag is in-memory, so a pod that rebuilds and then crashes
+  before its next `Get` leaves the row on the dead sandbox. That is the
+  pre-existing crash story (the row lapses at TTL and the next acquirer
+  replaces it), unchanged by this stage.
+- **Lock granularity** — `p.mu` guards only the executor/epoch maps; the
+  provisioning path runs under a per-scope striped lock (see Stage 2b →
+  Concurrency). Two consequences are accepted rather than solved: unrelated
+  scopes that hash to the same stripe queue behind each other, and `CloseAll`
+  does not take the scope locks, so a `Get` racing shutdown can register an
+  executor after the drain — the pre-existing "in-flight work dies with the
+  process" behavior, not a new hazard.
 
 ## Test topology
 
@@ -274,9 +437,26 @@ external dependencies.
   release/CloseAll failures keep sandboxes alive; reconcile registry errors
   keep the local executor; the double race (Acquire loss + CAS adoption miss)
   keeps the local sandbox unregistered. No database involved.
+- **Policy, rebuild (sandbox package)** — `lease_rebuild_test.go` shares that
+  fake and drives the whole rebuild path offline: envd is stubbed at the HTTP
+  boundary (the outermost layer) and the create call is injected, so
+  hydrate → probe → mark → republish runs for real. Covers the republish
+  invariant, the registry-error retry, the superseded-by-another-pod CAS miss,
+  the expiry re-acquire route (which publishes by construction), and the
+  no-lease-store no-op. It is also where the executor's own concurrency is
+  pinned: parallel rebuilds fan in to one replacement, and a rebuild that
+  cannot hydrate restores the previous identity and destroys the replacement.
+  `e2b_error_classification_test.go` covers the two decisions that used to be
+  guesses: only a 502/404 status from envd counts as "gone" (a message that
+  merely mentions those codes does not), and the destroy answer is read —
+  2xx/404 succeed, anything else is an error naming the sandbox.
 - **Adapter (store package)** — `sandbox_leases_test.go` runs `DBStore`
   through `sandbox.SandboxLeaseStore` against real sqlite: renew CAS miss,
   stale/missing release no-ops, monotonic epoch. `sandbox_leases_postgres_test.go`
+  `sandbox_leases_replace_test.go` pins the rebuild write against real sqlite:
+  a foreign owner cannot move the row, the owner's replace bumps the epoch and
+  rewrites sandbox/token/template, a stale-epoch destroy after it fails
+  closed, and an expired row is not replaceable. `sandbox_leases_postgres_test.go`
   covers the production dialect (concurrent acquire single winner, stale
   release fencing, idempotent `Migrate`) and is gated by
   `FASTAGENT_TEST_PG_DSN` — sqlite serializes writes, so cross-connection
@@ -300,9 +480,24 @@ external dependencies.
      sandbox with a copied lease row.
   3. Pod A releases with its stale epoch: the lease must survive and Pod B
      must still execute and still read the marker.
+- **Live e2e, rebuild (`TestE2BPoolCrossPodRebuild`)** — same gating and same
+  two-handle setup. Stages:
+  1. Pod A creates the sandbox and the lease records it.
+  2. The instance is destroyed out of band while the pool still holds the
+     handle — the `502 sandbox not found` signal a provider-side timeout also
+     produces — and the next exec must rebuild transparently.
+  3. The next `Get` republishes: the row must name a *different* sandbox than
+     the destroyed one.
+  4. Serving again must keep that identity (no new sandbox per call — the
+     churn this stage removes).
+  5. Pod B adopts the rebuilt instance and reads a marker A wrote *after* the
+     rebuild, proving both replicas are on the replacement rather than on a
+     duplicate or on the corpse.
 - **CI** — `.github/workflows/go-test.yml` runs the sandbox/store/gateway
-  suites against a Postgres service; a second job runs the live E2B e2e only
-  when `E2B_API_KEY`/`E2B_TEMPLATE` secrets exist.
+  suites against a Postgres service **with `-race`** (the sweeper goroutine and
+  the parallel-rebuild tests make races the interesting failure, and the test
+  doubles needed locks of their own the first time it ran); a second job runs
+  the live E2B e2e only when `E2B_API_KEY`/`E2B_TEMPLATE` secrets exist.
 - **Fallback / compatibility** — `TestSandboxLeaseStoreFrom` asserts shared
   leases are disabled without `FASTAGENT_OAUTH_SECRET` (never plaintext);
   `TestBuildSystemSandboxPoolWiring` covers disabled config → nil pool and
@@ -316,6 +511,13 @@ external dependencies.
 # Unit + adapter + gateway (no external deps)
 go test ./internal/sandbox/ ./internal/store/ ./internal/gateway/ -count=1
 
+# Same, with the race detector — this is what CI runs, and it is the only way
+# the pool's background sweeper and the parallel-rebuild path get checked.
+go test ./internal/sandbox/ ./internal/store/ ./internal/gateway/ -count=1 -race
+
+# Rebuild publish only (offline): policy + adapter
+go test ./internal/sandbox/ ./internal/store/ -run 'Rebuil|ReplaceSandbox' -count=1 -v
+
 # Postgres semantics (start any local PG first)
 FASTAGENT_TEST_PG_DSN='postgres://postgres@localhost:5432/postgres?sslmode=disable' \
   go test ./internal/store/ -run Postgres -count=1 -v
@@ -327,4 +529,8 @@ FASTAGENT_TEST_PG_DSN='postgres://postgres@localhost:5432/postgres?sslmode=disab
 # Live E2B cross-pod adoption (requires credentials)
 E2B_API_KEY='...' E2B_TEMPLATE='...' \
   go test ./internal/sandbox/ -run '^TestE2BPoolCrossPodAdoption$' -count=1 -v
+
+# Live E2B cross-pod rebuild (requires credentials)
+E2B_API_KEY='...' E2B_TEMPLATE='...' \
+  go test ./internal/sandbox/ -run '^TestE2BPoolCrossPodRebuild$' -count=1 -v
 ```
