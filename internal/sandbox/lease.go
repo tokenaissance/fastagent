@@ -17,8 +17,10 @@ type SandboxLeaseRecord struct {
 	// ADVISORY — a paused instance can be woken by traffic at any moment
 	// (autoResume), and a resume performed by another replica is not visible
 	// here until someone writes it. Never make a destruction decision from it;
-	// ask the provider. Its uses are to resume instead of rebuild on adoption,
-	// and to find long-paused instances for the reaper.
+	// ask the provider. Its one use is to resume instead of rebuild on
+	// adoption. (A reaper that hunted long-paused instances by this column was
+	// built and withdrawn — it would have asked the provider, not the row; see
+	// docs/sandbox-pool-leases.md → "Orphan reaping".)
 	State string
 	// PausedAt is a unix timestamp (seconds), 0 while running.
 	PausedAt int64
