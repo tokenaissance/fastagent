@@ -13,6 +13,15 @@ type SandboxLeaseRecord struct {
 	SandboxID string
 	EnvdToken string
 	Template  string
+	// State is the sandbox's provider lifecycle: "running" or "paused". It is
+	// ADVISORY — a paused instance can be woken by traffic at any moment
+	// (autoResume), and a resume performed by another replica is not visible
+	// here until someone writes it. Never make a destruction decision from it;
+	// ask the provider. Its uses are to resume instead of rebuild on adoption,
+	// and to find long-paused instances for the reaper.
+	State string
+	// PausedAt is a unix timestamp (seconds), 0 while running.
+	PausedAt int64
 	// ExpiresAt is a unix timestamp (seconds). An expired lease is dead:
 	// the next acquirer may replace it.
 	ExpiresAt int64
@@ -71,6 +80,15 @@ type SandboxLeaseStore interface {
 		scopeKey, owner, sandboxID, envdToken, template string,
 		ttl time.Duration,
 	) (epoch int64, err error)
+	// SetSandboxLeaseState records the sandbox's provider lifecycle
+	// ("running" / "paused") for a scope this pod still owns. It is a
+	// best-effort annotation: the same CAS on owner applies, but nothing else
+	// depends on the write landing — readers must treat the value as advisory
+	// (see SandboxLeaseRecord.State).
+	SetSandboxLeaseState(
+		ctx context.Context,
+		scopeKey, owner, state string,
+	) error
 	// ReleaseSandboxLease deletes the lease only when this pod is still the
 	// owner AND the stored epoch matches the one the caller last received.
 	// Returns true when the row was deleted (i.e. this pod may destroy the

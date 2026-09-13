@@ -29,6 +29,8 @@ owner          pod identity ("hostname:pid")
 sandbox_id     e2b instance id
 envd_token     short-lived e2b access token (shared so other pods can adopt)
 template       e2b template used at creation
+state          "running" | "paused" — advisory (see the invariant's I clause)
+paused_at      unix seconds; 0 while running
 expires_at     unix seconds; expired ⇒ dead, next acquirer may replace
 epoch          fencing version; bumped on renew/adopt/replace, reset to 1
                by a fresh acquire (monotonic within a lease cycle, not across)
@@ -188,6 +190,7 @@ sandbox, even if that means leaking one until TTL/expiry.
 | Idle sweep, sleep fails (a provider without pause, a transient API error) | Leaves the sandbox running and logs a warning: destroying what could not be slept would be the worse outcome. Only "there was nothing to sleep" falls through to the normal release | `TestLifecycleKeepsSandboxItCouldNotSleep`, `TestLifecycleFallsBackToReleaseWhenThereIsNothingToSleep` |
 | Operation longer than the sandbox's remaining TTL | `ScopeExtender` moves the expiry to `budget + 2 min` before an operation of ≥ 60s, so the auto-pause never lands mid-operation (it would cut the stream). Shorter operations may still straddle an expiry seconds away; that surfaces as a truncated stream and the caller can retry | `TestLifecycleExtendsTheSandboxBeforeALongOperation`, `TestE2BExtendTimeoutMovesTheExpiry` |
 | envd answers 401 (the token was superseded, e.g. across a pause) | Reconnects for the current token, records it as pending publication (the next reconcile writes it to the row through the rebuild-publish path) and retries once — the sandbox and its id are untouched | `TestE2BRefreshesASupersededEnvdToken`, `TestStaleEnvdTokenClassification` |
+| Adopting a scope whose row says `paused` | Calls `connect` before use: it resumes the instance, extends its TTL and returns the current token, so the first call does not pay a 401 first. Marked `running` afterwards. A running row skips this entirely | `TestAdoptingAPausedSandboxResumesIt`, `TestAdoptingARunningSandboxDoesNotConnect` |
 | Parallel rebuilds on one executor | The first caller replaces the sandbox; the rest observe the new identity and retry on it without creating anything — exactly one instance per dead sandbox | `TestE2BExecutorConcurrentRebuildMintsOneSandbox` |
 | envd failure that is **not** 502/404 (500 inside the sandbox, 401 from a stale token) | Surfaces to the caller; no rebuild — a rebuild cannot fix it and would cost an instance | `TestE2BExecDoesNotRebuildOnNonGoneFailures` |
 | Destroy answer: 2xx / 404 / anything else | 2xx and 404 succeed (a 404 means the instance is already gone, which is the goal); any other status is returned as an error naming the sandbox, so a "released" sandbox cannot keep running unnoticed | `TestE2BCloseReadsTheAnswer` |
@@ -235,7 +238,7 @@ buys:
 | 1 | `autoPause` + `autoPauseMemory` + `autoResume` on create (`e2bCreateBody`) | **done** — an expiry pauses and the next request resumes it, instead of costing a rebuild |
 | 2 | Idle eviction **pauses** instead of releasing (`ScopeSleeper`), behind the in-flight guard; a sleep that fails for any reason but "already gone" leaves the sandbox running | **done** |
 | 3 | `set-timeout` before an operation long enough to outlive the instance TTL, so an auto-pause never lands mid-exec | **done** — `ScopeExtender` → `ExtendTimeout`, called for budgets ≥ 60s with `budget + 2 min` |
-| 4 | `state` / `paused_at` on the row; adopting a paused instance resumes it and refreshes the token when needed | **token half done** — 401 → `connect` → publish the new token; the row's state column is still pending |
+| 4 | `state` / `paused_at` on the row; adopting a paused instance resumes it and refreshes the token when needed | **done** — columns + idempotent retrofit (`migrateSandboxLeasesAddState`), the idle sweep writes `paused`, adoption reads it and `connect`s (fresh token included), and a 401 anywhere still reconnects. The marker is advisory: it is never the basis of a destroy decision, because traffic can wake a paused sandbox without writing to the row |
 | 5 | Reconcile the table against provider lifecycle events (webhook or polled), including killing paused instances no row names | pending |
 
 Facts that size the design: paused sandboxes are unbilled, outside the
@@ -564,6 +567,11 @@ external dependencies.
   moving the instance expiry before a long op (and not paying for it on a short
   one), and recovering from a superseded envd token by reconnecting rather than
   rebuilding.
+  `lease_state_test.go` (sandbox) and `sandbox_leases_state_test.go` (store)
+  cover the running/paused marker end to end: the sweep writes it, adoption
+  reads it and resumes, a running row skips the round trip, renewing does not
+  reset it, a rebuild does, a foreign owner cannot write it, and the retrofit
+  adds the columns exactly once to a table that predates them.
 - **Adapter (store package)** — `sandbox_leases_test.go` runs `DBStore`
   through `sandbox.SandboxLeaseStore` against real sqlite: renew CAS miss,
   stale/missing release no-ops, monotonic epoch. `sandbox_leases_postgres_test.go`

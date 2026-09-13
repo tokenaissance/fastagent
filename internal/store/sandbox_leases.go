@@ -24,12 +24,12 @@ func (d *DBStore) GetSandboxLease(ctx context.Context, scopeKey string) (*sandbo
 	}
 	now := time.Now().Unix()
 	row := d.handle().QueryRowContext(ctx,
-		fmt.Sprintf(`SELECT sandbox_id, envd_token, template, expires_at, epoch
+		fmt.Sprintf(`SELECT sandbox_id, envd_token, template, state, paused_at, expires_at, epoch
 			FROM sandbox_leases
 			WHERE scope_key = %s AND expires_at > %s`, d.ph(1), d.ph(2)),
 		scopeKey, now)
 	var rec sandbox.SandboxLeaseRecord
-	if err := row.Scan(&rec.SandboxID, &rec.EnvdToken, &rec.Template, &rec.ExpiresAt, &rec.Epoch); err != nil {
+	if err := row.Scan(&rec.SandboxID, &rec.EnvdToken, &rec.Template, &rec.State, &rec.PausedAt, &rec.ExpiresAt, &rec.Epoch); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -67,6 +67,7 @@ func (d *DBStore) AcquireSandboxLease(
 	if _, err := d.handle().ExecContext(ctx,
 		fmt.Sprintf(`UPDATE sandbox_leases
 			SET owner = %s, sandbox_id = %s, envd_token = %s, template = %s,
+			    state = 'running', paused_at = 0,
 			    expires_at = %s, epoch = 1, updated_at = %s
 			WHERE scope_key = %s AND expires_at <= %s`,
 			d.ph(1), d.ph(2), d.ph(3), d.ph(4), d.ph(5), d.ph(6), d.ph(7), d.ph(8)),
@@ -76,8 +77,8 @@ func (d *DBStore) AcquireSandboxLease(
 	// 2. Insert when absent; a concurrent winner's insert wins and ours no-ops.
 	if _, err := d.handle().ExecContext(ctx,
 		fmt.Sprintf(`INSERT INTO sandbox_leases
-			(scope_key, owner, sandbox_id, envd_token, template, expires_at, epoch, updated_at)
-			VALUES (%s, %s, %s, %s, %s, %s, 1, %s)
+			(scope_key, owner, sandbox_id, envd_token, template, state, paused_at, expires_at, epoch, updated_at)
+			VALUES (%s, %s, %s, %s, %s, 'running', 0, %s, 1, %s)
 			ON CONFLICT (scope_key) DO NOTHING`,
 			d.ph(1), d.ph(2), d.ph(3), d.ph(4), d.ph(5), d.ph(6), d.ph(7)),
 		scopeKey, owner, sandboxID, envdToken, template, expires, now); err != nil {
@@ -150,6 +151,7 @@ func (d *DBStore) ReplaceSandboxLease(
 	err := d.handle().QueryRowContext(ctx,
 		fmt.Sprintf(`UPDATE sandbox_leases
 			SET sandbox_id = %s, envd_token = %s, template = %s,
+			    state = 'running', paused_at = 0,
 			    expires_at = %s, epoch = epoch + 1, updated_at = %s
 			WHERE scope_key = %s AND owner = %s AND expires_at > %s
 			RETURNING epoch`,
@@ -159,6 +161,32 @@ func (d *DBStore) ReplaceSandboxLease(
 		return 0, nil
 	}
 	return epoch, err
+}
+
+// SetSandboxLeaseState implements sandbox.SandboxLeaseStore.
+//
+// Same owner CAS as every other write here: a pod that lost the scope must not
+// be able to mark someone else's sandbox asleep. The epoch is deliberately not
+// bumped — a state annotation does not invalidate the caller's ownership, and
+// bumping it would make every in-flight fenced destroy stale for no reason.
+// Callers treat what they read as advisory (see SandboxLeaseRecord.State), so a
+// write that misses is not worth failing over; it is reported, not retried.
+func (d *DBStore) SetSandboxLeaseState(ctx context.Context, scopeKey, owner, state string) error {
+	if scopeKey == "" || owner == "" {
+		return nil
+	}
+	now := time.Now().Unix()
+	pausedAt := int64(0)
+	if state == "paused" {
+		pausedAt = now
+	}
+	_, err := d.handle().ExecContext(ctx,
+		fmt.Sprintf(`UPDATE sandbox_leases
+			SET state = %s, paused_at = %s, updated_at = %s
+			WHERE scope_key = %s AND owner = %s`,
+			d.ph(1), d.ph(2), d.ph(3), d.ph(4), d.ph(5)),
+		state, pausedAt, now, scopeKey, owner)
+	return err
 }
 
 // ReleaseSandboxLease implements sandbox.SandboxLeaseStore.
@@ -251,6 +279,12 @@ func (e *EncryptedSandboxLeaseStore) ReplaceSandboxLease(
 
 func (e *EncryptedSandboxLeaseStore) ReleaseSandboxLease(ctx context.Context, scopeKey, owner string, epoch int64) (bool, error) {
 	return e.Inner.ReleaseSandboxLease(ctx, scopeKey, owner, epoch)
+}
+
+// SetSandboxLeaseState carries no credential, so the decorator passes it
+// straight through.
+func (e *EncryptedSandboxLeaseStore) SetSandboxLeaseState(ctx context.Context, scopeKey, owner, state string) error {
+	return e.Inner.SetSandboxLeaseState(ctx, scopeKey, owner, state)
 }
 
 // encryptToken returns the AES-GCM ciphertext as base64 so the stored value
