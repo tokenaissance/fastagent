@@ -45,6 +45,14 @@ const (
 	OriginGoalContext = "goal_context"
 )
 
+// StoppedToolResult is the synthetic `tool` reply the agent loop writes for
+// a tool_use that was still in flight when the turn exited (client Stop,
+// task-queue timeout, daemon restart). Shared with the wire builder so the
+// pad and the sanitizer can't drift apart on the literal — the sanitizer
+// has to be able to reason about these replies to keep exactly one of them
+// per tool_call_id (see findOrphanToolCalls).
+const StoppedToolResult = "(stopped — execution was interrupted before the tool returned)"
+
 // Message represents a chat message.
 // When storing in session, keep ALL fields exactly as returned by the LLM
 // to ensure prompt cache hits on subsequent turns.
@@ -85,6 +93,30 @@ type Message struct {
 	// and billing audit trails.
 	Provider string `json:"provider,omitempty"`
 	Model    string `json:"model,omitempty"`
+}
+
+// EffectiveToolCalls returns the tool calls an assistant message declares.
+//
+// Most messages carry them parsed, but sessions written by older builds
+// streamed the assistant turn and only kept the raw JSON — for those the ids
+// live inside RawAssistant and the parsed field is empty. Callers that need
+// "what did this message call" (history normalisation, orphan detection) must
+// use this instead of reading ToolCalls directly, or they will treat a valid
+// pair as an orphan.
+func (m Message) EffectiveToolCalls() []ToolCall {
+	if len(m.ToolCalls) > 0 {
+		return m.ToolCalls
+	}
+	if len(m.RawAssistant) == 0 {
+		return nil
+	}
+	var raw struct {
+		ToolCalls []ToolCall `json:"tool_calls"`
+	}
+	if err := json.Unmarshal(m.RawAssistant, &raw); err != nil {
+		return nil
+	}
+	return raw.ToolCalls
 }
 
 // TextContent returns the message's user-visible text. Falls back to
