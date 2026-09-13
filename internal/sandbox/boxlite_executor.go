@@ -168,7 +168,7 @@ func (e *BoxliteExecutor) createBox(ctx context.Context) error {
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
+		return &sandboxHTTPError{status: resp.StatusCode, body: string(respBody)}
 	}
 	var box struct {
 		BoxID string `json:"box_id"`
@@ -205,7 +205,7 @@ func (e *BoxliteExecutor) startBox(ctx context.Context) error {
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+		return &sandboxHTTPError{status: resp.StatusCode, body: string(body)}
 	}
 	return nil
 }
@@ -328,7 +328,7 @@ func (e *BoxliteExecutor) Hydrate(ctx context.Context) error {
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("upload tar HTTP %d: %s", resp.StatusCode, string(body))
+		return &sandboxHTTPError{op: "upload tar", status: resp.StatusCode, body: string(body)}
 	}
 
 	slog.Info("boxlite sandbox hydrated",
@@ -437,12 +437,18 @@ func (e *BoxliteExecutor) Exec(ctx context.Context, command string, timeout time
 	return out, err
 }
 
+// isBoxliteGone reports whether the box no longer exists, so a rebuild is the
+// cure. 410 joins 404/502 here because boxlite answers a destroyed box with
+// "gone" rather than "missing". Like the e2b classifier this reads the status
+// the provider sent, not the text of the error (see sandboxHTTPError).
 func isBoxliteGone(err error) bool {
-	if err == nil {
+	status, ok := statusCodeOf(err)
+	if !ok {
 		return false
 	}
-	s := err.Error()
-	return strings.Contains(s, "HTTP 404") || strings.Contains(s, "HTTP 502") || strings.Contains(s, "HTTP 410")
+	return status == http.StatusNotFound ||
+		status == http.StatusBadGateway ||
+		status == http.StatusGone
 }
 
 func (e *BoxliteExecutor) recreate(ctx context.Context) error {
@@ -491,7 +497,7 @@ func (e *BoxliteExecutor) execOnce(ctx context.Context, command string, timeout 
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 300 {
-		return "", fmt.Errorf("boxlite exec start HTTP %d: %s", resp.StatusCode, string(respBody))
+		return "", &sandboxHTTPError{op: "boxlite exec start", status: resp.StatusCode, body: string(respBody)}
 	}
 	var ex struct {
 		ExecutionID string `json:"execution_id"`
@@ -536,7 +542,11 @@ func (e *BoxliteExecutor) attachAndDrain(ctx context.Context, execID string, tim
 			body = string(b)
 			dialResp.Body.Close()
 		}
-		return "", fmt.Errorf("boxlite attach: %w (HTTP %d: %s)", err, status, body)
+		if status == 0 {
+			// No response at all — a transport failure, not a provider verdict.
+			return "", fmt.Errorf("boxlite attach: %w", err)
+		}
+		return "", &sandboxHTTPError{op: "boxlite attach", status: status, body: body, cause: err}
 	}
 	defer conn.Close()
 
@@ -708,7 +718,7 @@ func (e *BoxliteExecutor) WriteFile(ctx context.Context, filePath, content strin
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("boxlite write HTTP %d: %s", resp.StatusCode, string(body))
+		return "", &sandboxHTTPError{op: "boxlite write", status: resp.StatusCode, body: string(body)}
 	}
 	return fmt.Sprintf("Wrote %d bytes to %s", len(content), filePath), nil
 }
@@ -756,7 +766,7 @@ func (e *BoxliteExecutor) SnapshotWorkspace(ctx context.Context) (map[string][]b
 	}
 	if resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("snapshot HTTP %d: %s", resp.StatusCode, string(body))
+		return nil, &sandboxHTTPError{op: "snapshot", status: resp.StatusCode, body: string(body)}
 	}
 	out := make(map[string][]byte)
 	tr := tar.NewReader(resp.Body)
