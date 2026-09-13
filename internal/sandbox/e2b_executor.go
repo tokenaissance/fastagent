@@ -347,6 +347,10 @@ func (e *E2BExecutor) ExtendTimeout(ctx context.Context, sandboxID string, d tim
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return &sandboxHTTPError{op: "e2b extend timeout " + sandboxID, status: resp.StatusCode, body: string(respBody)}
 	}
+	// Logged because it is the only evidence that a long operation protected
+	// itself: without it an operator cannot tell an extended expiry from one
+	// that was never needed.
+	slog.Info("e2b sandbox timeout extended", "sandboxID", sandboxID, "timeoutSec", int(d.Seconds()))
 	return nil
 }
 
@@ -383,6 +387,12 @@ func (e *E2BExecutor) Connect(ctx context.Context, sandboxID string, ttl time.Du
 	// 200 = already running, 201 = resumed.
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		return "", &sandboxHTTPError{op: "e2b connect " + sandboxID, status: resp.StatusCode, body: string(raw)}
+	}
+	if resp.StatusCode == http.StatusCreated {
+		// 201 = the sandbox was paused and is now running again; 200 = it was
+		// already running. The distinction is what makes a pause→resume cycle
+		// visible in the log.
+		slog.Info("e2b sandbox resumed", "sandboxID", sandboxID)
 	}
 	var out struct {
 		EnvdAccessToken string `json:"envdAccessToken"`
