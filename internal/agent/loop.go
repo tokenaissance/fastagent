@@ -2269,6 +2269,39 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		return rejection
 	}
 
+	// Turn admission: one turn at a time per session. A turn-start request
+	// that finds the session busy waits here (FIFO, cancellable) instead of
+	// running a second ReAct loop over the same history — two concurrent
+	// writers are what let a cron-fired turn and a dashboard turn interleave
+	// their messages and permanently poison a session with a duplicated
+	// tool_call_id (docs/session-turn-integrity.md, clause W).
+	//
+	// Acquired before the plan-mode branch so plan turns are covered too, and
+	// released by the outermost defer so the pad and leftover-steer writers
+	// still run inside the slot that owns the turn's own tool_use ids.
+	sess := a.sessions.Get(sessionTriple(msg, msg.ProjectID))
+	waitStart := time.Now()
+	if sess.TurnActive() {
+		// Tell the dashboard why nothing is happening yet: its turn is queued
+		// behind the turn that currently owns the session (a cron/goal tick or
+		// another client). Position 1 = next in line.
+		emitEvent(ctx, ChatEvent{Type: "queued", Data: map[string]any{
+			"position": sess.TurnWaiters() + 1,
+		}})
+	}
+	if !sess.AcquireTurn(ctx) {
+		slog.Info("turn admission: caller gave up while queued",
+			"agent", a.name, "channel", msg.Channel, "chat_id", msg.ChatID,
+			"queued_ms", time.Since(waitStart).Milliseconds())
+		return ""
+	}
+	if waited := time.Since(waitStart); waited > time.Second {
+		slog.Info("turn admission: waited for the in-flight turn",
+			"agent", a.name, "channel", msg.Channel, "chat_id", msg.ChatID,
+			"waited_ms", waited.Milliseconds(), "still_queued", sess.TurnWaiters())
+	}
+	defer sess.ReleaseTurn()
+
 	// Plan mode short-circuits the ReAct loop: tools off, the model
 	// emits a numbered plan, the user reviews it and replies normally
 	// (no planMode flag) on the next turn to execute. Lets users catch
@@ -2313,7 +2346,8 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	slog.Info("turn: refreshing skills",
 		"agent", a.name, "channel", msg.Channel, "chat_id", msg.ChatID, "user", chatterUID)
 	a.refreshSkillsFromStore(chatterUID)
-	sess := a.sessions.Get(sessionTriple(msg, msg.ProjectID))
+	// sess was resolved when the turn slot was acquired above; reuse it so
+	// the whole turn (including the pad) writes through one session object.
 	// Bind chatter onto sess. Session.ctx() builds its own
 	// context.Background-rooted ctx for store calls, so the
 	// WithChatterUserID we stamped onto the caller ctx above does NOT
@@ -3107,6 +3141,29 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 		return a.stringStream(rejection)
 	}
 
+	// Same turn admission as HandleMessage: one turn at a time per session,
+	// queued callers wait (FIFO, cancellable). See HandleMessage for the
+	// rationale and docs/session-turn-integrity.md for the incident.
+	sess := a.sessions.Get(sessionTriple(msg, msg.ProjectID))
+	waitStart := time.Now()
+	if sess.TurnActive() {
+		emitEvent(ctx, ChatEvent{Type: "queued", Data: map[string]any{
+			"position": sess.TurnWaiters() + 1,
+		}})
+	}
+	if !sess.AcquireTurn(ctx) {
+		slog.Info("turn admission: caller gave up while queued",
+			"agent", a.name, "channel", msg.Channel, "chat_id", msg.ChatID,
+			"queued_ms", time.Since(waitStart).Milliseconds())
+		return a.stringStream("")
+	}
+	if waited := time.Since(waitStart); waited > time.Second {
+		slog.Info("turn admission: waited for the in-flight turn",
+			"agent", a.name, "channel", msg.Channel, "chat_id", msg.ChatID,
+			"waited_ms", waited.Milliseconds(), "still_queued", sess.TurnWaiters())
+	}
+	defer sess.ReleaseTurn()
+
 	chatterUID := a.chatterUserID(msg)
 	ctx = sandbox.WithUserID(ctx, chatterUID)
 	// Tag ctx so DBStore session writes stamp chatter_user_id — see
@@ -3116,7 +3173,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 	slog.Info("turn: refreshing skills",
 		"agent", a.name, "channel", msg.Channel, "chat_id", msg.ChatID, "user", chatterUID)
 	a.refreshSkillsFromStore(chatterUID)
-	sess := a.sessions.Get(sessionTriple(msg, msg.ProjectID))
+	// sess was resolved when the turn slot was acquired above; reuse it.
 	// Bind chatter onto sess so its ctx() embeds WithChatterUserID
 	// for DBStore session writes — Session.ctx() rebuilds ctx from its
 	// own fields, so the chatter has to live on sess itself.

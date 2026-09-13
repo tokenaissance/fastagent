@@ -63,6 +63,20 @@ type Session struct {
 	// pending steer.
 	turnDepth int
 	steerBuf  []provider.Message
+
+	// Turn slot: exactly one turn at a time may write this session's
+	// history. turnActive is true while someone holds the slot; turnWaiters
+	// is the FIFO of callers queued behind it, each parked on its own
+	// channel. Handoff closes the waiter's channel and keeps turnActive set,
+	// so the slot is never momentarily free (a fresh caller cannot jump the
+	// queue). Guarded by mu; never held while blocking on a waiter.
+	//
+	// See docs/session-turn-integrity.md — clause W. Two turns appending to
+	// one session interleave their messages and can leave a tool reply
+	// separated from its call, which is what poisoned session
+	// hJKMWwtOp3mJOtqN8Uz2mW in production (2026-09-13).
+	turnActive  bool
+	turnWaiters []chan struct{}
 }
 
 // SessionKey returns the opaque session_key this Session is bound to.
@@ -506,6 +520,95 @@ func (s *Session) GetMessages() []provider.Message {
 	msgs := make([]provider.Message, len(s.Messages))
 	copy(msgs, s.Messages)
 	return msgs
+}
+
+// AcquireTurn blocks until this caller holds the session's single turn slot,
+// or until ctx ends. It returns true only when the caller owns the slot and
+// MUST eventually call ReleaseTurn.
+//
+// Why a session-level gate and not a per-chat-key lock: the session is the
+// unit that owns history, and several (channel, accountID, chatID) triples
+// can resolve to one session (shared-identity channels, URL-token recovery).
+// Serialising on the chat tuple leaves exactly the hole that poisoned
+// production: a dashboard turn and a cron-fired turn writing one history.
+//
+// Waiters are served first-in-first-out so a queued conversation keeps the
+// order the user typed it in. A caller that gives up (ctx canceled) leaves
+// the queue without stranding the slot, including when the cancellation
+// races the handoff.
+func (s *Session) AcquireTurn(ctx context.Context) bool {
+	s.mu.Lock()
+	if !s.turnActive {
+		s.turnActive = true
+		s.mu.Unlock()
+		return true
+	}
+	waiter := make(chan struct{})
+	s.turnWaiters = append(s.turnWaiters, waiter)
+	s.mu.Unlock()
+
+	select {
+	case <-waiter:
+		// The slot was handed to us. If the caller already gave up, pass it
+		// on instead of holding a slot nobody will release.
+		if ctx.Err() != nil {
+			s.ReleaseTurn()
+			return false
+		}
+		return true
+	case <-ctx.Done():
+		s.mu.Lock()
+		removed := false
+		for i, w := range s.turnWaiters {
+			if w == waiter {
+				s.turnWaiters = append(s.turnWaiters[:i], s.turnWaiters[i+1:]...)
+				removed = true
+				break
+			}
+		}
+		s.mu.Unlock()
+		if !removed {
+			// Lost the race: the slot was handed over while we were
+			// canceling. Give it to the next waiter.
+			s.ReleaseTurn()
+		}
+		return false
+	}
+}
+
+// ReleaseTurn frees the turn slot and hands it to the longest-waiting caller.
+// Calling it without holding the slot is a no-op rather than a way to let a
+// second turn in.
+func (s *Session) ReleaseTurn() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.turnActive {
+		return
+	}
+	if len(s.turnWaiters) > 0 {
+		next := s.turnWaiters[0]
+		s.turnWaiters = s.turnWaiters[1:]
+		// Ownership transfers: turnActive stays true so a new caller cannot
+		// slip in between the release and the woken waiter's first append.
+		close(next)
+		return
+	}
+	s.turnActive = false
+}
+
+// TurnActive reports whether a turn currently holds this session's slot.
+func (s *Session) TurnActive() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.turnActive
+}
+
+// TurnWaiters reports how many turn-start callers are queued behind the
+// current holder. Used by metric/log surfaces and tests.
+func (s *Session) TurnWaiters() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.turnWaiters)
 }
 
 // BeginTurn marks a HandleMessage turn as in-flight for this session.
