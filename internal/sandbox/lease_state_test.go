@@ -32,6 +32,49 @@ func TestSleepScopeRecordsThePausedState(t *testing.T) {
 	}
 }
 
+// A pause can coincide with a pending rebuild, and the lease renew that follows
+// it publishes the replacement — which stamps the row 'running', because a
+// rebuilt instance IS running. So the 'paused' write has to land last; the other
+// order leaves the row describing a sleeping sandbox as awake.
+func TestSleepRecordsPausedAfterPublishingARebuild(t *testing.T) {
+	ctx := context.Background()
+	store := &fakeLeaseStore{}
+	pool := newLeasePool(t, store, "pod-a")
+	envd := &fakeEnvdTransport{}
+	ex := testExecutor(&leaseCloseRecorder{}, "sb-old", "tok-old")
+	ex.client = &http.Client{Transport: envd}
+	ex.createFn = func(context.Context, string, string, time.Duration) (*E2BExecutor, error) {
+		return newAdoptedE2BExecutor("api-key", "sb-new", "tok-new", "tpl", time.Minute), nil
+	}
+	pool.executors[rebuildScopeKey] = ex
+	pool.leaseEpochs[rebuildScopeKey] = 3
+
+	// Rebuild, leaving the row (as production would) still naming the old id.
+	if err := ex.recreateIfCurrent(ctx, ex.identSnapshot()); err != nil {
+		t.Fatalf("recreate: %v", err)
+	}
+	store.getRec = &SandboxLeaseRecord{SandboxID: "sb-old", EnvdToken: "tok-old", Template: "tpl", Epoch: 3}
+
+	paused, err := pool.SleepScope(ctx, "agt_1", "", "chat_1")
+	if err != nil || !paused {
+		t.Fatalf("SleepScope = (%v, %v), want (true, nil)", paused, err)
+	}
+
+	ops := store.opLog()
+	if len(ops) < 2 || ops[len(ops)-1] != "state=paused" {
+		t.Fatalf("ops = %v, want the paused write last", ops)
+	}
+	var replaced bool
+	for _, op := range ops[:len(ops)-1] {
+		if op == "replace" {
+			replaced = true
+		}
+	}
+	if !replaced {
+		t.Fatalf("ops = %v, want the pending rebuild published before the state write", ops)
+	}
+}
+
 // Ownership is not transferred by a pause: the row's token, id and template all
 // stay as they were, which is what lets the next holder resume this instance.
 func TestAdoptingAPausedSandboxResumesIt(t *testing.T) {
