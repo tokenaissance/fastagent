@@ -155,10 +155,7 @@ func newE2BExecutor(ctx context.Context, apiKey, template string, timeout time.D
 	// is missing` when the field was renamed to snake_case. The
 	// snake_case form shows up in some SDK source code but the
 	// production REST API rejects it.
-	body, _ := json.Marshal(map[string]interface{}{
-		"templateID": template,
-		"timeout":    int(timeout.Seconds()),
-	})
+	body := e2bCreateBody(template, timeout)
 	// Bound the create-sandbox call to 60s — the call itself usually
 	// completes in 1–2s; if it's hanging past that there's a control-
 	// plane problem and we'd rather surface a clear timeout than wait
@@ -283,6 +280,36 @@ func (e *E2BExecutor) waitUntilRoutable(ctx context.Context) error {
 
 func (e *E2BExecutor) envdURLFor(sandboxID string) string {
 	return fmt.Sprintf("https://%s-%s.e2b.app", e2bEnvdPort, sandboxID)
+}
+
+// e2bCreateBody is the POST /sandboxes payload. It lives in its own function
+// because these fields are a design decision rather than incidental JSON, and
+// the wire shape should be assertable without a network seam.
+//
+// The three lifecycle fields change what a routine timeout MEANS. Left at the
+// provider defaults the sandbox is killed when its 30 minutes are up, so an
+// ordinary expiry arrives at our code as `502 sandbox not found` and the
+// recovery is the whole rebuild path: create a new instance, re-upload the
+// hydrate bundle, move the lease row onto the new id. With autoPause the same
+// expiry produces a paused sandbox — full memory snapshot, running processes
+// included — and with autoResume the next request wakes it. Paused sandboxes
+// are not billed, do not count toward the concurrency limit, and are kept
+// indefinitely, so a scope stops minting a new instance every half hour.
+//
+// https://docs.e2b.dev/sandbox/auto-resume.md
+// https://docs.e2b.dev/faq/paused-sandboxes-concurrency.md
+func e2bCreateBody(template string, timeout time.Duration) []byte {
+	body, _ := json.Marshal(map[string]interface{}{
+		"templateID": template,
+		"timeout":    int(timeout.Seconds()),
+		"autoPause":  true,
+		// Provider default; sent explicitly so the intent survives a change of
+		// default. false would persist the filesystem only, which cannot be
+		// woken by traffic and must be resumed explicitly.
+		"autoPauseMemory": true,
+		"autoResume":      map[string]interface{}{"enabled": true},
+	})
+	return body
 }
 
 // recreateIfCurrent replaces the sandbox the caller observed failing. The same
@@ -1652,6 +1679,28 @@ func (p *E2BExecutorPool) adoptFromLease(
 	p.recordEpoch(key, epoch)
 	p.registerExecutor(key, ex)
 	return ex, true
+}
+
+// reconcileLocalLease checks the shared lease against a locally cached
+// RenewLease re-runs the per-scope reconcile against the shared lease. Used by
+// the lifecycle layer after an operation long enough to have outlived the lease
+// TTL: reconcile renews the row under this pod, and — because it is the same
+// path every use takes — also publishes a rebuild that happened while the
+// operation was running. A scope with no cached executor has nothing to renew.
+func (p *E2BExecutorPool) RenewLease(ctx context.Context, agentID, projectID, sessionID string) error {
+	if p.leaseStore == nil {
+		return nil
+	}
+	key := poolKey(agentID, projectID, sessionID)
+	scope := p.scopeLock(key)
+	scope.Lock()
+	defer scope.Unlock()
+	ex, ok := p.cachedExecutor(key)
+	if !ok {
+		return nil
+	}
+	_, err := p.reconcileLocalLease(ctx, key, ex, agentID, projectID, sessionID)
+	return err
 }
 
 // reconcileLocalLease checks the shared lease against a locally cached

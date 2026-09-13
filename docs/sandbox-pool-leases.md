@@ -120,6 +120,19 @@ modes each map to a test in the failure-semantics table below.
   `sandbox_id` (so it can only maintain the status quo), and
   Release-then-Acquire opens a window where a sibling replica sees a free
   scope and creates a third sandbox for it.
+- **Routine expiry pauses; activity resumes.** Sandboxes are created with
+  `autoPause` + `autoPauseMemory` + `autoResume` (`e2bCreateBody`), so the
+  30-minute timeout yields a paused instance — full memory snapshot, running
+  processes included — that the next request wakes. Paused instances are not
+  billed, do not count toward the concurrency limit, and are kept indefinitely
+  ([auto-resume](https://docs.e2b.dev/sandbox/auto-resume.md),
+  [paused + concurrency](https://docs.e2b.dev/faq/paused-sandboxes-concurrency.md)).
+  That keeps an ordinary expiry off the failure path: without it the same event
+  arrives as `502 sandbox not found` and costs a create, a re-hydrate and an
+  identity re-publication. The rest of that redesign is staged below.
+- **Unverified:** whether the `envd_token` in a row is still valid for a
+  paused→resumed instance. If it is not, adopting a paused sandbox must
+  `connect` first and refresh the row's token — check before relying on it.
 
 ### Failure semantics (registry errors fail open)
 
@@ -181,6 +194,25 @@ The version column makes any stale destroy request fail closed.
 | 2 | CAS + epoch on renew/adopt/release + race unit tests | done (`86fcac1`) |
 | 2b | rebuild republish: key travels into adopted executors; `ReplaceSandboxLease` moves the row onto a rebuilt instance | done (2026-09-13) |
 | 3–6 | heartbeat/reconciliation loop, degraded state machine, metrics, liveness GC | **not in scope** — decision: CAS + epoch is sufficient for the current release; revisit only if prod observations justify them |
+
+### Provider-lifecycle redesign (staged, 2026-09-14)
+
+The e2b primitives above move routine expiry off the failure path, so the stages
+this document had frozen become cheap and concrete. Order, and what each one
+buys:
+
+| # | Change | Status |
+|---|---|---|
+| 1 | `autoPause` + `autoPauseMemory` + `autoResume` on create (`e2bCreateBody`) | **done** — an expiry pauses and the next request resumes it, instead of costing a rebuild |
+| 2 | Idle eviction **pauses** instead of releasing, behind the in-flight guard (a busy scope must never be paused mid-operation) | pending |
+| 3 | `set-timeout` before an operation long enough to outlive the instance TTL, so an auto-pause never lands mid-exec | pending |
+| 4 | `state` / `paused_at` on the row; adopting a paused instance resumes it and refreshes the token when needed | pending |
+| 5 | Reconcile the table against provider lifecycle events (webhook or polled), including killing paused instances no row names | pending |
+
+Facts that size the design: paused sandboxes are unbilled, outside the
+concurrency limit and kept indefinitely; continuous runtime is capped per plan
+(Hobby 1h, Pro 24h) and resets on pause+resume; concurrent *running* sandboxes
+are 20 (Hobby) / 100 (Pro, add-on to 1,100) — [billing](https://docs.e2b.dev/billing.md).
 
 ### Stage 2b: how a rebuild reaches the lease
 
@@ -399,10 +431,14 @@ Threat model and controls:
 ## Known tradeoffs (accepted)
 
 - Whenever a lease lapses — the pod crashed, or it simply went idle past TTL
-  (default 15 min) — another pod may create a fresh sandbox for that scope
-  while the old instance still lives until e2b's own 30-min timeout. The
-  holder that comes back adopts the newer sandbox and closes its own, so the
-  duplicate is bounded by the TTL↔timeout gap, not permanent.
+  (default 15 min) — another pod may take the scope. If it takes over **before**
+  the row is overwritten it adopts the same `sandbox_id`, and with `autoPause`
+  that instance is merely paused: the takeover resumes it instead of building a
+  replacement. A takeover that wins `Acquire` *after* the row was replaced
+  leaves the old instance paused, unreferenced and permanent — it is not billed
+  and does not count toward the concurrency limit, so the cost is bookkeeping
+  rather than money. Reaping those (lifecycle events, or a sweep that kills
+  paused instances no row names) is part of the staged work below.
 - Adoption races are benign for correctness of destruction (owner check), but
   two pods briefly sharing one sandbox is expected during takeover windows.
 - In the rare double-race where a creator loses `Acquire` and the subsequent
@@ -476,6 +512,10 @@ external dependencies.
   failure actionable: the Connect **trailer** is parsed instead of discarded
   (it is where the protocol carries a server-side error) and the frames that
   did arrive are named in the error, so "truncated" is never the whole story.
+  `e2b_create_body_test.go` pins the wire contract behind the lifecycle
+  redesign: the create body must ask for pause-on-timeout with a memory
+  snapshot and auto-resume, because losing those fields silently puts the
+  rebuild path back on the happy path.
 - **Adapter (store package)** — `sandbox_leases_test.go` runs `DBStore`
   through `sandbox.SandboxLeaseStore` against real sqlite: renew CAS miss,
   stale/missing release no-ops, monotonic epoch. `sandbox_leases_postgres_test.go`
