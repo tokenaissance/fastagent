@@ -291,6 +291,14 @@ Alternatives rejected as heavier than the problem:
   several pods (later hits log `e2b sandbox adopted from shared lease`). If
   the log shows `sharedLeases=false`, re-check that `FASTAGENT_OAUTH_SECRET`
   is configured before debugging further.
+
+  Counting instances from the log needs the causes separated, which is what the
+  lifecycle lines are for: `e2b sandbox provisioned` (a cold scope, with
+  `scopeKey` and the total `elapsedMs`) versus `e2b sandbox rebuilt` (a
+  replacement, naming `oldSandboxID` → `newSandboxID`) versus
+  `e2b sandbox adopted from shared lease` (another pod's instance, no create).
+  `e2b sandbox routable` reports how long e2b took to route a fresh id —
+  normally the first attempt, and the number to watch when creates are slow.
 - CI coverage: `.github/workflows/go-test.yml` runs the sandbox/store/gateway
   suites against a Postgres service on every push/PR; the live E2B job runs
   only when `E2B_API_KEY`/`E2B_TEMPLATE` secrets exist.
