@@ -61,6 +61,11 @@ type E2BExecutor struct {
 	client   *http.Client
 	template string        // remembered for recreate() so the new sandbox uses the same template; immutable once handed out by the pool
 	timeout  time.Duration // remembered for recreate()
+	// readyTimeout / readyInterval bound the post-create readiness wait. Zero
+	// means the defaults; tests shrink them so a persistent routing gap does
+	// not cost a minute of wall clock.
+	readyTimeout  time.Duration
+	readyInterval time.Duration
 	// rebuildMu serialises recreate(). Parallel tool calls share one executor
 	// (the agent loop fans tool calls out concurrently and only exec itself is
 	// not serialised), so several goroutines can observe the same dead sandbox
@@ -187,14 +192,83 @@ func newE2BExecutor(ctx context.Context, apiKey, template string, timeout time.D
 
 	slog.Info("e2b sandbox created", "sandboxID", result.SandboxID, "template", template)
 
-	return &E2BExecutor{
+	ex := &E2BExecutor{
 		apiKey:   apiKey,
 		ident:    sandboxIdent{id: result.SandboxID, token: result.EnvdAccessToken},
 		client:   client,
 		template: template,
 		timeout:  timeout,
 		createFn: newE2BExecutor,
-	}, nil
+	}
+	// POST /sandboxes returns an id before e2b's edge can route it. Waiting for
+	// the first answer here keeps that gap inside creation, where it is a retry,
+	// instead of leaking it into hydrate, where it is indistinguishable from a
+	// dead sandbox (see waitUntilRoutable).
+	if err := ex.waitUntilRoutable(ctx); err != nil {
+		// Do not leak an instance we cannot talk to.
+		_ = ex.closeSandboxByID(result.SandboxID)
+		return nil, err
+	}
+	return ex, nil
+}
+
+// Defaults for waitUntilRoutable. The 60s ceiling matches the create call's own
+// bound; the interval is short enough that a normal sandbox pays it once.
+const (
+	defaultReadyTimeout  = 60 * time.Second
+	defaultReadyInterval = 1500 * time.Millisecond
+)
+
+// waitUntilRoutable blocks until a freshly created sandbox answers envd.
+//
+// Why this exists: POST /sandboxes returns an id before the edge can route it.
+// The first call after create — hydrate's /files upload — is what pays for the
+// gap, and it gets the edge's
+//
+//	{"sandboxId":...,"message":"The sandbox was not found","code":502}
+//
+// which is byte-identical to the answer for a sandbox that died long ago. That
+// made a transient routing gap look like a dead instance, and the caller's
+// recovery — rebuild — could never converge, because every rebuild created
+// another sandbox and hit the same window.
+//
+// Only "not routable yet" is retried: a provider status that is not 502/404
+// (a 401 from a stale token, a 500 inside the sandbox) is returned at once,
+// because rebuilding cannot fix it and the caller should see it immediately.
+// Transport errors are retried too — a brand-new hostname may not resolve yet.
+func (e *E2BExecutor) waitUntilRoutable(ctx context.Context) error {
+	timeout := e.readyTimeout
+	if timeout <= 0 {
+		timeout = defaultReadyTimeout
+	}
+	interval := e.readyInterval
+	if interval <= 0 {
+		interval = defaultReadyInterval
+	}
+	deadline := time.Now().Add(timeout)
+
+	for attempt := 1; ; attempt++ {
+		_, err := e.execOnce(ctx, "true", 15*time.Second)
+		if err == nil {
+			if attempt > 1 {
+				slog.Info("e2b sandbox became routable",
+					"sandboxID", e.identSnapshot().id, "attempts", attempt)
+			}
+			return nil
+		}
+		if _, isProviderVerdict := statusCodeOf(err); isProviderVerdict && !sandboxGone(err) {
+			return fmt.Errorf("sandbox %s is not usable after create: %w", e.identSnapshot().id, err)
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("sandbox %s never became routable within %s (%d attempts): %w",
+				e.identSnapshot().id, timeout, attempt, err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(interval):
+		}
+	}
 }
 
 func (e *E2BExecutor) envdURLFor(sandboxID string) string {

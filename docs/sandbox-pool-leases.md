@@ -144,6 +144,7 @@ sandbox, even if that means leaking one until TTL/expiry.
 | Rebuild publish, CAS miss (scope moved to another pod) | Does **not** overwrite the winner's row; falls through to adopting the current lease and closes its own replacement exactly once | `TestE2BPoolRebuildSupersededByAnotherPodAdoptsCurrent` |
 | Rebuild with no shared lease (single pod / docker) | Nothing to publish; `recreate()` behaves exactly as before | `TestE2BPoolRebuildWithoutLeaseStoreIsInert` |
 | Rebuild whose hydrate/verify fails | Destroys the unusable replacement, restores the previous identity, surfaces the error; nothing is published and the next reconcile does not adopt the dead sandbox back | `TestE2BExecutorFailedRebuildRestoresIdentityAndDestroysReplacement` |
+| Create accepted but the edge cannot route the id yet | `waitUntilRoutable` retries while envd answers 502/404 (1.5s interval, 60s bound) and fails creation naming the sandbox if it never comes up; a verdict that is not "gone" (401 from a stale token, 500 inside the sandbox) fails immediately without retrying; an instance that never becomes routable is destroyed rather than leaked | `TestE2BWaitUntilRoutable` |
 | Parallel rebuilds on one executor | The first caller replaces the sandbox; the rest observe the new identity and retry on it without creating anything — exactly one instance per dead sandbox | `TestE2BExecutorConcurrentRebuildMintsOneSandbox` |
 | envd failure that is **not** 502/404 (500 inside the sandbox, 401 from a stale token) | Surfaces to the caller; no rebuild — a rebuild cannot fix it and would cost an instance | `TestE2BExecDoesNotRebuildOnNonGoneFailures` |
 | Destroy answer: 2xx / 404 / anything else | 2xx and 404 succeed (a 404 means the instance is already gone, which is the goal); any other status is returned as an error naming the sandbox, so a "released" sandbox cannot keep running unnoticed | `TestE2BCloseReadsTheAnswer` |
@@ -417,6 +418,13 @@ Threat model and controls:
   does not take the scope locks, so a `Get` racing shutdown can register an
   executor after the drain — the pre-existing "in-flight work dies with the
   process" behavior, not a new hazard.
+- **Waiting for a fresh sandbox costs latency when the provider is unwell** —
+  `waitUntilRoutable` polls for up to 60s before giving up. That bound is only
+  ever paid when e2b accepts a create and then cannot route the instance, in
+  which case the old behavior failed at hydrate with a `502 not found` that
+  looked like a dead sandbox. A sandbox the provider reaps outright (account
+  limits, billing, an unwell region) still fails — this retry buys routing
+  time, not instances.
 
 ## Test topology
 
@@ -450,6 +458,10 @@ external dependencies.
   guesses: only a 502/404 status from envd counts as "gone" (a message that
   merely mentions those codes does not), and the destroy answer is read —
   2xx/404 succeed, anything else is an error naming the sandbox.
+  `e2b_readiness_test.go` covers the gap between `POST /sandboxes` returning an
+  id and the edge being able to route it: ready on the first try, retried until
+  routable, given up on with the sandbox and the bound named, and never retried
+  for a verdict a rebuild cannot fix.
 - **Adapter (store package)** — `sandbox_leases_test.go` runs `DBStore`
   through `sandbox.SandboxLeaseStore` against real sqlite: renew CAS miss,
   stale/missing release no-ops, monotonic epoch. `sandbox_leases_postgres_test.go`
