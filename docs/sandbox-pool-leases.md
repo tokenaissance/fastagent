@@ -130,22 +130,24 @@ modes each map to a test in the failure-semantics table below.
   That keeps an ordinary expiry off the failure path: without it the same event
   arrives as `502 sandbox not found` and costs a create, a re-hydrate and an
   identity re-publication. The rest of that redesign is staged below.
-- **The row's `envd_token` is empty in our configuration, and whether that
-  should change is a security decision, not a detail.** `envdAccessToken` is
-  issued only for sandboxes created with `secure: true`; otherwise it is null
-  and "envd endpoints work without auth", while `network.allowPublicTraffic`
-  defaults to true ([create-sandbox](https://docs.e2b.dev/api-reference/sandboxes/create-sandbox.md)).
-  Our create body sets neither, so the token in every lease row is empty by
-  construction — which is also why the pause/resume question is moot for the
-  current configuration — and anyone who holds a sandbox id can reach envd
-  (port 49983) without authenticating. The id is not a secret we keep: the
-  runtime mints preview URLs from it (`ExposePort`), stores it in the row and
-  logs it. If we move to `secure: true`, the token to store is the one from the
-  most recent create/connect/resume response (all three return the `Sandbox`
-  schema), and adopting a resumed sandbox must refresh it.
+- **Sandboxes are created `secure`.** `envdAccessToken` is issued only for
+  sandboxes created with `secure: true`; otherwise it is null and "envd
+  endpoints work without auth", while `network.allowPublicTraffic` defaults to
+  true ([create-sandbox](https://docs.e2b.dev/api-reference/sandboxes/create-sandbox.md)).
+  Without it, anyone who holds a sandbox id can run commands in the sandbox, and
+  the id is not a secret we keep — the runtime mints preview URLs from it
+  (`ExposePort`), the row stores it, the logs print it. The create body now sets
+  `secure: true`, so envd requires the token.
+- **A superseded token is a repair, not a rebuild.** A secure sandbox's token can
+  change across a pause, and envd answers **401** when it no longer accepts the
+  one we hold. That is classified separately from "gone": the executor calls
+  `connect` (which resumes if needed, extends the TTL, and returns the current
+  token from the `Sandbox` response), records the new token as pending, and
+  retries once. The row is updated by the next reconcile through the same
+  publish path a rebuild uses, so no caller has to know the token changed.
   `e2b_token_probe_test.go` (build tag `manual`, credentials required) settles
-  the remaining empirical half: whether the create-time token still
-  authenticates after a pause+resume — i.e. whether that refresh is mandatory or
+  the empirical half — whether the create-time token would have survived a
+  pause+resume anyway — which decides whether that refresh is load-bearing or
   merely tidy.
 - **Idle eviction puts a sandbox to sleep.** When the backend can pause
   (`ScopeSleeper`, implemented by the E2B pool), the idle sweep pauses the
@@ -184,6 +186,8 @@ sandbox, even if that means leaking one until TTL/expiry.
 | Hydrate hits a cut stream or a 502 right after create | Retries the network steps up to 3 times, 1.5s apart — a container that was created moments ago can cut one stream while it finishes booting. Only "not routable yet" is retried: a 401 or a permission error is a verdict and fails immediately. The bundle is built once, outside the loop | `TestHydrateRetriesATruncatedStream`, `TestHydrateDoesNotRetryAVerdict` |
 | Idle sweep, backend can pause | Pauses the instance, renews the row (the paused instance is free to keep, so the row that names it should survive too) and keeps `hydrated` — the sandbox still holds its filesystem. A scope with an operation in flight is skipped entirely | `TestLifecycleIdleSleepsInsteadOfReleasing`, `TestLifecycleDoesNotEvictWhileAnOperationRuns` |
 | Idle sweep, sleep fails (a provider without pause, a transient API error) | Leaves the sandbox running and logs a warning: destroying what could not be slept would be the worse outcome. Only "there was nothing to sleep" falls through to the normal release | `TestLifecycleKeepsSandboxItCouldNotSleep`, `TestLifecycleFallsBackToReleaseWhenThereIsNothingToSleep` |
+| Operation longer than the sandbox's remaining TTL | `ScopeExtender` moves the expiry to `budget + 2 min` before an operation of ≥ 60s, so the auto-pause never lands mid-operation (it would cut the stream). Shorter operations may still straddle an expiry seconds away; that surfaces as a truncated stream and the caller can retry | `TestLifecycleExtendsTheSandboxBeforeALongOperation`, `TestE2BExtendTimeoutMovesTheExpiry` |
+| envd answers 401 (the token was superseded, e.g. across a pause) | Reconnects for the current token, records it as pending publication (the next reconcile writes it to the row through the rebuild-publish path) and retries once — the sandbox and its id are untouched | `TestE2BRefreshesASupersededEnvdToken`, `TestStaleEnvdTokenClassification` |
 | Parallel rebuilds on one executor | The first caller replaces the sandbox; the rest observe the new identity and retry on it without creating anything — exactly one instance per dead sandbox | `TestE2BExecutorConcurrentRebuildMintsOneSandbox` |
 | envd failure that is **not** 502/404 (500 inside the sandbox, 401 from a stale token) | Surfaces to the caller; no rebuild — a rebuild cannot fix it and would cost an instance | `TestE2BExecDoesNotRebuildOnNonGoneFailures` |
 | Destroy answer: 2xx / 404 / anything else | 2xx and 404 succeed (a 404 means the instance is already gone, which is the goal); any other status is returned as an error naming the sandbox, so a "released" sandbox cannot keep running unnoticed | `TestE2BCloseReadsTheAnswer` |
@@ -230,8 +234,8 @@ buys:
 |---|---|---|
 | 1 | `autoPause` + `autoPauseMemory` + `autoResume` on create (`e2bCreateBody`) | **done** — an expiry pauses and the next request resumes it, instead of costing a rebuild |
 | 2 | Idle eviction **pauses** instead of releasing (`ScopeSleeper`), behind the in-flight guard; a sleep that fails for any reason but "already gone" leaves the sandbox running | **done** |
-| 3 | `set-timeout` before an operation long enough to outlive the instance TTL, so an auto-pause never lands mid-exec | pending |
-| 4 | `state` / `paused_at` on the row; adopting a paused instance resumes it and refreshes the token when needed | pending |
+| 3 | `set-timeout` before an operation long enough to outlive the instance TTL, so an auto-pause never lands mid-exec | **done** — `ScopeExtender` → `ExtendTimeout`, called for budgets ≥ 60s with `budget + 2 min` |
+| 4 | `state` / `paused_at` on the row; adopting a paused instance resumes it and refreshes the token when needed | **token half done** — 401 → `connect` → publish the new token; the row's state column is still pending |
 | 5 | Reconcile the table against provider lifecycle events (webhook or polled), including killing paused instances no row names | pending |
 
 Facts that size the design: paused sandboxes are unbilled, outside the
@@ -495,6 +499,12 @@ Threat model and controls:
   looked like a dead sandbox. A sandbox the provider reaps outright (account
   limits, billing, an unwell region) still fails — this retry buys routing
   time, not instances.
+- **Only long operations move the expiry.** `extendThreshold` (60s) keeps the
+  common tool call from paying an API round trip, which leaves a narrow window:
+  an operation shorter than 60s that starts seconds before the expiry can still
+  be paused mid-flight. The stream is cut, the process survives in the snapshot,
+  and the caller sees a truncated response it can retry — accepted, because
+  closing that window means a call per tool call.
 
 ## Test topology
 
@@ -550,6 +560,10 @@ external dependencies.
   an `envdAccessToken`, then pauses and resumes a secure one to see whether the
   create-time token still authenticates or has to be replaced by the one
   `connect` returns.
+  `e2b_timeout_token_test.go` covers the two repairs a long operation needs:
+  moving the instance expiry before a long op (and not paying for it on a short
+  one), and recovering from a superseded envd token by reconnecting rather than
+  rebuilding.
 - **Adapter (store package)** — `sandbox_leases_test.go` runs `DBStore`
   through `sandbox.SandboxLeaseStore` against real sqlite: renew CAS miss,
   stale/missing release no-ops, monotonic epoch. `sandbox_leases_postgres_test.go`

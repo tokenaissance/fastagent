@@ -13,6 +13,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -56,6 +57,15 @@ type fakeEnvdTransport struct {
 	// trailerError, when set, is returned as a Connect end-stream trailer
 	// holding {"error":{...}} — where the protocol carries a server-side error.
 	trailerError string
+	// control records control-plane calls (pause / timeout / connect) as
+	// "METHOD path body".
+	control []string
+	// connectToken is what POST /sandboxes/{id}/connect answers with — the fresh
+	// envd token a secure sandbox gets when it is resumed.
+	connectToken string
+	// unauthorizedFirstN makes the first N exec attempts answer 401: the shape
+	// of a token the provider has superseded.
+	unauthorizedFirstN int
 
 	mu           sync.Mutex
 	commands     []string
@@ -79,11 +89,28 @@ func (f *fakeEnvdTransport) RoundTrip(req *http.Request) (*http.Response, error)
 		}
 		return envdResponse(req, status, []byte(`{"code":500,"message":"close refused"}`)), nil
 	}
+	// Control-plane calls share this client but not the envd framing.
+	if strings.Contains(req.URL.Path, "/sandboxes/") {
+		f.mu.Lock()
+		f.control = append(f.control, fmt.Sprintf("%s %s %s", req.Method, req.URL.Path, strings.TrimSpace(string(body))))
+		f.mu.Unlock()
+		switch {
+		case strings.HasSuffix(req.URL.Path, "/connect"):
+			out, _ := json.Marshal(map[string]any{"sandboxID": "sb-1", "envdAccessToken": f.connectToken})
+			return envdResponse(req, http.StatusOK, out), nil
+		default: // /timeout, /pause
+			return envdResponse(req, http.StatusNoContent, nil), nil
+		}
+	}
 	if strings.Contains(req.URL.Path, "Process/Start") {
 		f.mu.Lock()
 		f.execAttempts++
 		attempt := f.execAttempts
 		f.mu.Unlock()
+		if f.unauthorizedFirstN > 0 && attempt <= f.unauthorizedFirstN {
+			return envdResponse(req, http.StatusUnauthorized,
+				[]byte(`{"code":401,"message":"access token is invalid"}`)), nil
+		}
 		if f.trailerError != "" {
 			// A real end-stream trailer: flags 0x02. connectEnvelope hardcodes
 			// data frames, so a plain envelope here would exercise the raw-body
@@ -147,6 +174,14 @@ func (f *fakeEnvdTransport) attempts() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.execAttempts
+}
+
+func (f *fakeEnvdTransport) controlCalls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, len(f.control))
+	copy(out, f.control)
+	return out
 }
 
 func envdResponse(req *http.Request, status int, body []byte) *http.Response {
