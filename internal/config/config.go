@@ -375,9 +375,16 @@ type AgentDefaults struct {
 	// naturally serializes. 0 = unlimited (no cap, current behavior).
 	// Useful when downstream APIs (Brave free tier 1RPS, etc.) can't
 	// take a parallel burst.
-	MaxParallelToolCalls int    `json:"maxParallelToolCalls,omitempty"`
-	Thinking             string `json:"thinking,omitempty"`
-	PolicyPreset         string `json:"policy,omitempty"`
+	MaxParallelToolCalls int `json:"maxParallelToolCalls,omitempty"`
+	// SubagentTimeoutSec bounds how long one delegate_task sub-agent may run
+	// before it is finalized with whatever it has gathered. 0 = the built-in
+	// 15 minutes. It is a config knob rather than a constant because a
+	// legitimate research sweep needs more room than a quick lookup, and a knob
+	// that lives in the settings layers can be set per scope instead of
+	// requiring a redeploy.
+	SubagentTimeoutSec int    `json:"subagentTimeoutSec,omitempty"`
+	Thinking           string `json:"thinking,omitempty"`
+	PolicyPreset       string `json:"policy,omitempty"`
 	// PromptMode lives here so the agent-scope `agents.defaults`
 	// config row (written by CLI and dashboard) round-trips into
 	// ResolvedAgent at userspace assembly time — see
@@ -416,6 +423,7 @@ type AgentEntry struct {
 	Temperature          float64                    `json:"temperature,omitempty"`
 	MaxToolIterations    int                        `json:"maxToolIterations,omitempty"`
 	MaxParallelToolCalls int                        `json:"maxParallelToolCalls,omitempty"`
+	SubagentTimeoutSec   int                        `json:"subagentTimeoutSec,omitempty"`
 	Skills               []string                   `json:"skills,omitempty"`
 	MCPServers           map[string]MCPServerConfig `json:"mcpServers,omitempty"`
 	AlwaysLoadSkills     []string                   `json:"alwaysLoadSkills,omitempty"`
@@ -554,6 +562,7 @@ type AgentFileConfig struct {
 	Temperature          float64                    `json:"temperature,omitempty"`
 	MaxToolIterations    int                        `json:"maxToolIterations,omitempty"`
 	MaxParallelToolCalls int                        `json:"maxParallelToolCalls,omitempty"`
+	SubagentTimeoutSec   int                        `json:"subagentTimeoutSec,omitempty"`
 	Workspace            string                     `json:"workspace,omitempty"`
 	Skills               SkillsConfig               `json:"skills,omitempty"`
 	MCPServers           map[string]MCPServerConfig `json:"mcpServers,omitempty"`
@@ -624,6 +633,7 @@ type ResolvedAgent struct {
 	Temperature          float64
 	MaxToolIterations    int
 	MaxParallelToolCalls int
+	SubagentTimeoutSec   int
 	Thinking             string
 	Skills               SkillsConfig
 	MCPServers           map[string]MCPServerConfig
@@ -749,6 +759,7 @@ func (cfg *Config) MergedAgentConfig(entry AgentEntry) ResolvedAgent {
 		Temperature:          cfg.Agents.Defaults.Temperature,
 		MaxToolIterations:    cfg.Agents.Defaults.MaxToolIterations,
 		MaxParallelToolCalls: cfg.Agents.Defaults.MaxParallelToolCalls,
+		SubagentTimeoutSec:   cfg.Agents.Defaults.SubagentTimeoutSec,
 		Thinking:             cfg.Agents.Defaults.Thinking,
 		Sandbox:              cfg.Sandbox,
 		PolicyPreset:         cfg.Agents.Defaults.PolicyPreset,
@@ -765,6 +776,9 @@ func (cfg *Config) MergedAgentConfig(entry AgentEntry) ResolvedAgent {
 	}
 	if entry.MaxParallelToolCalls > 0 {
 		resolved.MaxParallelToolCalls = entry.MaxParallelToolCalls
+	}
+	if entry.SubagentTimeoutSec > 0 {
+		resolved.SubagentTimeoutSec = entry.SubagentTimeoutSec
 	}
 	if entry.Thinking != "" {
 		resolved.Thinking = entry.Thinking
@@ -827,6 +841,9 @@ func (cfg *Config) MergedAgentConfig(entry AgentEntry) ResolvedAgent {
 		}
 		if fileCfg.MaxParallelToolCalls > 0 {
 			resolved.MaxParallelToolCalls = fileCfg.MaxParallelToolCalls
+		}
+		if fileCfg.SubagentTimeoutSec > 0 {
+			resolved.SubagentTimeoutSec = fileCfg.SubagentTimeoutSec
 		}
 		resolved.Skills = fileCfg.Skills
 		if len(fileCfg.Admins) > 0 {
