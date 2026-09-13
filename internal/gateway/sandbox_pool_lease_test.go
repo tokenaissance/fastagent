@@ -41,10 +41,6 @@ func (fakeLeaseStore) ReleaseSandboxLease(context.Context, string, string, int64
 	return false, nil
 }
 
-func (fakeLeaseStore) ListSandboxLeaseRefs(context.Context) ([]sandbox.SandboxLeaseRef, error) {
-	return nil, nil
-}
-
 func (fakeLeaseStore) SetSandboxLeaseState(context.Context, string, string, string) error {
 	return nil
 }
@@ -55,18 +51,16 @@ func TestSandboxLeaseOptsSelection(t *testing.T) {
 		name    string
 		leases  sandbox.SandboxLeaseStore
 		ownerID string
-		poolTag string
 		wantNil bool
 	}{
-		{"no store", nil, owner, "", true},
-		{"no owner", fakeLeaseStore{}, "", "", true},
-		{"neither", nil, "", "", true},
-		{"both", fakeLeaseStore{}, owner, "", false},
-		{"both, tagged", fakeLeaseStore{}, owner, "prod", false},
+		{"no store", nil, owner, true},
+		{"no owner", fakeLeaseStore{}, "", true},
+		{"neither", nil, "", true},
+		{"both", fakeLeaseStore{}, owner, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := sandboxLeaseOpts(tc.leases, tc.ownerID, tc.poolTag)
+			got := sandboxLeaseOpts(tc.leases, tc.ownerID)
 			if tc.wantNil {
 				if got != nil {
 					t.Fatalf("sandboxLeaseOpts = %+v, want nil", got)
@@ -79,23 +73,7 @@ func TestSandboxLeaseOptsSelection(t *testing.T) {
 			if got.Owner != owner {
 				t.Fatalf("Owner = %q, want %q", got.Owner, owner)
 			}
-			// The tag is what lets the reaper claim an instance; dropping it
-			// here would silently turn reaping off in production.
-			if got.PoolTag != tc.poolTag {
-				t.Fatalf("PoolTag = %q, want %q", got.PoolTag, tc.poolTag)
-			}
 		})
-	}
-}
-
-func TestSandboxPoolTagFromEnv(t *testing.T) {
-	t.Setenv("FASTAGENT_SANDBOX_POOL_TAG", "")
-	if got := sandboxPoolTag(); got != "" {
-		t.Fatalf("unset tag = %q, want empty", got)
-	}
-	t.Setenv("FASTAGENT_SANDBOX_POOL_TAG", "prod-eu")
-	if got := sandboxPoolTag(); got != "prod-eu" {
-		t.Fatalf("sandboxPoolTag = %q, want prod-eu", got)
 	}
 }
 
@@ -130,9 +108,6 @@ func TestSandboxLeaseStoreFrom(t *testing.T) {
 }
 
 func TestBuildSystemSandboxPoolWiring(t *testing.T) {
-	// Hermetic: the pool tag is read from the environment, so an ambient value
-	// must not leak into this test's expectations.
-	t.Setenv("FASTAGENT_SANDBOX_POOL_TAG", "")
 	disabled := config.SandboxCfg{Enabled: false, Backend: "e2b"}
 	if pool := buildSystemSandboxPool(disabled, nil, fakeLeaseStore{}, "host:pid"); pool != nil {
 		t.Fatalf("disabled sandbox pool = %v, want nil", pool)

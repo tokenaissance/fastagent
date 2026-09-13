@@ -70,10 +70,6 @@ type LifecyclePool struct {
 	// TTL on their own need the trailing renew; keeping it conditional keeps the
 	// common path free of an extra round trip.
 	longOpRenew time.Duration
-	// reapEvery is how often the orphan reap runs when the inner pool can reap.
-	// Much slower than the idle sweep on purpose: an orphan is a bookkeeping
-	// problem, not an outage, and every pass is a provider list call.
-	reapEvery time.Duration
 }
 
 // sandboxScope is the (agentID, projectID, sessionID) tuple a sandbox
@@ -101,7 +97,6 @@ func NewLifecyclePool(inner ExecutorPool, idleTTL, sweep time.Duration) *Lifecyc
 		inUse:       make(map[string]int),
 		scopes:      make(map[string]sandboxScope),
 		longOpRenew: defaultLongOpRenew,
-		reapEvery:   defaultOrphanReapEvery,
 		stopCh:      make(chan struct{}),
 		done:        make(chan struct{}),
 	}
@@ -112,17 +107,6 @@ func NewLifecyclePool(inner ExecutorPool, idleTTL, sweep time.Duration) *Lifecyc
 // an operation that could outlive the TTL always renews, while the common
 // sub-second tool call never pays for it.
 const defaultLongOpRenew = 2 * time.Minute
-
-// defaultOrphanReapEvery is how often a pool that can reap is asked to. An
-// hour is well beyond any legitimate create→claim window (seconds), so a single
-// hourly pass cannot mistake a sandbox being provisioned for an orphan, and it
-// bounds how long an abandoned instance lingers in the account.
-const defaultOrphanReapEvery = time.Hour
-
-// orphanReapTimeout bounds one pass. The pool lists (with pagination, one
-// request per page) and deletes what nothing claims; a pass that cannot finish
-// in this window gives up and the next one retries.
-const orphanReapTimeout = 2 * time.Minute
 
 // LeaseRenewer is implemented by pools that hold a time-limited shared lease
 // for a scope (E2B does; docker has none). The lifecycle layer calls it after
@@ -155,20 +139,6 @@ type ScopeSleeper interface {
 // A pool without it (docker) simply has no expiry to move.
 type ScopeExtender interface {
 	ExtendScope(ctx context.Context, agentID, projectID, sessionID string, d time.Duration) error
-}
-
-// OrphanReaper is implemented by pools whose provider keeps instances after the
-// pool stops naming them. E2B pauses a sandbox at its timeout and then keeps it
-// indefinitely — unbilled and outside the concurrency limit, but forever — so
-// every instance whose scope is never used again (a crashed pod, a replaced
-// row, a rotation that made a row unreadable) would accumulate in the account.
-// A pool without it (docker) destroys on release and has nothing to reap.
-//
-// ReapOrphans reports how many instances it removed; an error means some of the
-// pass failed, never that the caller did something wrong. The lifecycle layer
-// owns the clock, the pool owns the rule for what counts as an orphan.
-type OrphanReaper interface {
-	ReapOrphans(ctx context.Context) (int, error)
 }
 
 // extendThreshold is the operation budget past which moving the expiry is worth
@@ -260,61 +230,24 @@ func (p *LifecyclePool) Start() {
 	if !first {
 		return
 	}
-	// The loop drives both clocks. Idle eviction can be switched off
-	// (idleTTL=0) and orphan reaping can still be wanted — a deployment that
-	// keeps sandboxes alive would otherwise never collect what a crashed pod
-	// left behind.
-	if p.idleTTL <= 0 && p.reaperFor() == nil {
+	if p.idleTTL <= 0 {
 		close(p.done) // nothing to do; keep Shutdown() cheap
 		return
 	}
 	go p.loop()
 }
 
-// reaperFor returns the duty to schedule, or nil when there is none: the inner
-// pool implements OrphanReaper and an interval is configured.
-func (p *LifecyclePool) reaperFor() OrphanReaper {
-	if p.reapEvery <= 0 {
-		return nil
-	}
-	reaper, _ := p.inner.(OrphanReaper)
-	return reaper
-}
-
 func (p *LifecyclePool) loop() {
 	defer close(p.done)
 	t := time.NewTicker(p.sweep)
 	defer t.Stop()
-	reaper := p.reaperFor()
-	var reapCh <-chan time.Time
-	if reaper != nil {
-		reap := time.NewTicker(p.reapEvery)
-		defer reap.Stop()
-		reapCh = reap.C
-	}
 	for {
 		select {
 		case <-p.stopCh:
 			return
 		case <-t.C:
-			if p.idleTTL > 0 {
-				p.evictIdle()
-			}
-		case <-reapCh:
-			p.reapOrphans(reaper)
+			p.evictIdle()
 		}
-	}
-}
-
-// reapOrphans runs one reaping pass under its own deadline. Best-effort by
-// design: a failed pass is a warning and the next one retries, and the context
-// is detached from anything a caller holds so a shutdown cannot cut a delete
-// mid-flight.
-func (p *LifecyclePool) reapOrphans(reaper OrphanReaper) {
-	ctx, cancel := context.WithTimeout(context.Background(), orphanReapTimeout)
-	defer cancel()
-	if _, err := reaper.ReapOrphans(ctx); err != nil {
-		slog.Warn("sandbox orphan reap failed", "error", err)
 	}
 }
 

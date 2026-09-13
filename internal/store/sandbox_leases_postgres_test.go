@@ -36,37 +36,6 @@ func newTestSandboxLeasePostgresDB(t *testing.T) *DBStore {
 	return db
 }
 
-// The reaper's read against the production dialect. A plain two-column SELECT
-// has no dialect to get wrong, but the expiry it returns is what decides which
-// sandboxes survive, so it is checked where production runs it.
-func TestSandboxLeaseRefsPostgres(t *testing.T) {
-	ctx := context.Background()
-	db := newTestSandboxLeasePostgresDB(t)
-	var st sandbox.SandboxLeaseStore = db
-	scope := fmt.Sprintf("agt_refs_%d:s:sess_refs", time.Now().UnixNano())
-
-	if _, _, err := st.AcquireSandboxLease(
-		ctx, scope, "pod-a", "sb-refs", "tok", "tpl", time.Minute); err != nil {
-		t.Fatalf("acquire: %v", err)
-	}
-	refs, err := st.ListSandboxLeaseRefs(ctx)
-	if err != nil {
-		t.Fatalf("ListSandboxLeaseRefs: %v", err)
-	}
-	found := false
-	for _, ref := range refs {
-		if ref.SandboxID == "sb-refs" && ref.ExpiresAt > time.Now().Unix() {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("refs = %+v, want sb-refs with a future expiry", refs)
-	}
-	if deleted, err := st.ReleaseSandboxLease(ctx, scope, "pod-a", 1); err != nil || !deleted {
-		t.Fatalf("cleanup release: deleted=%v err=%v", deleted, err)
-	}
-}
-
 // TestSandboxLeaseConcurrentAcquireSingleWinnerPostgres races many
 // acquirers against one scope on a real Postgres database. Exactly one
 // pod must win; every loser must observe the winner's sandbox_id (adopt),

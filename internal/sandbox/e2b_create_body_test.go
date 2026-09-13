@@ -12,7 +12,7 @@ import (
 
 func TestE2BCreateBodyPausesInsteadOfKilling(t *testing.T) {
 	var body map[string]any
-	if err := json.Unmarshal(e2bCreateBody("tpl-x", 30*time.Minute, nil), &body); err != nil {
+	if err := json.Unmarshal(e2bCreateBody("tpl-x", 30*time.Minute), &body); err != nil {
 		t.Fatalf("create body is not valid JSON: %v", err)
 	}
 

@@ -89,29 +89,11 @@ type SandboxLeaseStore interface {
 		ctx context.Context,
 		scopeKey, owner, state string,
 	) error
-	// ListSandboxLeaseRefs returns one reference per row: the instance it
-	// names and when the claim lapses. It is the naming authority's answer to
-	// "is anybody still pointing at this instance?", which is what the reaper
-	// needs to tell an orphan from a live sandbox.
-	//
-	// Deliberately a projection rather than a []SandboxLeaseRecord: the reaper
-	// must not need the token, and the at-rest encryption decorator must not
-	// have to decrypt (ids and expiries are not secrets) — so this read stays
-	// available even when the rows themselves are unreadable.
-	ListSandboxLeaseRefs(ctx context.Context) ([]SandboxLeaseRef, error)
 	// ReleaseSandboxLease deletes the lease only when this pod is still the
 	// owner AND the stored epoch matches the one the caller last received.
 	// Returns true when the row was deleted (i.e. this pod may destroy the
 	// sandbox); false when ownership moved or the epoch is stale.
 	ReleaseSandboxLease(ctx context.Context, scopeKey, owner string, epoch int64) (bool, error)
-}
-
-// SandboxLeaseRef is the minimal projection of a lease row the reaper reads:
-// which instance the row names, and when that claim lapses. ExpiresAt is a
-// unix timestamp in seconds, like SandboxLeaseRecord.ExpiresAt.
-type SandboxLeaseRef struct {
-	SandboxID string
-	ExpiresAt int64
 }
 
 // Lease TTL used by the pool when no explicit value is configured. Must be

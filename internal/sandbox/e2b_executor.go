@@ -62,12 +62,6 @@ type E2BExecutor struct {
 	client   *http.Client
 	template string        // remembered for recreate() so the new sandbox uses the same template; immutable once handed out by the pool
 	timeout  time.Duration // remembered for recreate()
-	// createMeta is attached to every sandbox this executor creates, rebuilds
-	// included. It carries the pool tag the reaper uses to prove an instance
-	// was created by this deployment — so a rebuild that dropped it would leak
-	// an instance nothing ever reaps. Immutable once the pool hands the
-	// executor out.
-	createMeta map[string]string
 	// readyTimeout / readyInterval bound the post-create readiness wait. Zero
 	// means the defaults; tests shrink them so a persistent routing gap does
 	// not cost a minute of wall clock.
@@ -90,10 +84,7 @@ type E2BExecutor struct {
 	// path — create → hydrate → verify → mark rebuilt — is exercisable offline,
 	// and so a pool that injected its own create seam gets it honored on
 	// rebuild too instead of silently falling back to the package function.
-	createFn func(
-		ctx context.Context, apiKey, template string, timeout time.Duration,
-		metadata map[string]string,
-	) (*E2BExecutor, error)
+	createFn func(ctx context.Context, apiKey, template string, timeout time.Duration) (*E2BExecutor, error)
 	// hydrate sources — set by the pool after creation so recreate()
 	// can rebuild /skills + /workspace without reaching back into the
 	// pool. Workspace store is optional; skill dirs may be empty.
@@ -142,12 +133,7 @@ func (e *E2BExecutor) clearRebuild(seen sandboxIdent) bool {
 	return true
 }
 
-func newE2BExecutor(
-	ctx context.Context,
-	apiKey, template string,
-	timeout time.Duration,
-	metadata map[string]string,
-) (*E2BExecutor, error) {
+func newE2BExecutor(ctx context.Context, apiKey, template string, timeout time.Duration) (*E2BExecutor, error) {
 	if template == "" {
 		template = "base"
 	}
@@ -169,7 +155,7 @@ func newE2BExecutor(
 	// is missing` when the field was renamed to snake_case. The
 	// snake_case form shows up in some SDK source code but the
 	// production REST API rejects it.
-	body := e2bCreateBody(template, timeout, metadata)
+	body := e2bCreateBody(template, timeout)
 	// Bound the create-sandbox call to 60s — the call itself usually
 	// completes in 1–2s; if it's hanging past that there's a control-
 	// plane problem and we'd rather surface a clear timeout than wait
@@ -205,13 +191,12 @@ func newE2BExecutor(
 	slog.Info("e2b sandbox created", "sandboxID", result.SandboxID, "template", template)
 
 	ex := &E2BExecutor{
-		apiKey:     apiKey,
-		ident:      sandboxIdent{id: result.SandboxID, token: result.EnvdAccessToken},
-		client:     client,
-		template:   template,
-		timeout:    timeout,
-		createMeta: metadata,
-		createFn:   newE2BExecutor,
+		apiKey:   apiKey,
+		ident:    sandboxIdent{id: result.SandboxID, token: result.EnvdAccessToken},
+		client:   client,
+		template: template,
+		timeout:  timeout,
+		createFn: newE2BExecutor,
 	}
 	// POST /sandboxes returns an id before e2b's edge can route it. Waiting for
 	// the first answer here keeps that gap inside creation, where it is a retry,
@@ -459,8 +444,8 @@ func (e *E2BExecutor) refreshEnvdToken(ctx context.Context, observed sandboxIden
 //
 // https://docs.e2b.dev/sandbox/auto-resume.md
 // https://docs.e2b.dev/faq/paused-sandboxes-concurrency.md
-func e2bCreateBody(template string, timeout time.Duration, metadata map[string]string) []byte {
-	payload := map[string]interface{}{
+func e2bCreateBody(template string, timeout time.Duration) []byte {
+	body, _ := json.Marshal(map[string]interface{}{
 		"templateID": template,
 		"timeout":    int(timeout.Seconds()),
 		"autoPause":  true,
@@ -477,16 +462,7 @@ func e2bCreateBody(template string, timeout time.Duration, metadata map[string]s
 		// carried like every other credential here: encrypted in the row,
 		// refreshed from the connect/resume response when it goes stale.
 		"secure": true,
-	}
-	// Instance metadata outlives the row that created it: e2b keeps it while
-	// the sandbox is paused, which is the only way a reaper can tell an
-	// instance this deployment leaked from one another deployment (or tenant)
-	// owns inside the same account. Omitted entirely when the deployment has no
-	// tag, because a tag the reaper cannot match is worthless.
-	if len(metadata) > 0 {
-		payload["metadata"] = metadata
-	}
-	body, _ := json.Marshal(payload)
+	})
 	return body
 }
 
@@ -516,9 +492,7 @@ func (e *E2BExecutor) recreateIfCurrent(ctx context.Context, observed sandboxIde
 		create = newE2BExecutor
 	}
 	slog.Info("e2b sandbox expired, recreating", "oldSandboxID", observed.id)
-	// The replacement carries the same create metadata as the original, so a
-	// rebuilt instance stays reapable by the pool that owns it.
-	newEx, err := create(ctx, e.apiKey, e.template, e.timeout, e.createMeta)
+	newEx, err := create(ctx, e.apiKey, e.template, e.timeout)
 	if err != nil {
 		return err
 	}
@@ -1592,20 +1566,11 @@ type E2BExecutorPool struct {
 	leaseStore SandboxLeaseStore
 	ownerID    string
 	leaseTTL   time.Duration
-	// poolTag names this deployment inside the e2b account. It is written into
-	// every sandbox's metadata at create time and is what lets the reaper
-	// claim an instance as its own: without it, "paused and unnamed" also
-	// describes another deployment's (or another tenant's) live sandbox, and
-	// reaping would destroy them. Empty disables both the tag and the reaper.
-	poolTag string
 
 	// Test seams: production defaults call the real e2b API; unit tests
 	// override them so the create/adopt/reconcile decision paths can be
 	// exercised without network access.
-	newSandboxExecutor func(
-		ctx context.Context, apiKey, template string, timeout time.Duration,
-		metadata map[string]string,
-	) (*E2BExecutor, error)
+	newSandboxExecutor func(ctx context.Context, apiKey, template string, timeout time.Duration) (*E2BExecutor, error)
 	// newAdoptedExecutor builds the executor for a sandbox another pod created.
 	// Defaults to newAdoptedE2BExecutor; a seam for the same reason as the one
 	// above — adoption now touches the network (it resumes a paused instance),
@@ -1614,12 +1579,6 @@ type E2BExecutorPool struct {
 	hydrateSandbox     func(ctx context.Context, ex *E2BExecutor) error
 	verifySandbox      func(ctx context.Context, ex *E2BExecutor) error
 	warmupSandbox      func(ctx context.Context, ex *E2BExecutor)
-	// listSandboxes and destroySandbox are the two provider calls the reaper
-	// makes. Seams for the same reason as newSandboxExecutor: the reap
-	// *decision* — what counts as an orphan — is the part that can be wrong,
-	// and it must be exercisable without an account.
-	listSandboxes  func(ctx context.Context, apiKey, state string) ([]e2bSandboxInfo, error)
-	destroySandbox func(ctx context.Context, apiKey, sandboxID string) error
 }
 
 // E2BLeaseOptions configures cross-pod sandbox sharing for the E2B pool.
@@ -1627,12 +1586,6 @@ type E2BLeaseOptions struct {
 	Store    SandboxLeaseStore
 	Owner    string
 	LeaseTTL time.Duration
-	// PoolTag is written into every created sandbox's metadata and is the
-	// proof the reaper requires before destroying a paused instance. Empty
-	// leaves instances untagged, which also disables reaping (ReapOrphans
-	// returns without doing anything) — a deployment that shares an e2b
-	// account must set one, or its orphans stay forever.
-	PoolTag string
 }
 
 // WithSandboxLeases attaches a shared lease store. Requires non-empty Owner
@@ -1644,7 +1597,6 @@ func WithSandboxLeases(o E2BLeaseOptions) func(*E2BExecutorPool) {
 		}
 		p.leaseStore = o.Store
 		p.ownerID = o.Owner
-		p.poolTag = o.PoolTag
 		p.leaseTTL = o.LeaseTTL
 		if p.leaseTTL <= 0 {
 			p.leaseTTL = DefaultSandboxLeaseTTL
@@ -1697,31 +1649,19 @@ func newAdoptedE2BExecutor(apiKey, sandboxID, accessToken, template string, time
 // sandbox binding for every other agent in the process.
 func NewE2BExecutorPool(apiKey, template, home string, timeout time.Duration, opts ...func(*E2BExecutorPool)) *E2BExecutorPool {
 	p := &E2BExecutorPool{
-		executors:   make(map[string]*E2BExecutor),
-		leaseEpochs: make(map[string]int64),
-		apiKey:      apiKey,
-		template:    template,
-		timeout:     timeout,
-		home:        home,
+		executors:          make(map[string]*E2BExecutor),
+		leaseEpochs:        make(map[string]int64),
+		apiKey:             apiKey,
+		template:           template,
+		timeout:            timeout,
+		home:               home,
+		newSandboxExecutor: newE2BExecutor,
 		newAdoptedExecutor: newAdoptedE2BExecutor,
 		hydrateSandbox: func(ctx context.Context, ex *E2BExecutor) error {
 			return ex.Hydrate(ctx)
 		},
 		verifySandbox: verifyWorkspaceWritable,
 		warmupSandbox: warmupCamoufoxDaemon,
-		// Closures over the pool, not the package functions, because both need
-		// the tag this deployment configured — and it is set by an option after
-		// this literal is built, so the value has to be read at call time.
-		newSandboxExecutor: func(
-			ctx context.Context, apiKey, template string, timeout time.Duration,
-			metadata map[string]string,
-		) (*E2BExecutor, error) {
-			return newE2BExecutor(ctx, apiKey, template, timeout, metadata)
-		},
-		listSandboxes: func(ctx context.Context, apiKey, state string) ([]e2bSandboxInfo, error) {
-			return listE2BSandboxes(ctx, &http.Client{}, apiKey, state)
-		},
-		destroySandbox: destroyE2BSandbox,
 	}
 	for _, opt := range opts {
 		opt(p)
@@ -1828,14 +1768,10 @@ func (p *E2BExecutorPool) Get(ctx context.Context, agentID, projectID, sessionID
 		}
 	}
 	provisionStarted := time.Now()
-	ex, err := p.newSandboxExecutor(ctx, p.apiKey, p.template, p.timeout, p.createMetadata())
+	ex, err := p.newSandboxExecutor(ctx, p.apiKey, p.template, p.timeout)
 	if err != nil {
 		return nil, err
 	}
-	// Same tag the create call was handed, so a rebuild from this executor
-	// carries it too. Setting it here (rather than only inside the create seam)
-	// covers adopted executors and any seam that ignores the argument.
-	ex.createMeta = p.createMetadata()
 	ex.SetHydrationSources(skillDirsForAgent(p.home, agentID), p.workspace, agentID, projectID, sessionID)
 	if err := p.hydrateSandbox(ctx, ex); err != nil {
 		// Hydrate is what chowns /workspace to the non-root `user`
@@ -1908,9 +1844,6 @@ func (p *E2BExecutorPool) adoptFromLease(
 		build = newAdoptedE2BExecutor
 	}
 	ex := build(p.apiKey, rec.SandboxID, rec.EnvdToken, rec.Template, p.timeout)
-	// An adopted executor rebuilds too, and its replacement must carry the
-	// deployment's tag or the reaper would never collect it.
-	ex.createMeta = p.createMetadata()
 	if rec.Template == "" {
 		ex.template = p.template
 	}
