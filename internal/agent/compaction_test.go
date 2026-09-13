@@ -14,9 +14,11 @@ import (
 // about the summary content, only the input.
 type fakeSummarizer struct {
 	gotSummaryRequest string
+	gotCtx            context.Context
 }
 
-func (f *fakeSummarizer) Chat(_ context.Context, msgs []provider.Message, _ []provider.Tool, _ string, _ int, _ float64) (*provider.Response, error) {
+func (f *fakeSummarizer) Chat(ctx context.Context, msgs []provider.Message, _ []provider.Tool, _ string, _ int, _ float64) (*provider.Response, error) {
+	f.gotCtx = ctx
 	// compressOlderMessages builds the user-role prompt as the
 	// second message; the older-history text lives in its Content
 	// after the "Summarize this conversation:\n\n" prefix.
@@ -24,6 +26,33 @@ func (f *fakeSummarizer) Chat(_ context.Context, msgs []provider.Message, _ []pr
 		f.gotSummaryRequest = msgs[1].Content
 	}
 	return &provider.Response{Content: "[fake summary]"}, nil
+}
+
+// TestCompactionSummaryCallCarriesContext pins the other half of the
+// context loss this file's fake uncovered: CompactMessages used to call
+// prov.Chat(nil, …), so `http.NewRequestWithContext` failed with
+// "create request: net/http: nil Context" and compression silently fell
+// back to pruning-only on every single turn (the sessions in the incident
+// sat at ~130k tokens and re-ran compaction on each cron tick because the
+// summary step could never succeed).
+func TestCompactionSummaryCallCarriesContext(t *testing.T) {
+	var msgs []provider.Message
+	for i := 0; i < PruneTurnAge+2; i++ {
+		msgs = append(msgs,
+			provider.Message{Role: "user", Content: "real user message", Origin: provider.OriginUser},
+			provider.Message{Role: "assistant", Content: "reply", Origin: provider.OriginUser},
+		)
+	}
+	f := &fakeSummarizer{}
+	if _, err := compressOlderMessages(context.Background(), msgs, f, "fake-model"); err != nil {
+		t.Fatalf("compress: %v", err)
+	}
+	if f.gotCtx == nil {
+		t.Fatal("summarizer was called with a nil context; net/http rejects that with 'nil Context'")
+	}
+	if f.gotSummaryRequest == "" {
+		t.Fatal("summarizer never ran")
+	}
 }
 
 func (f *fakeSummarizer) ChatStream(_ context.Context, _ []provider.Message, _ []provider.Tool, _ string, _ int, _ float64) (*provider.StreamReader, error) {
@@ -49,7 +78,7 @@ func TestCompactionDropsGoalContextFromSummary(t *testing.T) {
 	}
 
 	f := &fakeSummarizer{}
-	out, err := compressOlderMessages(msgs, f, "fake-model")
+	out, err := compressOlderMessages(context.Background(), msgs, f, "fake-model")
 	if err != nil {
 		t.Fatalf("compress: %v", err)
 	}
@@ -83,7 +112,7 @@ func TestCompactionPreservesContentWhenShortCircuits(t *testing.T) {
 		{Role: "user", Content: "hi"},
 		{Role: "assistant", Content: "hello"},
 	}
-	out, err := compressOlderMessages(in, nil, "")
+	out, err := compressOlderMessages(context.Background(), in, nil, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -194,7 +223,7 @@ func TestCompressOlderMessagesNeverStartsTailWithTool(t *testing.T) {
 	}
 
 	f := &fakeSummarizer{}
-	out, err := compressOlderMessages(msgs, f, "fake-model")
+	out, err := compressOlderMessages(context.Background(), msgs, f, "fake-model")
 	if err != nil {
 		t.Fatalf("compress: %v", err)
 	}
