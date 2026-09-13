@@ -1,0 +1,691 @@
+# Session turn integrity: one writer per session, non-pollutable history
+
+> **Status**: P0, P1, P1b, P2 and P3 landed in the working tree on branch
+> `fastagent` (not yet committed or deployed); P4, P5 and P6 planned.
+> **Progress**: P0 wire dedupe + pad scoping + compaction ctx + production data
+> repair · P1 session turn gate (`Session.AcquireTurn/ReleaseTurn`, wired into
+> `HandleMessage` and `HandleMessageStream`) · P1b `queued` event +
+> Codex-style queue block with Edit/Cancel and a withdraw endpoint ·
+> P2 `TurnMode`/`RunTurn` + gateway parking of
+> automatic turns · P3 `normalizeForPrompt` applied to the prompt in both
+> loops. Test names live in [Implementation plan](#implementation-plan).
+> **Scope**: how a turn is admitted for a session, and how that session's
+> history stays structurally valid for every provider.
+> **Storage**: `sessions.messages` (working set the agent loop reads) plus
+> `session_messages` (append-only archive the UI reads), Postgres in prod.
+> **Last updated**: 2026-09-14
+> **Decision owner**: mengmengmengqiang@gmail.com
+> **Reviewed by**: pending review (this document)
+> **Incident**: 2026-09-13 production, agent `agt_cda27bbfbf4a84e2dfa6`,
+> session `hJKMWwtOp3mJOtqN8Uz2mW` (see [Appendix A](#appendix-a--incident-evidence)).
+> **Reference design**: Codex (`/Users/reina/Project/tokenaissance/codex`,
+> `openai/codex`), cited inline.
+
+## Problem
+
+Production surfaced a provider 400 that made one chat session permanently
+unusable:
+
+```text
+API error 400: {"error":{"message":"Messages with role 'tool' must be a
+response to a preceding message with 'tool_calls'", "type":"invalid_request_error"}}
+```
+
+It repeated on **every** turn that session ran on a DeepSeek
+(OpenAI-compatible) model — 40 error lines across 10 failed turns (two
+retries + the terminal failure + the turn error, four lines per turn)
+between 11:35Z and 13:45Z on 2026-09-13, one turn per cron tick — while the
+same session ran normally whenever the agent was switched to Claude. The
+session history had been written into a shape the OpenAI-compatible
+validator rejects: one assistant declaring two tool calls followed by
+**four** tool replies (the synthetic "stopped" pad for each call, then the
+real result for each call).
+
+Two things made a single bad write permanent:
+
+1. `sessions.messages` **is** the prompt. There is no derived, normalized
+   projection, so any structural damage is replayed verbatim on every later
+   turn.
+2. Two turns can write the same session concurrently, and one of the writers
+   (`padOrphanToolResults`) reasons about the session globally ("the last
+   assistant with tool calls") rather than about its own turn.
+
+## Root cause
+
+### Layer 1 — two writers, no admission
+
+A turn can be started from several entry points, and only some of them
+serialize against each other:
+
+| Entry point | Path | Serialized by |
+|---|---|---|
+| IM / cron / goal / heartbeat / subagent delivery | bus → `processInbound` → `taskQueue.Submit` → `ag.HandleMessage` (`internal/gateway/gateway.go:521`) | `taskqueue.Queue`, per `chatKey(channel, accountID, chatID)` (`internal/taskqueue/queue.go:94`) |
+| Dashboard chat POST (streaming) | `handleChatStream` → goroutine → `HandleWebChatStream` → `HandleMessage` (`internal/setup/handlers.go:1254`) | **nothing** |
+| Dashboard chat POST (non-streaming), webhook, API-key `/v1/chat/completions` | `HandleWebChat` / `HandleMessage` / `HandleMessageStream` | **nothing** |
+
+`HandleWebChatStream` and the queue worker both end up in
+`Agent.HandleMessage` (`internal/agent/loop.go:2239`) or `HandleMessageStream`
+(`:3092`), and neither path takes a per-session lock. Two turns on one
+session can therefore interleave their appends.
+
+### Layer 2 — the pad is a global scan, executed by a *different* turn
+
+`padOrphanToolResults` (`internal/agent/loop.go:2937`) runs from each turn's
+`defer` and, before P0, looked for "the last assistant message carrying
+tool calls in the whole session" and padded every unresolved id it found
+there. In the incident the two overlapping turns were:
+
+* **A** — the cron-fired task `task-1789299000292-1`, started 11:30:00.292,
+  killed by the 300 s task-queue timeout at 11:35:00.897
+  (`duration_ms=300604`);
+* **B** — a dashboard turn started 11:34:32.776.
+
+Because A's tool round was still in flight (`exec` inside the sandbox,
+`list_cron_jobs`), B's defer padded **A's** tool_use ids:
+
+```text
+11:35:00.439 WARN msg="padding orphan tool_use with stopped result"
+             toolCallID=call_00_38dFV2Ml48bAd3FgPCS13513 tool=list_cron_jobs
+11:35:00.567 WARN msg="padding orphan tool_use with stopped result"
+             toolCallID=call_01_3nApOZmdQE6lQFv22vhH6960 tool=exec
+```
+
+A's real results then landed after those pads, leaving two replies for each
+`tool_call_id`.
+
+### Layer 3 — the wire sanitizer modelled two shapes, not three
+
+`findOrphanToolCalls` (`internal/provider/openai.go:148`) only knew:
+
+1. an assistant whose declared `tool_calls` are not answered by the
+   immediately following run of tool messages (strip the call), and
+2. a tool message whose id no earlier assistant declared (drop the reply).
+
+A duplicate answer violates neither: the id *is* answered in the immediate
+run, and it *was* declared earlier. So the request shipped a second answer
+to an already-closed call. DeepSeek rejects that; the Anthropic conversion
+path tolerates it (`internal/provider/anthropic.go:61` coalesces tool
+results per assistant), which is why switching models made it look like a
+provider or cron problem rather than history corruption.
+
+### Amplifiers
+
+* **300 s turn budget.** `taskTimeoutSec` defaults to 300
+  (`internal/gateway/gateway.go:418`) and kills a turn mid-tool — the exact
+  condition that produces a pad. Long sandbox work (`setsid nohup …`,
+  multi-minute `exec`) exceeds it routinely.
+* **Compaction that never compressed.** The summarizer was called with a nil
+  context (`internal/agent/compaction.go:190`, now fixed), so every
+  compaction fell back to pruning-only and the session stayed at ~130 k
+  tokens, re-running compaction on every tick and spending its budget before
+  the real work.
+* **Archive writes that fail silently for NUL-bearing tool output.**
+  `session archive append error: ERROR: invalid byte sequence for encoding
+  "UTF8": 0x00 (SQLSTATE 22021)` appears next to the incident: the real
+  reply never reached `session_messages`, so the archive and the working set
+  disagree (see P6).
+
+### Why "session pollution" is the right name
+
+We use the term for a persisted, propagating, easy-to-miss violation of the
+history's structural contract:
+
+| Property | Why it matters here |
+|---|---|
+| **Persisted** | the bad shape is written to `sessions.messages`, not a transient buffer |
+| **Propagating** | every later turn sends the same history, so one bad write breaks all future turns on that session |
+| **Hidden** | providers disagree about tolerance (Anthropic ok, DeepSeek 400), so the symptom looks provider-specific |
+
+Note the distinction the design has to preserve: an *incomplete* history
+(a tool call whose result never arrived because the turn was interrupted) is
+**truth, not pollution**. Codex persists exactly that and repairs it at
+prompt-build time. Pollution is when the *derived* prompt is structurally
+invalid, or when two turns' intents are interleaved in one history.
+
+## Reference design (Codex)
+
+Codex separates the two concerns we currently conflate: *who may write a
+turn* and *what the model is allowed to see*.
+
+**1. One active turn per thread, with explicit admission semantics.**
+`session.active_turn` is a single `Option<ActiveTurn>` slot; a turn is
+created through `active_turn.get_or_insert_with(ActiveTurn::default)`
+(`codex-rs/core/src/tasks/mod.rs`, around the `run_turn` path). Every
+producer must pick a submission mode
+(`codex-rs/protocol/src/turn_input.rs:133`):
+
+```rust
+enum TurnInputMode {
+    StartOrSteer,                      // idle → start; busy → steer the running turn
+    StartIfIdle,                       // idle → start; busy → NotSubmitted{NotIdle}
+    Steer { expected_turn_id: String },// steer only that exact turn
+}
+```
+
+and must handle the refusal
+(`NotSubmittedReason`, same file, `:217`): `NotIdle`, `NoActiveTurn`,
+`ExpectedTurnMismatch`, `ActiveTurnNotSteerable{Review|Compact}`, `PlanMode`,
+`EmptyInput`, `ActiveTurnOutputSchemaMismatch`. `session/turn_input.rs` is
+documented as *"the one place Core decides whether submitted input starts a
+turn, steers an active turn, or is rejected"*; `start_if_idle` (`:327`)
+returns `NotSubmitted{NotIdle}` instead of starting a second turn, and
+queued work is picked up at an idle boundary
+(`maybe_start_turn_for_pending_work`). Automatic sources (scheduled work,
+mailbox/`trigger_turn` deliveries, memory writebacks) use `StartIfIdle`;
+user input uses `StartOrSteer`; an active `Review`/`Compact` turn is
+explicitly not steerable.
+
+**2. History invariants are enforced on a derived prompt, not on the log.**
+`History::normalize_history`
+(`codex-rs/core/src/context_manager/history.rs:466`) states them:
+
+> 1. every call (function/custom) has a corresponding output entry
+> 2. every output has a corresponding call entry or names an external tool event
+> 3. unsupported image and audio content is stripped
+
+It runs inside `for_prompt()` (`history.rs:218`), i.e. the persisted rollout
+may contain an unfinished call, and the prompt never does.
+
+**3. Repair is deterministic and idempotent.**
+`ensure_call_outputs_present`
+(`codex-rs/core/src/context_manager/normalize.rs:21`) inserts a synthetic
+`FunctionCallOutput` **immediately after** the call (`items.insert(idx + 1,
+…)`, applied in reverse index order) and only when that `call_id` has no
+output **anywhere** in the list — so it cannot double-answer, and it cannot
+duplicate on a second pass. Its id is derived from the call id
+(`uuidv5(namespace, "fco:<call id>")`) with an explicit comment that
+changing the namespace would change model-visible ids and invalidate prompt
+caches. `remove_orphan_outputs` drops outputs with no call. Tests:
+`context_manager/history_tests.rs:1664+`
+(`normalize_adds_missing_output_for_function_call`,
+`normalize_removes_orphan_function_call_output`, …).
+
+**4. Removal is pair-aware.** `History::remove_first_item()`
+(`history.rs:293`) deletes the counterpart of the item it drops
+(`normalize::remove_corresponding_for`), so truncation cannot split a pair
+— and compaction, which replaces the item list wholesale, is re-normalized
+at the next prompt build rather than needing its own pair logic.
+
+## Decision
+
+| # | Decision | Rationale |
+|---|---|---|
+| **D1** | One turn at a time per **session** (not per chat key). Every turn-start entry point passes through one admission gate owned by the session. | The session is the unit that has history and memory; `shared_identity` channels and URL-token recovery already map multiple `(channel, accountID, chatID)` triples onto one session, so a chat-key lock is not sufficient. |
+| **D2** | Default policy for a turn-start request that finds a turn in flight is **queue and run after it** — not steer, not run concurrently. | Chosen 2026-09-14: the dashboard keeps steering as a deliberate user action. Deterministic, and it is what makes a single writer possible without changing what the model sees mid-turn. |
+| **D3** | Steering stays explicit: the web UI keeps its `/api/chat/steer` button; inbound IM messages keep today's best-effort auto-steer (`trySteer`, `internal/gateway/routing.go:258`). Both fold into the running turn instead of starting one. | Steering is not the defect — concurrent *turns* are. IM responsiveness is a product property we are not changing in this doc (see Q1). |
+| **D4** | The prompt is a **derived, normalized projection** of history. A pure `normalizeForPrompt` becomes the authoritative guard that every provider sees valid calls/replies. | Provider-specific wire sanitizers are a second line of defence, not the contract; Anthropic already needed an extra sweep the OpenAI path did not have. |
+| **D5** | Persisted history stays truthful. We do not rewrite the model's own record except to repair pollution (as in Appendix B); structural fixes are applied on the way *out*. | Keeps audits, prompt-cache stability and the UI's "what actually happened" intact. |
+| **D6** | Truncation/compaction never splits a pair. | `safeCompactionCutoff` today only handles the tail starting with a tool message; normalisation makes the whole class unrepresentable. |
+
+### Non-goals
+
+* Not a rewrite of the task queue or of session storage.
+* No change to what an IM user sees while a turn is running (typing indicator
+  stays; steer behaviour unchanged).
+* No cross-session or cross-agent coordination: the invariant is per session.
+  Two agents, or two sessions of one agent, may still run in parallel.
+
+## Invariant
+
+Written as four separately falsifiable clauses, each with the mechanism that
+enforces it and the test that would catch a violation.
+
+| # | Clause | Violated when | Enforced by | Guarding test |
+|---|---|---|---|---|
+| **W** · single writer | At most one turn is executing against a session's history at any instant | two `HandleMessage` bodies are past admission for one session | session turn gate (P1, landed): FIFO waiter queue owned by the session | `TestAcquireTurnSerializesCallers`, `TestAcquireTurnHandsOffFIFO`, `TestAcquireTurnContextCancelDoesNotLeakSlot`, `TestHandleMessageWaitsForInFlightTurn`, `TestHandleMessageSerializesQueuedTurns` (gateway e2e still to come) |
+| **P** · pair integrity | For the model, every tool call has exactly one reply, and every reply belongs to a call | a request ships N replies for a call id, an unanswered call, or an orphan reply | `normalizeForPrompt` (P3, landed) + wire builder (`internal/provider/openai.go:148`, P0) | `TestNormalizeForPromptShapes` (7 shapes + idempotence + no mutation), `TestNormalizeForPromptReadsRawAssistantCalls`, `TestNormalizeForPromptStripsDuplicateCallDeclaration`, `TestToAPIMessagesDropsDuplicateToolReplies`, `TestToAPIMessagesDropsDanglingToolReplies` |
+| **O** · ordering | A turn's own messages append in order and are never interleaved with another turn's | a user message or tool reply from turn B lands between turn A's call and its reply | clause W (there is no other writer) | `TestHandleMessageSerializesHistory` (asserts full-sequence equality, not just counts) |
+| **T** · truthful pad | A synthetic "interrupted" reply is written only for a call this turn declared, only when no reply exists for that id, and only once | a pad answers another turn's call, answers an already-answered id, or is written twice | P0 `turnToolCallIDs` scoping + idempotence (landed) | `TestPadOrphanToolResultsLeavesOtherTurnsToolUseAlone`, `TestPadOrphanToolResultsNoTurnIDsIsNoop`, `TestPadOrphanToolResultsIsIdempotent` |
+
+Accepted windows / known gaps (to keep the table honest):
+
+* W is per **process**. Two gateway replicas serving the same session can
+  still both admit a turn (the sandbox pool solved the same problem with a
+  Postgres lease; a session-level lease is out of scope here — see Q6 and
+  the "sticky session" alternative).
+* P is guaranteed for OpenAI-compatible and Anthropic wire builds; other
+  providers inherit `normalizeForPrompt` because it runs before the provider
+  split.
+* Pads remain persisted (P3 keeps them, in an idempotent form); whether the
+  pad should become prompt-only (Codex parity) is Q4.
+
+## Design
+
+### P1 — Session turn gate (single writer) ✅ landed
+
+Owned by `session.Session` because the session already owns its history,
+steer buffer and turn depth, and because `Manager.Get` is the single place
+every entry point resolves a session through.
+
+Landed API (`internal/session/manager.go`): `AcquireTurn(ctx) bool`,
+`ReleaseTurn()`, plus `TurnActive()` / `TurnWaiters()` for logs and tests.
+Handoff keeps `turnActive` set and closes the waiter's channel, so the slot is
+never momentarily free and a fresh caller cannot jump the queue; `ReleaseTurn`
+without the slot is a no-op rather than a way in.
+
+```go
+// AcquireTurn blocks until this caller holds the session's single turn slot,
+// or ctx ends. Callers MUST run exactly one turn between AcquireTurn and
+// ReleaseTurn, and MUST NOT start another turn for the same session while
+// holding it.
+func (s *Session) AcquireTurn(ctx context.Context) bool
+
+// ReleaseTurn frees the slot and hands it to the longest-waiting caller.
+func (s *Session) ReleaseTurn()
+```
+
+* FIFO waiter queue (`[]chan struct{}`), so queueing is fair and the order of
+  user messages is preserved.
+* `ctx` cancellation while waiting removes the waiter and does **not** leak
+  the slot (including the race where the slot is handed over at the same
+  moment the ctx ends).
+* Acquisition points: `HandleMessage` (after the slash-command and quota
+  gates, before the plan-mode branch so plan mode is covered too) and
+  `HandleMessageStream`. Everything else — `HandleWebChat`,
+  `HandleWebChatStream`, webhook, API — reaches those two.
+* `defer sess.ReleaseTurn()` sits **outermost** so it runs after the existing
+  defers (`flushLeftoverSteer`, `padOrphanToolResults`) — the pad is part of
+  the turn, not of the next one.
+* Steering is unaffected: `PushSteerIfActive` keeps using the existing
+  in-flight window; the gate and the steer window are, by construction,
+  held by the same turn.
+* Re-entrancy is forbidden: a turn must never call back into
+  `HandleMessage`/`HandleMessageStream` for the same session synchronously.
+  Goal continuations satisfy this by construction — `goal.TryFireContinuation`
+  publishes onto the bus (`internal/agent/goal/continue.go:43,54`) instead of
+  calling back into the agent, so the follow-up turn runs on the gateway's
+  goroutine and simply waits for the slot. The explicit no-deadlock e2e test
+  is still on the [Integration / e2e](#integration--e2e) list.
+
+### P1b — Queued-state UX (dashboard), modelled on Codex ✅ landed
+
+Codex renders pending input in a dedicated `PendingInputPreview` widget above
+its composer (`codex-rs/tui/src/bottom_pane/pending_input_preview.rs`), not in
+the transcript:
+
+```text
+• Queued follow-up inputs
+  ↳ Hello, world!
+  ↳ This is another message
+    ⌥ + ↑ edit last queued message
+```
+
+(snapshot `render_two_messages`; sections above it read *"Messages to be
+submitted after next tool call (press Esc to interrupt and send immediately)"*
+and *"Messages to be submitted at end of turn"* — Codex keeps steers and
+plain queued follow-ups visually separate, dim/italic per message, 3 lines
+max, FIFO, and submits exactly one queued message when the turn goes idle.)
+
+Mapping to fastagent:
+
+| Codex | fastagent dashboard |
+|---|---|
+| queued message never shown as a turn until it starts | unchanged: the optimistic bubble stays where it is; the queue block lives above the composer (the transcript keeps only the turn that is producing output) |
+| `• Queued follow-up inputs` header, `↳ text`, dim + italic, 3-line cap | same header/arrow/italics; the text comes from the `queued` event and is truncated to one line by the composer's width |
+| `⌥ + ↑ edit last queued message` | **Edit queued message** link — withdraws the queued turn server-side and restores the text into the composer |
+| interrupt / queued-message removal | **Cancel** link — withdraws the queued turn; nothing is written to the session |
+| one queued message submitted at a time, FIFO | the session turn gate (P1) + `(n ahead)` in the header |
+| submitted when the turn goes idle | automatic: the waiting POST acquires the slot the moment the current turn releases it |
+
+Backend surface for the two actions: `POST /api/chat/cancel` with
+`{agentId, sessionId, turnId}` → `200 {"canceled":true}` while the turn is
+still queued, `409 {"reason":"already_started"}` once it holds the slot (the
+client then falls back to plain Stop semantics — detach this stream, the
+server keeps the turn), `404 {"reason":"not_queued"}` when nothing is
+registered for that turn id. The "started" bit comes from
+`agent.WithAdmissionSignal` (closed by the agent right after it acquires the
+session's turn slot), not from the session event hub — the hub is
+session-scoped and also carries *other* turns' events (cron ticks stream into
+the same chat panel).
+
+Not implemented yet: pausing auto-send after an interrupt the way Codex does
+(`suppress_queue_autosend`). We have no "interrupt and keep queued" state —
+Cancel removes the queued turn outright.
+
+### P2 — Admission result and per-source policy ✅ landed
+
+P1 blocks; P2 makes the refusal explicit so an automatic producer never holds
+a queue worker (and its 300 s budget) behind a user turn.
+
+```go
+// internal/agent/admission.go
+type TurnMode int
+const (
+    TurnStartOrQueue TurnMode = iota // user-facing: wait for the slot
+    TurnStartIfIdle                  // automatic: refuse instead of waiting
+)
+var ErrTurnNotAdmitted = errors.New("turn not admitted: session is busy")
+
+// RunTurn is the admission-aware entry point; HandleMessage stays the
+// waiting behaviour every existing caller already had.
+func (a *Agent) RunTurn(ctx context.Context, msg bus.InboundMessage) (string, error)
+```
+
+`turnModeForSource` maps `bus.SourceCron`, `bus.SourceGoalContext`,
+`bus.SourceHeartbeat` and `bus.SourceSubAgent` to `TurnStartIfIdle`; everything
+else (including the empty source = a real user turn) is `TurnStartOrQueue`.
+
+The gateway consumes the refusal: the task handler calls `RunTurn`, and on
+`ErrTurnNotAdmitted` it **parks** the message
+(`internal/gateway/deferred_turns.go`) and returns the queue slot immediately.
+A drain loop re-submits a parked message once its session looks idle
+(`Gateway.sessionBusy`), keeping per-chat FIFO and dropping anything that has
+waited longer than five minutes with a warning. The agent re-checks on every
+attempt, so a race just parks the message again rather than running it into a
+busy session.
+
+Policy matrix as landed:
+
+| Source | Mode | Busy behaviour |
+|---|---|---|
+| dashboard POST (streaming / non-streaming) | `StartOrQueue` | queue (D2) |
+| `/api/chat/steer` | `Steer` | steer the running turn (unchanged) |
+| IM DM / group inbound | `StartOrSteer` | steer (unchanged, Q1) |
+| cron tick | `TurnStartIfIdle` | `ErrTurnNotAdmitted` → parked, retried every second for up to 5 min |
+| goal continuation / heartbeat / subagent | `TurnStartIfIdle` | same |
+| webhook / API-key completion | `StartOrQueue` | queue |
+| plan mode | `StartIfIdle` on a session with an active turn | queue, never preempt |
+
+### P3 — `normalizeForPrompt` (the authoritative guard) ✅ landed
+
+A pure function applied where the prompt is assembled
+(`internal/agent/loop.go:2404` and `:3164`, after compaction, before the
+system messages are prepended):
+
+```go
+// normalizeForPrompt returns a prompt-safe copy of msgs:
+//   - every tool call has exactly one reply, inserted immediately after it
+//     when missing (synthetic provider.StoppedToolResult reply)
+//   - replies whose call id is unknown are dropped
+//   - second and later replies for one call id are dropped (first wins)
+//   - a call re-declared after it was answered loses the later declaration
+//   - input is never mutated
+func normalizeForPrompt(msgs []provider.Message) []provider.Message
+```
+
+Rules taken from Codex and adapted:
+
+| Rule | Note |
+|---|---|
+| insert synthetic reply at `call index + 1`, not at the end | keeps adjacency even when another message was appended after the call |
+| only when the id has no reply anywhere in the slice | cannot double-answer |
+| first reply wins when an id is answered twice (the one adjacent to the call) | same choice the wire builder makes, so the two layers agree |
+| a reply is identified by its `tool_call_id` (= the call's id), so the synthetic reply is stable by construction | repeated runs produce byte-identical prompts (prompt cache); nothing extra to derive |
+| a call re-declared after it was answered loses the later declaration (`RawAssistant` cleared so serialisers cannot re-introduce it) | a duplicated assistant append cannot create a second unanswered call |
+| drop unknown-id and duplicate replies | the third shape the current sanitizer misses |
+| never mutate the input slice | the session keeps the truthful record (D5) |
+
+`padOrphanToolResults` stays for the UI ("interrupted, not still running"),
+but P3 makes it idempotent and conditional: pad only ids this turn declared
+that have no reply anywhere, and never twice (`TestPadOrphanToolResultsIsIdempotent`).
+
+### P4 — Truncation, compaction and stable ids
+
+* Any compaction/truncation result is re-normalized before send (P3 makes
+  this automatic), so `safeCompactionCutoff`'s special case becomes an
+  optimisation rather than correctness.
+* Any future "drop oldest item" path must drop the counterpart with it
+  (Codex `remove_first_item` → `remove_corresponding_for`).
+* Synthetic ids are derived, not random no-increment: `synthetic:<call id>`
+  hashed into a stable token so two normalizations of the same history are
+  identical, and so the API never sees a synthetic id that collides with a
+  real one.
+
+### P5 — Turn budgets and interruption semantics
+
+Today one number (`taskTimeoutSec`, default 300 s) both delimits an IM turn
+and hard-kills any tool execution in flight, which is what manufactures pads.
+Proposed split (needs product input, Q5):
+
+* per-source budget: web 15 min (`agentTurnTimeout`), IM 300 s, cron
+  configurable;
+* on budget expiry, stop *feeding* the turn but let the in-flight tool
+  finish and be recorded (bounded grace), so the history gets a real result
+  instead of a pad;
+* if the grace expires too, the pad is the correct outcome — and it is now
+  guaranteed to be a single, truthful, idempotent reply (P0+P3).
+
+### P6 — Archive integrity and operations
+
+* Fix the NUL-byte archive failure (`0x00` in tool output must be escaped or
+  stripped before `AppendSessionMessage`) so the archive and the working set
+  cannot diverge.
+* Add a checker the on-call can run against a live database (the analysis
+  used during the incident, productised):
+
+```bash
+fastagent doctor sessions --agent <id>       # flags sessions with
+                                             # duplicate / orphan / missing replies
+fastagent doctor sessions --fix --agent <id> # drops duplicate pads (P0 repair,
+                                             # backed up first)
+```
+
+## Alternatives considered
+
+* **Route every entry point through `taskqueue.Queue` (per chat key).**
+  Rejected as the primary mechanism: the queue keys on
+  `channel:accountID:chatID`, and the session — the thing that owns history —
+  can be shared across channels (`shared_identity`) or reached through
+  several URL tokens (`recoverWebTriple`). Keying on the chat tuple would
+  leave exactly the hole we are closing. It also forces one timeout for all
+  sources (P5) and gives no place to express "queued" vs "rejected" (P2).
+  The queue stays as the IM/cron transport; the gate becomes the authority
+  everyone passes.
+* **Auto-steer everything while busy (Codex's `StartOrSteer` for user input).**
+  Rejected by decision D2 for the dashboard: a mid-turn user message changing
+  the running turn's direction is a product choice, and the UI already offers
+  it explicitly. Not rejected for IM (Q1).
+* **Advisory lock in the store (Postgres) instead of in-process.**
+  Deferred: it is the only way to make W hold across gateway replicas, but it
+  adds a round-trip to every turn and couples the agent loop to the store for
+  a property that is currently only violated inside one process. Recorded as
+  Q6 with the sandbox-lease design as the precedent to copy when needed.
+* **Make the provider layer (wire sanitizer) the only defence.**
+  Rejected: it is per-provider (Anthropic needed its own sweep), it runs after
+  compaction and truncation have already shaped the prompt, and it silently
+  rewrites the request without telling anyone — the incident survived a
+  release precisely because the OpenAI builder looked "defensive enough".
+* **Rewrite history on every anomaly (self-healing store).**
+  Rejected: destroys the audit trail and prompt cache stability, and hides
+  the concurrency defect instead of removing it.
+
+## Implementation plan
+
+Each phase is independently shippable and test-first. P0 is already in the
+working tree.
+
+| Phase | Change | Files | Tests first |
+|---|---|---|---|
+| **P0** ✅ | Drop duplicate tool replies at wire build; scope pads to the turn's own ids; thread a real ctx into the compaction summarizer; repair the incident session's stored history | `internal/provider/openai.go`, `internal/provider/provider.go`, `internal/agent/loop.go`, `internal/agent/compaction.go`, `internal/agent/slash.go` | `openai_dangling_tool_test.go` (+2), `pad_orphan_tool_test.go` (new, +2), `compaction_test.go` (+1) |
+| **P0.5** | Build and deploy P0 (`./build-image.sh dev` → verify → `prod`). Prod still runs `6345e2b`, i.e. the old pad path. | — | Appendix C checklist |
+| **P1** ✅ | `Session.AcquireTurn/ReleaseTurn` (FIFO, ctx-aware, no leak); acquired in `HandleMessage` + `HandleMessageStream` before the plan-mode branch, released outermost so the pad and leftover-steer writers stay inside the turn; admission waits >1 s logged | `internal/session/manager.go`, `internal/agent/loop.go` | `internal/session/turn_gate_test.go` (serialize, FIFO, cancel-while-queued, cancel-at-handoff race), `internal/agent/turn_gate_test.go` (waits for in-flight turn; queued turns serialized, roles `user,assistant,user,assistant`); gateway e2e still to come |
+| **P1b** ✅ | Queued-state UX modelled on Codex's `PendingInputPreview`: `queued` event, queue block above the composer with `↳ text`, `(n ahead)`, and Edit/Cancel actions backed by a new withdraw endpoint (`/api/chat/cancel`, `agent.WithAdmissionSignal` marks the point of no return) | `internal/agent/loop.go`, `internal/agent/admission.go`, `internal/setup/handlers.go`, `internal/setup/handlers_chat_cancel.go` (new), `internal/setup/server.go`, `web/src/components/chat-screen.tsx`, `web/src/lib/api.ts` | `TestRunTurnQueuesUserSourceAndEmitsQueuedEvent`, `TestWithAdmissionSignalClosesWhenTurnStarts`, `TestPendingTurnRegistryWithdrawContract`, `TestPendingTurnKeyIsolatesTabsAndSessions`; `tsc --noEmit` clean; handler-level "queued POST still streams the reply" test still to come |
+| **P2** ✅ | `TurnMode` + `ErrTurnNotAdmitted` + `RunTurn`; gateway parks refused automatic turns and retries them at the next idle point instead of blocking a queue worker | `internal/agent/admission.go` (new), `internal/gateway/deferred_turns.go` (new), `internal/gateway/gateway.go` | `admission_test.go` (refusal, queued event + position, source policy), `deferred_turns_test.go` (FIFO drain, busy skip, budget expiry) |
+| **P3** ✅ | `normalizeForPrompt` applied to the prompt in both loops (+ idempotent conditional pad); `provider.Message.EffectiveToolCalls()` added so a call declared only inside `RawAssistant` is still recognised, and the OpenAI wire scanner reuses it instead of parsing raw a second time | `internal/agent/normalize.go` (new), `internal/agent/loop.go`, `internal/provider/provider.go`, `internal/provider/openai.go` | `internal/agent/normalize_test.go` (7 shapes incl. the incident's pad+real duplicate, raw-assistant declaration, duplicate declaration; each case also asserts idempotence and input immutability), `pad_orphan_tool_test.go` (+1 idempotence) |
+| **P4** | Pair-aware truncation; retire `safeCompactionCutoff`'s special case; stable synthetic ids | `internal/agent/compaction.go`, `internal/agent/normalize.go` | `compaction_test.go` additions; `TestNormalizeForPromptIsStable` |
+| **P5** | Per-source turn budget + graceful interrupt (stop feeding the turn, let the tool finish within a grace window) | `internal/taskqueue/queue.go`, `internal/gateway/gateway.go`, `internal/agent/loop.go` | `TestTurnBudgetAllowsToolToFinish`, `TestTurnBudgetPadsWhenGraceExpires` |
+| **P6** | Escape NUL in archived tool output; `fastagent doctor sessions` (report + `--fix`) | `internal/session/store_adapter.go`, `internal/store/database.go`, `cmd/fastclaw/cmd_doctor.go` (or `cmd/session.go`) | store test for NUL round-trip; checker tests against the incident shapes |
+
+## Test plan
+
+### Unit
+
+* **Session gate** ✅ — `TestAcquireTurnSerializesCallers`,
+  `TestAcquireTurnHandsOffFIFO`, `TestAcquireTurnContextCancelDoesNotLeakSlot`,
+  `TestAcquireTurnCancelAtHandoffDoesNotStrandSlot` (200-iteration race).
+* **Agent admission** ✅ — `TestHandleMessageWaitsForInFlightTurn` (no
+  provider call, no history write, no return while the slot is held),
+  `TestHandleMessageSerializesQueuedTurns` (history roles are exactly
+  `user,assistant,user,assistant`, contents in arrival order).
+* **normalizeForPrompt** ✅ — `TestNormalizeForPromptShapes`: well-formed
+  history unchanged, pad+real duplicate collapsed, the incident's 2-calls-4-
+  replies shape, orphan reply dropped, unanswered call padded in place, late
+  reply pulled next to its call, empty input; every case also asserts
+  idempotence and that the input slice was not mutated.
+  `TestNormalizeForPromptReadsRawAssistantCalls` (call declared only in
+  `RawAssistant`), `TestNormalizeForPromptStripsDuplicateCallDeclaration`.
+* **Pad** ✅ — `TestPadOrphanToolResultsLeavesOtherTurnsToolUseAlone`,
+  `TestPadOrphanToolResultsNoTurnIDsIsNoop`,
+  `TestPadOrphanToolResultsIsIdempotent`.
+* **Admission** ✅ — `TestRunTurnDefersAutomaticSourceWhenSessionIsBusy`
+  (refused, nothing written), `TestRunTurnQueuesUserSourceAndEmitsQueuedEvent`
+  (queues, emits `queued` with position 1, runs after release),
+  `TestTurnModeForSourcePolicy`.
+* **Gateway parking** ✅ — `TestDeferredTurnsDrainPolicy` (busy sessions are
+  skipped, per-chat FIFO head only, one submission per idle observation),
+  `TestDeferredTurnsDropsMessagesPastBudget`.
+* **Wire builder** ✅ — the P0 tests stay as defence-in-depth
+  (`TestToAPIMessagesDropsDuplicateToolReplies`,
+  `TestToAPIMessagesDropsDanglingToolReplies`,
+  `TestToAPIMessagesKeepsAnsweredPairAndDropsStrayReply`).
+* **Still to write** — a `toolu_*`/`call_*` mixed-provider snapshot fixture
+  (the incident's real session mixed Anthropic and DeepSeek ids) and a
+  multi-turn transcript with compaction in the middle.
+
+### Integration / e2e
+
+* `TestConcurrentWebAndCronTurnSerialize`: a web POST and a cron fire against
+  one session; asserts one turn at a time, no interleaving, and that the
+  final history has no duplicate or missing replies.
+* `TestQueuedTurnRunsAfterLongTool`: turn A holds the slot through a slow
+  tool; turn B (queued) must not append its user message until A released.
+* `TestGoalContinuationDoesNotDeadlock`: continuation fired from
+  `runPostTurn` while the slot is held by that same turn.
+* `TestCronTickDoesNotInterleaveWithWebTurn`: the incident's exact timing
+  (cron task in a long tool + user message during it), asserting the session
+  never contains a second reply for one `tool_call_id`.
+* Replay harness: `FA_DIAG_HISTORY=<jsonl> go test ./internal/provider/ -run TestZZReplay`
+  (offline, not part of CI) for forensic runs; the incident's 13 snapshots
+  replay clean under both the deployed and the P3 rules.
+
+### Verification against production
+
+* `fastagent doctor sessions --session hJKMWwtOp3mJOtqN8Uz2mW` returns clean
+  after the P0 repair (it did: 517 → 512 messages, 0 duplicate ids).
+* After deploy: grep the gateway logs for
+  `must be a response to a preceding message` over a 24 h window and for
+  `padding orphan tool_use` paired with a later real result for the same id.
+* `sessions.messages` scan for duplicate `toolCallId` across all sessions.
+
+## Rollout, verification, rollback
+
+1. **P0.5** — ship the landed fixes to `development`, replay the incident
+   session through a live conversation, then `production`.
+2. **P1** — ship behind a config flag (`turn_gate_enabled`, default on in
+   dev) so it can be disabled without a rollback; watch
+   `turn admission wait` logs for p99 and for waits that exceed a turn
+   budget (P5 will make those a first-class outcome).
+3. **P2–P4** — no flag needed; each is covered by unit + integration tests
+   and by the doctor checker before/after.
+4. **Rollback** — the gate holds no persisted state, so rolling the image
+   back is complete; the data repair is independent and reversible from the
+   backup taken during the incident (`/tmp/fa-diag/backup_session_*.json`).
+
+## Open questions for review
+
+| # | Question | Current default in this doc |
+|---|---|---|
+| **Q1** | IM inbound while a turn is running: keep auto-steer, or queue like the dashboard? | keep auto-steer (D3) |
+| **Q2** | Does the dashboard need a visible "排队中" state, or is the typing indicator enough? | yes, add one (P1b) |
+| **Q3** | Cron/goal on a busy session: block the queue worker (P1) or `NotAdmitted` + re-queue (P2)? | P1 blocks (bounded by the queue timeout), P2 re-queues |
+| **Q4** | Keep synthetic "interrupted" replies persisted, or move them to prompt-only (Codex parity) and render them in the UI from the call? | keep persisted, make idempotent (P3); revisit |
+| **Q5** | Per-source turn budgets and the graceful-interrupt semantics (P5) | web 15 min, IM 300 s, grace 60 s |
+| **Q6** | Do we need cross-replica session locking (store lease) now, or is in-process enough? | in-process now; lease if we see cross-pod overlap |
+| **Q7** | Should the checker ship as a CLI subcommand or a test-only harness? | CLI subcommand (`doctor sessions`), P6 |
+
+## Appendix A — incident evidence
+
+Session: agent `agt_cda27bbfbf4a84e2dfa6`, `session_key` /
+`chat_id` `hJKMWwtOp3mJOtqN8Uz2mW`, owner
+`u_396a1f8812880c67e6ff`, model `deepseek/deepseek-flash` at failure time
+(`claude-sonnet-4-6` earlier and later); cron job `kronos-crypto-resume`;
+gateway image `20260913111345-fastagent-6345e2b`.
+
+```text
+11:30:00.011 firing store-backed cron job  id=5498f0ea-… name=kronos-crypto-resume
+11:30:00.292 task submitted  task-1789299000292-1 chat_key=web::hJKMWwtOp3mJOtqN8Uz2mW
+11:34:32.776 turn: refreshing skills   chat_id=hJKMWwtOp3mJOtqN8Uz2mW   ← second turn (dashboard)
+11:34:41.381 hook: before tool call    tool=list_cron_jobs / tool=exec
+11:35:00.294 tool execution error      tool=exec  (e2b snapshot failure, tool still in flight)
+11:35:00.439 WARN padding orphan tool_use with stopped result toolCallID=call_00_38dF…S13513
+11:35:00.567 WARN padding orphan tool_use with stopped result toolCallID=call_01_3nA…hH6960
+11:35:00.897 task completed            duration_ms=300604      ← 300 s timeout killed turn A
+11:35:32.146 openai request            api.deepseek.com/v1/chat/completions
+11:35:32.957 API error 400: Messages with role 'tool' must be a response to a
+             preceding message with 'tool_calls'
+…same 400 on every cron tick through 13:45:02 (40 error lines on the pod that
+served the ticks; the second replica logged the 19:50 repeat below)…
+19:50:06.124 same 400 after the agent was switched back to deepseek-flash
+```
+
+History snapshot analysis (13 `history_*.jsonl` snapshots written by
+compaction, replayed through the repo's own wire builder):
+
+| Snapshot | Duplicate replies | Provider | Outcome |
+|---|---|---|---|
+| 11:30:01, 11:34:33 | 0 | deepseek | ok |
+| 11:35:32 … 13:45:02 (11 snapshots) | 1 run with 4 replies for 2 calls | deepseek | 400 every time |
+| same snapshots | 1 | anthropic | ok |
+| 19:50:05 | 1 | deepseek | 400 |
+
+Stored history after the incident: 5 `tool_call_id`s answered twice
+(`…OfGixT0207`, `…GCBlDA3546`, `…FgPCS13513`, `…v22vhH6960`, `…kP8wt7ABwG`);
+in every one of the five the first reply is the
+`(stopped — execution was interrupted before the tool returned)` pad and the
+second is the real result.
+
+## Appendix B — the P0 repair (already applied)
+
+1. `internal/provider/openai.go` — a `tool_call_id` may be answered at most
+   once on the wire; later replies are dropped (first reply wins, i.e. the one
+   adjacent to the declaring assistant).
+2. `internal/agent/loop.go` — `padOrphanToolResults(sess, turnToolCallIDs)`
+   pads only ids the current turn declared, resolved against the whole
+   session; the pad literal is shared as `provider.StoppedToolResult`.
+3. `internal/agent/compaction.go` — summariser receives the live `ctx`
+   (`API error`-free compaction; previously `net/http: nil Context`).
+4. Production data — the incident session's `sessions.messages` went from 517
+   to 512 entries (5 duplicate pads removed, real results kept) and
+   `session_messages` from 573 to 572 rows; the row was backed up first to
+   `/tmp/fa-diag/backup_session_20260913T202427Z.json`. Verification: the
+   repaired history replays through the wire builder with 0 rejected replies
+   and 0 runs with extra replies under **both** the deployed and the new
+   rules — i.e. the repair alone unblocked the session on the old binary.
+
+## Appendix C — deployment checklist for P0.5
+
+```bash
+cd /Users/reina/Project/tokenaissance/fastagent
+go test ./internal/provider/ ./internal/agent/ ./internal/session/ -count=1
+./build-image.sh dev                       # tag: <ts>-fastagent-<sha>, namespace development
+# smoke: run one turn in the incident session, check logs for the 400 string
+./build-image.sh prod                      # requires typing 'production'
+```
+
+Post-deploy verification:
+
+```bash
+kubectl logs -n production -l app=fastagent --since=24h | grep -c "must be a response to a preceding"
+# expect 0
+```
+
+### Build-time gotcha (2026-09-14)
+
+`docker build` needs the **amd64** base images (`node:22-alpine`,
+`golang:1.25-alpine`, `alpine:3.21`) because the helm images are built with
+`--platform linux/amd64`, while a developer Mac may only hold arm64 copies.
+When `registry-1.docker.io` is unreachable (it was, twice: `Bad Gateway`, then
+`context deadline exceeded`), the build dies in "load metadata" before any
+layer runs. Working around it without touching the Docker daemon:
+
+```bash
+for img in node:22-alpine golang:1.25-alpine alpine:3.21; do
+  docker pull --platform linux/amd64 "docker.m.daocloud.io/library/$img"
+  docker tag "docker.m.daocloud.io/library/$img" "$img"     # digest-identical upstream layers
+done
+```
+
+That replaces the local arm64 tags — re-pull them (`docker pull <img>`) if an
+arm64 build is needed later. The in-container `pnpm install` uses npmjs
+(reachable) and `go mod download` falls back to `direct` → github.com
+(reachable), so only the base images need the mirror.
