@@ -322,11 +322,30 @@ func (p *LifecyclePool) sleepOrRelease(sleeper ScopeSleeper, sc sandboxScope) bo
 		// Nothing to sleep: fall through and release.
 		return false
 	default:
-		// Keep the sandbox: never destroy what we could not sleep.
-		slog.Warn("sandbox sleep failed; leaving it running",
+		// Keep the sandbox: never destroy what we could not sleep — and keep it
+		// in the sweep set, or it would drop out of idle tracking entirely and
+		// run (and bill) until the process exits. A sleep that fails now may work
+		// at the next sweep.
+		slog.Warn("sandbox sleep failed; leaving it running and retrying next sweep",
 			"agent", sc.agentID, "session", sc.sessionID, "error", err)
+		p.keepForNextSweep(sc)
 		return true
 	}
+}
+
+// keepForNextSweep restores the idle bookkeeping evictIdle removes before a
+// teardown attempt, timestamped now so the next attempt happens one idleTTL from
+// here rather than immediately. It is a no-op when a racing Get already
+// re-registered the scope (which is the other reason an entry can reappear).
+func (p *LifecyclePool) keepForNextSweep(sc sandboxScope) {
+	k := poolKey(sc.agentID, sc.projectID, sc.sessionID)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if _, live := p.lastUsed[k]; live {
+		return
+	}
+	p.lastUsed[k] = time.Now()
+	p.scopes[k] = sc
 }
 
 // extendBudget moves the sandbox's expiry past the end of an operation whose
@@ -504,8 +523,11 @@ func (l *lazyExecutor) Exec(ctx context.Context, command string, timeout time.Du
 	started := time.Now()
 	l.pool.beginUse(l.scope)
 	l.pool.extendBudget(ctx, l.scope, timeout)
+	// Deferred rather than called inline: the post-exec sync below reads the
+	// sandbox, and a scope that is no longer marked in use could be swept
+	// (paused) in the middle of it.
+	defer l.pool.endUse(ctx, l.scope, started)
 	out, execErr := ex.Exec(ctx, command, timeout)
-	l.pool.endUse(ctx, l.scope, started)
 	// Post-exec sync only for cloud sandboxes (RemoteWorkspace marker).
 	// Docker's /workspace is bind-mounted to host so files appear
 	// instantly with no sync needed; rerunning the snapshot+Put cycle

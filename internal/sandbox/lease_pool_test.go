@@ -67,6 +67,9 @@ type fakeLeaseStore struct {
 	// SetSandboxLeaseState scripting: the running/paused annotation.
 	states   []string
 	stateErr error
+	// ops records every method in call order, so tests can assert ordering
+	// between two writes that touch the same row.
+	ops []string
 }
 
 func (f *fakeLeaseStore) GetSandboxLease(_ context.Context, _ string) (*SandboxLeaseRecord, error) {
@@ -112,6 +115,7 @@ func (f *fakeLeaseStore) ReleaseSandboxLease(_ context.Context, _, _ string, _ i
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.releaseCalls++
+	f.ops = append(f.ops, "release")
 	return f.releaseOK, f.releaseErr
 }
 
@@ -123,6 +127,7 @@ func (f *fakeLeaseStore) ReplaceSandboxLease(
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.replaceCalls++
+	f.ops = append(f.ops, "replace")
 	f.replaceIDs = append(f.replaceIDs, sandboxID)
 	if f.replaceErr != nil {
 		return 0, f.replaceErr
@@ -168,7 +173,17 @@ func (f *fakeLeaseStore) SetSandboxLeaseState(_ context.Context, _, _, state str
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.states = append(f.states, state)
+	f.ops = append(f.ops, "state="+state)
 	return f.stateErr
+}
+
+// opLog returns the recorded methods in call order.
+func (f *fakeLeaseStore) opLog() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, len(f.ops))
+	copy(out, f.ops)
+	return out
 }
 
 func (f *fakeLeaseStore) recordedStates() []string {

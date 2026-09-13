@@ -160,6 +160,13 @@ modes each map to a test in the failure-semantics table below.
   considered idle (`inUse`), and a sleep that fails for any reason other than
   "the instance is already gone" leaves the sandbox **running** — a provider
   that cannot pause must not turn into a destroy.
+  The `paused` annotation is written **after** the lease renew, not before: the
+  renew reconciles, and reconciling a pending rebuild publishes the replacement
+  — which stamps the row `running`, because a rebuilt instance is running by
+  definition. The other order would leave the row describing a sleeping sandbox
+  as awake. The annotation carries the same owner + liveness CAS as the other
+  writes, so a pod that lost the scope (or a row that has since expired) cannot
+  be annotated at all.
 
 ### Failure semantics (registry errors fail open)
 
@@ -187,7 +194,7 @@ sandbox, even if that means leaking one until TTL/expiry.
 | Create accepted but the edge cannot route the id yet | `waitUntilRoutable` retries while envd answers 502/404 (1.5s interval, 60s bound) and fails creation naming the sandbox if it never comes up; a verdict that is not "gone" (401 from a stale token, 500 inside the sandbox) fails immediately without retrying; an instance that never becomes routable is destroyed rather than leaked | `TestE2BWaitUntilRoutable` |
 | Hydrate hits a cut stream or a 502 right after create | Retries the network steps up to 3 times, 1.5s apart — a container that was created moments ago can cut one stream while it finishes booting. Only "not routable yet" is retried: a 401 or a permission error is a verdict and fails immediately. The bundle is built once, outside the loop | `TestHydrateRetriesATruncatedStream`, `TestHydrateDoesNotRetryAVerdict` |
 | Idle sweep, backend can pause | Pauses the instance, renews the row (the paused instance is free to keep, so the row that names it should survive too) and keeps `hydrated` — the sandbox still holds its filesystem. A scope with an operation in flight is skipped entirely | `TestLifecycleIdleSleepsInsteadOfReleasing`, `TestLifecycleDoesNotEvictWhileAnOperationRuns` |
-| Idle sweep, sleep fails (a provider without pause, a transient API error) | Leaves the sandbox running and logs a warning: destroying what could not be slept would be the worse outcome. Only "there was nothing to sleep" falls through to the normal release | `TestLifecycleKeepsSandboxItCouldNotSleep`, `TestLifecycleFallsBackToReleaseWhenThereIsNothingToSleep` |
+| Idle sweep, sleep fails (a provider without pause, a transient API error) | Leaves the sandbox running, logs a warning, and keeps the scope in the idle set so the next sweep retries — dropping it would leave a running, billed sandbox that nothing tracks. Only "there was nothing to sleep" falls through to the normal release | `TestLifecycleKeepsSandboxItCouldNotSleep`, `TestAFailedSleepKeepsTheScopeInTheSweepSet`, `TestLifecycleFallsBackToReleaseWhenThereIsNothingToSleep` |
 | Operation longer than the sandbox's remaining TTL | `ScopeExtender` moves the expiry to `budget + 2 min` before an operation of ≥ 60s, so the auto-pause never lands mid-operation (it would cut the stream). Shorter operations may still straddle an expiry seconds away; that surfaces as a truncated stream and the caller can retry | `TestLifecycleExtendsTheSandboxBeforeALongOperation`, `TestE2BExtendTimeoutMovesTheExpiry` |
 | envd answers 401 (the token was superseded, e.g. across a pause) | Reconnects for the current token, records it as pending publication (the next reconcile writes it to the row through the rebuild-publish path) and retries once — the sandbox and its id are untouched | `TestE2BRefreshesASupersededEnvdToken`, `TestStaleEnvdTokenClassification` |
 | Adopting a scope whose row says `paused` | Calls `connect` before use: it resumes the instance, extends its TTL and returns the current token, so the first call does not pay a 401 first. Marked `running` afterwards. A running row skips this entirely | `TestAdoptingAPausedSandboxResumesIt`, `TestAdoptingARunningSandboxDoesNotConnect` |
@@ -328,6 +335,9 @@ Alternatives rejected as heavier than the problem:
   (`ReplaceSandboxLease` is the rebuild-publish write)
 - `internal/store/sandbox_leases.go` — Postgres/sqlite adapter (DBStore) +
   `EncryptedSandboxLeaseStore` (at-rest token encryption decorator)
+- `internal/store/database.go` — the `sandbox_leases` DDL plus
+  `migrateSandboxLeasesAddState`, the idempotent retrofit that adds `state` /
+  `paused_at` to a table created before them
 - `internal/cryptoutil/cipher.go` — neutral at-rest credential cipher
   contract shared with MCP OAuth (`port.Cryptor` aliases it)
 - `internal/sandbox/http_error.go` — `sandboxHTTPError`: every provider HTTP
@@ -508,6 +518,11 @@ Threat model and controls:
   be paused mid-flight. The stream is cut, the process survives in the snapshot,
   and the caller sees a truncated response it can retry — accepted, because
   closing that window means a call per tool call.
+- **The in-use marker covers the post-exec sync too.** The sync reads the
+  sandbox, so the scope stays marked busy until it finishes; otherwise the sweep
+  could pause the sandbox mid-sync. That also means a wedged sync holds the scope
+  out of idle handling for its duration — the same trade as a long exec, and the
+  same reason the sweep prefers its own clock over a lease on the work.
 
 ## Test topology
 

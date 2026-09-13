@@ -180,12 +180,14 @@ func (d *DBStore) SetSandboxLeaseState(ctx context.Context, scopeKey, owner, sta
 	if state == "paused" {
 		pausedAt = now
 	}
+	// Same liveness guard as the other writes: annotating an expired row would
+	// say something about a sandbox that is no longer anyone's.
 	_, err := d.handle().ExecContext(ctx,
 		fmt.Sprintf(`UPDATE sandbox_leases
 			SET state = %s, paused_at = %s, updated_at = %s
-			WHERE scope_key = %s AND owner = %s`,
-			d.ph(1), d.ph(2), d.ph(3), d.ph(4), d.ph(5)),
-		state, pausedAt, now, scopeKey, owner)
+			WHERE scope_key = %s AND owner = %s AND expires_at > %s`,
+			d.ph(1), d.ph(2), d.ph(3), d.ph(4), d.ph(5), d.ph(6)),
+		state, pausedAt, now, scopeKey, owner, now)
 	return err
 }
 

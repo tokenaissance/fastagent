@@ -1953,18 +1953,24 @@ func (p *E2BExecutorPool) SleepScope(ctx context.Context, agentID, projectID, se
 		}
 		return false, err
 	}
-	// Record the lifecycle for the next reader (and for the future reaper).
-	// Advisory and best-effort: a failed annotation must not undo a pause that
-	// already happened.
-	if serr := p.leaseStore.SetSandboxLeaseState(ctx, key, p.ownerID, "paused"); serr != nil {
-		slog.Warn("sandbox paused but its lease state was not recorded",
-			"sandboxID", ex.identSnapshot().id, "scopeKey", key, "error", serr)
-	}
 	// The instance is free to keep (paused sandboxes are unbilled and outside
 	// the concurrency limit), so keep the row that names it alive too.
 	if err := p.renewLeaseLocked(ctx, key, ex, agentID, projectID, sessionID); err != nil {
 		slog.Warn("sandbox paused but its lease renew failed",
 			"sandboxID", ex.identSnapshot().id, "scopeKey", key, "error", err)
+	}
+	// Record the lifecycle LAST, and deliberately after the renew: the renew
+	// reconciles, and reconciling a pending rebuild publishes the replacement
+	// through ReplaceSandboxLease — which stamps the row 'running' because a
+	// rebuilt instance is running by definition. Writing 'paused' first would be
+	// overwritten by that publish, leaving the row describing a sandbox that is
+	// asleep as if it were awake.
+	//
+	// Advisory and best-effort: a failed annotation must not undo a pause that
+	// already happened.
+	if serr := p.leaseStore.SetSandboxLeaseState(ctx, key, p.ownerID, "paused"); serr != nil {
+		slog.Warn("sandbox paused but its lease state was not recorded",
+			"sandboxID", ex.identSnapshot().id, "scopeKey", key, "error", serr)
 	}
 	return true, nil
 }

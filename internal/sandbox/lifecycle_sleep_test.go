@@ -190,6 +190,107 @@ func TestLifecycleFallsBackToReleaseWhenThereIsNothingToSleep(t *testing.T) {
 	}
 }
 
+// A failed sleep must not drop the scope out of idle tracking: the sandbox is
+// still running and still billed, so the sweep has to try again. (evictIdle
+// removes the bookkeeping before it attempts the teardown, so the failure path
+// has to put it back.)
+func TestAFailedSleepKeepsTheScopeInTheSweepSet(t *testing.T) {
+	inner := &sleepablePool{fakePool: *newFakePool(), sleepErr: errors.New("pause API unavailable")}
+	lp := NewLifecyclePool(inner, 20*time.Millisecond, 5*time.Millisecond)
+	lp.longOpRenew = time.Hour
+	lp.Start()
+	defer lp.CloseAll()
+
+	ex, err := lp.Get(context.Background(), "erin", "", "s")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if _, err := ex.Exec(context.Background(), "true", time.Second); err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for inner.sleepCount() < 2 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := inner.sleepCount(); got < 2 {
+		t.Fatalf("sleep attempts = %d, want the sweep to retry after a failure", got)
+	}
+	lp.mu.Lock()
+	_, tracked := lp.lastUsed[poolKey("erin", "", "s")]
+	lp.mu.Unlock()
+	if !tracked {
+		t.Fatal("a scope whose sleep failed must stay in idle tracking")
+	}
+}
+
+// blockingSnapshotExecutor holds the post-exec sync open, so the test can look
+// at the in-use marker while the sync is reading the sandbox.
+type blockingSnapshotExecutor struct {
+	fakeExecutor
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (e *blockingSnapshotExecutor) IsRemoteWorkspace() {}
+
+func (e *blockingSnapshotExecutor) SnapshotWorkspace(context.Context) (map[string][]byte, error) {
+	close(e.entered)
+	<-e.release
+	return map[string][]byte{"artifact.txt": []byte("hi")}, nil
+}
+
+type blockingSnapshotPool struct{ ex *blockingSnapshotExecutor }
+
+func (p *blockingSnapshotPool) Get(context.Context, string, string, string) (Executor, error) {
+	return p.ex, nil
+}
+func (p *blockingSnapshotPool) Release(string, string, string) error { return nil }
+func (p *blockingSnapshotPool) CloseAll()                            {}
+func (p *blockingSnapshotPool) Backend() string                      { return "snapshotting" }
+
+// The post-exec sync reads the sandbox, so the scope has to stay marked in use
+// until it finishes — otherwise the sweeper can pause (or release) the sandbox
+// in the middle of the sync.
+func TestThePostExecSyncStaysInsideTheInUseWindow(t *testing.T) {
+	inner := &blockingSnapshotPool{ex: &blockingSnapshotExecutor{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}}
+	lp := NewLifecyclePool(inner, time.Hour, time.Hour)
+	lp.SetWorkspace(newFakeWorkspace())
+	defer lp.CloseAll()
+
+	ex, err := lp.Get(context.Background(), "erin", "", "s")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := ex.Exec(context.Background(), "true", time.Second)
+		done <- err
+	}()
+	<-inner.ex.entered
+
+	lp.mu.Lock()
+	inFlight := lp.inUse[poolKey("erin", "", "s")]
+	lp.mu.Unlock()
+	if inFlight == 0 {
+		t.Fatal("the scope must stay marked in use while the post-exec sync reads it")
+	}
+
+	close(inner.ex.release)
+	if err := <-done; err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	lp.mu.Lock()
+	after := lp.inUse[poolKey("erin", "", "s")]
+	lp.mu.Unlock()
+	if after != 0 {
+		t.Fatalf("in-use marker left behind after the operation: %d", after)
+	}
+}
+
 func TestSleepOrReleaseDecisionTable(t *testing.T) {
 	sc := sandboxScope{agentID: "a", sessionID: "s"}
 	cases := []struct {
