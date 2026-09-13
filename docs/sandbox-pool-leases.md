@@ -253,6 +253,14 @@ concurrency limit and kept indefinitely; continuous runtime is capped per plan
 (Hobby 1h, Pro 24h) and resets on pause+resume; concurrent *running* sandboxes
 are 20 (Hobby) / 100 (Pro, add-on to 1,100) — [billing](https://docs.e2b.dev/billing.md).
 
+One commit-history note so a bisect lands on the right story: step 2's
+`LeaseRenewer` hook (`E2BExecutorPool.RenewLease`) actually shipped a commit
+earlier, inside the pause-on-timeout change, and was wired up here. The pause
+commit's message does not mention it. It is a harmless unused method at that
+point in the history, and it was left in place rather than rewriting the
+branch — at the time of writing there were 14 commits after it, seven of them
+another agent's, on a branch still being written to.
+
 ### Stage 2b: how a rebuild reaches the lease
 
 A sandbox that idles out is detected by an envd call returning `502`/`404`,
