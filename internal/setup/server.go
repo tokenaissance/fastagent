@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/fastclaw-ai/fastclaw/internal/agent"
@@ -89,6 +90,12 @@ type Server struct {
 	chatEvents *agent.EventHub
 	usage      usage.Meter
 	startedAt  time.Time
+	// pendingTurns tracks dashboard chat POSTs whose turn has not started yet
+	// (queued behind another turn on the same session) so the client can
+	// withdraw them. Keyed by uid|agent|session|turnID — see
+	// handlers_chat_cancel.go.
+	pendingTurnsMu sync.Mutex
+	pendingTurns   map[string]*pendingWebTurn
 	// runtimeMgr powers the coding-agent project runtime (live dev server
 	// + preview). Optional: nil when the deployment hasn't wired a
 	// sandbox-backed runtime, in which case the /runtime endpoints return
@@ -283,6 +290,9 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("POST /api/chat/stream", auth(s.handleChatStream))
 	mux.HandleFunc("POST /api/chat/team/stream", auth(s.handleTeamChatStream))
 	mux.HandleFunc("POST /api/chat/steer", auth(s.handleChatSteer))
+	// Withdraw a queued (not yet started) turn — the dashboard's "Cancel" /
+	// "Edit" action on a queued message.
+	mux.HandleFunc("POST /api/chat/cancel", auth(s.handleChatCancel))
 	mux.HandleFunc("GET /api/chats", auth(s.handleChats))
 	mux.HandleFunc("GET /api/chat/history", auth(s.handleChatHistory))
 	mux.HandleFunc("GET /api/chat/todo", auth(s.handleChatTodo))

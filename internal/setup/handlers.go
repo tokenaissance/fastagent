@@ -270,9 +270,9 @@ type settingNamespace struct {
 	// (objectStore, toolProviders, tools) while the storage name is the
 	// namespace, and two namespaces can share one wire key (skills.install /
 	// skills.entries both hang off "skills").
-	jsonPath  []string
-	dst       func(*config.Config) interface{}
-	collect   func(*config.Config) map[string]interface{}
+	jsonPath []string
+	dst      func(*config.Config) interface{}
+	collect  func(*config.Config) map[string]interface{}
 }
 
 // namespacesInBody returns the namespaces the request body actually carries.
@@ -1000,6 +1000,12 @@ func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
 type chatRequest struct {
 	AgentID   string `json:"agentId,omitempty"`
 	SessionID string `json:"sessionId"`
+	// TurnID is a client-generated id for this POST. It keys the pending-turn
+	// registry so the client can withdraw a *queued* turn ("Edit"/"Cancel" on
+	// the queued-message block) without being able to touch another tab's
+	// turn. Optional: when empty, withdrawal is impossible but everything
+	// else behaves the same.
+	TurnID string `json:"turnId,omitempty"`
 	// ProjectID, when non-empty AND the session row doesn't yet exist,
 	// is the "this chat belongs to project X" hint the URL carries
 	// (`?project=<pid>`) before the first message. Once the row exists
@@ -1244,6 +1250,9 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	// continuation's events can reach this handler's safety-net check.
 	defer cancel()
 	agentCtx = agent.ContextWithStream(agentCtx, nil, s.dataStore, hub, uid, agentID, req.SessionID)
+	// admissionStarted closes when the agent holds the session's turn slot;
+	// until then this turn is still queued and may be withdrawn.
+	agentCtx, admissionStarted := agent.WithAdmissionSignal(agentCtx)
 
 	agentDone := make(chan struct{})
 	go func() {
@@ -1252,6 +1261,21 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		// streamCtx attached above (persist + hub). The legacy channel
 		// path is no longer needed for this handler.
 		_ = ag.HandleWebChatStream(agentCtx, req.SessionID, req.ProjectID, uid, msgText, imageURLs, req.Params, nil)
+	}()
+
+	// Register this turn so a *queued* one can be withdrawn from the UI
+	// (Codex offers the same for its queued follow-up inputs). The signal
+	// fires when the agent actually holds the session's turn slot; before
+	// that, canceling this context makes the turn never start.
+	turnKey := chatTurnKey(uid, agentID, req.SessionID, req.TurnID)
+	s.registerPendingTurn(turnKey, cancel)
+	defer s.unregisterPendingTurn(turnKey)
+	go func() {
+		select {
+		case <-admissionStarted:
+			s.markPendingTurnStarted(turnKey)
+		case <-agentDone:
+		}
 	}()
 
 	// Heartbeat keeps proxies (nginx 60s default, Cloudflare 100s, ELB
