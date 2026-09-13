@@ -37,4 +37,11 @@ func TestE2BCreateBodyPausesInsteadOfKilling(t *testing.T) {
 	if resume["enabled"] != true {
 		t.Fatal("autoResume must be enabled so activity wakes a paused sandbox")
 	}
+
+	// secure: true is a security decision, not a default: only secure sandboxes
+	// get an envd access token, and without one anyone holding the sandbox id —
+	// which we hand out in preview URLs — can run commands in it.
+	if body["secure"] != true {
+		t.Fatal("secure must be true: non-secure sandboxes leave envd open to anyone with the id")
+	}
 }

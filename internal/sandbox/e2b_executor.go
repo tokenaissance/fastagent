@@ -315,6 +315,109 @@ func (e *E2BExecutor) Pause(ctx context.Context, sandboxID string) error {
 	return nil
 }
 
+// ExtendTimeout pushes the instance's expiry out to now+d. Called before an
+// operation long enough to straddle that expiry: with autoPause on, an expiry
+// mid-exec pauses the sandbox and cuts our stream, which the caller experiences
+// as a truncated response even though the process itself survives in the
+// snapshot.
+//
+// e2b rewrites the TTL from the time of the request, so the caller must pass
+// the whole budget it needs (see LifecyclePool.extendBudget), not an increment.
+//
+// https://docs.e2b.dev/api-reference/sandboxes/set-sandbox-timeout.md
+func (e *E2BExecutor) ExtendTimeout(ctx context.Context, sandboxID string, d time.Duration) error {
+	if sandboxID == "" || d <= 0 {
+		return nil
+	}
+	body, _ := json.Marshal(map[string]any{"timeout": int(d.Seconds())})
+	req, err := http.NewRequestWithContext(ctx, "POST",
+		fmt.Sprintf("%s/sandboxes/%s/timeout", e2bBaseURL, sandboxID), bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", e.apiKey)
+	resp, err := e.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("e2b extend timeout %s: %w", sandboxID, err)
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	// 204: the API's documented success for this call.
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return &sandboxHTTPError{op: "e2b extend timeout " + sandboxID, status: resp.StatusCode, body: string(respBody)}
+	}
+	return nil
+}
+
+// Connect resumes the sandbox if it is paused and returns the envd access token
+// from the response. e2b returns the full `Sandbox` schema here, so this is also
+// how a token is refreshed: a secure sandbox's token can change across a pause,
+// and the row must be brought up to date before a sibling adopts it.
+//
+// The timeout in the request extends the TTL ("TTL is only extended"), which is
+// why this doubles as the "keep it alive" call.
+//
+// https://docs.e2b.dev/api-reference/sandboxes/connect-to-sandbox.md
+func (e *E2BExecutor) Connect(ctx context.Context, sandboxID string, ttl time.Duration) (string, error) {
+	if sandboxID == "" {
+		return "", nil
+	}
+	if ttl <= 0 {
+		ttl = e.timeout
+	}
+	body, _ := json.Marshal(map[string]any{"timeout": int(ttl.Seconds())})
+	req, err := http.NewRequestWithContext(ctx, "POST",
+		fmt.Sprintf("%s/sandboxes/%s/connect", e2bBaseURL, sandboxID), bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", e.apiKey)
+	resp, err := e.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("e2b connect sandbox %s: %w", sandboxID, err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	// 200 = already running, 201 = resumed.
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return "", &sandboxHTTPError{op: "e2b connect " + sandboxID, status: resp.StatusCode, body: string(raw)}
+	}
+	var out struct {
+		EnvdAccessToken string `json:"envdAccessToken"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return "", fmt.Errorf("e2b connect %s: parse response: %w", sandboxID, err)
+	}
+	return out.EnvdAccessToken, nil
+}
+
+// staleEnvdToken reports whether an envd error looks like a token that has been
+// superseded rather than a sandbox that is gone. e2b answers 401 for a token it
+// no longer accepts; the repair is to reconnect and publish the new one, not to
+// rebuild the instance.
+func staleEnvdToken(err error) bool {
+	status, ok := statusCodeOf(err)
+	return ok && status == http.StatusUnauthorized
+}
+
+// refreshEnvdToken reconnects to obtain the current token and records it as
+// pending publication: the row is updated by the next reconcile, through the
+// same path a rebuild uses, so no caller has to know the token changed.
+func (e *E2BExecutor) refreshEnvdToken(ctx context.Context, observed sandboxIdent) error {
+	token, err := e.Connect(ctx, observed.id, e.timeout)
+	if err != nil {
+		return err
+	}
+	if token == "" {
+		return fmt.Errorf("e2b connect %s returned no envd token", observed.id)
+	}
+	e.setIdent(observed.id, token, true)
+	slog.Info("e2b envd token refreshed", "sandboxID", observed.id)
+	return nil
+}
+
 // e2bCreateBody is the POST /sandboxes payload. It lives in its own function
 // because these fields are a design decision rather than incidental JSON, and
 // the wire shape should be assertable without a network seam.
@@ -341,6 +444,14 @@ func e2bCreateBody(template string, timeout time.Duration) []byte {
 		// woken by traffic and must be resumed explicitly.
 		"autoPauseMemory": true,
 		"autoResume":      map[string]interface{}{"enabled": true},
+		// envd authenticates with a per-sandbox access token, which e2b only
+		// issues for secure sandboxes ("Null for non-secure sandboxes (envd
+		// endpoints work without auth)"). Without it anyone holding the sandbox
+		// id can reach envd — and we hand the id out: preview URLs are built
+		// from it, the lease row stores it, the logs print it. The token is
+		// carried like every other credential here: encrypted in the row,
+		// refreshed from the connect/resume response when it goes stale.
+		"secure": true,
 	})
 	return body
 }
@@ -860,6 +971,12 @@ func (e *E2BExecutor) Exec(ctx context.Context, command string, timeout time.Dur
 		}
 		return e.execOnce(ctx, wrapped, timeout)
 	}
+	if staleEnvdToken(err) {
+		if rerr := e.refreshEnvdToken(ctx, observed); rerr != nil {
+			return "", fmt.Errorf("envd token refresh failed: %w (original: %v)", rerr, err)
+		}
+		return e.execOnce(ctx, wrapped, timeout)
+	}
 	return result, err
 }
 
@@ -1039,6 +1156,12 @@ func (e *E2BExecutor) ReadFile(ctx context.Context, path string) (string, error)
 		}
 		return e.readFileOnce(ctx, path)
 	}
+	if staleEnvdToken(err) {
+		if rerr := e.refreshEnvdToken(ctx, observed); rerr != nil {
+			return "", rerr
+		}
+		return e.readFileOnce(ctx, path)
+	}
 	return result, err
 }
 
@@ -1074,6 +1197,12 @@ func (e *E2BExecutor) WriteFile(ctx context.Context, path, content string) (stri
 	result, err := e.writeFileOn(ctx, observed, path, content)
 	if sandboxGone(err) {
 		if rerr := e.recreateIfCurrent(ctx, observed); rerr != nil {
+			return "", rerr
+		}
+		return e.writeFileOnce(ctx, path, content)
+	}
+	if staleEnvdToken(err) {
+		if rerr := e.refreshEnvdToken(ctx, observed); rerr != nil {
 			return "", rerr
 		}
 		return e.writeFileOnce(ctx, path, content)
@@ -1781,6 +1910,20 @@ func (p *E2BExecutorPool) SleepScope(ctx context.Context, agentID, projectID, se
 			"sandboxID", ex.identSnapshot().id, "scopeKey", key, "error", err)
 	}
 	return true, nil
+}
+
+// ExtendScope pushes the scope's sandbox expiry out to now+d. Implements the
+// lifecycle layer's ScopeExtender.
+func (p *E2BExecutorPool) ExtendScope(ctx context.Context, agentID, projectID, sessionID string, d time.Duration) error {
+	key := poolKey(agentID, projectID, sessionID)
+	scope := p.scopeLock(key)
+	scope.Lock()
+	defer scope.Unlock()
+	ex, ok := p.cachedExecutor(key)
+	if !ok {
+		return nil
+	}
+	return ex.ExtendTimeout(ctx, ex.identSnapshot().id, d)
 }
 
 // reconcileLocalLease checks the shared lease against a locally cached

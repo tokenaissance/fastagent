@@ -130,6 +130,28 @@ type ScopeSleeper interface {
 	SleepScope(ctx context.Context, agentID, projectID, sessionID string) (paused bool, err error)
 }
 
+// ScopeExtender is implemented by pools whose backend can push out a running
+// sandbox's expiry. It exists for one hazard: an operation that starts near the
+// end of the instance's life and outlives it. With autoPause on the expiry
+// pauses the sandbox mid-operation and cuts our stream, so the caller sees a
+// truncated response even though the process survives in the snapshot.
+//
+// A pool without it (docker) simply has no expiry to move.
+type ScopeExtender interface {
+	ExtendScope(ctx context.Context, agentID, projectID, sessionID string, d time.Duration) error
+}
+
+// extendThreshold is the operation budget past which moving the expiry is worth
+// an API round trip. Shorter operations can in principle still straddle an
+// expiry that is seconds away; that surfaces as a truncated stream, which the
+// caller already classifies and can retry. Paying a call per tool call to
+// close that last few-seconds window would cost more than it saves.
+const extendThreshold = 60 * time.Second
+
+// extendSlack is added to the operation's budget so the expiry lands after the
+// operation ends rather than exactly at it.
+const extendSlack = 2 * time.Minute
+
 // beginUse marks one operation as running against sc and refreshes the idle
 // clock. Paired with endUse.
 func (p *LifecyclePool) beginUse(sc sandboxScope) {
@@ -307,6 +329,27 @@ func (p *LifecyclePool) sleepOrRelease(sleeper ScopeSleeper, sc sandboxScope) bo
 	}
 }
 
+// extendBudget moves the sandbox's expiry past the end of an operation whose
+// budget is long enough to matter. Best-effort: the operation still runs if the
+// call fails — it just runs with the extra risk of being paused mid-flight, and
+// the truncation that follows is classified like any other cut stream.
+func (p *LifecyclePool) extendBudget(ctx context.Context, sc sandboxScope, opBudget time.Duration) {
+	if opBudget < extendThreshold {
+		return
+	}
+	ext, ok := p.inner.(ScopeExtender)
+	if !ok {
+		return
+	}
+	extendCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	if err := ext.ExtendScope(extendCtx, sc.agentID, sc.projectID, sc.sessionID, opBudget+extendSlack); err != nil {
+		slog.Warn("could not extend the sandbox timeout before a long operation",
+			"agent", sc.agentID, "session", sc.sessionID,
+			"opBudget", opBudget, "error", err)
+	}
+}
+
 // flushIfSupported snapshots the sandbox workspace and uploads anything
 // that isn't already in the durable store. Skips silently when the backend
 // doesn't implement WorkspaceSnapshotter (docker is the only current
@@ -460,6 +503,7 @@ func (l *lazyExecutor) Exec(ctx context.Context, command string, timeout time.Du
 	// this the sweeper would destroy the sandbox underneath it.
 	started := time.Now()
 	l.pool.beginUse(l.scope)
+	l.pool.extendBudget(ctx, l.scope, timeout)
 	out, execErr := ex.Exec(ctx, command, timeout)
 	l.pool.endUse(ctx, l.scope, started)
 	// Post-exec sync only for cloud sandboxes (RemoteWorkspace marker).
