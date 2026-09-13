@@ -282,6 +282,39 @@ func (e *E2BExecutor) envdURLFor(sandboxID string) string {
 	return fmt.Sprintf("https://%s-%s.e2b.app", e2bEnvdPort, sandboxID)
 }
 
+// Pause puts the instance to sleep: e2b snapshots filesystem and memory (running
+// processes included) and keeps it, unbilled and outside the concurrency limit,
+// until something resumes it. This is the control-plane counterpart of the
+// autoPause option on create — the same transition, requested early by the idle
+// sweep instead of at the instance's own timeout.
+//
+// https://docs.e2b.dev/api-reference/sandboxes/pause-sandbox.md
+func (e *E2BExecutor) Pause(ctx context.Context, sandboxID string) error {
+	if sandboxID == "" {
+		return nil
+	}
+	req, err := http.NewRequestWithContext(ctx, "POST",
+		fmt.Sprintf("%s/sandboxes/%s/pause", e2bBaseURL, sandboxID), nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("X-API-Key", e.apiKey)
+	resp, err := e.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("e2b pause sandbox %s: %w", sandboxID, err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusNotFound {
+		return &sandboxHTTPError{op: "e2b pause " + sandboxID, status: resp.StatusCode, body: string(body)}
+	}
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return &sandboxHTTPError{op: "e2b pause " + sandboxID, status: resp.StatusCode, body: string(body)}
+	}
+	slog.Info("e2b sandbox paused", "sandboxID", sandboxID)
+	return nil
+}
+
 // e2bCreateBody is the POST /sandboxes payload. It lives in its own function
 // because these fields are a design decision rather than incidental JSON, and
 // the wire shape should be assertable without a network seam.
@@ -1688,9 +1721,6 @@ func (p *E2BExecutorPool) adoptFromLease(
 // path every use takes — also publishes a rebuild that happened while the
 // operation was running. A scope with no cached executor has nothing to renew.
 func (p *E2BExecutorPool) RenewLease(ctx context.Context, agentID, projectID, sessionID string) error {
-	if p.leaseStore == nil {
-		return nil
-	}
 	key := poolKey(agentID, projectID, sessionID)
 	scope := p.scopeLock(key)
 	scope.Lock()
@@ -1699,8 +1729,58 @@ func (p *E2BExecutorPool) RenewLease(ctx context.Context, agentID, projectID, se
 	if !ok {
 		return nil
 	}
+	return p.renewLeaseLocked(ctx, key, ex, agentID, projectID, sessionID)
+}
+
+// renewLeaseLocked is the shared body of RenewLease and SleepScope. Callers hold
+// the scope lock.
+func (p *E2BExecutorPool) renewLeaseLocked(ctx context.Context, key string, ex *E2BExecutor, agentID, projectID, sessionID string) error {
+	if p.leaseStore == nil {
+		return nil
+	}
 	_, err := p.reconcileLocalLease(ctx, key, ex, agentID, projectID, sessionID)
 	return err
+}
+
+// SleepScope pauses the scope's sandbox instead of destroying it, then keeps the
+// lease row alive so a sibling that takes the scope over later resumes the SAME
+// instance rather than building a replacement.
+//
+// paused=false with a nil error means there was no cached executor to sleep.
+// An error is returned untouched so the caller can distinguish "already gone"
+// (sandboxGone) from "could not sleep" — see LifecyclePool.sleepOrRelease.
+func (p *E2BExecutorPool) SleepScope(ctx context.Context, agentID, projectID, sessionID string) (bool, error) {
+	key := poolKey(agentID, projectID, sessionID)
+	scope := p.scopeLock(key)
+	scope.Lock()
+	defer scope.Unlock()
+	ex, ok := p.cachedExecutor(key)
+	if !ok {
+		return false, nil
+	}
+	if err := ex.Pause(ctx, ex.identSnapshot().id); err != nil {
+		// Already gone: there is nothing to sleep, so drop the row and the local
+		// reference rather than leaving a lease that names a dead instance. The
+		// caller's fall-through Release then finds nothing and no-ops.
+		//
+		// The classification lives here, not in the lifecycle layer: "gone" is
+		// this adapter's notion (a 502/404 from e2b), and policy should not have
+		// to know the provider's status vocabulary.
+		if sandboxGone(err) {
+			if dead, epoch, ok := p.takeExecutor(key); ok {
+				return false, p.releaseExecutor(key, dead, epoch)
+			}
+			return false, nil
+		}
+		return false, err
+	}
+	// The instance is free to keep (paused sandboxes are unbilled and outside
+	// the concurrency limit), so keep the row that names it alive too.
+	if err := p.renewLeaseLocked(ctx, key, ex, agentID, projectID, sessionID); err != nil {
+		slog.Warn("sandbox paused but its lease renew failed",
+			"sandboxID", ex.identSnapshot().id, "scopeKey", key, "error", err)
+	}
+	return true, nil
 }
 
 // reconcileLocalLease checks the shared lease against a locally cached

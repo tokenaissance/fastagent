@@ -133,6 +133,15 @@ modes each map to a test in the failure-semantics table below.
 - **Unverified:** whether the `envd_token` in a row is still valid for a
   paused→resumed instance. If it is not, adopting a paused sandbox must
   `connect` first and refresh the row's token — check before relying on it.
+- **Idle eviction puts a sandbox to sleep.** When the backend can pause
+  (`ScopeSleeper`, implemented by the E2B pool), the idle sweep pauses the
+  instance and renews the row instead of releasing it, so the scope keeps the
+  same `sandbox_id` and the next caller resumes it; the `hydrated` flag is kept
+  because a paused sandbox still holds its filesystem. Two rules make this safe
+  rather than destructive: a scope with an operation in flight is never
+  considered idle (`inUse`), and a sleep that fails for any reason other than
+  "the instance is already gone" leaves the sandbox **running** — a provider
+  that cannot pause must not turn into a destroy.
 
 ### Failure semantics (registry errors fail open)
 
@@ -159,6 +168,8 @@ sandbox, even if that means leaking one until TTL/expiry.
 | Rebuild whose hydrate/verify fails | Destroys the unusable replacement, restores the previous identity, surfaces the error; nothing is published and the next reconcile does not adopt the dead sandbox back | `TestE2BExecutorFailedRebuildRestoresIdentityAndDestroysReplacement` |
 | Create accepted but the edge cannot route the id yet | `waitUntilRoutable` retries while envd answers 502/404 (1.5s interval, 60s bound) and fails creation naming the sandbox if it never comes up; a verdict that is not "gone" (401 from a stale token, 500 inside the sandbox) fails immediately without retrying; an instance that never becomes routable is destroyed rather than leaked | `TestE2BWaitUntilRoutable` |
 | Hydrate hits a cut stream or a 502 right after create | Retries the network steps up to 3 times, 1.5s apart — a container that was created moments ago can cut one stream while it finishes booting. Only "not routable yet" is retried: a 401 or a permission error is a verdict and fails immediately. The bundle is built once, outside the loop | `TestHydrateRetriesATruncatedStream`, `TestHydrateDoesNotRetryAVerdict` |
+| Idle sweep, backend can pause | Pauses the instance, renews the row (the paused instance is free to keep, so the row that names it should survive too) and keeps `hydrated` — the sandbox still holds its filesystem. A scope with an operation in flight is skipped entirely | `TestLifecycleIdleSleepsInsteadOfReleasing`, `TestLifecycleDoesNotEvictWhileAnOperationRuns` |
+| Idle sweep, sleep fails (a provider without pause, a transient API error) | Leaves the sandbox running and logs a warning: destroying what could not be slept would be the worse outcome. Only "there was nothing to sleep" falls through to the normal release | `TestLifecycleKeepsSandboxItCouldNotSleep`, `TestLifecycleFallsBackToReleaseWhenThereIsNothingToSleep` |
 | Parallel rebuilds on one executor | The first caller replaces the sandbox; the rest observe the new identity and retry on it without creating anything — exactly one instance per dead sandbox | `TestE2BExecutorConcurrentRebuildMintsOneSandbox` |
 | envd failure that is **not** 502/404 (500 inside the sandbox, 401 from a stale token) | Surfaces to the caller; no rebuild — a rebuild cannot fix it and would cost an instance | `TestE2BExecDoesNotRebuildOnNonGoneFailures` |
 | Destroy answer: 2xx / 404 / anything else | 2xx and 404 succeed (a 404 means the instance is already gone, which is the goal); any other status is returned as an error naming the sandbox, so a "released" sandbox cannot keep running unnoticed | `TestE2BCloseReadsTheAnswer` |
@@ -204,7 +215,7 @@ buys:
 | # | Change | Status |
 |---|---|---|
 | 1 | `autoPause` + `autoPauseMemory` + `autoResume` on create (`e2bCreateBody`) | **done** — an expiry pauses and the next request resumes it, instead of costing a rebuild |
-| 2 | Idle eviction **pauses** instead of releasing, behind the in-flight guard (a busy scope must never be paused mid-operation) | pending |
+| 2 | Idle eviction **pauses** instead of releasing (`ScopeSleeper`), behind the in-flight guard; a sleep that fails for any reason but "already gone" leaves the sandbox running | **done** |
 | 3 | `set-timeout` before an operation long enough to outlive the instance TTL, so an auto-pause never lands mid-exec | pending |
 | 4 | `state` / `paused_at` on the row; adopting a paused instance resumes it and refreshes the token when needed | pending |
 | 5 | Reconcile the table against provider lifecycle events (webhook or polled), including killing paused instances no row names | pending |
@@ -516,6 +527,10 @@ external dependencies.
   redesign: the create body must ask for pause-on-timeout with a memory
   snapshot and auto-resume, because losing those fields silently puts the
   rebuild path back on the happy path.
+  `lifecycle_sleep_test.go` covers the idle sweep's two hazards: an operation
+  that outlives `idleTTL` must not have its sandbox reclaimed underneath it,
+  and a sandbox that cannot be slept must survive (only "nothing to sleep"
+  falls through to release).
 - **Adapter (store package)** — `sandbox_leases_test.go` runs `DBStore`
   through `sandbox.SandboxLeaseStore` against real sqlite: renew CAS miss,
   stale/missing release no-ops, monotonic epoch. `sandbox_leases_postgres_test.go`
