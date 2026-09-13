@@ -247,20 +247,29 @@ func (e *E2BExecutor) waitUntilRoutable(ctx context.Context) error {
 		interval = defaultReadyInterval
 	}
 	deadline := time.Now().Add(timeout)
+	started := time.Now()
 
 	for attempt := 1; ; attempt++ {
 		_, err := e.execOnce(ctx, "true", 15*time.Second)
 		if err == nil {
-			if attempt > 1 {
-				slog.Info("e2b sandbox became routable",
-					"sandboxID", e.identSnapshot().id, "attempts", attempt)
-			}
+			// Logged even when the first attempt works: "how long does e2b take
+			// to route a fresh id" is the question this wait exists to answer,
+			// and a silent success would leave nothing to measure.
+			slog.Info("e2b sandbox routable",
+				"sandboxID", e.identSnapshot().id,
+				"attempts", attempt,
+				"elapsedMs", time.Since(started).Milliseconds())
 			return nil
 		}
 		if _, isProviderVerdict := statusCodeOf(err); isProviderVerdict && !sandboxGone(err) {
 			return fmt.Errorf("sandbox %s is not usable after create: %w", e.identSnapshot().id, err)
 		}
 		if time.Now().After(deadline) {
+			slog.Warn("e2b sandbox never became routable",
+				"sandboxID", e.identSnapshot().id,
+				"attempts", attempt,
+				"elapsedMs", time.Since(started).Milliseconds(),
+				"error", err)
 			return fmt.Errorf("sandbox %s never became routable within %s (%d attempts): %w",
 				e.identSnapshot().id, timeout, attempt, err)
 		}
@@ -296,6 +305,7 @@ func (e *E2BExecutor) recreateIfCurrent(ctx context.Context, observed sandboxIde
 			"observedSandboxID", observed.id, "currentSandboxID", cur.id)
 		return nil
 	}
+	started := time.Now()
 	create := e.createFn
 	if create == nil {
 		create = newE2BExecutor
@@ -330,6 +340,14 @@ func (e *E2BExecutor) recreateIfCurrent(ctx context.Context, observed sandboxIde
 	// (reconcileLocalLeaseLocked) — the pool owns the lease, so the executor
 	// only records the fact and stays free of SQL and scope bookkeeping.
 	e.setIdent(replacement.id, replacement.token, true)
+	// One line per rebuild, with both ids and how long it took. Counting
+	// instances in the provider dashboard is otherwise guesswork: cold creates
+	// and rebuilds both log "e2b sandbox created", and only this line says which
+	// dead instance each new one replaced.
+	slog.Info("e2b sandbox rebuilt",
+		"oldSandboxID", observed.id,
+		"newSandboxID", replacement.id,
+		"elapsedMs", time.Since(started).Milliseconds())
 	return nil
 }
 
@@ -345,6 +363,10 @@ func (e *E2BExecutor) recreateIfCurrent(ctx context.Context, observed sandboxIde
 // why the rebuild failed; the next call retries from a consistent state.
 func (e *E2BExecutor) abandonRebuild(prev sandboxIdent, failedSandboxID string, cause error) error {
 	e.setIdent(prev.id, prev.token, false)
+	slog.Warn("e2b rebuild abandoned",
+		"failedSandboxID", failedSandboxID,
+		"restoredSandboxID", prev.id,
+		"error", cause)
 	if cerr := e.closeSandboxByID(failedSandboxID); cerr != nil {
 		slog.Warn("e2b could not destroy the unusable replacement sandbox",
 			"sandboxID", failedSandboxID, "error", cerr)
@@ -500,6 +522,7 @@ func (e *E2BExecutor) Hydrate(ctx context.Context) error {
 	// cannot fix — a 401, a permission error, an instance that is simply gone —
 	// is not retried. The bundle is built once, above: assembling it walks the
 	// workspace store.
+	hydrateStarted := time.Now()
 	var err error
 	for attempt := 1; attempt <= hydrateAttempts; attempt++ {
 		err = e.shipBundleOnce(ctx, cmd, bundle)
@@ -518,7 +541,9 @@ func (e *E2BExecutor) Hydrate(ctx context.Context) error {
 		}
 	}
 	if err != nil {
-		slog.Warn("e2b hydrate failed", "sandboxID", e.identSnapshot().id, "error", err)
+		slog.Warn("e2b hydrate failed",
+			"sandboxID", e.identSnapshot().id, "error", err,
+			"elapsedMs", time.Since(hydrateStarted).Milliseconds())
 		return err
 	}
 	slog.Info("e2b sandbox hydrated",
@@ -526,7 +551,8 @@ func (e *E2BExecutor) Hydrate(ctx context.Context) error {
 		"skills", skillCount,
 		"skillFiles", skillFileCount,
 		"workspaceFiles", workspaceCount,
-		"tarBytes", bundle.gz.Len())
+		"tarBytes", bundle.gz.Len(),
+		"elapsedMs", time.Since(hydrateStarted).Milliseconds())
 	return nil
 }
 
@@ -1536,6 +1562,7 @@ func (p *E2BExecutorPool) Get(ctx context.Context, agentID, projectID, sessionID
 				"scopeKey", key, "owner", p.ownerID)
 		}
 	}
+	provisionStarted := time.Now()
 	ex, err := p.newSandboxExecutor(ctx, p.apiKey, p.template, p.timeout)
 	if err != nil {
 		return nil, err
@@ -1580,6 +1607,14 @@ func (p *E2BExecutorPool) Get(ctx context.Context, agentID, projectID, sessionID
 			}
 		}
 	}
+	// One line per cold provision, naming the scope and the total. Counting
+	// instances needs the two kinds separated: "e2b sandbox created" fires for
+	// cold starts and rebuilds alike, while "e2b sandbox rebuilt" only covers
+	// the second — this is the first.
+	slog.Info("e2b sandbox provisioned",
+		"scopeKey", key,
+		"sandboxID", ex.identSnapshot().id,
+		"elapsedMs", time.Since(provisionStarted).Milliseconds())
 	p.registerExecutor(key, ex)
 	return ex, nil
 }
