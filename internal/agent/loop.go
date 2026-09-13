@@ -2468,7 +2468,12 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	if reminder := renderChatbotPersistenceReminder(a.promptMode, a.displayName, chatterMem.LoadUserFile(), chatterMem.LoadMemory()); reminder != "" {
 		messages = append(messages, provider.Message{Role: "system", Content: reminder})
 	}
-	messages = append(messages, a.withMessageTimestampsForChatter(sessionMsgs, chatterUID)...)
+	// The prompt is a NORMALISED PROJECTION of stored history: the session
+	// keeps what actually happened, the model only ever sees well-formed
+	// call/reply pairs (docs/session-turn-integrity.md, clause P). Without
+	// this, a duplicated or orphaned reply from any past turn is replayed
+	// verbatim and can 400 every later request on the session.
+	messages = append(messages, a.withMessageTimestampsForChatter(normalizeForPrompt(sessionMsgs), chatterUID)...)
 
 	toolDefs := a.registry.DefinitionsForMode(builtinAllowForMode(a.promptMode))
 
@@ -3247,7 +3252,12 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 	if reminder := renderChatbotPersistenceReminder(a.promptMode, a.displayName, chatterMem.LoadUserFile(), chatterMem.LoadMemory()); reminder != "" {
 		messages = append(messages, provider.Message{Role: "system", Content: reminder})
 	}
-	messages = append(messages, a.withMessageTimestampsForChatter(sessionMsgs, chatterUID)...)
+	// The prompt is a NORMALISED PROJECTION of stored history: the session
+	// keeps what actually happened, the model only ever sees well-formed
+	// call/reply pairs (docs/session-turn-integrity.md, clause P). Without
+	// this, a duplicated or orphaned reply from any past turn is replayed
+	// verbatim and can 400 every later request on the session.
+	messages = append(messages, a.withMessageTimestampsForChatter(normalizeForPrompt(sessionMsgs), chatterUID)...)
 
 	toolDefs := a.registry.DefinitionsForMode(builtinAllowForMode(a.promptMode))
 
