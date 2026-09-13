@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"io"
@@ -478,13 +479,6 @@ func (e *E2BExecutor) Hydrate(ctx context.Context) error {
 	//   bundle gets.
 	// - chown after extract: tar-as-root lands files root-owned, so
 	//   re-chown after extract; agent's subsequent writes run as user.
-	if bundle.fileCount > 0 {
-		// Upload as `user`-owned to /tmp; tar still runs under sudo so
-		// it can land /skills/* and /workspace/* at the filesystem root.
-		if err := e.uploadBytes(ctx, "/tmp/fc-hydrate.tar.gz", bundle.gz.Bytes()); err != nil {
-			return fmt.Errorf("hydrate upload tar: %w", err)
-		}
-	}
 	cmdParts := []string{
 		"set -e",
 		"sudo mkdir -p /skills /workspace",
@@ -498,10 +492,34 @@ func (e *E2BExecutor) Hydrate(ctx context.Context) error {
 		)
 	}
 	cmd := strings.Join(cmdParts, "; ")
-	out, err := e.execOnce(ctx, cmd, 60*time.Second)
+	// Ship it, with a bounded retry. A sandbox created moments ago can cut a
+	// stream once while it finishes booting — seen in production as "did not
+	// exit cleanly … response stream truncated" from the mkdir/chown step, and
+	// as a 502 from the upload before it. Both network steps are idempotent
+	// (same tar to the same path, same mkdir/chown), and anything a retry
+	// cannot fix — a 401, a permission error, an instance that is simply gone —
+	// is not retried. The bundle is built once, above: assembling it walks the
+	// workspace store.
+	var err error
+	for attempt := 1; attempt <= hydrateAttempts; attempt++ {
+		err = e.shipBundleOnce(ctx, cmd, bundle)
+		if err == nil {
+			break
+		}
+		if attempt == hydrateAttempts || !retryableHydrateFailure(err) {
+			break
+		}
+		slog.Warn("retrying hydrate against a freshly created sandbox",
+			"sandboxID", e.identSnapshot().id, "attempt", attempt, "error", err)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(hydrateRetryInterval):
+		}
+	}
 	if err != nil {
-		slog.Warn("e2b hydrate extract failed", "sandboxID", e.identSnapshot().id, "error", err, "out", out)
-		return fmt.Errorf("hydrate sandbox dirs: %w (output: %s)", err, out)
+		slog.Warn("e2b hydrate failed", "sandboxID", e.identSnapshot().id, "error", err)
+		return err
 	}
 	slog.Info("e2b sandbox hydrated",
 		"sandboxID", e.identSnapshot().id,
@@ -509,6 +527,48 @@ func (e *E2BExecutor) Hydrate(ctx context.Context) error {
 		"skillFiles", skillFileCount,
 		"workspaceFiles", workspaceCount,
 		"tarBytes", bundle.gz.Len())
+	return nil
+}
+
+// Hydrate's bounded retry. See shipBundleOnce for why a retry is safe and
+// retryableHydrateFailure for what is allowed to use it.
+const (
+	hydrateAttempts      = 3
+	hydrateRetryInterval = 1500 * time.Millisecond
+)
+
+// retryableHydrateFailure reports whether an envd failure is the kind a
+// freshly created sandbox produces once and then not again: a stream that ended
+// without its exit-status trailer (the container was still coming up), or an
+// explicit 502/404 from the edge. Everything else — a 401 from a stale token, a
+// permission error inside the sandbox — is a verdict, and retrying it just
+// delays the report.
+func retryableHydrateFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	if sandboxGone(err) {
+		return true
+	}
+	var truncated *execStreamTruncatedError
+	return errors.As(err, &truncated)
+}
+
+// shipBundleOnce uploads the tar (when there is one) and runs the
+// mkdir/chown/extract script. Idempotent by construction, which is what makes
+// the retry in Hydrate safe.
+func (e *E2BExecutor) shipBundleOnce(ctx context.Context, cmd string, bundle *tarBundle) error {
+	if bundle.fileCount > 0 {
+		// Upload as `user`-owned to /tmp; tar still runs under sudo so
+		// it can land /skills/* and /workspace/* at the filesystem root.
+		if err := e.uploadBytes(ctx, "/tmp/fc-hydrate.tar.gz", bundle.gz.Bytes()); err != nil {
+			return fmt.Errorf("hydrate upload tar: %w", err)
+		}
+	}
+	out, err := e.execOnce(ctx, cmd, 60*time.Second)
+	if err != nil {
+		return fmt.Errorf("hydrate sandbox dirs: %w (output: %s)", err, out)
+	}
 	return nil
 }
 
@@ -628,8 +688,13 @@ func connectEnvelope(payload []byte) []byte {
 
 // parseConnectStream reads Connect protocol streaming response.
 // Each frame: [1 byte flags][4 bytes length][payload]
-func parseConnectStream(data []byte) []json.RawMessage {
-	var messages []json.RawMessage
+//
+// Trailers (flags & 0x02) are returned rather than dropped. They used to be
+// skipped, which discarded the one place the protocol carries a server-side
+// error: a stream that fails mid-flight ends with an end-stream frame holding
+// {"error":{...}}, and throwing it away left callers with "the stream was
+// truncated" and no idea why.
+func parseConnectStream(data []byte) (messages, trailers []json.RawMessage) {
 	for len(data) >= 5 {
 		flags := data[0]
 		length := binary.BigEndian.Uint32(data[1:5])
@@ -640,13 +705,56 @@ func parseConnectStream(data []byte) []json.RawMessage {
 		payload := data[:length]
 		data = data[length:]
 
-		// flags & 0x02 = end_stream (trailer), skip it
 		if flags&0x02 != 0 {
+			trailers = append(trailers, json.RawMessage(payload))
 			continue
 		}
 		messages = append(messages, json.RawMessage(payload))
 	}
-	return messages
+	return messages, trailers
+}
+
+// connectErrorFrom returns the server's own error text from an end-stream
+// frame, if it sent one.
+func connectErrorFrom(trailers []json.RawMessage) string {
+	for _, raw := range trailers {
+		var envelope struct {
+			Error *struct {
+				Code    string `json:"code"`
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(raw, &envelope); err != nil || envelope.Error == nil {
+			continue
+		}
+		if envelope.Error.Code != "" && envelope.Error.Message != "" {
+			return envelope.Error.Code + ": " + envelope.Error.Message
+		}
+		if envelope.Error.Message != "" {
+			return envelope.Error.Message
+		}
+		return string(raw)
+	}
+	return ""
+}
+
+// execStreamTruncatedError is an exec response that ended without its
+// exit-status trailer. It is a distinct type so callers can decide whether the
+// failure is worth retrying: a fresh sandbox can cut a stream once while it
+// finishes booting, and a genuinely broken one cuts every stream.
+type execStreamTruncatedError struct {
+	detail string
+}
+
+func (e *execStreamTruncatedError) Error() string { return e.detail }
+
+// snippet bounds a body for a log line or an error message.
+func snippet(body []byte, limit int) string {
+	s := strings.TrimSpace(string(body))
+	if len(s) <= limit {
+		return s
+	}
+	return s[:limit] + "…"
 }
 
 func (e *E2BExecutor) Exec(ctx context.Context, command string, timeout time.Duration) (string, error) {
@@ -733,7 +841,8 @@ func (e *E2BExecutor) execOn(ctx context.Context, id sandboxIdent, command strin
 	}
 
 	// Parse Connect streaming response frames
-	frames := parseConnectStream(body)
+	frames, trailers := parseConnectStream(body)
+	connectErr := connectErrorFrom(trailers)
 
 	var stdout, stderr strings.Builder
 	exitCode := 0
@@ -789,7 +898,7 @@ func (e *E2BExecutor) execOn(ctx context.Context, id sandboxIdent, command strin
 	}
 	output = strings.TrimSpace(output)
 
-	slog.Info("e2b exec completed", "sandboxID", id.id, "exitCode", exitCode, "exited", exited, "outputLen", len(output), "frames", len(frames), "bodyBytes", len(body))
+	slog.Info("e2b exec completed", "sandboxID", id.id, "exitCode", exitCode, "exited", exited, "outputLen", len(output), "frames", len(frames), "trailers", len(trailers), "bodyBytes", len(body), "connectError", connectErr)
 
 	// Reject a stream that didn't deliver a proper "End/exited=true" trailer.
 	// Why this matters: when the request payload pushes envd past some
@@ -804,7 +913,26 @@ func (e *E2BExecutor) execOn(ctx context.Context, id sandboxIdent, command strin
 		if output == "" {
 			output = "(no output — response stream truncated before exit-status trailer)"
 		}
-		return output, fmt.Errorf("e2b exec did not exit cleanly (frames=%d, bodyBytes=%d): %s", len(frames), len(body), output)
+		// Say what the provider said. Without this the caller could not tell a
+		// sandbox that vanished mid-exec from an envd error we failed to parse;
+		// the trailer usually names it ("not found", "internal", …), and the raw
+		// body is the only clue when the stream simply died.
+		detail := fmt.Sprintf("e2b exec did not exit cleanly (frames=%d, trailers=%d, bodyBytes=%d): %s",
+			len(frames), len(trailers), len(body), output)
+		if connectErr != "" {
+			detail += "; server error: " + connectErr
+		}
+		// Frames are already parsed JSON, so they read far better than the
+		// framed bytes; the raw body is the fallback when nothing parsed (which
+		// is itself the diagnosis: the stream died mid-frame).
+		if len(frames) > 0 {
+			if joined, err := json.Marshal(frames); err == nil {
+				detail += "; frames=" + snippet(joined, 300)
+			}
+		} else if raw := snippet(body, 300); raw != "" {
+			detail += "; raw=" + raw
+		}
+		return output, &execStreamTruncatedError{detail: detail}
 	}
 
 	if exitCode != 0 {
