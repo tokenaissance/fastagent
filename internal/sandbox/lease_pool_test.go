@@ -68,6 +68,12 @@ type fakeLeaseStore struct {
 	// SetSandboxLeaseState scripting: the running/paused annotation.
 	states   []string
 	stateErr error
+	// ListSandboxLeaseRefs scripting: what the reaper sees. Refs are the rows'
+	// (sandbox_id, expires_at) projection, so a test stages "claimed" and
+	// "orphaned" by choosing expiries relative to the reap grace.
+	refs      []SandboxLeaseRef
+	refsErr   error
+	refsCalls int
 	// ops records every method in call order, so tests can assert ordering
 	// between two writes that touch the same row.
 	ops []string
@@ -177,6 +183,25 @@ func (f *fakeLeaseStore) SetSandboxLeaseState(_ context.Context, _, _, state str
 	f.states = append(f.states, state)
 	f.ops = append(f.ops, "state="+state)
 	return f.stateErr
+}
+
+func (f *fakeLeaseStore) ListSandboxLeaseRefs(_ context.Context) ([]SandboxLeaseRef, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.refsCalls++
+	f.ops = append(f.ops, "refs")
+	if f.refsErr != nil {
+		return nil, f.refsErr
+	}
+	out := make([]SandboxLeaseRef, len(f.refs))
+	copy(out, f.refs)
+	return out, nil
+}
+
+func (f *fakeLeaseStore) refsCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.refsCalls
 }
 
 // opLog returns the recorded methods in call order.
@@ -353,7 +378,7 @@ func TestE2BPoolCreateLostRaceAdoptsWinner(t *testing.T) {
 	}
 	pool := newLeasePool(t, store, "pod-a")
 	created := &leaseCloseRecorder{}
-	pool.newSandboxExecutor = func(_ context.Context, _, _ string, _ time.Duration) (*E2BExecutor, error) {
+	pool.newSandboxExecutor = func(_ context.Context, _, _ string, _ time.Duration, _ map[string]string) (*E2BExecutor, error) {
 		return testExecutor(created, "sb-1", "tok-1"), nil
 	}
 	pool.hydrateSandbox = func(context.Context, *E2BExecutor) error { return nil }
@@ -393,7 +418,7 @@ func TestE2BPoolFreshGetLeaseErrorsFailOpen(t *testing.T) {
 		}
 		pool := newLeasePool(t, store, "pod-a")
 		rec := &leaseCloseRecorder{}
-		pool.newSandboxExecutor = func(_ context.Context, _, _ string, _ time.Duration) (*E2BExecutor, error) {
+		pool.newSandboxExecutor = func(_ context.Context, _, _ string, _ time.Duration, _ map[string]string) (*E2BExecutor, error) {
 			return testExecutor(rec, "sb-1", "tok-1"), nil
 		}
 		pool.hydrateSandbox = func(context.Context, *E2BExecutor) error { return nil }
@@ -420,7 +445,7 @@ func TestE2BPoolFreshGetLeaseErrorsFailOpen(t *testing.T) {
 		store := &fakeLeaseStore{acquireErr: errors.New("lease write failed")}
 		pool := newLeasePool(t, store, "pod-a")
 		rec := &leaseCloseRecorder{}
-		pool.newSandboxExecutor = func(_ context.Context, _, _ string, _ time.Duration) (*E2BExecutor, error) {
+		pool.newSandboxExecutor = func(_ context.Context, _, _ string, _ time.Duration, _ map[string]string) (*E2BExecutor, error) {
 			return testExecutor(rec, "sb-1", "tok-1"), nil
 		}
 		pool.hydrateSandbox = func(context.Context, *E2BExecutor) error { return nil }
@@ -532,7 +557,7 @@ func TestE2BPoolCreateLostRaceAdoptMissKeepsLocalUnregistered(t *testing.T) {
 	}
 	pool := newLeasePool(t, store, "pod-a")
 	rec := &leaseCloseRecorder{}
-	pool.newSandboxExecutor = func(_ context.Context, _, _ string, _ time.Duration) (*E2BExecutor, error) {
+	pool.newSandboxExecutor = func(_ context.Context, _, _ string, _ time.Duration, _ map[string]string) (*E2BExecutor, error) {
 		return testExecutor(rec, "sb-1", "tok-1"), nil
 	}
 	pool.hydrateSandbox = func(context.Context, *E2BExecutor) error { return nil }
@@ -653,7 +678,7 @@ func TestE2BPoolAdoptedExecutorCarriesAPIKey(t *testing.T) {
 			acquired:   false, // another replica won the claim while we created
 		}
 		pool := newLeasePool(t, store, "pod-a")
-		pool.newSandboxExecutor = func(_ context.Context, _, _ string, _ time.Duration) (*E2BExecutor, error) {
+		pool.newSandboxExecutor = func(_ context.Context, _, _ string, _ time.Duration, _ map[string]string) (*E2BExecutor, error) {
 			return testExecutor(&leaseCloseRecorder{}, "sb-1", "tok-1"), nil
 		}
 		pool.hydrateSandbox = func(context.Context, *E2BExecutor) error { return nil }

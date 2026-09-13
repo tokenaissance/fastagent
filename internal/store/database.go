@@ -1479,8 +1479,9 @@ func (d *DBStore) migrateAgentFilesUserID(ctx context.Context) error {
 // PRAGMA table_info() pseudo-table.
 // migrateSandboxLeasesAddState retrofits the running/paused marker onto a
 // sandbox_leases table that predates it. The marker is what lets an adoption
-// recognise a paused sandbox (resume it, don't rebuild it), and what a future
-// reaper would use to find paused instances no row names.
+// recognise a paused sandbox (resume it, don't rebuild it). The orphan reaper
+// does NOT read it: it asks the provider, because a sandbox can be woken by
+// traffic without anyone writing this column back (see SandboxLeaseRecord.State).
 //
 // Idempotent, and a no-op when the table does not exist yet: a fresh install
 // gets both columns from the CREATE TABLE in migrationSQL.

@@ -43,7 +43,7 @@ func TestSleepRecordsPausedAfterPublishingARebuild(t *testing.T) {
 	envd := &fakeEnvdTransport{}
 	ex := testExecutor(&leaseCloseRecorder{}, "sb-old", "tok-old")
 	ex.client = &http.Client{Transport: envd}
-	ex.createFn = func(context.Context, string, string, time.Duration) (*E2BExecutor, error) {
+	ex.createFn = func(context.Context, string, string, time.Duration, map[string]string) (*E2BExecutor, error) {
 		return newAdoptedE2BExecutor("api-key", "sb-new", "tok-new", "tpl", time.Minute), nil
 	}
 	pool.executors[rebuildScopeKey] = ex

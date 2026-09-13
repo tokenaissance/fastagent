@@ -35,7 +35,7 @@ func TestE2BExecDoesNotRebuildOnNonGoneFailures(t *testing.T) {
 			ex := testExecutor(&leaseCloseRecorder{}, "sb-live", "tok-live")
 			ex.client = &http.Client{Transport: envd}
 			var creates int32
-			ex.createFn = func(context.Context, string, string, time.Duration) (*E2BExecutor, error) {
+			ex.createFn = func(context.Context, string, string, time.Duration, map[string]string) (*E2BExecutor, error) {
 				atomic.AddInt32(&creates, 1)
 				return newAdoptedE2BExecutor("api-key", "sb-new", "tok-new", "tpl", time.Minute), nil
 			}

@@ -1,15 +1,17 @@
 # Cross-pod E2B sandbox lease registry
 
-> **Status**: implemented, **unreleased** (feature branch
-> `feat/e2b-sandbox-leases`)
+> **Status**: implemented, **unreleased** (built on the
+> `feat/e2b-sandbox-leases` line, now part of `fastagent`)
 > **Storage**: Postgres (`sandbox_leases`) in production; sqlite in tests
-> **Last updated**: 2026-09-13
+> **Last updated**: 2026-09-14
 > **Decision owner**: mengmengmengqiang@gmail.com
 > **Reviewed by**: mengmengmengqiang@gmail.com (2026-09-09)
-> **Commits**: see `feat/e2b-sandbox-leases` git log; latest doc revision
-> `85b17fa`, plus the rebuild-publish change (2026-09-13) documented below
-> **Open follow-ups**: none — every clause of the invariant below has a
-> guarding mechanism and a test. Rotation runbook:
+> **Commits**: the `internal/sandbox` history on `fastagent`. Beyond the
+> original lease design, two rounds are documented below: rebuild-publish
+> (2026-09-13) and the provider lifecycle redesign (2026-09-14, stages 1–5)
+> **Open follow-ups**: one operational step — set `FASTAGENT_SANDBOX_POOL_TAG`
+> on every replica, or orphan reaping stays off (Stage 5). Every clause of the
+> invariant below has a guarding mechanism and a test. Rotation runbook:
 > [sandbox-secret-rotation.md](./sandbox-secret-rotation.md).
 
 ## Problem
@@ -74,7 +76,7 @@ release, expiry — so each clause can be checked operation by operation:
 
 | Clause | Enforced by | Accepted window | Known open violators |
 |---|---|---|---|
-| U | the row is the only naming authority: single-winner `Acquire`, the loser closes its own copy, adoption is a CAS, destroy is fenced on `owner`+`epoch` **and** reads the control-plane answer (a rejected DELETE is an error, 404 is "already gone"); per-scope locks make `Get`/`Release` single-writer for a scope, and within one executor `rebuildMu` funnels parallel rebuilds into a single replacement | two pods may briefly share one instance during a takeover; a lapsed lease is reclaimable at TTL while its instance lives on until the provider timeout | none known |
+| U | the row is the only naming authority: single-winner `Acquire`, the loser closes its own copy, adoption is a CAS, destroy is fenced on `owner`+`epoch` **and** reads the control-plane answer (a rejected DELETE is an error, 404 is "already gone"); per-scope locks make `Get`/`Release` single-writer for a scope, and within one executor `rebuildMu` funnels parallel rebuilds into a single replacement; an instance no row claims stops running and is collected (Stage 5) | two pods may briefly share one instance during a takeover; a lapsed lease is reclaimable at TTL, and until the next reap pass its instance keeps its state (paused, unbilled) | none known |
 | A | per-use reconcile; rebuild only on a **status-code** 502/404 from envd (any other failure surfaces instead of costing an instance); fail-open keeps the local sandbox serving; a rebuild that cannot hydrate or verify destroys its replacement and restores the previous identity, so the executor never keeps a sandbox that cannot serve | a publish lands on the next `Get`, so the row may lag the executor by one call | none known |
 | I | the identity (`id` + token + pending-publish bit) is one value behind one mutex, swapped whole; `ReplaceSandboxLease` moves the row under an `owner` CAS; the expiry re-acquire stamps the current id | the pending bit is in-memory only: a crash before the next `Get` loses it and the row ages out via TTL | none known |
 
@@ -246,7 +248,21 @@ buys:
 | 2 | Idle eviction **pauses** instead of releasing (`ScopeSleeper`), behind the in-flight guard; a sleep that fails for any reason but "already gone" leaves the sandbox running | **done** |
 | 3 | `set-timeout` before an operation long enough to outlive the instance TTL, so an auto-pause never lands mid-exec | **done** — `ScopeExtender` → `ExtendTimeout`, called for budgets ≥ 60s with `budget + 2 min` |
 | 4 | `state` / `paused_at` on the row; adopting a paused instance resumes it and refreshes the token when needed | **done** — columns + idempotent retrofit (`migrateSandboxLeasesAddState`), the idle sweep writes `paused`, adoption reads it and `connect`s (fresh token included), and a 401 anywhere still reconnects. The marker is advisory: it is never the basis of a destroy decision, because traffic can wake a paused sandbox without writing to the row |
-| 5 | Reconcile the table against provider lifecycle events (webhook or polled), including killing paused instances no row names | pending |
+| 5 | Reap paused instances no row still claims, using the provider's lifecycle as the authority and the lease table as the naming authority | **done** — `ReapOrphans` (three conjuncts, see below), driven by the lifecycle layer's own hourly clock |
+
+**Why polling and not webhooks, and why not "reconcile the table against
+events".** The original plan for this stage had two halves. The reconciliation
+half is already done where it can be done correctly: the pool reconciles
+against the lease row before **every** use (`reconcileLocalLease`), and it
+learns an instance died from the only signal that matters — a 502/404 from
+envd — so a background poller would only discover deaths that nobody is
+waiting on, at the cost of a second writer for a marker that is explicitly
+advisory. Deleting that half is the point (Musk step 2): a lifecycle-event
+consumer also needs a cursor, a retention window (events are kept 7 days) and a
+high-water mark it must not lose, all to pre-empt a rebuild that per-use
+reconcile already performs for free. The reaping half is *new* capability —
+nothing else in the system can do it, because e2b never kills a paused sandbox
+on its own — so it is the half that shipped.
 
 Facts that size the design: paused sandboxes are unbilled, outside the
 concurrency limit and kept indefinitely; continuous runtime is capped per plan
@@ -260,6 +276,72 @@ commit's message does not mention it. It is a harmless unused method at that
 point in the history, and it was left in place rather than rewriting the
 branch — at the time of writing there were 14 commits after it, seven of them
 another agent's, on a branch still being written to.
+
+### Stage 5: reaping what no row names
+
+Pausing instead of destroying is what makes the next call a resume, but it also
+means nothing ends an instance any more except us: e2b keeps a paused sandbox
+indefinitely, never kills it, and does not bill it. So a scope nobody uses again
+— a crashed pod's sandbox, a row replaced by a takeover, a rotation that made a
+row unreadable — leaves an instance in the account forever. Reaping is the other
+half of "pause instead of kill", and it needs three facts from two places:
+
+| # | Conjunct | Where it comes from | Why the opposite guess is unsafe |
+|---|---|---|---|
+| 1 | the provider says `paused` | `GET /v2/sandboxes?state=paused` | a *running* sandbox may hold a process mid-flight; the query is an optimization, so `ReapOrphans` re-checks the state of every candidate |
+| 2 | its metadata carries this deployment's `fastagent_pool` tag | the create body, which survives pausing | an e2b account can be shared: "paused and unclaimed" describes another deployment's live sandbox exactly as well as our orphan |
+| 3 | no row still claims it | `ListSandboxLeaseRefs` | the row is the naming authority, so an instance it names is not ours to collect |
+
+Conjunct 3 is a window, not an equality: a row whose `expires_at` is in the
+past still protects its instance for `reapGrace` (2 × lease TTL, 30 min by
+default). Inside that window the row may have lapsed between two writes of a
+pod that is still working, or the scope may return before its paused sandbox
+becomes a rebuild. Past it the instance is unreachable by construction: every
+read path treats an expired row as absent (`GetSandboxLease` returns nil), and
+adoption only ever starts from a valid row, so nothing will resume or adopt it.
+That is also what bounds the "kept indefinitely" property: a paused sandbox now
+outlives its scope's last use by at most `TTL + grace` plus one pass.
+
+The one residue is the same one the accepted windows already record: a pod that
+still holds a *cached* executor for an instance reaped this way re-claims the
+row on its next call (`reconcileLocalLease` → `Acquire` stamps whatever sandbox
+it is holding, dead or not) and pays a single rebuild. Reaching it needs the row
+to have lapsed for `TTL + grace` while that pod stayed alive, which means its
+renewals failed for half an hour — and during a registry outage the reaper's own
+read fails closed, so the two cannot overlap freely.
+
+The port and the clock sit at the same seam as the rest of the lifecycle work:
+
+- `OrphanReaper` is declared by the consumer (`LifecyclePool`) and implemented
+  by the pool, like `ScopeSleeper` / `ScopeExtender` / `LeaseRenewer`. Docker
+  has nothing to reap and simply does not implement it.
+- `LifecyclePool.loop` drives it on its **own** interval
+  (`defaultOrphanReapEvery` = 1h, deliberately much slower than the 30s idle
+  sweep). The loop now starts when *either* duty exists, so a deployment with
+  idle eviction off still collects what its crashed pods left behind.
+- `E2BLeaseOptions.PoolTag` → `FASTAGENT_SANDBOX_POOL_TAG` (env-only, like the
+  rest of the deployment manifest) carries the identity. Empty disables the tag
+  *and* the reaper: with no way to prove ownership the pool reaps nothing
+  rather than guessing, logs
+  `sandbox orphan reaping disabled: FASTAGENT_SANDBOX_POOL_TAG is not set` at
+  startup, and reports `orphanReaping=false` in the pool-created line.
+
+**What it does not do.** It does not touch running instances, however
+unreferenced they look (a leaked running sandbox converges to paused at its own
+timeout and is collected on a later pass, so the leak costs at most one instance
+timeout of billing instead of forever). It does not reap instances created
+before the deployment was tagged — a one-time residue worth one manual sweep in
+the dashboard when the tag is introduced. It does not consult the row's `state`
+marker: that column is advisory by definition, so the reaper asks the provider.
+
+**Failure semantics.** The lease-table read is fail-**closed** (an unreadable
+table would make every paused instance look unclaimed, so nothing is
+destroyed), a failed provider listing ends the pass, and one failed delete does
+not stop the rest — the errors are joined and returned so the log names every
+instance that survived. Every pass logs one line,
+`e2b orphan reap pass listed=<n> claimed=<n> reaped=<k>`, which is the only way
+to tell "reaping works and found nothing" from "the provider returned nothing
+at all".
 
 ### Stage 2b: how a rebuild reaches the lease
 
@@ -340,7 +422,9 @@ Alternatives rejected as heavier than the problem:
 ## Files
 
 - `internal/sandbox/lease.go` — port + lease record + default TTL
-  (`ReplaceSandboxLease` is the rebuild-publish write)
+  (`ReplaceSandboxLease` is the rebuild-publish write; `ListSandboxLeaseRefs`
+  is the reaper's read — the naming authority's answer with the credential left
+  out)
 - `internal/store/sandbox_leases.go` — Postgres/sqlite adapter (DBStore) +
   `EncryptedSandboxLeaseStore` (at-rest token encryption decorator)
 - `internal/store/database.go` — the `sandbox_leases` DDL plus
@@ -355,11 +439,17 @@ Alternatives rejected as heavier than the problem:
   `TestE2BExecDoesNotRebuildOnNonGoneFailures` and
   `TestIsBoxliteGoneReadsTheStatusNotTheText`.
 - `internal/sandbox/e2b_executor.go` — pool adopt/acquire/release integration
+- `internal/sandbox/e2b_reaper.go` — Stage 5: the provider listing
+  (`GET /v2/sandboxes`, paginated) and `ReapOrphans` (the three conjuncts),
+  plus `createMetadata` — the tag every create and rebuild carries
 - `internal/sandbox/lifecycle.go` — the idle/duty layer above the pool: the
   in-use refcount that keeps a busy scope out of the sweep, `ScopeSleeper`
   (pause instead of destroy), `ScopeExtender` (move both clocks before a long
-  operation) and `LeaseRenewer` (renew after one)
+  operation), `LeaseRenewer` (renew after one) and `OrphanReaper` (drive the
+  reap on its own clock)
 - `internal/gateway/userspace.go` — pool wiring: per-pod owner id + lease store
+  + pool tag (`sandboxPoolTag`), and the startup warning when the tag is
+  missing
 - `docs/sandbox-secret-rotation.md` — key rotation runbook
 
 ## Rollout
@@ -367,6 +457,12 @@ Alternatives rejected as heavier than the problem:
 - **Prerequisite**: `FASTAGENT_OAUTH_SECRET` must be configured. Without it
   the gateway disables shared leases and falls back to per-pod sandboxes —
   plaintext `envd_token` rows are never written.
+- **Recommended**: set `FASTAGENT_SANDBOX_POOL_TAG` to this deployment's name
+  (e.g. `prod`) on every replica. It is written into each sandbox's metadata
+  and is what makes orphan reaping safe to enable; unset means untagged
+  instances and no reaping, and the gateway says so at startup. Every replica
+  must use the **same** value — a per-pod value would make each pod's
+  instances look foreign to the others and nothing would be reapable.
 - No manual migration needed: boot `Migrate()` runs
   `CREATE TABLE IF NOT EXISTS sandbox_leases (...)` (including `epoch`) on
   both dialects. The table ships only with this feature branch — nothing has
@@ -385,6 +481,12 @@ Alternatives rejected as heavier than the problem:
   `e2b sandbox adopted from shared lease` (another pod's instance, no create).
   `e2b sandbox routable` reports how long e2b took to route a fresh id —
   normally the first attempt, and the number to watch when creates are slow.
+  Reaping has its own line: `e2b orphan reap pass listed=<n> claimed=<n>
+  reaped=<k>` once per hour per replica, with a separate
+  `e2b orphan sandbox reaped` line per instance. `listed=0` every hour on a
+  fleet that has been running a while is the signal that the deployment is
+  untagged (or that the state filter is not being honored) — check
+  `orphanReaping=true` on the pool-created line first.
 - CI coverage: `.github/workflows/go-test.yml` runs the sandbox/store/gateway
   suites against a Postgres service on every push/PR; the live E2B job runs
   only when `E2B_API_KEY`/`E2B_TEMPLATE` secrets exist.
@@ -489,10 +591,13 @@ Threat model and controls:
   the row is overwritten it adopts the same `sandbox_id`, and with `autoPause`
   that instance is merely paused: the takeover resumes it instead of building a
   replacement. A takeover that wins `Acquire` *after* the row was replaced
-  leaves the old instance paused, unreferenced and permanent — it is not billed
-  and does not count toward the concurrency limit, so the cost is bookkeeping
-  rather than money. Reaping those (lifecycle events, or a sweep that kills
-  paused instances no row names) is part of the staged work below.
+  leaves the old instance paused and unreferenced. It is not billed and does not
+  count toward the concurrency limit, and Stage 5 collects it within a pass —
+  the residue is bounded by the reap interval, not by the sandbox's life.
+  What remains accepted after Stage 5: an instance created **before** the
+  deployment carried a pool tag is never collected (one-time), a running
+  instance that leaked keeps billing until its own timeout pauses it, and every
+  replica runs the listing (N list calls per hour, no coordination).
 - Adoption races are benign for correctness of destruction (owner check), but
   two pods briefly sharing one sandbox is expected during takeover windows.
 - In the rare double-race where a creator loses `Acquire` and the subsequent
@@ -536,13 +641,18 @@ Threat model and controls:
   otherwise have happened at TTL. The alternative (letting the row lapse while
   the operation runs) trades a slow takeover for a second sandbox, which the
   lease exists to prevent.
-- **Two things about the secure switch are not verifiable from here.**
-  [UNVERIFIED] whether e2b's destroy call accepts a *paused* sandbox id (a
-  release of a scope whose sandbox is asleep must not leak it), and during a
+- **One thing about the secure switch is not verifiable from here.** During a
   rolling deploy the fleet is mixed: sandboxes created before `secure: true`
   carry no token, and envd answers them without auth, so calls to them still
-  work (our client simply sends no `X-Access-Token`). Both are worth one check
-  against a real account.
+  work (our client simply sends no `X-Access-Token`). Worth one check against a
+  real account.
+  The other half of this bullet is now settled by the provider's own docs:
+  destroy *does* apply to a paused sandbox — "E2B never kills paused sandboxes
+  on its own. A paused sandbox is only removed when you explicitly call `kill`
+  on it", [paused-sandboxes-concurrency](https://docs.e2b.dev/faq/paused-sandboxes-concurrency.md).
+  That is what makes Stage 5's reaping the *only* thing that can collect a
+  paused orphan, and why releasing a scope whose sandbox is asleep does not
+  leak it.
 - **The in-use marker covers the post-exec sync too.** The sync reads the
   sandbox, so the scope stays marked busy until it finishes; otherwise the sweep
   could pause the sandbox mid-sync. That also means a wedged sync holds the scope
@@ -551,7 +661,7 @@ Threat model and controls:
 
 ## Test topology
 
-**Last reviewed**: 2026-09-09
+**Last reviewed**: 2026-09-14
 
 Test layers mirror the production dependency direction (policy → port →
 adapter → composition root), so each seam is exercised without pulling
@@ -616,6 +726,32 @@ external dependencies.
   (`TestSandboxLeaseStatePostgres`, `TestSandboxLeaseStateMigrationPostgres`),
   because production is Postgres and neither the retrofit's information_schema
   lookup nor its ALTER is exercised by sqlite.
+  `e2b_reaper_test.go` covers Stage 5. One test per conjunct, because each one
+  is the difference between collecting an orphan and destroying live state:
+  only instances this deployment tagged are candidates
+  (`TestReapOrphansLeavesSandboxesItCannotProveItCreated`), only the ones the
+  provider reports as paused
+  (`TestReapOrphansNeverDestroysARunningSandbox`), and only those no row still
+  claims — including the window itself, from both sides
+  (`TestReapOrphansKeepsInstancesASlippedLeaseStillClaims` versus
+  `TestReapOrphansReapsAfterTheGraceWindow`). Plus the fail-closed path
+  (`TestReapOrphansFailsClosedWhenTheRegistryCannotAnswer`), the two no-op
+  paths (no tag, no lease store), a partial failure that must not abandon the
+  pass (`TestReapOrphansKeepsGoingAfterAFailedDestroy`), the wire contract
+  (`TestListE2BSandboxesPaginatesThePausedFilter`: v2 path, `state=paused`,
+  page size, cursor followed, metadata carried through), and the tag's journey
+  from option → create body → rebuild
+  (`TestRebuildCarriesThePoolTagIntoTheCreateCall`,
+  `TestE2BCreateBodyCarriesPoolMetadata`). Every conjunct was verified by
+  reverting it and watching the matching test fail.
+  `lifecycle_reap_test.go` covers the clock, not the rule: that the loop
+  actually drives the reaper (`TestLifecyclePoolReapsOrphansOnItsOwnClock`),
+  that it does so even when idle eviction is off
+  (`TestLifecyclePoolReapsEvenWhenIdleEvictionIsOff`), that a pool which cannot
+  reap keeps the old no-goroutine fast path
+  (`TestLifecyclePoolWithoutAReaperStillShortCircuits`), and that a failed pass
+  is retried rather than fatal
+  (`TestLifecyclePoolKeepsReapingAfterAFailedPass`).
 - **Adapter (store package)** — `sandbox_leases_test.go` runs `DBStore`
   through `sandbox.SandboxLeaseStore` against real sqlite: renew CAS miss,
   stale/missing release no-ops, monotonic epoch. `sandbox_leases_postgres_test.go`
@@ -626,14 +762,21 @@ external dependencies.
   covers the production dialect (concurrent acquire single winner, stale
   release fencing, idempotent `Migrate`) and is gated by
   `FASTAGENT_TEST_PG_DSN` — sqlite serializes writes, so cross-connection
-  semantics are only proven on Postgres. `sandbox_leases_crypto_test.go`
+  semantics are only proven on Postgres. The reaper's read is the exception
+  that proves the rule: `TestSandboxLeaseRefsProjectEveryRow` runs on sqlite and
+  asserts a lapsed row is still *reported* (the grace window is the pool's
+  decision, not the store's), with `TestSandboxLeaseRefsPostgres` for the
+  production dialect. `sandbox_leases_crypto_test.go`
   covers the encryption decorator: round-trip with no plaintext in the raw
   row, wrong-key fail-closed, and rotation (old-key rows unreadable → new
   key reclaims after TTL) on sqlite, with a Postgres variant gated by
-  `FASTAGENT_TEST_PG_DSN`.
+  `FASTAGENT_TEST_PG_DSN`. It also pins that the reaper's read needs no key
+  (`TestEncryptedSandboxLeaseStoreListsRefsWithoutDecrypting`, using a cipher
+  that fails every call) — post-rotation is exactly when orphans appear.
 - **Composition root (gateway package)** — `sandbox_pool_lease_test.go` tests
   the pure `sandboxLeaseOpts` decision (nil store / missing owner ⇒ no shared
-  lease) and `buildSystemSandboxPool` wiring without network access.
+  lease, and the pool tag travelling with it) and `buildSystemSandboxPool`
+  wiring without network access.
 - **Live e2e (`TestE2BPoolCrossPodAdoption`)** — requires `E2B_API_KEY` and
   `E2B_TEMPLATE`; in CI a missing credential set fails the test instead of
   silently skipping. Each "pod" opens its own `DBStore` handle over the same
