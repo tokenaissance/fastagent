@@ -267,53 +267,6 @@ func TestSandboxLeaseRenewEpochMonotonic(t *testing.T) {
 	}
 }
 
-// The reaper's read: every row's instance and expiry, lapsed ones included.
-// Which of those still counts as a claim is the pool's rule (the grace window),
-// not the store's — so the store must not filter.
-func TestSandboxLeaseRefsProjectEveryRow(t *testing.T) {
-	ctx := context.Background()
-	db := newTestSandboxLeaseDB(t)
-	var st sandbox.SandboxLeaseStore = db
-
-	if _, _, err := st.AcquireSandboxLease(
-		ctx, "agt_1:s:sess_1", "pod-a", "sb-live", "tok", "tpl", time.Minute); err != nil {
-		t.Fatalf("acquire live row: %v", err)
-	}
-	// A row that lapsed an hour ago: the abandoned-session case the reaper
-	// exists for, and the one a WHERE expires_at > now would hide. Ages the row
-	// directly because no API path produces one — Acquire floors the expiry at
-	// now+1s so a live claim never looks expired.
-	if _, _, err := st.AcquireSandboxLease(
-		ctx, "agt_2:s:sess_2", "pod-a", "sb-lapsed", "tok", "tpl", time.Minute); err != nil {
-		t.Fatalf("acquire lapsed row: %v", err)
-	}
-	if _, err := db.db.ExecContext(ctx,
-		"UPDATE sandbox_leases SET expires_at = ? WHERE scope_key = ?",
-		time.Now().Add(-time.Hour).Unix(), "agt_2:s:sess_2"); err != nil {
-		t.Fatalf("age the row: %v", err)
-	}
-
-	refs, err := st.ListSandboxLeaseRefs(ctx)
-	if err != nil {
-		t.Fatalf("ListSandboxLeaseRefs: %v", err)
-	}
-	byID := make(map[string]int64, len(refs))
-	for _, ref := range refs {
-		byID[ref.SandboxID] = ref.ExpiresAt
-	}
-	now := time.Now().Unix()
-	if exp, ok := byID["sb-live"]; !ok || exp <= now {
-		t.Fatalf("sb-live ref = (%d, %v), want an expiry in the future", exp, ok)
-	}
-	exp, ok := byID["sb-lapsed"]
-	if !ok {
-		t.Fatal("sb-lapsed missing: a lapsed row must still be reported, or the reaper cannot tell a slip from an abandonment")
-	}
-	if exp >= now {
-		t.Fatalf("sb-lapsed expiry = %d, want in the past", exp)
-	}
-}
-
 func newTestSandboxLeaseDB(t *testing.T) *DBStore {
 	t.Helper()
 	db, err := NewDBStore("sqlite", "file:"+filepath.Join(t.TempDir(), "leases.db")+"?cache=shared")

@@ -228,7 +228,7 @@ func rebuildableExecutor(t *testing.T, rec *leaseCloseRecorder, sandboxID, token
 	envd := &fakeEnvdTransport{}
 	ex := testExecutor(rec, sandboxID, token)
 	ex.client = &http.Client{Transport: envd}
-	ex.createFn = func(context.Context, string, string, time.Duration, map[string]string) (*E2BExecutor, error) {
+	ex.createFn = func(context.Context, string, string, time.Duration) (*E2BExecutor, error) {
 		return newAdoptedE2BExecutor("api-key", replacementID, replacementToken, "tpl", time.Minute), nil
 	}
 	return ex, envd
@@ -433,7 +433,7 @@ func TestE2BExecutorConcurrentRebuildMintsOneSandbox(t *testing.T) {
 	ex.client = &http.Client{Transport: envd}
 
 	var creates int32
-	ex.createFn = func(context.Context, string, string, time.Duration, map[string]string) (*E2BExecutor, error) {
+	ex.createFn = func(context.Context, string, string, time.Duration) (*E2BExecutor, error) {
 		atomic.AddInt32(&creates, 1)
 		return newAdoptedE2BExecutor("api-key", "sb-new", "tok-new", "tpl", time.Minute), nil
 	}
@@ -478,7 +478,7 @@ func TestE2BExecutorFailedRebuildRestoresIdentityAndDestroysReplacement(t *testi
 	envd := &fakeEnvdTransport{brokenSandboxIDs: []string{"sb-new"}}
 	ex := testExecutor(rec, "sb-old", "tok-old")
 	ex.client = &http.Client{Transport: envd}
-	ex.createFn = func(context.Context, string, string, time.Duration, map[string]string) (*E2BExecutor, error) {
+	ex.createFn = func(context.Context, string, string, time.Duration) (*E2BExecutor, error) {
 		return newAdoptedE2BExecutor("api-key", "sb-new", "tok-new", "tpl", time.Minute), nil
 	}
 

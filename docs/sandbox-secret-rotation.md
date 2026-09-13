@@ -19,12 +19,11 @@ refresh tokens). This runbook covers rotating that secret.
   current secret. Such rows become readable again without waiting for TTL;
   the rest still age out as above.
 - **Orphaned E2B instances** created before rotation are not destroyed by this
-  runbook, but they no longer accumulate forever: each one keeps running until
-  its provider timeout, pauses there (unbilled), and is then collected by the
-  orphan reaper once no lease row still claims it. That requires the deployment
-  to have set `FASTAGENT_SANDBOX_POOL_TAG` — without a tag the pool cannot prove
-  the instance is its own, so it stays paused indefinitely. See
-  [sandbox-pool-leases.md](./sandbox-pool-leases.md) → Stage 5.
+  runbook, and nothing else destroys them either: each one runs out its provider
+  timeout, pauses there (unbilled, outside the concurrency limit) and stays
+  paused forever, because a paused sandbox has no time-to-live on e2b's side.
+  Orphan reaping was implemented and withdrawn pending a growth measurement —
+  see [sandbox-pool-leases.md](./sandbox-pool-leases.md) → "Orphan reaping".
 - **MCP OAuth is affected too**: the same secret encrypts stored OAuth
   refresh tokens. Rotating it invalidates every stored refresh token and
   forces all users/agents to re-authorize. Coordinate the window and notify
@@ -49,10 +48,9 @@ refresh tokens). This runbook covers rotating that secret.
    DELETE FROM sandbox_leases;
    ```
 
-   Deleting the rows is also what unclaims their instances: each one pauses at
-   its own provider timeout and is then reaped. The reaper's read needs no key,
-   so it works during the rotation window even though the rows themselves are
-   unreadable.
+   This releases their *instances* from any claim as well, but it does not
+   destroy them: e2b keeps a paused sandbox until someone kills it, so the ones
+   already paused before the rotation stay in the account.
 4. Verify:
 
    ```bash

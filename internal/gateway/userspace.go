@@ -129,19 +129,11 @@ func sandboxLeaseStoreFrom(st store.Store) sandbox.SandboxLeaseStore {
 // per-pod behavior (each replica creates its own sandbox). Extracted from
 // buildSystemSandboxPool so the wiring decision is unit-testable without
 // constructing a pool.
-func sandboxLeaseOpts(leases sandbox.SandboxLeaseStore, ownerID, poolTag string) *sandbox.E2BLeaseOptions {
+func sandboxLeaseOpts(leases sandbox.SandboxLeaseStore, ownerID string) *sandbox.E2BLeaseOptions {
 	if leases == nil || ownerID == "" {
 		return nil
 	}
-	return &sandbox.E2BLeaseOptions{Store: leases, Owner: ownerID, PoolTag: poolTag}
-}
-
-// sandboxPoolTag is the deployment's identity inside a shared e2b account —
-// the metadata value that lets the pool tell its own leaked sandboxes from
-// another deployment's live ones. Read from the environment like the lease
-// store's secret, and empty (reaping off) when unset.
-func sandboxPoolTag() string {
-	return config.LoadEnv().Sandbox.PoolTag
+	return &sandbox.E2BLeaseOptions{Store: leases, Owner: ownerID}
 }
 
 // buildSystemSandboxPool constructs the gateway-wide sandbox pool from
@@ -187,18 +179,13 @@ func buildSystemSandboxPool(
 			template = "base"
 		}
 		var opts []func(*sandbox.E2BExecutorPool)
-		sharedLeases := sandboxLeaseOpts(leases, ownerID, sandboxPoolTag())
+		sharedLeases := sandboxLeaseOpts(leases, ownerID)
 		if sharedLeases != nil {
 			opts = append(opts, sandbox.WithSandboxLeases(*sharedLeases))
 		}
 		inner = sandbox.NewE2BExecutorPool(apiKey, template, home, 30*time.Minute, opts...)
 		slog.Info("system sandbox executor pool created",
-			"backend", "e2b", "template", template, "sharedLeases", sharedLeases != nil,
-			"orphanReaping", sharedLeases != nil && sharedLeases.PoolTag != "")
-		if sharedLeases != nil && sharedLeases.PoolTag == "" {
-			slog.Warn("sandbox orphan reaping disabled: FASTAGENT_SANDBOX_POOL_TAG is not set",
-				"hint", "paused sandboxes that no lease row names are kept by e2b forever")
-		}
+			"backend", "e2b", "template", template, "sharedLeases", sharedLeases != nil)
 	case "boxlite":
 		secret := cfg.BoxliteKey
 		if secret == "" {

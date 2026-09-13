@@ -29,7 +29,7 @@ func TestE2BPoolProvisionsScopesConcurrently(t *testing.T) {
 
 	pool := NewE2BExecutorPool("api-key", "tpl", "", time.Minute)
 	rec := &leaseCloseRecorder{}
-	pool.newSandboxExecutor = func(_ context.Context, _, _ string, _ time.Duration, _ map[string]string) (*E2BExecutor, error) {
+	pool.newSandboxExecutor = func(_ context.Context, _, _ string, _ time.Duration) (*E2BExecutor, error) {
 		ex := testExecutor(rec, "sb-x", "tok-x")
 		ex.client = &http.Client{Transport: &fakeEnvdTransport{}}
 		return ex, nil
