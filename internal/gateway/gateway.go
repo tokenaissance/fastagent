@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -163,14 +164,18 @@ func buildToolChainFromResolved(resolved config.ResolvedAgent, category string) 
 // per-UserSpace `SandboxPool` field is just a borrowed reference;
 // shutdown closes this single pool.
 type Gateway struct {
-	bus         *bus.MessageBus
-	users       *userSpaceRegistry
-	chanMgr     *channels.Manager
-	webChan     *channels.WebChannel
-	scheduler   *cron.Scheduler
-	webhookSrv  *webhook.Server
-	pluginMgr   *plugin.Manager
-	taskQueue   *taskqueue.Queue
+	bus        *bus.MessageBus
+	users      *userSpaceRegistry
+	chanMgr    *channels.Manager
+	webChan    *channels.WebChannel
+	scheduler  *cron.Scheduler
+	webhookSrv *webhook.Server
+	pluginMgr  *plugin.Manager
+	taskQueue  *taskqueue.Queue
+	// deferred holds automatic turn-start requests (cron / goal / heartbeat /
+	// subagent) that found their session busy; a drain loop retries them.
+	// See internal/gateway/deferred_turns.go.
+	deferred    *deferredTurns
 	store       store.Store
 	accounts    *users.Accounts
 	workspace   workspace.Store
@@ -252,6 +257,28 @@ func (g *Gateway) TaskQueue() *taskqueue.Queue { return g.taskQueue }
 
 // EnvConfig returns the bootstrap config (FASTAGENT_* env vars).
 func (g *Gateway) EnvConfig() *config.EnvConfig { return g.envCfg }
+
+// sessionBusy reports whether the session an automatic message targets has a
+// turn in flight. The deferred-turn drain uses it to decide when a parked
+// tick may be submitted.
+//
+// Fail-closed on lookup errors: keeping a cron tick parked is recoverable,
+// firing it into a session that is still writing is not.
+func (g *Gateway) sessionBusy(ctx context.Context, agentID string, msg bus.InboundMessage) bool {
+	if g == nil || g.users == nil {
+		return false
+	}
+	space, err := g.users.getOrLoad(ctx, msg.OwnerUserID)
+	if err != nil {
+		return true
+	}
+	ag := space.Agents.AgentByID(agentID)
+	if ag == nil || ag.Sessions() == nil {
+		return false
+	}
+	sess := ag.Sessions().Get(msg.Channel, msg.AccountID, msg.ChatID, msg.ProjectID)
+	return sess != nil && sess.TurnActive()
+}
 
 // New creates a Gateway. Storage + workspace + plugin manager + channel
 // manager + cron scheduler + webhook all initialize here, but no agents
@@ -518,7 +545,19 @@ func New(env *config.EnvConfig) (*Gateway, error) {
 			}
 		}
 
-		reply := ag.HandleMessage(ctx, task.Message)
+		// RunTurn (not HandleMessage) so an automatic source — cron tick,
+		// goal continuation, heartbeat, subagent delivery — that finds this
+		// session busy is refused immediately instead of blocking this worker
+		// (and its whole turn budget) behind the user turn that owns the
+		// session. The message is parked and retried once the session is idle.
+		reply, runErr := ag.RunTurn(ctx, task.Message)
+		if errors.Is(runErr, agent.ErrTurnNotAdmitted) {
+			close(typingDone)
+			if g.deferred != nil {
+				g.deferred.park(task.AgentID, task.ChatKey, task.Message, task.AccountID)
+			}
+			return "", nil
+		}
 		close(typingDone)
 		// Extract `![alt](workspace/relative/path)` markdown image refs
 		// from the agent's reply, resolve their bytes via the
@@ -578,6 +617,14 @@ func New(env *config.EnvConfig) (*Gateway, error) {
 		return reply, nil
 	})
 	g.taskQueue = tq
+	// Parked automatic turns are re-submitted through the same queue, so they
+	// keep per-chat FIFO ordering and the queue's own concurrency limits.
+	g.deferred = newDeferredTurns(
+		func(agentID, chatKey string, msg bus.InboundMessage, accountID string) {
+			tq.Submit(agentID, chatKey, msg, accountID)
+		},
+		g.sessionBusy,
+	)
 
 	// Register all enabled channel rows from the DB.
 	if err := registerChannelsFromStore(st, mb, chanMgr); err != nil {
@@ -733,6 +780,10 @@ func (g *Gateway) Run() error {
 	go func() { defer wg.Done(); g.cleanupDedup(ctx) }()
 	wg.Add(1)
 	go func() { defer wg.Done(); g.processInbound(ctx) }()
+	if g.deferred != nil {
+		wg.Add(1)
+		go func() { defer wg.Done(); g.deferred.run(ctx) }()
+	}
 	wg.Add(1)
 	go func() { defer wg.Done(); g.chanMgr.Start(ctx) }()
 	if g.scheduler != nil {
