@@ -195,7 +195,7 @@ sandbox, even if that means leaking one until TTL/expiry.
 | Hydrate hits a cut stream or a 502 right after create | Retries the network steps up to 3 times, 1.5s apart — a container that was created moments ago can cut one stream while it finishes booting. Only "not routable yet" is retried: a 401 or a permission error is a verdict and fails immediately. The bundle is built once, outside the loop | `TestHydrateRetriesATruncatedStream`, `TestHydrateDoesNotRetryAVerdict` |
 | Idle sweep, backend can pause | Pauses the instance, renews the row (the paused instance is free to keep, so the row that names it should survive too) and keeps `hydrated` — the sandbox still holds its filesystem. A scope with an operation in flight is skipped entirely | `TestLifecycleIdleSleepsInsteadOfReleasing`, `TestLifecycleDoesNotEvictWhileAnOperationRuns` |
 | Idle sweep, sleep fails (a provider without pause, a transient API error) | Leaves the sandbox running, logs a warning, and keeps the scope in the idle set so the next sweep retries — dropping it would leave a running, billed sandbox that nothing tracks. Only "there was nothing to sleep" falls through to the normal release | `TestLifecycleKeepsSandboxItCouldNotSleep`, `TestAFailedSleepKeepsTheScopeInTheSweepSet`, `TestLifecycleFallsBackToReleaseWhenThereIsNothingToSleep` |
-| Operation longer than the sandbox's remaining TTL | `ScopeExtender` moves the expiry to `budget + 2 min` before an operation of ≥ 60s, so the auto-pause never lands mid-operation (it would cut the stream). Shorter operations may still straddle an expiry seconds away; that surfaces as a truncated stream and the caller can retry | `TestLifecycleExtendsTheSandboxBeforeALongOperation`, `TestE2BExtendTimeoutMovesTheExpiry` |
+| Operation longer than the sandbox's remaining TTL — **both clocks** | Before an operation of ≥ 60s, `ScopeExtender` moves the instance's expiry to `budget + 2 min` (so the auto-pause cannot land mid-operation and cut the stream) **and** renews the lease for the same budget (so the row cannot lapse mid-operation, which would let a sibling replica acquire the scope and start a second sandbox while this one is still working). Renewing never shortens below the pool's own TTL. Shorter operations may still straddle an expiry seconds away; that surfaces as a truncated stream and the caller can retry | `TestLifecycleExtendsTheSandboxBeforeALongOperation`, `TestE2BExtendTimeoutMovesTheExpiry`, `TestExtendScopeMovesTheLeaseClockToo` |
 | envd answers 401 (the token was superseded, e.g. across a pause) | Reconnects for the current token, records it as pending publication (the next reconcile writes it to the row through the rebuild-publish path) and retries once — the sandbox and its id are untouched | `TestE2BRefreshesASupersededEnvdToken`, `TestStaleEnvdTokenClassification` |
 | Adopting a scope whose row says `paused` | Calls `connect` before use: it resumes the instance, extends its TTL and returns the current token, so the first call does not pay a 401 first. Marked `running` afterwards. A running row skips this entirely | `TestAdoptingAPausedSandboxResumesIt`, `TestAdoptingARunningSandboxDoesNotConnect` |
 | Parallel rebuilds on one executor | The first caller replaces the sandbox; the rest observe the new identity and retry on it without creating anything — exactly one instance per dead sandbox | `TestE2BExecutorConcurrentRebuildMintsOneSandbox` |
@@ -347,6 +347,10 @@ Alternatives rejected as heavier than the problem:
   `TestE2BExecDoesNotRebuildOnNonGoneFailures` and
   `TestIsBoxliteGoneReadsTheStatusNotTheText`.
 - `internal/sandbox/e2b_executor.go` — pool adopt/acquire/release integration
+- `internal/sandbox/lifecycle.go` — the idle/duty layer above the pool: the
+  in-use refcount that keeps a busy scope out of the sweep, `ScopeSleeper`
+  (pause instead of destroy), `ScopeExtender` (move both clocks before a long
+  operation) and `LeaseRenewer` (renew after one)
 - `internal/gateway/userspace.go` — pool wiring: per-pod owner id + lease store
 - `docs/sandbox-secret-rotation.md` — key rotation runbook
 
@@ -518,6 +522,19 @@ Threat model and controls:
   be paused mid-flight. The stream is cut, the process survives in the snapshot,
   and the caller sees a truncated response it can retry — accepted, because
   closing that window means a call per tool call.
+- **A long operation holds the scope longer than the TTL would.** Renewing the
+  lease for the operation's budget means the row stays this pod's until the
+  operation ends — which is the point, but it also delays a takeover that would
+  otherwise have happened at TTL. The alternative (letting the row lapse while
+  the operation runs) trades a slow takeover for a second sandbox, which the
+  lease exists to prevent.
+- **Two things about the secure switch are not verifiable from here.**
+  [UNVERIFIED] whether e2b's destroy call accepts a *paused* sandbox id (a
+  release of a scope whose sandbox is asleep must not leak it), and during a
+  rolling deploy the fleet is mixed: sandboxes created before `secure: true`
+  carry no token, and envd answers them without auth, so calls to them still
+  work (our client simply sends no `X-Access-Token`). Both are worth one check
+  against a real account.
 - **The in-use marker covers the post-exec sync too.** The sync reads the
   sandbox, so the scope stays marked busy until it finishes; otherwise the sweep
   could pause the sandbox mid-sync. That also means a wedged sync holds the scope
@@ -587,6 +604,10 @@ external dependencies.
   reads it and resumes, a running row skips the round trip, renewing does not
   reset it, a rebuild does, a foreign owner cannot write it, and the retrofit
   adds the columns exactly once to a table that predates them.
+  The store's state tests also exist in their Postgres form
+  (`TestSandboxLeaseStatePostgres`, `TestSandboxLeaseStateMigrationPostgres`),
+  because production is Postgres and neither the retrofit's information_schema
+  lookup nor its ALTER is exercised by sqlite.
 - **Adapter (store package)** — `sandbox_leases_test.go` runs `DBStore`
   through `sandbox.SandboxLeaseStore` against real sqlite: renew CAS miss,
   stale/missing release no-ops, monotonic epoch. `sandbox_leases_postgres_test.go`

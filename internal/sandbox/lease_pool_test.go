@@ -55,6 +55,7 @@ type fakeLeaseStore struct {
 	renewEpoch   int64
 	renewErr     error
 	renewMiss    bool
+	renewTTLs    []time.Duration
 	releaseOK    bool
 	releaseErr   error
 	releaseCalls int
@@ -94,11 +95,12 @@ func (f *fakeLeaseStore) AcquireSandboxLease(
 func (f *fakeLeaseStore) RenewSandboxLease(
 	_ context.Context,
 	_, _, _ string,
-	_ time.Duration,
+	ttl time.Duration,
 ) (int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.renewCalls++
+	f.renewTTLs = append(f.renewTTLs, ttl)
 	if f.renewErr != nil {
 		return 0, f.renewErr
 	}
@@ -192,6 +194,15 @@ func (f *fakeLeaseStore) recordedStates() []string {
 	out := make([]string, len(f.states))
 	copy(out, f.states)
 	return out
+}
+
+func (f *fakeLeaseStore) renewTTL(i int) time.Duration {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if i >= len(f.renewTTLs) {
+		return 0
+	}
+	return f.renewTTLs[i]
 }
 
 func newLeasePool(t *testing.T, store SandboxLeaseStore, owner string) *E2BExecutorPool {

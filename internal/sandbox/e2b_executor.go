@@ -1975,8 +1975,18 @@ func (p *E2BExecutorPool) SleepScope(ctx context.Context, agentID, projectID, se
 	return true, nil
 }
 
-// ExtendScope pushes the scope's sandbox expiry out to now+d. Implements the
-// lifecycle layer's ScopeExtender.
+// ExtendScope makes a scope survive an operation of length d. Two clocks have
+// to move, and moving only one is a bug:
+//
+//   - the instance's provider expiry, or the auto-pause lands mid-operation and
+//     cuts the stream;
+//   - the lease row's expiry, or the row lapses mid-operation and a sibling
+//     replica acquires the scope and starts a SECOND sandbox while this one is
+//     still working — which is exactly the duplication the lease exists to
+//     prevent.
+//
+// Implements the lifecycle layer's ScopeExtender. A pool without a lease store
+// (single pod) only has the first clock.
 func (p *E2BExecutorPool) ExtendScope(ctx context.Context, agentID, projectID, sessionID string, d time.Duration) error {
 	key := poolKey(agentID, projectID, sessionID)
 	scope := p.scopeLock(key)
@@ -1986,7 +1996,27 @@ func (p *E2BExecutorPool) ExtendScope(ctx context.Context, agentID, projectID, s
 	if !ok {
 		return nil
 	}
-	return ex.ExtendTimeout(ctx, ex.identSnapshot().id, d)
+	id := ex.identSnapshot().id
+	if err := ex.ExtendTimeout(ctx, id, d); err != nil {
+		return err
+	}
+	if p.leaseStore == nil {
+		return nil
+	}
+	// Never shorten: an operation that needs 90 seconds should not leave the
+	// scope with a 90-second lease when the pool's own TTL is longer.
+	ttl := d
+	if ttl < p.leaseTTL {
+		ttl = p.leaseTTL
+	}
+	epoch, err := p.leaseStore.RenewSandboxLease(ctx, key, p.ownerID, id, ttl)
+	if err != nil {
+		return fmt.Errorf("extend lease for %s: %w", id, err)
+	}
+	if epoch > 0 {
+		p.recordEpoch(key, epoch)
+	}
+	return nil
 }
 
 // reconcileLocalLease checks the shared lease against a locally cached
