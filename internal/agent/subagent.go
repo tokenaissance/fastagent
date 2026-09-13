@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
+	"github.com/fastclaw-ai/fastclaw/internal/agent/tools"
 	"github.com/fastclaw-ai/fastclaw/internal/provider"
 )
 
@@ -20,6 +22,28 @@ import (
 // subagent.
 const subagentDefaultTimeout = 15 * time.Minute
 
+// subagentSalvageTimeout bounds the tools-free round that writes down what the
+// sub-agent already gathered when its wall budget runs out. Without it a
+// budget expiry threw away every fetched document the sub-agent had collected:
+// the loop returned ("", err) and the parent only saw a failure note.
+const subagentSalvageTimeout = 90 * time.Second
+
+// subagentWallBudget resolves the wall-clock budget for one sub-agent: the
+// caller's explicit request, then this agent's configured default, then the
+// built-in. The default is configuration, not ambient state — it arrives on the
+// Agent from the resolved config (system → user → agent scope) rather than
+// being read from the environment here, so the settings layers and the panel
+// stay the single place a default is decided.
+func (a *Agent) subagentWallBudget(explicit time.Duration) time.Duration {
+	if explicit > 0 {
+		return explicit
+	}
+	if a.subagentTimeout > 0 {
+		return a.subagentTimeout
+	}
+	return subagentDefaultTimeout
+}
+
 // RunSubagent implements tools.SubagentRunner so the delegate_task tool
 // can call back into the Agent without creating an import cycle.
 //
@@ -29,13 +53,13 @@ const subagentDefaultTimeout = 15 * time.Minute
 // runs — even when the next sub-agent doesn't start immediately or
 // the parent decides to handle the result before issuing another
 // delegate_task.
-func (a *Agent) RunSubagent(ctx context.Context, task string, maxIterations int) (out string, err error) {
+func (a *Agent) RunSubagent(ctx context.Context, req tools.SubagentRequest) (out string, err error) {
 	defer func() {
 		emitEvent(ctx, ChatEvent{Type: "subagent_progress", Data: map[string]any{
 			"phase": "done",
 		}})
 	}()
-	return a.runSubagentLoop(ctx, task, maxIterations)
+	return a.runSubagentLoop(ctx, req)
 }
 
 // runSubagentLoop is a self-contained ReAct loop used by delegate_task.
@@ -59,14 +83,17 @@ func (a *Agent) RunSubagent(ctx context.Context, task string, maxIterations int)
 // sub-agents can't spawn further sub-agents (v1 nesting limit).
 //
 // Return contract: the final synthesized text in all "we got something"
-// cases — clean exit, cap-hit forced delivery, or loop-detection abort.
-// A non-nil error is returned only for plumbing failures (no provider,
-// transient API error during a Chat call); callers fold that into the
-// tool_result so the parent agent can react.
-func (a *Agent) runSubagentLoop(ctx context.Context, task string, maxIterations int) (string, error) {
+// cases — clean exit, cap-hit forced delivery, budget-expiry salvage, or
+// loop-detection abort. A non-nil error is returned only for plumbing failures
+// (no provider, transient API error during a Chat call); callers fold that into
+// the tool_result so the parent agent can react. When the wall budget expires
+// the text returned alongside the error is whatever the sub-agent managed to
+// write — see finalizeSubagent.
+func (a *Agent) runSubagentLoop(ctx context.Context, req tools.SubagentRequest) (string, error) {
 	if a.provider == nil {
 		return "", fmt.Errorf("agent has no provider configured")
 	}
+	maxIterations := req.MaxIterations
 	if maxIterations <= 0 {
 		maxIterations = a.maxToolIterations
 	}
@@ -76,15 +103,23 @@ func (a *Agent) runSubagentLoop(ctx context.Context, task string, maxIterations 
 
 	// Each subagent gets its own bounded ctx so a slow sibling can't
 	// drain the rest of a parallel fan-out. Parent cancel still wins —
-	// we're wrapping, not detaching.
-	subCtx, cancel := context.WithTimeout(ctx, subagentDefaultTimeout)
+	// we're wrapping, not detaching. Keep the parent ctx: telling "my budget
+	// expired" from "the parent gave up" is what decides whether salvaging is
+	// allowed to spend one more round.
+	budget := a.subagentWallBudget(req.WallTimeout)
+	parentCtx := ctx
+	subCtx, cancel := context.WithTimeout(parentCtx, budget)
 	defer cancel()
 	ctx = subCtx
+	// lastContent is the newest thing the model actually wrote. Tool-calling
+	// rounds carry their prose in the same message, so this is usually non-empty
+	// long before the loop ends — it is the floor salvage falls back to.
+	lastContent := ""
 
 	systemPrompt := a.ctxBuilder.BuildSystemPrompt() + subagentSystemSuffix()
 	messages := []provider.Message{
 		{Role: "system", Content: systemPrompt},
-		{Role: "user", Content: task},
+		{Role: "user", Content: req.Task},
 	}
 
 	// Filter delegate_task out of the sub-agent's toolset — no nesting
@@ -148,15 +183,29 @@ func (a *Agent) runSubagentLoop(ctx context.Context, task string, maxIterations 
 			// stream — surface the timeout explicitly so the parent
 			// agent can decide to retry with a tighter task scope.
 			if errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
-				return "", fmt.Errorf(
-					"subagent ran out of its %s wall-time budget at iteration %d — task was too large; the parent should retry with a tighter scope or lower max_iterations",
-					subagentDefaultTimeout, i+1)
+				if parentCtx.Err() != nil {
+					// The parent's turn is gone: no point spending another
+					// round, and nothing is listening for the result.
+					return "", fmt.Errorf("subagent cancelled with its parent at iteration %d: %w", i+1, parentCtx.Err())
+				}
+				budgetErr := fmt.Errorf(
+					"subagent ran out of its %s wall-time budget at iteration %d — task was too large; the parent should retry with a tighter scope, a higher wall_timeout_sec, or both",
+					budget, i+1)
+				text, ferr := a.finalizeSubagent(parentCtx, messages, lastContent, budgetNudge(budget), i+1, budget)
+				if ferr != nil {
+					slog.Warn("subagent finalization after budget expiry failed",
+						"agent", a.name, "iteration", i+1, "error", ferr)
+				}
+				return text, budgetErr
 			}
 			return "", fmt.Errorf("subagent chat failed at iteration %d: %w", i+1, err)
 		}
 
 		if !resp.HasToolCalls() {
 			return resp.Content, nil
+		}
+		if strings.TrimSpace(resp.Content) != "" {
+			lastContent = resp.Content
 		}
 
 		messages = append(messages, provider.Message{
@@ -227,24 +276,68 @@ func (a *Agent) runSubagentLoop(ctx context.Context, task string, maxIterations 
 		}
 	}
 
-	// Cap reached — forced-delivery turn with tools off. Same nudge as
-	// HandleMessage; the system message reads naturally in both contexts.
+	// Cap reached — finalize with tools off, same as a budget expiry does.
 	slog.Warn("subagent max iterations reached — forcing final delivery",
 		"agent", a.name, "max", maxIterations)
-	emitEvent(ctx, ChatEvent{Type: "subagent_progress", Data: map[string]any{
-		"iteration": maxIterations,
-		"max":       maxIterations,
-		"phase":     "final-delivery",
-	}})
-	finalMessages := append(messages, capReachedNudge(maxIterations))
-	finalResp, err := a.provider.Chat(ctx, finalMessages, nil, a.model, a.maxTokens, a.temperature)
+	text, err := a.finalizeSubagent(ctx, messages, lastContent, capReachedNudge(maxIterations), maxIterations, budget)
 	if err != nil {
-		return "", fmt.Errorf("subagent forced final delivery failed: %w", err)
+		return text, fmt.Errorf("subagent forced final delivery failed: %w", err)
 	}
-	if finalResp.Content == "" {
+	if strings.TrimSpace(text) == "" {
 		return fmt.Sprintf("[subagent reached %d-iteration limit without producing a final answer]", maxIterations), nil
 	}
-	return finalResp.Content, nil
+	return text, nil
+}
+
+// finalizeSubagent is the sub-agent's single "last word" path: one tools-free
+// round on a fresh bounded deadline, falling back to the prose the model
+// already produced. Both exits that have material worth keeping — the iteration
+// cap and the wall budget — go through here, so the fallback rules exist once.
+//
+// Why: the budget used to end the sub-agent with ("", err), so up to fifteen
+// minutes of fetched documentation and numbers were discarded and the parent
+// received only a failure note. The material is already in `messages` as tool
+// results; one more round turns it into something the parent can use, and the
+// caller keeps its own reason for the truncation so partial work is never
+// mistaken for a complete answer.
+//
+// The fresh ctx is detached from an expired one but still bounded; callers only
+// reach this when the parent is alive, because a cancelled parent means nobody
+// is waiting for the result.
+func (a *Agent) finalizeSubagent(parentCtx context.Context, messages []provider.Message, lastContent string, nudge provider.Message, iteration int, budget time.Duration) (string, error) {
+	emitEvent(parentCtx, ChatEvent{Type: "subagent_progress", Data: map[string]any{
+		"iteration": iteration,
+		"phase":     "final-delivery",
+	}})
+
+	finalCtx, cancel := context.WithTimeout(context.WithoutCancel(parentCtx), subagentSalvageTimeout)
+	defer cancel()
+
+	resp, err := a.provider.Chat(finalCtx, append(messages, nudge), nil, a.model, a.maxTokens, a.temperature)
+	if err == nil && strings.TrimSpace(resp.Content) != "" {
+		slog.Info("subagent finalized from gathered material",
+			"agent", a.name, "iteration", iteration, "budget", budget)
+		return resp.Content, nil
+	}
+	if trimmed := strings.TrimSpace(lastContent); trimmed != "" {
+		slog.Info("subagent finalization produced nothing usable; returning earlier prose",
+			"agent", a.name, "iteration", iteration, "error", err)
+		return lastContent, nil
+	}
+	return "", err
+}
+
+// budgetNudge is finalizeSubagent's instruction for a run that ran out of
+// wall-clock rather than iterations — same contract, different stated reason.
+func budgetNudge(budget time.Duration) provider.Message {
+	return provider.Message{
+		Role: "system",
+		Content: fmt.Sprintf(
+			"Your %s wall-time budget is exhausted. Tools are disabled for this final response — do not attempt to call any. "+
+				"Write the deliverable now from what you have already gathered, in the requested format, and mark anything you could not confirm as 'unknown' / 'partial' / [UNVERIFIED]. "+
+				"Producing a complete-but-shorter artifact beats apologizing or explaining what you would have done.",
+			budget),
+	}
 }
 
 // subagentSystemSuffix is appended to the agent's normal system prompt

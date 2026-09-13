@@ -4,19 +4,36 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
+	"time"
 )
+
+// SubagentRequest is everything the tool decides before crossing into the
+// agent: the bounded task, its iteration cap, and an optional wall-clock
+// budget. A struct rather than positional arguments because these three travel
+// together and the tool is not the only thing that will ever want to set them.
+//
+// WallTimeout of zero means "the agent's configured default" — the tool does
+// not know that default, and should not: it belongs to the agent's
+// configuration, not to the tool call.
+type SubagentRequest struct {
+	Task          string
+	MaxIterations int
+	WallTimeout   time.Duration
+}
 
 // SubagentRunner is what the delegate_task tool calls to spawn a
 // sub-agent. The agent package implements this on Agent so we avoid
 // pulling agent into tools (would form an import cycle).
 type SubagentRunner interface {
-	RunSubagent(ctx context.Context, task string, maxIterations int) (string, error)
+	RunSubagent(ctx context.Context, req SubagentRequest) (string, error)
 }
 
 type delegateTaskArgs struct {
 	Task           string `json:"task"`
 	ExpectedOutput string `json:"expected_output,omitempty"`
 	MaxIterations  int    `json:"max_iterations,omitempty"`
+	WallTimeoutSec int    `json:"wall_timeout_sec,omitempty"`
 }
 
 // RegisterDelegateTask wires the delegate_task tool. No-op when runner
@@ -71,7 +88,11 @@ func RegisterDelegateTask(r *Registry, runner SubagentRunner) {
 				},
 				"max_iterations": map[string]interface{}{
 					"type":        "integer",
-					"description": "Optional override for the sub-agent's tool-iteration budget. Default is the same cap as your turn (typically 20). REALISTIC BUDGETS: for browser-heavy sub-tasks (camoufox-cli — each open/snapshot/click is 1-30s real time, plus a 2-3 min cold-start on the first call), the sub-agent has a 15-minute wall-time cap, so a max_iterations of 12-18 is the practical ceiling — setting 40 just means it'll hit the wall-clock long before iteration 40 and you'll get a partial answer with a 'ran out of budget' note. For quick web_search / web_fetch sub-tasks, 20-30 is fine. For pure synthesis (no tools), 3-5 is enough.",
+					"description": "Optional override for the sub-agent's tool-iteration budget. Default is the same cap as your turn (typically 20). REALISTIC BUDGETS: for browser-heavy sub-tasks (camoufox-cli — each open/snapshot/click is 1-30s real time, plus a 2-3 min cold-start on the first call) the wall clock binds long before the iteration count, so 12-18 is the practical ceiling and setting 40 just wastes the parameter. For quick web_search / web_fetch sub-tasks, 20-30 is fine. For pure synthesis (no tools), 3-5 is enough.",
+				},
+				"wall_timeout_sec": map[string]interface{}{
+					"type":        "integer",
+					"description": "Optional wall-clock budget for this sub-agent in seconds. Leave it unset to use the agent's configured default (15 minutes unless the operator changed subagentTimeoutSec). Set it when a sub-task is legitimately long — a multi-source research sweep, a browser-heavy crawl — instead of forcing the work into the default. Two constraints still apply: the whole fan-out is serial, so N sub-agents cost N × their budget, and the parent turn has its own 45-minute ceiling. When the budget expires the sub-agent gets one tools-free round to write down what it already gathered, and that partial text is returned with the failure note — so a truncated result is marked, never silently partial.",
 				},
 			},
 			"required": []string{"task"},
@@ -88,12 +109,27 @@ func RegisterDelegateTask(r *Registry, runner SubagentRunner) {
 			if args.ExpectedOutput != "" {
 				taskPrompt += "\n\n## Expected output format\n\n" + args.ExpectedOutput
 			}
-			out, err := runner.RunSubagent(ctx, taskPrompt, args.MaxIterations)
+			out, err := runner.RunSubagent(ctx, SubagentRequest{
+				Task:          taskPrompt,
+				MaxIterations: args.MaxIterations,
+				WallTimeout:   time.Duration(args.WallTimeoutSec) * time.Second,
+			})
 			if err != nil {
 				// Surface the error inside the tool_result so the parent
 				// sees it as a normal tool failure (gets the "analyze
 				// the error and try a different approach" envelope from
 				// the registry) rather than a hard tool-execution error.
+				//
+				// When the sub-agent ran out of wall time it hands back
+				// whatever it managed to write. Dropping that text would
+				// throw away the fetched material the parent needs to
+				// finish the job, so keep both: the partial artifact, and
+				// the reason it is partial.
+				if partial := strings.TrimSpace(out); partial != "" {
+					return fmt.Sprintf(
+						"%s\n\n---\n[subagent stopped early: %s]\nThe text above is what the sub-agent had produced when it ran out of budget — partial, and not yet verified by it. Reuse it, fill the gaps, and re-issue only what is missing.",
+						partial, err.Error()), err
+				}
 				return fmt.Sprintf("[subagent failed: %s]", err.Error()), err
 			}
 			return out, nil
