@@ -40,11 +40,18 @@ type fakeEnvdTransport struct {
 	// brokenBody is the body those failures return. Tests use it to prove the
 	// rebuild decision reads the status code, not the message text.
 	brokenBody string
+	// brokenStatus is the status those failures answer with (0 → 500).
+	brokenStatus int
 	// deleteStatus answers Close()'s DELETE. Zero means 200.
 	deleteStatus int
+	// routableAfter makes the first N exec attempts answer 502 "The sandbox was
+	// not found" before succeeding — the gap between create returning an id and
+	// the edge being able to route it.
+	routableAfter int
 
-	mu       sync.Mutex
-	commands []string
+	mu           sync.Mutex
+	commands     []string
+	execAttempts int
 }
 
 func (f *fakeEnvdTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -64,6 +71,16 @@ func (f *fakeEnvdTransport) RoundTrip(req *http.Request) (*http.Response, error)
 		}
 		return envdResponse(req, status, []byte(`{"code":500,"message":"close refused"}`)), nil
 	}
+	if strings.Contains(req.URL.Path, "Process/Start") {
+		f.mu.Lock()
+		f.execAttempts++
+		attempt := f.execAttempts
+		f.mu.Unlock()
+		if f.routableAfter > 0 && attempt <= f.routableAfter {
+			return envdResponse(req, http.StatusBadGateway,
+				[]byte(`{"sandboxId":"sb-x","message":"The sandbox was not found","code":502}`)), nil
+		}
+	}
 	for _, id := range f.deadSandboxIDs {
 		if strings.Contains(req.URL.Host, id) {
 			return envdResponse(req, http.StatusBadGateway, []byte(`{"code":502,"message":"sandbox not found"}`)), nil
@@ -75,7 +92,11 @@ func (f *fakeEnvdTransport) RoundTrip(req *http.Request) (*http.Response, error)
 			if body == "" {
 				body = `{"code":500,"message":"boom"}`
 			}
-			return envdResponse(req, http.StatusInternalServerError, []byte(body)), nil
+			status := f.brokenStatus
+			if status == 0 {
+				status = http.StatusInternalServerError
+			}
+			return envdResponse(req, status, []byte(body)), nil
 		}
 	}
 	if strings.Contains(req.URL.Path, "/files") {
@@ -99,6 +120,12 @@ func (f *fakeEnvdTransport) ranCommand(substr string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return strings.Contains(strings.Join(f.commands, "\n"), substr)
+}
+
+func (f *fakeEnvdTransport) attempts() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.execAttempts
 }
 
 func envdResponse(req *http.Request, status int, body []byte) *http.Response {
