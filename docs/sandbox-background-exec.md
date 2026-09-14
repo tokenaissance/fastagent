@@ -178,7 +178,7 @@ error now carries the next step instead of a bare provider string
 | What the error says | Which clock | What it tells the model now |
 |---|---|---|
 | `e2b exec body read: context canceled` | ours — turn budget expired, turn superseded, caller gone | the process it started may still be running: check `ps` and the log it redirected to, adopt that result, and prefer `run_in_background` next time |
-| `did not exit cleanly … server error: deadline_exceeded` | envd's `Connect-Timeout-Ms` | if output was delivered, say so; a process the command started is holding the exec stream — redirect its stdin (`</dev/null`) and use `run_in_background` |
+| `did not exit cleanly … server error: deadline_exceeded` | envd's `Connect-Timeout-Ms` | if output was delivered, say so; a process the command started is holding the exec stream — run it with `run_in_background` instead |
 
 Both are additive: the provider's own text and the partial output are
 unchanged, and a plain truncation (a sandbox still booting, which `Hydrate`
