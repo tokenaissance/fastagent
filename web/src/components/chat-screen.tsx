@@ -3551,10 +3551,12 @@ function WorkspacePanel({
     try {
       const res = await revealAgentWorkspace(agentId, sessionId || undefined, projectId);
       if (!res.ok) {
-        // Best-effort UX — surface the error inline rather than a
-        // toast lib we don't have. The message comes from the
-        // backend (e.g. "S3-backed store, no host path").
-        // eslint-disable-next-line no-alert
+        // Best-effort UX — a blocking alert, not an inline banner: this app
+        // ships no toast/banner primitive, and the failure is a deliberate
+        // refusal rather than a transient error. The text is the BACKEND's
+        // ("workspace reveal is disabled on hosted deployments",
+        // "no local path (e.g. S3-backed)"), so the user learns the reason
+        // instead of a generic "could not open".
         alert(res.error || "Could not open workspace folder");
       }
     } finally {
