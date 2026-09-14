@@ -64,6 +64,13 @@ web/.next/
 
 openclaw.json
 
+# Project-local skill installs (the skill installer writes these into the repo
+# root; only the skills/ halves and its lock file, so a future project-level
+# .agents/ or .claude/ config can still be tracked deliberately).
+.agents/skills/
+.claude/skills/
+skills-lock.json
+
 # Runtime config
 env.toml
 
