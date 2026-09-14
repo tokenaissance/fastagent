@@ -3,6 +3,7 @@ package agent
 import (
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 
 	"github.com/fastclaw-ai/fastclaw/internal/agent/tools"
@@ -29,13 +30,42 @@ import (
 // builds its own provider.Provider from its own API key+base, not the
 // user-space-wide one.
 func providerForAgent(rc config.ResolvedAgent, shared provider.Provider) provider.Provider {
-	parts := strings.SplitN(rc.Model, "/", 2)
-	if len(parts) == 2 {
-		if pc, ok := rc.Providers[parts[0]]; ok && pc.APIKey != "" {
-			return provider.NewProvider(pc.APIKey, pc.APIBase, pc.APIType)
-		}
+	key, _ := provider.SplitProviderModel(rc.Model)
+	if key == "" {
+		// A bare model name still works, but the credentials — and therefore
+		// the upstream account/group — are the *shared* provider's. That is how
+		// a model nobody misspelled answers "No available channel for model X
+		// under group Y": the name was right, the account was not the one the
+		// operator had in mind. Say it once per build instead of leaving the
+		// 503 to be decoded by hand.
+		slog.Warn("agent model has no provider prefix — requests use the shared provider",
+			"agent", rc.ID, "model", rc.Model,
+			"hint", "write the model as <providerKey>/<modelId> to pin a provider row from this agent's Providers map")
+		return shared
+	}
+	if pc, ok := rc.Providers[key]; ok && pc.APIKey != "" {
+		return provider.NewProvider(pc.APIKey, pc.APIBase, pc.APIType)
+	}
+	if _, ok := rc.Providers[key]; ok {
+		slog.Warn("agent model names a provider row without an API key — requests use the shared provider",
+			"agent", rc.ID, "model", rc.Model, "providerKey", key)
+	} else {
+		slog.Warn("agent model names an unknown provider — requests use the shared provider",
+			"agent", rc.ID, "model", rc.Model, "providerKey", key,
+			"knownProviderKeys", strings.Join(providerKeys(rc.Providers), ","))
 	}
 	return shared
+}
+
+// providerKeys returns the configured provider keys, sorted so the log line is
+// stable (and diffable in tests).
+func providerKeys(m map[string]config.ProviderConfig) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // ManagerOption configures optional Manager behavior.
