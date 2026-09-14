@@ -95,9 +95,16 @@ func TestE2BExecClockHints(t *testing.T) {
 			!strings.Contains(err.Error(), "deadline_exceeded: context deadline exceeded") {
 			t.Fatalf("provider detail was replaced instead of annotated: %q", err.Error())
 		}
-		if !strings.Contains(err.Error(), "</dev/null") ||
-			!strings.Contains(err.Error(), "run_in_background") {
+		if !strings.Contains(err.Error(), "run_in_background") {
 			t.Fatalf("envd-deadline error must name the fix: %q", err.Error())
+		}
+		// One supported way to wait. `</dev/null`, nohup, setsid and tmux are the
+		// hand-rolled shapes whose five incidents this hint exists to end; naming
+		// them here would re-teach them.
+		for _, alternative := range []string{"</dev/null", "nohup", "setsid", "tmux"} {
+			if strings.Contains(err.Error(), alternative) {
+				t.Fatalf("hint still teaches %q: %q", alternative, err.Error())
+			}
 		}
 		// This transport delivers no frames, so the "output was delivered"
 		// clause must stay out — the hint may not claim bytes we never got.
