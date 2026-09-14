@@ -1018,15 +1018,23 @@ func (e *E2BExecutor) Exec(ctx context.Context, command string, timeout time.Dur
 		if rerr := e.recreateIfCurrent(ctx, observed); rerr != nil {
 			return "", fmt.Errorf("sandbox recreate failed: %w (original: %v)", rerr, err)
 		}
-		return e.execOnce(ctx, wrapped, timeout)
+		return e.toolResult(e.execOnce(ctx, wrapped, timeout))
 	}
 	if staleEnvdToken(err) {
 		if rerr := e.refreshEnvdToken(ctx, observed); rerr != nil {
 			return "", fmt.Errorf("envd token refresh failed: %w (original: %v)", rerr, err)
 		}
-		return e.execOnce(ctx, wrapped, timeout)
+		return e.toolResult(e.execOnce(ctx, wrapped, timeout))
 	}
-	return result, err
+	return e.toolResult(result, err)
+}
+
+// toolResult bounds what Exec hands back, on every path including the
+// recreate / token-refresh retries. This is the port that feeds the model, and
+// the production OOM came through it: 76 MB results assembled from this stream
+// killed two pods on 2026-09-14 (see output_clip.go).
+func (e *E2BExecutor) toolResult(out string, err error) (string, error) {
+	return ClipAndLog(out, "exec/e2b"), err
 }
 
 func (e *E2BExecutor) execOnce(ctx context.Context, command string, timeout time.Duration) (string, error) {
@@ -1150,15 +1158,13 @@ func (e *E2BExecutor) execOn(ctx context.Context, id sandboxIdent, command strin
 		output += stderr.String()
 	}
 	output = strings.TrimSpace(output)
-	// Bound it here, before it becomes a tool result that lives in the
-	// conversation: production OOMKilled two pods on 73 MB results assembled
-	// from exactly this stream (see output_clip.go).
-	// outputLen stays the pre-clip size — that is the number operators grep for
-	// to spot a runaway command; resultLen is what actually leaves here.
-	outputLen := len(output)
-	output = ClipAndLog(output, "exec/e2b")
-
-	slog.Info("e2b exec completed", "sandboxID", id.id, "exitCode", exitCode, "exited", exited, "outputLen", outputLen, "resultLen", len(output), "frames", len(frames), "trailers", len(trailers), "bodyBytes", len(body), "connectError", connectErr)
+	// Deliberately NOT clipped here. execOn is shared by two contracts: the
+	// tool-result port (Exec → the model) and the machine-payload port
+	// (SnapshotWorkspace's base64 tar → the durable workspace.Store). A
+	// shortened tool result is a smaller message; a shortened tar is corrupt
+	// data. The bound belongs on the port, not on the shared interpreter —
+	// Exec clips, SnapshotWorkspace refuses (see output_clip.go).
+	slog.Info("e2b exec completed", "sandboxID", id.id, "exitCode", exitCode, "exited", exited, "outputLen", len(output), "frames", len(frames), "trailers", len(trailers), "bodyBytes", len(body), "connectError", connectErr)
 
 	// Reject a stream that didn't deliver a proper "End/exited=true" trailer.
 	// Why this matters: when the request payload pushes envd past some
