@@ -83,7 +83,7 @@ func RegisterDelegateTask(r *Registry, runner SubagentRunner) {
 				},
 				"wall_timeout_sec": map[string]interface{}{
 					"type":        "integer",
-					"description": "Optional wall-clock budget in seconds; unset uses the agent's default (15 min unless the operator changed subagentTimeoutSec). Set it for legitimately long sweeps instead of forcing them into the default. On expiry the sub-agent gets one tools-free round to write down what it has, and that text returns with the failure note — a truncated result is marked partial, never silent. The parent turn's own ceiling still applies.",
+					"description": "Optional wall-clock budget in seconds; unset uses the agent's default (15 min unless the operator changed subagentTimeoutSec). Set it for legitimately long sweeps instead of forcing them into the default. On expiry the sub-agent gets one tools-free round to write down what it has, and that text returns with the failure note — a truncated result is marked partial, never silent. This turn's own clock still wins: the budget is clamped to the time the turn has left (less a margin for finishing it), and a sweep that needs more than that belongs in a turn of its own.",
 				},
 			},
 			"required": []string{"task"},
