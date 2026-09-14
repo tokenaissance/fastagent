@@ -96,10 +96,11 @@ the source file is the truth, and F lists the paths.
 
 * literals are joined the way the compiler joins them, `%s`/`%d` placeholders
   stay as placeholders, and each block carries `<!-- source: file:line -->`;
-* blocks that choose between strings get a `NOTE: branchy block` marker — their
-  text is the branches concatenated in source order, **not** what a single call
-  prints (e.g. `modAgentIntro` hosted vs self-hosted, `buildDateLine` implicit
-  vs explicit timezone);
+* blocks that choose between strings get a `NOTE: N branch point(s)` marker —
+  their text is the branches concatenated in source order, **not** what a single
+  call prints. The count is the point: `modIdentityAnchor` (1 arm) reads almost
+  exactly like the runtime text, `modAgentIntro` (hosted vs self-hosted) or
+  `buildDateLine` (implicit vs explicit timezone) does not;
 * `_test.go` files are excluded, so test fixtures never look like product text.
 
 ## Review findings (2026-09-14)
