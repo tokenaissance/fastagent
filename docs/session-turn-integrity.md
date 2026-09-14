@@ -537,6 +537,19 @@ split that landed:
   the job inside the sandbox and `bash_output` polls it from later turns — the
   r39–r42 incident was exactly a long job measured against a turn budget. See
   `docs/sandbox-background-exec.md`.
+* **The other budget is rounds, not seconds.** `maxToolIterations` (default 20)
+  caps how many model rounds one turn may run; hitting it ends the turn with a
+  forced synthesis and the chat panel's "Iteration limit reached" badge
+  (`capReachedNudge` / `iterationCapMetadata`). Running out of *seconds* and
+  running out of *rounds* need different answers, so the round budget no longer
+  ends a turn that is still working: a segment that produced at least one real
+  tool result earns an extension — `maxToolIterationContinues` (default 1,
+  `0` = never, chatbot mode 0 unless set explicitly) — with a nudge telling the
+  model to build on what it already has and stop repeating calls. A segment
+  whose rounds *all* failed is not extended: it keeps the old bounded ending,
+  because another budget would burn on the same wall. The badge then reports
+  the budget the turn actually had (segments × rounds), and sub-agents are
+  excluded — their own cap plus the wall-clock budget already bound them.
 
 ### P6 — Archive integrity and operations ✅ landed
 
