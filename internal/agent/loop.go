@@ -36,18 +36,25 @@ import (
 
 // Agent is the ReAct agent loop.
 type Agent struct {
-	name                 string
-	provider             provider.Provider
-	registry             *tools.Registry
-	sessions             *session.Manager
-	memory               *Memory
-	ctxBuilder           *ContextBuilder
-	mcpMgr               *mcp.Manager
-	hooks                *HookRegistry
-	model                string
-	maxTokens            int
-	temperature          float64
-	maxToolIterations    int
+	name              string
+	provider          provider.Provider
+	registry          *tools.Registry
+	sessions          *session.Manager
+	memory            *Memory
+	ctxBuilder        *ContextBuilder
+	mcpMgr            *mcp.Manager
+	hooks             *HookRegistry
+	model             string
+	maxTokens         int
+	temperature       float64
+	maxToolIterations int
+	// maxToolContinues is how many EXTRA iteration segments this agent's turn
+	// may start after burning maxToolIterations rounds (0 = never; see
+	// config.DefaultToolIterationContinues). A segment only continues when the
+	// one that just ended actually produced a successful tool result — a turn
+	// that is only failing gets the old forced-final-delivery treatment
+	// instead of another budget to burn.
+	maxToolContinues     int
 	maxParallelToolCalls int           // 0 = unlimited
 	subagentTimeout      time.Duration // 0 = the built-in default
 	thinking             string
@@ -370,6 +377,7 @@ func newAgentWithActor(rc config.ResolvedAgent, prov provider.Provider, mb *bus.
 		maxTokens:            rc.MaxTokens,
 		temperature:          rc.Temperature,
 		maxToolIterations:    rc.MaxToolIterations,
+		maxToolContinues:     rc.MaxToolIterationContinues,
 		maxParallelToolCalls: rc.MaxParallelToolCalls,
 		subagentTimeout:      time.Duration(rc.SubagentTimeoutSec) * time.Second,
 		thinking:             rc.Thinking,
@@ -2502,8 +2510,13 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	// splits on it (AllowSplit=true) or collapses to newlines otherwise.
 	var replyParts []string
 
-	// ReAct loop
-	for i := 0; i < a.maxToolIterations; i++ {
+	// ReAct loop. `rounds` may grow past maxToolIterations: a segment that
+	// actually produced a tool result is extended (up to maxToolContinues
+	// times) instead of ending the turn with a synthesized apology.
+	rounds := a.maxToolIterations
+	segmentsUsed := 1
+	segProgress := false
+	for i := 0; i < rounds; i++ {
 		slog.Info("agent loop iteration",
 			"agent", a.name,
 			"iteration", i+1,
@@ -2851,6 +2864,9 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 			allFailedRounds++
 		} else {
 			allFailedRounds = 0
+			// Something in this round worked: the segment is making progress,
+			// which is what earns it an extension if the rounds run out.
+			segProgress = true
 		}
 
 		// Steering: messages that arrived while this tool round ran are
@@ -2859,14 +2875,28 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		if steer := sess.DrainSteer(); len(steer) > 0 {
 			messages = a.appendSteer(ctx, sess, messages, steer)
 		}
+
+		// Last round of this segment: extend it when the work is going
+		// somewhere. A pure-failure segment keeps the old behavior (forced
+		// final delivery) — another budget would just burn on the same wall.
+		if i == rounds-1 && segProgress && segmentsUsed <= a.maxToolContinues {
+			segmentsUsed++
+			rounds += a.maxToolIterations
+			segProgress = false
+			messages = append(messages, iterationContinueNudge(a.maxToolIterations, segmentsUsed, 1+a.maxToolContinues))
+			slog.Info("iteration budget extended",
+				"agent", a.name, "segment", segmentsUsed,
+				"segments", 1+a.maxToolContinues, "rounds", rounds)
+		}
 	}
 
-	slog.Warn("max tool iterations reached — forcing final delivery", "agent", a.name, "max", a.maxToolIterations)
+	capBudget := segmentsUsed * a.maxToolIterations
+	slog.Warn("max tool iterations reached — forcing final delivery", "agent", a.name, "max", capBudget)
 	// Forced final delivery: one more LLM call with tools disabled and a
 	// nudge that tells the model to synthesize what it has. Replaces the
 	// old behavior of just returning a canned warning, which left users
 	// with zero deliverable after a full iteration budget got burned.
-	finalMessages := append(messages, capReachedNudge(a.maxToolIterations))
+	finalMessages := append(messages, capReachedNudge(capBudget))
 	if a.piiScrubEnabled {
 		finalMessages = privacy.ScrubMessages(finalMessages)
 	}
@@ -2880,13 +2910,13 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		// Synthesis call itself failed or returned empty — fall back to
 		// the canned line so the user still gets *something* with the
 		// badge attached.
-		finalContent = fmt.Sprintf("I've reached the maximum number of tool iterations (%d) and couldn't synthesize a final response. The work above represents what I gathered before hitting the limit.", a.maxToolIterations)
+		finalContent = fmt.Sprintf("I've reached the maximum number of tool iterations (%d) and couldn't synthesize a final response. The work above represents what I gathered before hitting the limit.", capBudget)
 	}
 	// The forced-final-delivery reply also closes the turn, so it carries the
 	// same produced-files list (the budget ran out mid-work, which is exactly
 	// when "what did it write" matters most).
 	capMeta := mergeMetadata(
-		mergeMetadata(iterationCapMetadata(a.maxToolIterations), knowledgeMeta),
+		mergeMetadata(iterationCapMetadata(capBudget), knowledgeMeta),
 		a.turnFilesMeta(ctx, msg.ProjectID, msg.ChatID, turnStart),
 	)
 	sess.Append(provider.Message{
@@ -3209,8 +3239,13 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 	consecutiveCount := 0
 	totalToolCalls := 0
 
-	// ReAct loop - use Chat for tool iterations
-	for i := 0; i < a.maxToolIterations; i++ {
+	// ReAct loop - use Chat for tool iterations. See the non-streaming loop:
+	// `rounds` can grow by maxToolContinues segments while the round keeps
+	// producing real tool results.
+	rounds := a.maxToolIterations
+	segmentsUsed := 1
+	segProgress := false
+	for i := 0; i < rounds; i++ {
 		hcBefore := &HookContext{AgentName: a.name, Point: BeforeModelCall, Messages: messages, Channel: msg.Channel, AccountID: msg.AccountID, ChatID: msg.ChatID, UserID: a.ownerUserID}
 		a.hooks.Run(ctx, hcBefore)
 
@@ -3383,11 +3418,27 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 			toolMsg := provider.Message{Role: "tool", Content: resultContent, ToolCallID: tc.ID, Name: r.toolName, Metadata: meta}
 			sess.Append(toolMsg)
 			messages = append(messages, toolMsg)
+			if !isFailedToolResult(r.err, resultContent) {
+				// Same rule as the non-streaming loop: only a round that
+				// produced something real can buy the segment an extension.
+				segProgress = true
+			}
+		}
+
+		if i == rounds-1 && segProgress && segmentsUsed <= a.maxToolContinues {
+			segmentsUsed++
+			rounds += a.maxToolIterations
+			segProgress = false
+			messages = append(messages, iterationContinueNudge(a.maxToolIterations, segmentsUsed, 1+a.maxToolContinues))
+			slog.Info("iteration budget extended",
+				"agent", a.name, "segment", segmentsUsed,
+				"segments", 1+a.maxToolContinues, "rounds", rounds)
 		}
 	}
 
-	slog.Warn("max tool iterations reached — streaming forced final delivery", "agent", a.name, "max", a.maxToolIterations)
-	return a.streamFinalDeliveryAfterCap(ctx, msg, messages, sess, totalToolCalls, chatterMem)
+	capBudget := segmentsUsed * a.maxToolIterations
+	slog.Warn("max tool iterations reached — streaming forced final delivery", "agent", a.name, "max", capBudget)
+	return a.streamFinalDeliveryAfterCap(ctx, msg, messages, sess, totalToolCalls, chatterMem, capBudget)
 }
 
 // streamFinalDeliveryAfterCap runs one extra ChatStream with tools
@@ -3395,14 +3446,14 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 // with iteration-cap metadata so the chat UI can badge the bubble.
 // Returned StreamReader matches the contract of the normal "final
 // response" branch above so callers don't need a special case.
-func (a *Agent) streamFinalDeliveryAfterCap(ctx context.Context, inboundMsg bus.InboundMessage, messages []provider.Message, sess *session.Session, toolCallCount int, chatterMem *Memory) *provider.StreamReader {
-	capMeta := mergeMetadata(iterationCapMetadata(a.maxToolIterations), knowledgeMetadata(extractKnowledgeCitationSources(firstSystemContent(messages))))
-	finalMessages := append(messages, capReachedNudge(a.maxToolIterations))
+func (a *Agent) streamFinalDeliveryAfterCap(ctx context.Context, inboundMsg bus.InboundMessage, messages []provider.Message, sess *session.Session, toolCallCount int, chatterMem *Memory, capBudget int) *provider.StreamReader {
+	capMeta := mergeMetadata(iterationCapMetadata(capBudget), knowledgeMetadata(extractKnowledgeCitationSources(firstSystemContent(messages))))
+	finalMessages := append(messages, capReachedNudge(capBudget))
 	sr, err := a.provider.ChatStream(ctx, finalMessages, nil, a.model, a.maxTokens, a.temperature)
 	if err != nil {
 		// Streaming endpoint failed — persist+emit a fallback line
 		// with the badge so the user still gets the signal.
-		fallback := fmt.Sprintf("I've reached the maximum number of tool iterations (%d) and couldn't synthesize a final response. The work above represents what I gathered before hitting the limit.", a.maxToolIterations)
+		fallback := fmt.Sprintf("I've reached the maximum number of tool iterations (%d) and couldn't synthesize a final response. The work above represents what I gathered before hitting the limit.", capBudget)
 		fallbackMsg := provider.Message{Role: "assistant", Content: fallback, Metadata: capMeta, Timestamp: time.Now().UnixMilli()}
 		sess.Append(fallbackMsg)
 		emitEvent(ctx, ChatEvent{Type: "content", Data: map[string]any{"content": fallback, "metadata": capMeta}})
@@ -3510,6 +3561,22 @@ func capReachedNudge(maxIterations int) provider.Message {
 		Content: fmt.Sprintf(
 			"You've used all %d tool-call iterations available for this turn. Tools are now disabled for this final response — do not attempt to call any. Synthesize what you've already gathered into the most complete deliverable you can: if the user asked for a structured artifact (table, list, ICP summary, email drafts, etc.), produce it now from the existing tool results. For any fields you couldn't resolve, mark them as 'unknown' / 'not found' / 'partial' rather than dropping rows or skipping the structure — give the user something usable plus an honest note about what's missing. Do not apologize without delivering content.",
 			maxIterations,
+		),
+	}
+}
+
+// iterationContinueNudge is the counterweight to capReachedNudge: it is
+// appended when a segment that was making progress runs out of rounds and the
+// turn is therefore extended, so the model keeps going instead of synthesizing
+// early. The one thing it must not do is redo the work it already has — a
+// continuation that repeats calls burns the new budget on ground already
+// covered.
+func iterationContinueNudge(rounds int, segment, segments int) provider.Message {
+	return provider.Message{
+		Role: "system",
+		Content: fmt.Sprintf(
+			"You used all %d tool-call iterations of segment %d of %d — the turn continues with a fresh %d, because the last round produced real results. Keep going toward what the user asked for: build on the tool results you already hold, target the specific gaps that are still open, and do not repeat a call whose answer you already have. Deliver as soon as you have enough instead of exploring further.",
+			rounds, segment, segments, rounds,
 		),
 	}
 }
