@@ -1,15 +1,18 @@
 # Session turn integrity: one writer per session, non-pollutable history
 
-> **Status**: P0–P6 landed. P0–P3 are deployed to dev + prod
-> (`20260914015438-deploy-54b07f7`); P4, P5 (grace + per-source budgets), P6 and
-> the timing-margin test fix landed after that deploy.
+> **Status**: P0–P6 landed, plus Q4 (no persisted synthetic replies). P0–P3 are
+> deployed to dev + prod (`20260914015438-deploy-54b07f7`); P4, P5 (grace +
+> per-source budgets), P6, Q4 and the timing-margin test fix landed after that
+> deploy.
 > **Progress**: P0 wire dedupe + pad scoping + compaction ctx + production data
 > repair · P1 session turn gate (`Session.AcquireTurn/ReleaseTurn`, wired into
 > `HandleMessage` and `HandleMessageStream`) · P1b `queued` event +
 > Codex-style queue block with Edit/Cancel and a withdraw endpoint ·
 > P2 `TurnMode`/`RunTurn` + gateway parking of
 > automatic turns · P3 `normalizeForPrompt` applied to the prompt in both
-> loops · P5 tool grace · P6 NUL-safe archive + `fastagent doctor sessions`.
+> loops · Q4 the loop persists no synthetic "interrupted" reply (the projection
+> writes it at prompt-build time) · P5 tool grace · P6 NUL-safe archive +
+> `fastagent doctor sessions`.
 > Test names live in [Implementation plan](#implementation-plan).
 > **Scope**: how a turn is admitted for a session, and how that session's
 > history stays structurally valid for every provider.
@@ -49,8 +52,8 @@ Two things made a single bad write permanent:
    projection, so any structural damage is replayed verbatim on every later
    turn.
 2. Two turns can write the same session concurrently, and one of the writers
-   (`padOrphanToolResults`) reasons about the session globally ("the last
-   assistant with tool calls") rather than about its own turn.
+   (`padOrphanToolResults`, removed in Q4) reasoned about the session globally
+   ("the last assistant with tool calls") rather than about its own turn.
 
 ## Root cause
 
@@ -114,7 +117,7 @@ provider or cron problem rather than history corruption.
 
 * **300 s turn budget.** `taskTimeoutSec` defaults to 300
   (`internal/gateway/gateway.go:418`) and kills a turn mid-tool — the exact
-  condition that produces a pad. Long sandbox work (`setsid nohup …`,
+  condition that produced a pad. Long sandbox work (`setsid nohup …`,
   multi-minute `exec`) exceeds it routinely.
 * **Compaction that never compressed.** The summarizer was called with a nil
   context (`internal/agent/compaction.go:190`, now fixed), so every
@@ -237,7 +240,7 @@ enforces it and the test that would catch a violation.
 | **W** · single writer | At most one turn is executing against a session's history at any instant | two `HandleMessage` bodies are past admission for one session | session turn gate (P1, landed): FIFO waiter queue owned by the session | `TestAcquireTurnSerializesCallers`, `TestAcquireTurnHandsOffFIFO`, `TestAcquireTurnContextCancelDoesNotLeakSlot`, `TestHandleMessageWaitsForInFlightTurn`, `TestHandleMessageSerializesQueuedTurns` (gateway e2e still to come) |
 | **P** · pair integrity | For the model, every tool call has exactly one reply, and every reply belongs to a call | a request ships N replies for a call id, an unanswered call, or an orphan reply | `normalizeForPrompt` (P3, landed) + wire builder (`internal/provider/openai.go:148`, P0) | `TestNormalizeForPromptShapes` (7 shapes + idempotence + no mutation), `TestNormalizeForPromptReadsRawAssistantCalls`, `TestNormalizeForPromptStripsDuplicateCallDeclaration`, `TestToAPIMessagesDropsDuplicateToolReplies`, `TestToAPIMessagesDropsDanglingToolReplies` |
 | **O** · ordering | A turn's own messages append in order and are never interleaved with another turn's | a user message or tool reply from turn B lands between turn A's call and its reply | clause W (there is no other writer) | `TestHandleMessageSerializesHistory` (asserts full-sequence equality, not just counts) |
-| **T** · truthful pad | A synthetic "interrupted" reply is written only for a call this turn declared, only when no reply exists for that id, and only once | a pad answers another turn's call, answers an already-answered id, or is written twice | P0 `turnToolCallIDs` scoping + idempotence (landed) | `TestPadOrphanToolResultsLeavesOtherTurnsToolUseAlone`, `TestPadOrphanToolResultsNoTurnIDsIsNoop`, `TestPadOrphanToolResultsIsIdempotent` |
+| **T** · truthful pad | Stored history carries **no** synthetic "interrupted" reply: an interrupted turn leaves its call open, and the projection answers each open call with exactly one synthetic reply at field-build time | a synthetic reply is persisted at all, an open call gets two of them in the projection, or a reply is emitted for a call that is already answered | Q4 (pad path removed) + `normalizeForPrompt` (P3) | `TestInterruptedTurnLeavesNoSyntheticReplyInHistory` (loop detection breaks out mid-tool: history has the open call, no pad; the projection is doctor-clean), `TestNormalizeForPromptShapes` (unanswered call indexed in place, duplicate collapses to one, idempotent), `TestTurnBudgetExpiryLetsInFlightToolRecordItsResult` |
 
 Accepted windows / known gaps (to keep the table honest):
 
@@ -248,8 +251,12 @@ Accepted windows / known gaps (to keep the table honest):
 * P is guaranteed for OpenAI-compatible and Anthropic wire builds; other
   providers inherit `normalizeForPrompt` because it runs before the provider
   split.
-* Pads remain persisted (P3 keeps them, in an idempotent form); whether the
-  pad should become prompt-only (Codex parity) is Q4.
+* A synthetic reply exists only in the projection. Stored history therefore
+  shows an *unanswered call* for every interrupted turn, which the doctor
+  scanner reports as expected and does **not** gate on (Q4, decided
+  2026-09-14 — Codex parity). Sessions written before Q4 keep their pads until
+  the next `doctor sessions --fix`; the projection collapses those duplicates
+  at request time either way.
 
 ## Design
 
@@ -286,8 +293,8 @@ func (s *Session) ReleaseTurn()
   `HandleMessageStream`. Everything else — `HandleWebChat`,
   `HandleWebChatStream`, webhook, API — reaches those two.
 * `defer sess.ReleaseTurn()` sits **outermost** so it runs after the existing
-  defers (`flushLeftoverSteer`, `padOrphanToolResults`) — the pad is part of
-  the turn, not of the next one.
+  defers (`flushLeftoverSteer`) — a parked steer is part of the turn that
+  owned the session, not of the next one.
 * Steering is unaffected: `PushSteerIfActive` keeps using the existing
   in-flight window; the gate and the steer window are, by construction,
   held by the same turn.
@@ -424,7 +431,8 @@ system messages are prepended):
 ```go
 // normalizeForPrompt returns a prompt-safe copy of msgs:
 //   - every tool call has exactly one reply, inserted immediately after it
-//     when missing (synthetic provider.StoppedToolResult reply)
+//     when missing (synthetic provider.StoppedToolResult reply — the only
+//     synthetic reply left in the system, and it is never persisted)
 //   - replies whose call id is unknown are dropped
 //   - second and later replies for one call id are dropped (first wins)
 //   - a call re-declared after it was answered loses the later declaration
@@ -444,9 +452,35 @@ Rules taken from Codex and adapted:
 | drop unknown-id and duplicate replies | the third shape the current sanitizer misses |
 | never mutate the input slice | the session keeps the truthful record (D5) |
 
-`padOrphanToolResults` stays for the UI ("interrupted, not still running"),
-but P3 makes it idempotent and conditional: pad only ids this turn declared
-that have no reply anywhere, and never twice (`TestPadOrphanToolResultsIsIdempotent`).
+### Q4 — the synthetic reply is prompt-only ✅ landed
+
+The pad was answering two needs: a well-formed prompt (every call has a
+reply) and a terminal UI ("interrupted, not still running" instead of a
+forever-spinning tool). P3 took over the first — the projection inserts the
+reply at request time — and the chat UI already derives the second from the
+call itself (`web/src/components/chat-screen.tsx`, the "any tool_use that
+still has no result … mark them stopped" sweep on history rebuild and on
+abort). That left only the collision risk: a persisted pad is a second write
+on a call a *late real result* can still answer, which is the incident.
+
+Landed: `padOrphanToolResults` and its two defer call sites are gone, along
+with the per-turn `turnToolCallIDs` bookkeeping and its test file. An
+interrupted turn now ends with the call **open**:
+
+* the session keeps the truth (the tool never returned);
+* the next request is valid because `normalizeForPrompt` fills exactly one
+  reply per open call, in place, idempotently;
+* `provider.StoppedToolResult` remains the shared literal, but its only
+  producer is the projection;
+* the doctor scanner classifies an unanswered call as *expected* — reported,
+  never gated on (`doctor.Finding.Expected`, `doctor.Unexpected`), because it
+  is now the normal shape of an interrupted turn rather than history debt.
+
+Guarding tests: `TestInterruptedTurnLeavesNoSyntheticReplyInHistory` (drives
+the loop detector into breaking out mid-round on the streaming path, then
+asserts no pad in history, a genuinely open call, and a doctor-clean
+projection), `TestNormalizeForPromptShapes`, `TestExpectedCoversOpenCallsOnly`,
+`TestDoctorSessionsTreatsOpenCallAsExpected`.
 
 ### P4 — Truncation, compaction and stable ids
 
@@ -463,14 +497,15 @@ that have no reply anywhere, and never twice (`TestPadOrphanToolResultsIsIdempot
 ### P5 — Turn budgets and interruption semantics ✅ landed
 
 One number (`taskTimeoutSec`, default 300 s) used to delimit an IM turn *and*
-hard-kill any tool execution in flight, which is what manufactures pads. The
+hard-kill any tool execution in flight, which is what manufactured pads. The
 split that landed:
 
 * **Grace before the pad**: on budget expiry the turn stops being fed (its own
   ctx is cancelled, so no further model round starts) while an in-flight tool
   keeps running for `toolGraceDefault` (60 s) and lands its real result. The
-  pad remains the outcome when the grace also expires — and it is a single,
-  truthful, idempotent reply (P0+P3).
+  call is left open when the grace also expires — the projection answers it
+  with one synthetic reply at request time (Q4), and nothing is written to
+  history that a late result could collide with.
 * **Per-source budget** via the system `taskqueue` namespace
   (`TaskQueueCfg`): `maxConcurrent` (global), `taskTimeoutSec` (every queued
   turn — IM, cron, goal, webhook), `cronTimeoutSec` (cron ticks only; 0 = same
@@ -547,13 +582,14 @@ working tree.
 |---|---|---|---|
 | **P0** ✅ | Drop duplicate tool replies at wire build; scope pads to the turn's own ids; thread a real ctx into the compaction summarizer; repair the incident session's stored history | `internal/provider/openai.go`, `internal/provider/provider.go`, `internal/agent/loop.go`, `internal/agent/compaction.go`, `internal/agent/slash.go` | `openai_dangling_tool_test.go` (+2), `pad_orphan_tool_test.go` (new, +2), `compaction_test.go` (+1) |
 | **P0.5** | Build and deploy P0 (`./build-image.sh dev` → verify → `prod`). Prod still runs `6345e2b`, i.e. the old pad path. | — | Appendix C checklist |
-| **P1** ✅ | `Session.AcquireTurn/ReleaseTurn` (FIFO, ctx-aware, no leak); acquired in `HandleMessage` + `HandleMessageStream` before the plan-mode branch, released outermost so the pad and leftover-steer writers stay inside the turn; admission waits >1 s logged | `internal/session/manager.go`, `internal/agent/loop.go` | `internal/session/turn_gate_test.go` (serialize, FIFO, cancel-while-queued, cancel-at-handoff race), `internal/agent/turn_gate_test.go` (waits for in-flight turn; queued turns serialized, roles `user,assistant,user,assistant`); gateway e2e still to come |
+| **P1** ✅ | `Session.AcquireTurn/ReleaseTurn` (FIFO, ctx-aware, no leak); acquired in `HandleMessage` + `HandleMessageStream` before the plan-mode branch, released outermost so the leftover-steer writer stays inside the turn (the pad writer it originally also covered is gone — Q4); admission waits >1 s logged | `internal/session/manager.go`, `internal/agent/loop.go` | `internal/session/turn_gate_test.go` (serialize, FIFO, cancel-while-queued, cancel-at-handoff race), `internal/agent/turn_gate_test.go` (waits for in-flight turn; queued turns serialized, roles `user,assistant,user,assistant`); gateway e2e still to come |
 | **P1b** ✅ | Queued-state UX modelled on Codex's `PendingInputPreview`: `queued` event, queue block above the composer with `↳ text`, `(n ahead)`, and Edit/Cancel actions backed by a new withdraw endpoint (`/api/chat/cancel`, `agent.WithAdmissionSignal` marks the point of no return) | `internal/agent/loop.go`, `internal/agent/admission_signal.go` (new), `internal/setup/handlers.go`, `internal/setup/handlers_chat_cancel.go` (new), `internal/setup/server.go`, `web/src/components/chat-screen.tsx`, `web/src/lib/api.ts` | `TestRunTurnQueuesUserSourceAndEmitsQueuedEvent`, `TestWithAdmissionSignalClosesWhenTurnStarts`, `TestPendingTurnRegistryWithdrawContract`, `TestPendingTurnKeyIsolatesTabsAndSessions`, `TestQueuedChatTurnIsAnnouncedAndWithdrawableE2E`, `TestStartedChatTurnCannotBeWithdrawnE2E`; `tsc --noEmit` clean |
 | **P2** ✅ | `TurnMode` + `ErrTurnNotAdmitted` + `RunTurn`; gateway parks refused automatic turns and retries them at the next idle point instead of blocking a queue worker | `internal/agent/admission.go` (new), `internal/gateway/deferred_turns.go` (new), `internal/gateway/gateway.go` | `admission_test.go` (refusal, queued event + position, source policy), `deferred_turns_test.go` (FIFO drain, busy skip, budget expiry) |
-| **P3** ✅ | `normalizeForPrompt` applied to the prompt in both loops (+ idempotent conditional pad); `provider.Message.EffectiveToolCalls()` added so a call declared only inside `RawAssistant` is still recognised, and the OpenAI wire scanner reuses it instead of parsing raw a second time | `internal/agent/normalize.go` (new), `internal/agent/loop.go`, `internal/provider/provider.go`, `internal/provider/openai.go` | `internal/agent/normalize_test.go` (7 shapes incl. the incident's pad+real duplicate, raw-assistant declaration, duplicate declaration; each case also asserts idempotence and input immutability), `pad_orphan_tool_test.go` (+1 idempotence) |
-| **P4** ✅ | Truncation cannot split a pair *and* the claim is now tested: compacted history, after `normalizeForPrompt`, carries no pairing findings — verified with the doctor scanner as the oracle, for a cutoff landing inside a pair and for a retained tail that itself holds a duplicate. `safeCompactionCutoff` is documented as an optimisation (it keeps the prompt byte-identical to last turn's) rather than the correctness guarantee | `internal/agent/compaction.go` (comment), `internal/agent/compaction_pairs_test.go` (new) | `TestCompactionOutputNormalisesToAPairingCleanHistory` (both shapes, through prune + compress) |
+| **P3** ✅ | `normalizeForPrompt` applied to the prompt in both loops; `provider.Message.EffectiveToolCalls()` added so a call declared only inside `RawAssistant` is still recognised, and the OpenAI wire scanner reuses it instead of parsing raw a second time | `internal/agent/normalize.go` (new), `internal/agent/loop.go`, `internal/provider/provider.go`, `internal/provider/openai.go` | `internal/agent/normalize_test.go` (7 shapes incl. the incident's legacy duplicate, raw-assistant declaration, duplicate declaration; each case also asserts idempotence and input immutability) |
+| **Q4** ✅ | The loop stops persisting synthetic "interrupted" replies: `padOrphanToolResults`, its defer sites and the per-turn `turnToolCallIDs` bookkeeping are deleted, so an interrupted turn leaves its call open and `normalizeForPrompt` answers it at request time. The doctor scanner keeps reporting an unanswered call but stops gating on it (`Finding.Expected`/`Unexpected`) | `internal/agent/loop.go`, `internal/provider/provider.go` (doc), `internal/provider/anthropic.go`, `internal/doctor/scan.go`, `cmd/fastclaw/cmd_doctor.go`, `web/src/components/chat-screen.tsx` (comments; the UI sweep was already the renderer) | `internal/agent/interrupted_turn_test.go` (new), `internal/doctor/scan_test.go` (+1), `cmd/fastclaw/cmd_doctor_test.go` (+1); `pad_orphan_tool_test.go` deleted with the code it pinned |
+| **P4** ✅ | Truncation cannot split a pair *and* the claim is now tested: compacted history, after `normalizeForPrompt`, carries no pairing findings — verified with the doctor scanner as the oracle, for a cutoff landing inside a pair, for a retained tail that itself holds a duplicate, and for a retained tail that holds an open call (Q4's shape). `safeCompactionCutoff` is documented as an optimisation (it keeps the prompt byte-identical to last turn's) rather than the correctness guarantee | `internal/agent/compaction.go` (comment), `internal/agent/compaction_pairs_test.go` (new) | `TestCompactionOutputNormalisesToAPairingCleanHistory` (three shapes, through prune + compress) |
 | **P5** ✅ | **Grace** (bounded, in-flight tools land their real result), **per-source budgets** (`TaskQueueCfg.CronTimeoutSec`; one policy site `Gateway.taskTimeoutFor` behind `submitTask`), and **hot reload** of the whole `taskqueue` namespace (`ReloadTaskQueue` + the `taskQueueReloader` hook, no pod roll; resize-safe semaphore swap) | `internal/agent/tool_grace.go` (new), `internal/agent/loop.go`, `internal/taskqueue/queue.go`, `internal/config/config.go`, `internal/gateway/gateway.go`, `internal/gateway/routing.go`, `internal/gateway/taskqueue_reload.go` (new), `internal/setup/handlers.go`, `cmd/fastclaw/main.go` | `TestToolGraceContext*` (3), `TestTurnBudgetExpiryLetsInFlightToolRecordItsResult`, `TestSubmitWithTimeoutOverridesQueueDefault`, `TestTaskTimeoutForSourcePolicy`, `TestSetDefaultTimeoutAppliesToTheNextTask`, `TestSetMaxConcurrentResizesWithoutStrandingInFlight`, `TestReloadTaskQueueAppliesSystemConfig`, `TestReloadTaskQueueDegradesQuietly`, `TestTaskQueue_HotReloadCloudPathE2E` |
-| **P6** ✅ | `sanitizeNUL` at the persistence boundary (session_messages + session_events) so a NUL-bearing tool result can no longer vanish from the archive; `fastagent doctor sessions` reports duplicate/orphan/unanswered pairings, exits non-zero while findings remain, and `--fix` removes duplicate replies after backing the row up | `internal/store/database.go`, `internal/doctor/scan.go` (new), `internal/store` `ListSessionSnapshots`, `internal/session/store_adapter.go` (`ProviderMessages`), `cmd/fastclaw/cmd_doctor.go` (new) | `TestAppendSessionMessageStripsNUL`, `internal/doctor` shape table + RawAssistant declarations, `TestListSessionSnapshotsOrderingAndFilter`, `TestDoctorSessionsFindsAndFixesDuplicateReplies` (CLI end to end: seed → scan fails → fix → backup → clean) |
+| **P6** ✅ | `sanitizeNUL` at the persistence boundary (session_messages + session_events) so a NUL-bearing tool result can no longer vanish from the archive; `fastagent doctor sessions` reports duplicate/orphan/unanswered pairings, exits non-zero on the *actionable* ones (duplicates and orphans — an unanswered call is expected and only reported, see Q4), and `--fix` removes duplicate replies after backing the row up | `internal/store/database.go`, `internal/doctor/scan.go` (new), `internal/store` `ListSessionSnapshots`, `internal/session/store_adapter.go` (`ProviderMessages`), `cmd/fastclaw/cmd_doctor.go` (new) | `TestAppendSessionMessageStripsNUL`, `internal/doctor` shape table + RawAssistant declarations + `TestExpectedCoversOpenCallsOnly`, `TestListSessionSnapshotsOrderingAndFilter`, `TestDoctorSessionsFindsAndFixesDuplicateReplies` (CLI end to end: seed → scan fails → fix → backup → clean), `TestDoctorSessionsTreatsOpenCallAsExpected` |
 
 ## Test plan
 
@@ -567,15 +603,17 @@ working tree.
   `TestHandleMessageSerializesQueuedTurns` (history roles are exactly
   `user,assistant,user,assistant`, contents in arrival order).
 * **normalizeForPrompt** ✅ — `TestNormalizeForPromptShapes`: well-formed
-  history unchanged, pad+real duplicate collapsed, the incident's 2-calls-4-
-  replies shape, orphan reply dropped, unanswered call padded in place, late
-  reply pulled next to its call, empty input; every case also asserts
+  history unchanged, legacy synthetic reply + real result collapsed, the
+  incident's 2-calls-4-replies shape, orphan reply dropped, unanswered call
+  (Q4's shape: an interrupted turn leaves the call open) answered in place,
+  late reply pulled next to its call, empty input; every case also asserts
   idempotence and that the input slice was not mutated.
   `TestNormalizeForPromptReadsRawAssistantCalls` (call declared only in
   `RawAssistant`), `TestNormalizeForPromptStripsDuplicateCallDeclaration`.
-* **Pad** ✅ — `TestPadOrphanToolResultsLeavesOtherTurnsToolUseAlone`,
-  `TestPadOrphanToolResultsNoTurnIDsIsNoop`,
-  `TestPadOrphanToolResultsIsIdempotent`.
+* **Interrupted turn (Q4)** ✅ — `TestInterruptedTurnLeavesNoSyntheticReplyInHistory`:
+  the loop detector breaks out mid-round, history keeps the open call and no
+  synthetic reply, and `doctor.Scan(normalizeForPrompt(history))` is empty —
+  the same oracle the provider contract is written against.
 * **Admission** ✅ — `TestRunTurnDefersAutomaticSourceWhenSessionIsBusy`
   (refused, nothing written), `TestRunTurnQueuesUserSourceAndEmitsQueuedEvent`
   (queues, emits `queued` with position 1, runs after release),
@@ -635,8 +673,12 @@ working tree.
   after the P0 repair (it did: 517 → 512 messages, 0 duplicate ids).
 * After deploy: grep the gateway logs for
   `must be a response to a preceding message` over a 24 h window and for
-  `padding orphan tool_use` paired with a later real result for the same id.
+  `padding orphan tool_use` paired with a later real result for the same id
+  (pre-Q4 images only — that log line is gone now, and its absence is the
+  point: nothing writes a synthetic reply into a session any more).
 * `sessions.messages` scan for duplicate `toolCallId` across all sessions.
+  Since Q4, `doctor sessions` exits 0 when the only findings are unanswered
+  calls, so this scan is now a clean gate again.
 
 ## Rollout, verification, rollback
 
@@ -659,7 +701,7 @@ working tree.
 | **Q1** | IM inbound while a turn is running: keep auto-steer, or queue like the dashboard? | keep auto-steer (D3) |
 | **Q2** | Does the dashboard need a visible "排队中" state, or is the typing indicator enough? | yes, add one (P1b) |
 | **Q3** | Cron/goal on a busy session: block the queue worker (P1) or `NotAdmitted` + re-queue (P2)? | P1 blocks (bounded by the queue timeout), P2 re-queues |
-| **Q4** | Keep synthetic "interrupted" replies persisted, or move them to prompt-only (Codex parity) and render them in the UI from the call? | keep persisted, make idempotent (P3); revisit |
+| **Q4** | Keep synthetic "interrupted" replies persisted, or move them to prompt-only (Codex parity) and render them in the UI from the call? | **prompt-only, decided 2026-09-14** (Codex parity): the projection writes the reply, stored history keeps the call open, the UI renders `(stopped)` from the call, and the doctor scanner treats the open call as expected. The persisted pad's only remaining effect was the incident's collision risk |
 | **Q5** | Per-source turn budgets and the graceful-interrupt semantics (P5) | web 15 min, IM 300 s, grace 60 s |
 | **Q6** | Do we need cross-replica session locking (store lease) now, or is in-process enough? | in-process now; lease if we see cross-pod overlap |
 | **Q7** | Should the checker ship as a CLI subcommand or a test-only harness? | CLI subcommand (`doctor sessions`), P6 |
@@ -713,6 +755,9 @@ second is the real result.
 2. `internal/agent/loop.go` — `padOrphanToolResults(sess, turnToolCallIDs)`
    pads only ids the current turn declared, resolved against the whole
    session; the pad literal is shared as `provider.StoppedToolResult`.
+   **Superseded by Q4**: the function is gone; the literal now belongs to the
+   projection. This entry is kept because it describes the binary that was
+   deployed on 2026-09-14 and the repair that ran against production data.
 3. `internal/agent/compaction.go` — summariser receives the live `ctx`
    (`API error`-free compaction; previously `net/http: nil Context`).
 4. Production data — the incident session's `sessions.messages` went from 517

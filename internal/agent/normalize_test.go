@@ -28,9 +28,13 @@ func nReply(id, content string) provider.Message {
 // normalizeForPrompt is the single place that guarantees the history
 // contract every provider enforces: one reply per call, every reply
 // belonging to a call (docs/session-turn-integrity.md, clause P). The
-// stored record stays truthful; only the projection is repaired.
+// stored record stays truthful; only the projection is repaired — including
+// the synthetic reply for a call an interrupted turn left open (clause T/Q4).
+//
+// Duplicates are therefore a legacy shape: only histories written before
+// Q4 can carry a synthetic reply in storage next to a real one.
 func TestNormalizeForPromptShapes(t *testing.T) {
-	pad := provider.StoppedToolResult
+	stopped := provider.StoppedToolResult
 
 	cases := []struct {
 		name string
@@ -43,17 +47,17 @@ func TestNormalizeForPromptShapes(t *testing.T) {
 			want: []provider.Message{nUser("go"), nCall("A"), nReply("A", "done"), nUser("next"), {Role: "assistant", Content: "ok"}},
 		},
 		{
-			name: "duplicate reply (pad then real) collapses to one",
-			in:   []provider.Message{nUser("go"), nCall("A"), nReply("A", pad), nReply("A", "real")},
-			want: []provider.Message{nUser("go"), nCall("A"), nReply("A", pad)},
+			name: "legacy synthetic reply plus real result collapses to one",
+			in:   []provider.Message{nUser("go"), nCall("A"), nReply("A", stopped), nReply("A", "real")},
+			want: []provider.Message{nUser("go"), nCall("A"), nReply("A", stopped)},
 		},
 		{
 			name: "incident shape: two calls answered twice each",
 			in: []provider.Message{
 				nUser("resume"), nCall("A", "B"),
-				nReply("A", pad), nReply("B", pad), nReply("A", "real"), nReply("B", "real"),
+				nReply("A", stopped), nReply("B", stopped), nReply("A", "real"), nReply("B", "real"),
 			},
-			want: []provider.Message{nUser("resume"), nCall("A", "B"), nReply("A", pad), nReply("B", pad)},
+			want: []provider.Message{nUser("resume"), nCall("A", "B"), nReply("A", stopped), nReply("B", stopped)},
 		},
 		{
 			name: "reply with no declaring call is dropped",
@@ -63,7 +67,7 @@ func TestNormalizeForPromptShapes(t *testing.T) {
 		{
 			name: "unanswered call gets a synthetic reply next to it",
 			in:   []provider.Message{nCall("A"), nUser("next")},
-			want: []provider.Message{nCall("A"), {Role: "tool", ToolCallID: "A", Name: "tool_A", Content: pad}, nUser("next")},
+			want: []provider.Message{nCall("A"), {Role: "tool", ToolCallID: "A", Name: "tool_A", Content: stopped}, nUser("next")},
 		},
 		{
 			name: "late reply is pulled next to its call",
