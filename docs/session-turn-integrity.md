@@ -572,16 +572,19 @@ split that landed:
   start. On 2026-09-14 that surfaced as a turn that ended with the tool row
   still reading *"Queued (waiting on prior sub-agent)…"* — the result had
   nowhere to go, and the row is what a reader sees for the whole wait.
-  `clampSubagentBudget` (subagent.go) now takes the turn's remaining time as
-  the ceiling, reserving `subagentTurnMargin` (2 m = the 90 s salvage round
-  plus the parent's final model call) so the sub-agent's *own* budget expires
-  first: that is what keeps it on the salvage path instead of being cut down
-  mid-flight by the parent, which is the difference between "partial result
-  with a reason" and "nothing". The clamp bit is named in the tool result and
-  in a warning log. When the turn has less than the margin left, delegating is
-  refused with the remaining time and the instruction to re-issue in a fresh
-  turn — starting a doomed sub-agent is worse than saying so, because the
-  parent still has to answer within the same clock.
+  `subagentWallBudget(ctx, explicit)` (subagent.go) is now the one owner of that
+  number — resolve the caller's request / the configured default / the built-in,
+  then hold it inside the turn. It reserves `subagentTurnMargin`, derived as
+  `subagentSalvageTimeout + 30 s` rather than chosen, so the sub-agent's *own*
+  budget expires first: that is what keeps it on the salvage path instead of
+  being cut down mid-flight by the parent, which is the difference between
+  "partial result with a reason" and "nothing" (`TestClampedSubagentStillSalvagesWhenItsOwnBudgetEnds`
+  fails with *cancelled with its parent* when the reservation is dropped). The
+  clamp bit is named in the tool result and in a warning log. When the turn has
+  less than the margin left, delegating is refused with the remaining time and
+  the instruction to re-issue in a fresh turn — starting a doomed sub-agent is
+  worse than saying so, because the parent still has to answer within the same
+  clock.
   The wait itself is bounded now too: `RegisterSerialFrom` serialises through a
   one-slot channel instead of a `sync.Mutex`, so a queued call returns
   `ctx.Err()` the moment its turn ends rather than staying blocked until the
@@ -695,7 +698,11 @@ working tree.
   `TestSubagentBudgetUnderTheTurnCeilingIsUntouched` (5 m in a 45 m turn stays
   5 m), `TestSubagentBudgetWithoutATurnDeadlineIsUntouched` (cron/CLI keeps the
   configured budget), `TestSubagentRefusesWhenTheTurnHasNoRoomLeft` (no model
-  round is ever spent), and the serial wait itself:
+  round is ever spent),
+  `TestClampedSubagentStillSalvagesWhenItsOwnBudgetEnds` (the clamped expiry is
+  the sub-agent's own, so the salvage round runs — dropping the margin makes it
+  *cancelled with its parent*, which salvages nothing), and the serial wait
+  itself:
   `TestRegisterSerialQueuedCallIsReleasedByItsContext`,
   `TestRegisterSerialAlreadyCancelledCallNeverEnters`.
 * **Wire builder** ✅ — the P0 tests stay as defence-in-depth
