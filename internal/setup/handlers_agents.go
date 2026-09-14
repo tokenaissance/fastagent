@@ -670,11 +670,18 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	// invalidateAgent (not invalidateUser) so super_admin / public-link
-	// viewers / apikey callers that lazy-attached this agent into their
-	// own UserSpace also drop their stale rc.Model — without this they
-	// keep firing the previous model until the 30-min idle eviction.
-	s.invalidateAgent(rec.ID)
+	// The agent's resolved runtime changed (model / promptMode / plugins), so
+	// every replica holding it cached must rebuild it — this pod included.
+	// notifyAgentChanged does the local InvalidateAgent (owner's space plus any
+	// super_admin / public-link / apikey caller that lazy-attached the agent)
+	// and stamps the per-user reload marker: the DB epoch replicas without Redis
+	// poll, plus the Redis broadcast that reaches the rest instantly.
+	//
+	// Local-only invalidation was the earlier behavior: chatters whose next
+	// message landed on a sibling replica kept firing the previous model until
+	// that replica's 30-minute idle eviction, which reads exactly like "the
+	// dashboard switch did not work".
+	s.notifyAgentChanged(rec.UserID, rec.ID)
 	share := agentShareModelConfig(rec)
 	jsonResponse(w, http.StatusOK, map[string]any{
 		"agent": map[string]any{
