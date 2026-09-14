@@ -3869,11 +3869,72 @@ func sessionTriple(msg bus.InboundMessage, projectID string) (string, string, st
 	return ch, acc, cid, projectID
 }
 
+// chatterUserID resolves the identity this turn's per-chatter state is
+// keyed to: USER.md / MEMORY.md rows, the per-user skills dir, the tz
+// preference, and the chatter_user_id column on session writes.
+//
+// Scheduled / runtime-injected turns (cron self-fires, heartbeat ticks,
+// goal continuations) carry a SENTINEL UserID ("cron" / "system" /
+// "goal") instead of a real account. The gateway mints a synthetic
+// app_user for such a value ("web:cron" → u_cd82…), and keying
+// per-chatter files on it strands the agent's own memory writes in a
+// row no conversation ever reads. Those turns act for the agent owner:
+// the owner's MEMORY.md is the file the interactive chats read, and it
+// is the row the agent's "record this finding" instructions mean.
+//
+// (Before the synthetic row existed, the same mix-up surfaced as a hard
+// "system file get: store: not found" on every edit_file against
+// MEMORY.md from a cron turn — memory_store_adapter.GetMemory and the
+// file tools both do a strict per-chatter lookup.)
 func (a *Agent) chatterUserID(msg bus.InboundMessage) string {
+	if actor := autonomousActorUserID(msg, a.ownerUserID); actor != "" {
+		return actor
+	}
 	if msg.UserID != "" {
 		return msg.UserID
 	}
 	return a.ownerUserID
+}
+
+// autonomousUserIDs are the sentinel UserID values internal producers
+// stamp on their messages instead of a real account. Real chatters are
+// always canonical u_xxx ids (minted by the gateway's resolveChatter,
+// or resolved from auth for web chat), so these can't collide with a
+// human — and unlike a Source tag they survive producers that forget to
+// set one (the webhook server posts UserID "webhook" with no Source).
+var autonomousUserIDs = map[string]bool{
+	"cron":    true,
+	"system":  true,
+	"goal":    true,
+	"webhook": true,
+}
+
+// autonomousActorUserID returns the account a scheduled / machine-driven
+// turn acts for, or "" when msg is a real user turn.
+//
+// Cron and goal messages carry the job owner explicitly. A heartbeat
+// tick has no owner field at all — it is the agent checking its own
+// HEARTBEAT.md conditions — so it falls back to the agent owner.
+// Sub-agent spawns are deliberately absent: they inherit the parent
+// turn's chatter and must keep writing to the same memory.
+func autonomousActorUserID(msg bus.InboundMessage, agentOwner string) string {
+	switch msg.Source {
+	case bus.SourceCron, bus.SourceHeartbeat, bus.SourceGoalContext:
+		return firstNonEmptyUserID(msg.OwnerUserID, agentOwner)
+	}
+	if autonomousUserIDs[msg.UserID] {
+		return firstNonEmptyUserID(msg.OwnerUserID, agentOwner)
+	}
+	return ""
+}
+
+func firstNonEmptyUserID(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // refreshSkillsFromStore mirrors OSS-hosted skills (global, per-agent,
