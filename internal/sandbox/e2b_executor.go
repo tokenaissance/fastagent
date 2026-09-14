@@ -955,6 +955,45 @@ type execStreamTruncatedError struct {
 
 func (e *execStreamTruncatedError) Error() string { return e.detail }
 
+// Two clocks can end a long exec, and e2b reports them differently. Both read
+// as plain failures, which is what made the kronos batch look broken while it
+// was in fact running:
+//
+//	r39/r41/r45  "context canceled", nothing but the start frame  → the turn's
+//	             clock (budget expired, turn superseded, caller gone)
+//	r42 / 553    "deadline_exceeded" WITH the command's output     → envd's
+//	             clock, with a process still holding the stream open
+//
+// The error text is the only thing the model sees, so each clock's message
+// carries the next step instead of leaving a bare provider string.
+const execCancelledHintText = " [hint: the exec request was cancelled by the runtime, not by the sandbox — the turn's budget expired, the turn was superseded, or the caller disconnected. A process this command started may still be running inside the sandbox: check it (ps, plus whatever log file it was redirected to) and adopt that result before re-running anything. To make that check possible next time, start it with exec({\"run_in_background\": true}) and read it with bash_output.]"
+
+// execCancelledHint answers for the errors that mean "the runtime stopped
+// waiting", as opposed to "the sandbox answered with a problem".
+func execCancelledHint(err error) string {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return execCancelledHintText
+	}
+	return ""
+}
+
+// execStalledHint explains the other clock: envd cut the stream at its Connect
+// deadline because a process the command started kept the stream open. The
+// clause about delivered output matters — in the r42/553 case the number the
+// model needed was already in the output it was about to discard.
+func execStalledHint(connectErr, output string) string {
+	if !strings.Contains(connectErr, "deadline_exceeded") {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString(" [hint: ")
+	if strings.TrimSpace(output) != "" {
+		b.WriteString("the output above was delivered, but ")
+	}
+	b.WriteString("a process this command started is still holding the exec stream open — envd ended the request at its own deadline. Redirect that process's stdin (</dev/null) and start it with exec({\"run_in_background\": true}), which returns immediately and hands back a bash_id for bash_output. Don't read this as a failed run: inspect the sandbox before re-running.]")
+	return b.String()
+}
+
 // snippet bounds a body for a log line or an error message.
 func snippet(body []byte, limit int) string {
 	s := strings.TrimSpace(string(body))
@@ -1046,7 +1085,8 @@ func (e *E2BExecutor) execOn(ctx context.Context, id sandboxIdent, command strin
 	// long-running exec calls.
 	body, readErr := io.ReadAll(resp.Body)
 	if readErr != nil {
-		return string(body), fmt.Errorf("e2b exec body read: %w (got %d bytes)", readErr, len(body))
+		return string(body), fmt.Errorf("e2b exec body read: %w (got %d bytes)%s",
+			readErr, len(body), execCancelledHint(readErr))
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -1123,6 +1163,10 @@ func (e *E2BExecutor) execOn(ctx context.Context, id sandboxIdent, command strin
 	// verifyWorkspaceWritable reported "/workspace probe: Permission denied"
 	// with no clue why the chown didn't take.
 	if !exited {
+		// Read the hint before `output` is replaced by the placeholder — it
+		// says something different depending on whether the command got to
+		// print anything before the clock ran out.
+		clockHint := execStalledHint(connectErr, output)
 		if output == "" {
 			output = "(no output — response stream truncated before exit-status trailer)"
 		}
@@ -1135,6 +1179,7 @@ func (e *E2BExecutor) execOn(ctx context.Context, id sandboxIdent, command strin
 		if connectErr != "" {
 			detail += "; server error: " + connectErr
 		}
+		detail += clockHint
 		// Frames are already parsed JSON, so they read far better than the
 		// framed bytes; the raw body is the fallback when nothing parsed (which
 		// is itself the diagnosis: the stream died mid-frame).
