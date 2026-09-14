@@ -149,6 +149,8 @@ the build:
 | When to delegate / how to write the `task` arg / the worked example | `taskDelegationContent` (always-on) | ~1.6 K chars of the `delegate_task` schema (it is sent with every request) | `TestDelegateTaskSchemaKeepsCallTimeFacts` + `TestDelegateTaskSchemaStaysUnderItsBudget` |
 | web_search-vs-web_fetch routing (when to search, never fetch a search-results page, browser fallback on 403) | `toolDisciplineContent` + `modChatbotTools` | ~0.9 K chars of the `web_fetch` schema (a third copy) | `TestWebFetchSchemaKeepsCallTimeFacts` (asserts the routing text is gone) |
 | Background-job contract (`bash_output` / `kill_shell` semantics) | **the tool schemas — there is no other home** | nothing to remove: the corpus mentions `bash_output`/`kill_shell`/`run_in_background` zero times | `TestBashOutputSchemaCarriesTheWholeContract` + `TestKillShellSchemaCarriesItsContract` (locks, not budgets) |
+| The five POSIX-only shell limits (`<<<`, `[[ ]]`, process substitution) | `sandboxShellQuirks`, emitted for docker/boxlite only | nothing for e2b: it runs every exec through `/bin/bash -c` (`sandbox/e2b_executor.go`), so the warning was **false** there | `TestSandboxPromptShellQuirksFollowTheBackend` |
+| A worked PIL drawing example | `Multi-line Scripts` + `Visual/Graphics Tasks` | the 585-char example itself (it illustrated rules that remain) | `TestSandboxPromptKeepsItsRulesWithoutTheWorkedExample` |
 
 The todo.md rules are load-bearing rather than verbose: the chat panel re-fetches
 on every `write_file`/`edit_file` that touches the file and hides itself when the
@@ -172,8 +174,10 @@ expensive line in the whole payload. After the trim above:
 |---|---|---|
 | `delegate_task` | 3,457 chars | **1,865 chars** |
 | `web_fetch` | 1,687 chars | **~760 chars** |
+| `modSandbox` (e2b rendering) | 4,764 chars | **3,657 chars** |
+| `modSandbox` (docker rendering, keeps the shell quirks) | 4,764 chars | 3,966 chars |
 | tool schema (13 tools, real agent) | 13,159 chars ≈ 3.3 K tokens | **10,655 chars ≈ 2.7 K tokens** |
-| system prompt + tool schema | ≈9.0 K tokens | **≈8.4 K tokens** |
+| system prompt + tool schema (e2b, agent mode) | ≈9.0 K tokens | **≈8.1 K tokens** |
 
 For scale: Codex's own harness pays ≈1.9 K tokens of model prompt plus ≈2.3 K of
 tool specs (its everyday set), or ≈5.4 K + 2.3 K on a generic model — so
@@ -186,3 +190,11 @@ itself) and the prompt corpus mentions that machinery zero times, so budgeting
 them would delete documentation rather than duplication. What did change there is
 accuracy: their `bash_id` docs now name both id shapes — a host shell (`bash_3`)
 and a sandbox job (`sbg_1a2b_3`).
+
+One more pair of copies is a *maintenance* risk rather than a token cost:
+`toolDisciplineContent` (agent mode, 5.4 K chars) and `modChatbotTools` (chatbot
+mode, 3.2 K chars) state the same routing / skill / blocked-page rules for their
+respective modes. They never appear in one request, but editing one and forgetting
+the other is how the two halves of the product drift, so
+`TestAgentAndChatbotDisciplineStayInSync` fails when a rule is present in only one
+of them.

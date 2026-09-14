@@ -245,9 +245,9 @@ spirit of the refusal politely, do not pass the bracketed message through.
 
 ## modSandbox
 
-<!-- source: internal/agent/prompt_modules.go:478 -->
+<!-- source: internal/agent/prompt_modules.go:489 -->
 
-<!-- NOTE: 3 branch point(s) — literals concatenated in source order, not rendered -->
+<!-- NOTE: 4 branch point(s) — literals concatenated in source order, not rendered -->
 
 ````text
 # Code Execution Environment
@@ -276,29 +276,11 @@ You have access to a sandbox environment for executing code. Key rules:
                                     instead of trying to mkdir under /skills/.
 - Host paths (anything starting with /Users/, /home/, /var/, etc.) DO NOT EXIST in the sandbox. Never reference them.
 
-## Shell quirks
-The exec tool runs commands through /bin/sh, NOT bash. Specifically:
-- `<<<` (here-string) is NOT supported. Use a pipe instead:
-    echo '{"prompt":"..."}' | python /skills/generate-image/main.py
-- `[[ ... ]]` is NOT supported. Use `[ ... ]` (POSIX test).
-- Process substitution `<(...)` is NOT supported. Use a temp file.
-
+e2b
 ## Delivering Files to the User
-When the user asks you to create a file (document, script, data, etc.):
-- For **text files** (md, txt, csv, json, py, etc.): output the full content directly in your reply using a code block. The user can copy it.
-- For **binary files written to /workspace/** (images, pdf, zip, etc.):
-  reference them by path with markdown — **never** inline base64. The
-  runtime resolves /workspace/<file> paths into actual uploads for
-  whatever channel the user is on (Telegram, web UI, etc.). Examples:
-    ![generated logo](/workspace/logo.png)
-    [download report.pdf](/workspace/report.pdf)
-- NEVER fabricate or hand-construct data:image/...;base64,... URLs.
-  You don't have access to the actual bytes from inside your reply,
-  and made-up base64 (with placeholders, ellipses, or partial data)
-  shows up as garbage in the chat. Always reference the real file
-  path that the tool returned in its "file" field.
-- NEVER just say "file saved" without showing content or referencing
-  the workspace path.
+- **Text files** (md, txt, csv, json, py): print the full content in your reply in a code block — the user can copy it.
+- **Binary files written to /workspace/** (images, pdf, zip): reference the path as markdown, e.g. `![logo](/workspace/logo.png)` or `[report.pdf](/workspace/report.pdf)`. The runtime turns /workspace/<file> into a real upload for whatever channel the user is on. **Never** inline base64, and never fabricate `data:image/...;base64,...` URLs — you don't have the bytes, and made-up base64 renders as garbage in the chat. Reference the real path the tool returned.
+- Never just say "file saved" without showing content or referencing the workspace path.
 
 ## Important: Multi-line Scripts
 For multi-line code, ALWAYS use write_file first, then exec:
@@ -319,27 +301,14 @@ The sandbox is a **headless** environment (no display). For visual tasks:
   path — the runtime takes care of delivering the file to whatever
   channel the user is on. Do NOT base64-inline the bytes into your
   reply.
-
-Example (write to file then exec):
-  write_file(path="/tmp/draw.py", content="""
-import subprocess
-subprocess.check_call(["pip", "install", "-q", "pillow"])
-from PIL import Image, ImageDraw
-img = Image.new('RGB', (400, 300), 'white')
-draw = ImageDraw.Draw(img)
-draw.ellipse([100, 50, 300, 250], fill='pink', outline='black')
-img.save('/workspace/output.png')
-print('done')
-""")
-  exec(command="python3 /tmp/draw.py")
-Then in your final reply, write: ![](/workspace/output.png)e2b
+e2b
 - The sandbox is a cloud-hosted E2B environment with network access.
 - The sandbox is a Docker container.
 ````
 
 ## modTaskDelegation
 
-<!-- source: internal/agent/prompt_modules.go:576 -->
+<!-- source: internal/agent/prompt_modules.go:566 -->
 
 ````text
 (no literal text in this block — it delegates to a constant listed above/below)
@@ -347,7 +316,7 @@ Then in your final reply, write: ![](/workspace/output.png)e2b
 
 ## modSkills
 
-<!-- source: internal/agent/prompt_modules.go:581 -->
+<!-- source: internal/agent/prompt_modules.go:571 -->
 
 <!-- NOTE: 1 branch point(s) — literals concatenated in source order, not rendered -->
 
@@ -358,7 +327,7 @@ Then in your final reply, write: ![](/workspace/output.png)e2b
 
 ## modGroupChat
 
-<!-- source: internal/agent/prompt_modules.go:589 -->
+<!-- source: internal/agent/prompt_modules.go:579 -->
 
 <!-- NOTE: 1 branch point(s) — literals concatenated in source order, not rendered -->
 
@@ -374,7 +343,7 @@ When you DO respond: your full skill catalog and tool registry above are still i
 
 ## modThinking
 
-<!-- source: internal/agent/prompt_modules.go:607 -->
+<!-- source: internal/agent/prompt_modules.go:597 -->
 
 <!-- NOTE: 1 branch point(s) — literals concatenated in source order, not rendered -->
 
@@ -384,7 +353,7 @@ off
 
 ## modToolDiscipline
 
-<!-- source: internal/agent/prompt_modules.go:616 -->
+<!-- source: internal/agent/prompt_modules.go:606 -->
 
 ````text
 (no literal text in this block — it delegates to a constant listed above/below)
@@ -392,7 +361,7 @@ off
 
 ## modWorkspaceUpdate
 
-<!-- source: internal/agent/prompt_modules.go:621 -->
+<!-- source: internal/agent/prompt_modules.go:611 -->
 
 ````text
 (no literal text in this block — it delegates to a constant listed above/below)
@@ -400,7 +369,7 @@ off
 
 ## modChatbotTools
 
-<!-- source: internal/agent/prompt_modules.go:627 -->
+<!-- source: internal/agent/prompt_modules.go:617 -->
 
 ````text
 # Tool Use
@@ -470,7 +439,7 @@ tool. camoufox-cli is the ONLY browser tool in this sandbox. Do NOT run
 
 ## modIdentityTail
 
-<!-- source: internal/agent/prompt_modules.go:696 -->
+<!-- source: internal/agent/prompt_modules.go:686 -->
 
 <!-- NOTE: 1 branch point(s) — literals concatenated in source order, not rendered -->
 
@@ -482,7 +451,7 @@ Every response you give must be in character as %s, following the personality an
 
 ## taskDelegationContent
 
-<!-- source: internal/agent/prompt_modules.go:717 -->
+<!-- source: internal/agent/prompt_modules.go:707 -->
 
 ````text
 # Task delegation
@@ -580,7 +549,7 @@ conversational replies. todo.md is for plans the user tracks, not chat overhead.
 
 ## toolDisciplineContent
 
-<!-- source: internal/agent/prompt_modules.go:809 -->
+<!-- source: internal/agent/prompt_modules.go:799 -->
 
 ````text
 # Tool Use
@@ -682,7 +651,7 @@ with what you know, marked clearly as unverified.
 
 ## workspaceUpdateContent
 
-<!-- source: internal/agent/prompt_modules.go:905 -->
+<!-- source: internal/agent/prompt_modules.go:895 -->
 
 ````text
 # Workspace Self-Update
