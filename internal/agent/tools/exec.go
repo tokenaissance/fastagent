@@ -345,7 +345,9 @@ func makeExecToolFull(r *Registry, sbCfg *SandboxConfig, envProvider SkillEnvPro
 
 		output, err := cmd.CombinedOutput()
 
-		result := string(output)
+		// Same bound as the sandbox paths: a host command that dumps a log file
+		// must not become a 70 MB tool result either (see sandbox.ClipOutput).
+		result := sandbox.ClipAndLog(string(output), "exec/host")
 		if err != nil {
 			return fmt.Sprintf("%s\nError: %s", result, err.Error()), err
 		}
@@ -515,7 +517,7 @@ func registerHostExec(r *Registry, envProvider SkillEnvProvider, skillDirs []str
 			}
 			cmd.Env = buildSubprocessEnv(skillEnv)
 			out, err := cmd.CombinedOutput()
-			result := string(out)
+			result := sandbox.ClipAndLog(string(out), "host_exec")
 			if err != nil {
 				return fmt.Sprintf("%s\nError: %s", result, err.Error()), err
 			}
