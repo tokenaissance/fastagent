@@ -188,7 +188,7 @@ Edit a file by replacing an exact substring. Prefer this over write_file when ch
 
 ## read_file
 
-<!-- source: internal/agent/tools/file.go:906 -->
+<!-- source: internal/agent/tools/file.go:902 -->
 
 ````text
 Read the contents of a file
@@ -196,7 +196,7 @@ Read the contents of a file
 
 ## write_file
 
-<!-- source: internal/agent/tools/file.go:1000 -->
+<!-- source: internal/agent/tools/file.go:996 -->
 
 ````text
 Write content to a file (creates directories as needed)
@@ -204,7 +204,7 @@ Write content to a file (creates directories as needed)
 
 ## list_dir
 
-<!-- source: internal/agent/tools/file.go:1073 -->
+<!-- source: internal/agent/tools/file.go:1069 -->
 
 ````text
 List files and directories in a path

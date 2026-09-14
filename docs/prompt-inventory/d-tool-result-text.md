@@ -2,7 +2,7 @@
 
 ## error suffix on every failed tool
 
-<!-- source: internal/agent/tools/registry.go:864 -->
+<!-- source: internal/agent/tools/registry.go:918 -->
 
 ````text
 [Analyze the error above and try a different approach.]
@@ -42,10 +42,11 @@ deadline_exceeded [hint: the output above was delivered, but a process this comm
 
 ## sandbox-absence hint
 
-<!-- source: internal/agent/tools/exec.go:634 -->
+<!-- source: internal/agent/tools/exec.go:642 -->
 
 ````text
-(no literal text in this block — it delegates to a constant listed above/below)
+%w
+[hint: this looks like a sandbox-environment miss (binary or path not present in the container). If the command needs the user's actual host machine — e.g. `fastagent upgrade`, `~/Downloads`, host CLI tools — retry with the `host_exec` tool instead.]
 ````
 
 ## background job started
