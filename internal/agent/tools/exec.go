@@ -20,6 +20,12 @@ type execArgs struct {
 	Timeout         int    `json:"timeout,omitempty"`           // seconds, default 120
 	Sandbox         bool   `json:"sandbox,omitempty"`           // force sandbox for this call
 	RunInBackground bool   `json:"run_in_background,omitempty"` // launch detached, return bash_id for bash_output / kill_shell
+	// AllowLongWait overrides the guard that refuses a foreground wait ≥30s
+	// (longForegroundWait). It exists for the case the guard cannot judge — a
+	// genuinely foreground wait — and is deliberately NOT advertised in the
+	// refusal text: the supported way to wait is run_in_background, and this is
+	// the exception, not an alternative.
+	AllowLongWait bool `json:"allow_long_wait,omitempty"`
 }
 
 // MetaSandboxPrefix marks an exec result as having run inside a sandbox.
@@ -192,6 +198,10 @@ func registerExecFull(r *Registry, sbCfg *SandboxConfig, envProvider SkillEnvPro
 				"type":        "boolean",
 				"description": "Run the command detached and return a bash_id immediately. ANY command that waits belongs here — sleeps, polling loops, build watchers, migrations, dev servers, training runs — because a foreground call is ended by the turn's clock and the observation (not the work) is what dies. Read progress later with bash_output(bash_id); terminate with kill_shell(bash_id).",
 			},
+			"allow_long_wait": map[string]interface{}{
+				"type":        "boolean",
+				"description": "Override for the guard that refuses a foreground wait of 30s or more. Use it only for a wait that genuinely cannot be backgrounded — the turn's clock can still end this call and take the output with it, which is how the r39–r45 runs lost their results. Default false.",
+			},
 		},
 		"required": []string{"command"},
 	}, makeExecToolFull(r, sbCfg, envProvider, skillDirs))
@@ -225,11 +235,16 @@ func makeExecToolFull(r *Registry, sbCfg *SandboxConfig, envProvider SkillEnvPro
 				return "", fmt.Errorf("dangerous command blocked: %s", args.Command)
 			}
 		}
-		if !args.RunInBackground {
+		if !args.RunInBackground && !args.AllowLongWait {
 			if secs, ok := longForegroundWait(args.Command); ok {
 				slog.Info("long foreground wait refused",
 					"seconds", secs, "cmdHead", firstN(args.Command, 80))
 				return "", longWaitRefusal(secs)
+			}
+		} else if args.AllowLongWait {
+			if secs, ok := longForegroundWait(args.Command); ok {
+				slog.Info("long foreground wait allowed by allow_long_wait override",
+					"seconds", secs, "cmdHead", firstN(args.Command, 80))
 			}
 		}
 
@@ -522,6 +537,10 @@ func registerSandboxedExec(r *Registry, ex sandbox.Executor) {
 				"type":        "boolean",
 				"description": "Run the command detached in the sandbox and return a bash_id immediately, without waiting for it to finish. ANY command that waits belongs here — sleeps, polling loops, batch jobs, training runs, dev servers — because a foreground call is ended by the turn's clock and the observation (not the job) is what dies. Read progress later with bash_output(bash_id); stop it with kill_shell(bash_id). The `timeout` argument does not apply to a background job.",
 			},
+			"allow_long_wait": map[string]interface{}{
+				"type":        "boolean",
+				"description": "Override for the guard that refuses a foreground wait of 30s or more. Use it only for a wait that genuinely cannot be backgrounded — the turn's clock can still end this call and take the output with it. Default false.",
+			},
 		},
 		"required": []string{"command"},
 	}, func(ctx context.Context, rawArgs json.RawMessage) (string, error) {
@@ -532,11 +551,16 @@ func registerSandboxedExec(r *Registry, ex sandbox.Executor) {
 		if args.Command == "" {
 			return "", fmt.Errorf("command is required")
 		}
-		if !args.RunInBackground {
+		if !args.RunInBackground && !args.AllowLongWait {
 			if secs, ok := longForegroundWait(args.Command); ok {
 				slog.Info("long foreground wait refused",
 					"seconds", secs, "cmdHead", firstN(args.Command, 80))
 				return "", longWaitRefusal(secs)
+			}
+		} else if args.AllowLongWait {
+			if secs, ok := longForegroundWait(args.Command); ok {
+				slog.Info("long foreground wait allowed by allow_long_wait override",
+					"seconds", secs, "cmdHead", firstN(args.Command, 80))
 			}
 		}
 		timeout := 120
