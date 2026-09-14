@@ -34,6 +34,15 @@ type execArgs struct {
 // Uses the ASCII Unit Separator so it never collides with shell output.
 const MetaSandboxPrefix = "\x1fFC_META:sandbox\x1f\n"
 
+// The exec tool is registered twice — once by the host/pool closure
+// (registerExecFull) and once by the sandbox closure (registerSandboxedExec) —
+// so its description exists in two copies. Keep them side by side: everything
+// except the first clause must stay identical, and TestExecDescriptionsStayInSync
+// fails when an edit lands on only one of them.
+const execHostDescription = "Execute a shell command and return stdout/stderr. For binary or image output (PNG, JPEG, PDF, audio, video), write the file into the workspace (e.g. ./out.png) and reference it by relative path in your reply — do NOT base64-encode it into stdout, and do NOT inline data: URLs in your response. The workspace file will be surfaced to the user via the Files panel."
+
+const execSandboxDescription = "Execute a shell command in the sandbox and return stdout/stderr. For binary or image output (PNG, JPEG, PDF, audio, video), write the file into the workspace (e.g. ./out.png) and reference it by relative path in your reply — do NOT base64-encode it into stdout, and do NOT inline data: URLs in your response. The workspace file will be surfaced to the user via the Files panel."
+
 var dangerousCommands = []string{
 	"rm -rf /",
 	"mkfs",
@@ -175,7 +184,7 @@ func RegisterExecWithSkillEnv(r *Registry, sbCfg *SandboxConfig, envProvider Ski
 }
 
 func registerExecFull(r *Registry, sbCfg *SandboxConfig, envProvider SkillEnvProvider, skillDirs []string) {
-	r.Register("exec", "Execute a shell command and return stdout/stderr. For binary or image output (PNG, JPEG, PDF, audio, video), write the file into the workspace (e.g. ./out.png) and reference it by relative path in your reply — do NOT base64-encode it into stdout, and do NOT inline data: URLs in your response. The workspace file will be surfaced to the user via the Files panel.", map[string]interface{}{
+	r.Register("exec", execHostDescription, map[string]interface{}{
 		"type": "object",
 		"properties": map[string]interface{}{
 			"command": map[string]interface{}{
@@ -518,7 +527,7 @@ func registerHostExec(r *Registry, envProvider SkillEnvProvider, skillDirs []str
 func registerSandboxedExec(r *Registry, ex sandbox.Executor) {
 	envProvider := r.envProvider
 	skillDirs := r.skillDirs
-	r.Register("exec", "Execute a shell command in the sandbox and return stdout/stderr. For binary or image output (PNG, JPEG, PDF, audio, video), write the file into the workspace (e.g. ./out.png) and reference it by relative path in your reply — do NOT base64-encode it into stdout, and do NOT inline data: URLs in your response. The workspace file will be surfaced to the user via the Files panel.", map[string]interface{}{
+	r.Register("exec", execSandboxDescription, map[string]interface{}{
 		"type": "object",
 		"properties": map[string]interface{}{
 			"command": map[string]interface{}{
