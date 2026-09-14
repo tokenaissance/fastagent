@@ -19,6 +19,41 @@ import (
 // model sees that it was interrupted".
 const toolGraceDefault = 60 * time.Second
 
+// turnDeadlineKey carries the deadline of the turn that started this tool call
+// across the grace boundary below.
+//
+// The grace context deliberately drops the real deadline — an in-flight tool is
+// allowed to outlive its turn (P5). A tool that must *not* outlive it still has
+// to know when the turn ends: delegate_task sizes a sub-agent's wall budget
+// inside the turn. Reading ctx.Deadline() for that answers "no ceiling" for
+// every tool call in production, which is how the first version of the
+// sub-agent clamp ended up as dead code — the unit tests handed RunSubagent a
+// deadline-carrying context directly and never crossed this boundary.
+type turnDeadlineKey struct{}
+
+// withTurnDeadline stamps the turn's deadline onto a tool context, so a tool
+// can tell how much of the turn is left even though its own context has no
+// deadline.
+func withTurnDeadline(toolCtx, turnCtx context.Context) context.Context {
+	if deadline, ok := turnCtx.Deadline(); ok {
+		return context.WithValue(toolCtx, turnDeadlineKey{}, deadline)
+	}
+	return toolCtx
+}
+
+// turnRemaining reports how much of the turn is left: the stamped value first
+// (the production path), then the context's own deadline — a caller that drives
+// a sub-agent directly (CLI, cron, tests) has no grace boundary in between.
+func turnRemaining(ctx context.Context) (time.Duration, bool) {
+	if deadline, ok := ctx.Value(turnDeadlineKey{}).(time.Time); ok {
+		return time.Until(deadline), true
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		return time.Until(deadline), true
+	}
+	return 0, false
+}
+
 // toolGraceContext returns a context for one round of tool execution that
 // keeps running for up to grace after the turn's context is cancelled. The
 // returned stop func MUST be called when the round ends.
