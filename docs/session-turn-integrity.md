@@ -3,7 +3,9 @@
 > **Status**: P0–P6 landed, plus Q4 (no persisted synthetic replies). P0–P3 are
 > deployed to dev + prod (`20260914015438-deploy-54b07f7`); P4, P5 (grace +
 > per-source budgets), P6, Q4 and the timing-margin test fix landed after that
-> deploy.
+> deploy. Q6 (cross-replica session lease) is **decided-deferred**, with its
+> reopen triggers written down in
+> [Deferred: cross-replica session lease](#deferred-cross-replica-session-lease-q6).
 > **Progress**: P0 wire dedupe + pad scoping + compaction ctx + production data
 > repair · P1 session turn gate (`Session.AcquireTurn/ReleaseTurn`, wired into
 > `HandleMessage` and `HandleMessageStream`) · P1b `queued` event +
@@ -246,8 +248,9 @@ Accepted windows / known gaps (to keep the table honest):
 
 * W is per **process**. Two gateway replicas serving the same session can
   still both admit a turn (the sandbox pool solved the same problem with a
-  Postgres lease; a session-level lease is out of scope here — see Q6 and
-  the "sticky session" alternative).
+  Postgres lease). Accepted deliberately rather than solved: decided
+  2026-09-14, with the evidence that would reopen it written down in
+  [Deferred: cross-replica session lease](#deferred-cross-replica-session-lease-q6).
 * P is guaranteed for OpenAI-compatible and Anthropic wire builds; other
   providers inherit `normalizeForPrompt` because it runs before the provider
   split.
@@ -560,10 +563,12 @@ rewriting history.
   the running turn's direction is a product choice, and the UI already offers
   it explicitly. Not rejected for IM (Q1).
 * **Advisory lock in the store (Postgres) instead of in-process.**
-  Deferred: it is the only way to make W hold across gateway replicas, but it
-  adds a round-trip to every turn and couples the agent loop to the store for
-  a property that is currently only violated inside one process. Recorded as
-  Q6 with the sandbox-lease design as the precedent to copy when needed.
+  Deferred by decision (2026-09-14): it is the only way to make W hold across
+  gateway replicas, but it adds a round-trip to every turn and couples the
+  agent loop to the store for a property that has only ever been violated
+  inside one process. Q6 records the reopen triggers and the fix shape
+  ([Deferred: cross-replica session lease](#deferred-cross-replica-session-lease-q6));
+  the sandbox-lease design is the precedent to copy when that trigger fires.
 * **Make the provider layer (wire sanitizer) the only defence.**
   Rejected: it is per-provider (Anthropic needed its own sweep), it runs after
   compaction and truncation have already shaped the prompt, and it silently
@@ -703,8 +708,95 @@ working tree.
 | **Q3** | Cron/goal on a busy session: block the queue worker (P1) or `NotAdmitted` + re-queue (P2)? | P1 blocks (bounded by the queue timeout), P2 re-queues |
 | **Q4** | Keep synthetic "interrupted" replies persisted, or move them to prompt-only (Codex parity) and render them in the UI from the call? | **prompt-only, decided 2026-09-14** (Codex parity): the projection writes the reply, stored history keeps the call open, the UI renders `(stopped)` from the call, and the doctor scanner treats the open call as expected. The persisted pad's only remaining effect was the incident's collision risk |
 | **Q5** | Per-source turn budgets and the graceful-interrupt semantics (P5) | web 15 min, IM 300 s, grace 60 s |
-| **Q6** | Do we need cross-replica session locking (store lease) now, or is in-process enough? | in-process now; lease if we see cross-pod overlap |
+| **Q6** | Do we need cross-replica session locking (store lease) now, or is in-process enough? | **not now, decided 2026-09-14**: the in-process gate is enough until one of the measurable triggers appears — a post-Q4 `duplicate_tool_reply`, a cross-turn interleave in stored history, or two pods waiting on one session. Triggers, rationale and the fix's shape: [Deferred: cross-replica session lease](#deferred-cross-replica-session-lease-q6) |
 | **Q7** | Should the checker ship as a CLI subcommand or a test-only harness? | CLI subcommand (`doctor sessions`), P6 |
+
+## Deferred: cross-replica session lease (Q6)
+
+**Decision (2026-09-14): not now.** Clause W holds per *process*. The gap is
+real but unobserved, and closing it costs availability — so the thing that
+reopens it is evidence, not a date. This section is the record of that
+decision and of what to build when the evidence shows up.
+
+### Why not now
+
+* The incident's symptom — a session that 400s forever — is already gone
+  without the lease. A cross-pod interleave today costs a duplicated or
+  misordered message inside one turn; the wire builder drops a duplicate
+  reply, the prompt projection repairs the request (P3), the loop no longer
+  persists a synthetic reply that a late result can collide with (Q4), and
+  the doctor reports whatever is left. Nothing writes a permanent hole any
+  more.
+* Every turn would pay a store round trip for a property no measurement has
+  asked for. The only admission contention in production so far is
+  same-process: the dashboard POST queued behind the cron tick that started
+  the incident, which is exactly what the in-process gate fixed.
+* A lease adds a new way to be unavailable: the agent loop would need the
+  store to *start* a turn (the sandbox pool accepts that coupling for
+  long-lived executors, but a turn is a much hotter path), plus TTL renewal,
+  a fencing token so a stale holder's appends cannot land, and a policy for
+  "lease store unreachable". Availability is worth more than an unobserved
+  concurrency property.
+
+### What reopens it (measurable triggers)
+
+In rough order of how cheap they are to see:
+
+1. **A post-Q4 duplicate.** `doctor sessions` reports a
+   `duplicate_tool_reply` on a session whose whole history was written after
+   Q4 shipped. No persisted pad exists to explain that shape any more, so
+   some other writer produced it.
+2. **Cross-turn interleaving.** Stored history shows turn B's user message or
+   reply between turn A's call and its reply (the shape
+   `TestHandleMessageSerializesHistory` rejects). One process cannot do that.
+3. **Two pods on one session.** Two replicas log
+   `turn admission: waited for the in-flight turn` for the same session
+   within one turn budget. Prep needed before this trigger is usable: that
+   log line carries `chat_id` but not the session key or the pod identity —
+   add both, or the trigger is invisible.
+
+### Where the overlap would come from
+
+The gateway runs two replicas (`deploy/helm/fastagent/values.yaml`,
+`deploy/k8s/fastagent.yaml`). The ingress does pin a *browser* to a pod —
+cookie affinity (`fastagent-affinity` in
+`deploy/helm/fastagent/templates/ingress.yaml`) with a `ClientIP` Service
+fallback — but the server-originated sources (cron tick, goal continuation,
+webhook) fire on whichever replica owns the queue. There is no leader
+election and no session→pod routing for them, so affinity covers the web half
+of the traffic while the combination that actually produced the incident
+(dashboard turn + cron tick) is only serialized when both land on one pod.
+
+### Shape of the fix when it is triggered
+
+Reuse the sandbox lease design rather than inventing one
+(`docs/sandbox-pool-leases.md`, upstream PR #124; the store slice is measured
+in [upstream-pr-split.md](upstream-pr-split.md)):
+
+* scope key `(user_id, agent_id, session_key)` instead of a sandbox pool id;
+* owner = pod identity, TTL ≥ turn budget + tool grace, renewed while the turn
+  runs; CAS adoption and the `state`/`paused_at` columns already exist in that
+  design to copy from;
+* the in-process FIFO gate stays the fast path — only a caller that finds a
+  live lease held by *another* pod pays the round trip, and the `queued` event
+  (P1b) is already the user-facing half of "you are waiting for the other
+  writer";
+* a fencing token per acquisition, checked where the session appends, so a
+  holder that lost its lease (crash, partition, TTL expiry) cannot keep
+  writing when its goroutine resumes.
+
+If the trigger fires before that work is ready, the cheaper intermediates are
+all partial:
+
+* **Stickiness** — route a session's turns to one pod by hashing the session
+  key. It closes the web half only, unless the server-originated sources hash
+  the same way.
+* **Write fence without queueing** — a monotonic generation per session,
+  compared on append so a stale writer is rejected rather than interleaved.
+  This still needs the store to arbitrate a compare-and-append, i.e. most of
+  the lease's cost without its ordering semantics.
+* **Park automatic sources by policy** — P2 already parks them per process; a
+  cross-replica version needs the same shared state, so it is not cheaper.
 
 ## Appendix A — incident evidence
 

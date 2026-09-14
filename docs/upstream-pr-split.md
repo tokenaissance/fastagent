@@ -64,6 +64,17 @@ PRs whose diffs are each about one concern, not one 12k-line PR.
 Recommendation: try 2 first (cheap to check: how far apart are the two `dev`s
 now?), fall back to 1.
 
+## Not in this plan (deliberately)
+
+A **session-scoped** lease for the agent turn gate — the cross-replica version
+of `Session.AcquireTurn` — is *not* one of these slices. It was deferred on
+2026-09-14 with explicit reopen triggers, rationale and a fix shape in
+[session-turn-integrity.md › Deferred: cross-replica session lease](session-turn-integrity.md#deferred-cross-replica-session-lease-q6).
+When it is triggered it reuses slice 1's store pattern with a
+`(user_id, agent_id, session_key)` scope instead of a sandbox scope; bundling
+it into these PRs would put a hot-path availability dependency in front of
+reviewers who are being asked to review executor pooling.
+
 ## Rules for whoever executes this
 
 * Never open a PR from a tree that does not build. The PR base must compile and
