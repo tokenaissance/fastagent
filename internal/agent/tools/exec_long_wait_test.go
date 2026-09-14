@@ -127,6 +127,35 @@ func TestExecAcceptsTheLongWaitOnRunInBackground(t *testing.T) {
 	}
 }
 
+// The escape hatch: a wait the guard cannot judge still has a door. It is
+// advertised in the schema, never in the refusal text — the default answer
+// stays run_in_background.
+func TestExecAcceptsTheLongWaitWithTheOverride(t *testing.T) {
+	ctx := context.Background()
+	ex := &bgRecordingExecutor{replies: []string{"one"}}
+	r := NewRegistry(t.TempDir(), t.TempDir())
+	defer r.Close()
+	r.SetExecutor(ex)
+
+	out, err := r.Execute(ctx, "exec", execArgsJSON(t,
+		"sleep 175; tail -3 log", map[string]any{"allow_long_wait": true}))
+	if err != nil {
+		t.Fatalf("allow_long_wait must let a foreground wait through: %v (out=%q)", err, out)
+	}
+	if got := ex.commands(); len(got) != 1 || !strings.Contains(got[0], "sleep 175") {
+		t.Fatalf("the overridden command did not run: %v", got)
+	}
+}
+
+// The override must not leak into the refusal: the model's default path stays
+// run_in_background, so the guidance cannot become "just set the flag".
+func TestLongWaitRefusalDoesNotAdvertiseTheOverride(t *testing.T) {
+	msg := longWaitRefusal(175).Error()
+	if strings.Contains(msg, "allow_long_wait") {
+		t.Fatalf("refusal advertises the override instead of the supported primitive:\n%s", msg)
+	}
+}
+
 // Short waits stay allowed: a one-second readiness probe is a legitimate
 // foreground call and must not grow a refusal path.
 func TestExecAllowsShortForegroundSleep(t *testing.T) {
