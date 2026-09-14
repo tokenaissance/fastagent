@@ -2760,6 +2760,11 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 			totalToolCalls++
 			tc := resp.ToolCalls[idx]
 			resultContent, meta := extractToolMeta(r.result)
+			// Backstop for every tool, not just exec: a 70 MB result is what
+			// OOMKilled two prod pods on 2026-09-14 (see sandbox.ClipOutput). The
+			// producers clip first; this catches the ones that don't (read_file of
+			// a giant CSV, an MCP tool that returns a dump, …).
+			resultContent = sandbox.ClipAndLog(resultContent, "tool/"+r.toolName)
 
 			// Hook: AfterToolCall
 			a.hooks.Run(ctx, &HookContext{
@@ -3392,6 +3397,11 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 		for idx, r := range results {
 			tc := resp.ToolCalls[idx]
 			resultContent, meta := extractToolMeta(r.result)
+			// Backstop for every tool, not just exec: a 70 MB result is what
+			// OOMKilled two prod pods on 2026-09-14 (see sandbox.ClipOutput). The
+			// producers clip first; this catches the ones that don't (read_file of
+			// a giant CSV, an MCP tool that returns a dump, …).
+			resultContent = sandbox.ClipAndLog(resultContent, "tool/"+r.toolName)
 			a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: AfterToolCall, ToolName: r.toolName, ToolResult: resultContent, Error: r.err, Channel: msg.Channel, AccountID: msg.AccountID, ChatID: msg.ChatID, UserID: a.ownerUserID, GoalSessionKey: a.registry.GoalSessionKey(), IsPlanMode: isPlanMode(msg.Params), Source: msg.Source})
 
 			if r.err != nil {
