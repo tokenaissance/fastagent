@@ -769,10 +769,27 @@ func (r *Registry) RegisterSerial(name, description string, parameters interface
 
 // RegisterSerialFrom is RegisterSerial with an explicit source.
 func (r *Registry) RegisterSerialFrom(name, description string, parameters interface{}, fn ToolFunc, source ToolSource) {
-	mu := &sync.Mutex{}
+	// A slot rather than a mutex: the wait has to be abandonable. A queued
+	// delegate_task is waiting on the turn's clock too, and when that clock runs
+	// out the call must return something the loop can render — not hold a
+	// goroutine until the running sibling finishes and then enter the tool body
+	// with an already-dead ctx. That is the turn of 2026-09-14 that ended with
+	// delegate_task still showing "Queued (waiting on prior sub-agent)…" and a
+	// result nobody was waiting for.
+	slot := make(chan struct{}, 1)
 	wrapped := func(ctx context.Context, args json.RawMessage) (string, error) {
-		mu.Lock()
-		defer mu.Unlock()
+		// Checked before the select: with a dead ctx and a free slot both cases
+		// are ready and select picks at random, so the dead-ctx answer has to be
+		// decided first.
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		select {
+		case slot <- struct{}{}:
+			defer func() { <-slot }()
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
 		return fn(ctx, args)
 	}
 	r.RegisterFrom(name, description, parameters, wrapped, source)
