@@ -158,6 +158,21 @@ Revisit the per-replica row the moment cross-replica polling is actually
 needed: persisting the job row (id, pid, log path, owner) in the store is the
 same shape as the sandbox lease row.
 
+## When a hand-rolled start still gets cut off
+
+The two clocks that end a long exec report themselves differently, and each
+error now carries the next step instead of a bare provider string
+(`internal/sandbox/e2b_executor.go`):
+
+| What the error says | Which clock | What it tells the model now |
+|---|---|---|
+| `e2b exec body read: context canceled` | ours — turn budget expired, turn superseded, caller gone | the process it started may still be running: check `ps` and the log it redirected to, adopt that result, and prefer `run_in_background` next time |
+| `did not exit cleanly … server error: deadline_exceeded` | envd's `Connect-Timeout-Ms` | if output was delivered, say so; a process the command started is holding the exec stream — redirect its stdin (`</dev/null`) and use `run_in_background` |
+
+Both are additive: the provider's own text and the partial output are
+unchanged, and a plain truncation (a sandbox still booting, which `Hydrate`
+retries) gets no hint at all.
+
 ## Where the code lives
 
 | Layer | File | Role |
