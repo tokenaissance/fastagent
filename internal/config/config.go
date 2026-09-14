@@ -172,6 +172,12 @@ type PluginEntryCfg struct {
 type TaskQueueCfg struct {
 	MaxConcurrent  int `json:"maxConcurrent,omitempty"`
 	TaskTimeoutSec int `json:"taskTimeoutSec,omitempty"`
+	// CronTimeoutSec is the turn budget for cron-fired turns, in seconds.
+	// Zero means "same as TaskTimeoutSec": a scheduled tick often runs longer
+	// agent work than an interactive reply, so operators can widen it without
+	// loosening the budget for chat traffic (docs/session-turn-integrity.md,
+	// P5).
+	CronTimeoutSec int `json:"cronTimeoutSec,omitempty"`
 }
 
 // PrefsCfg holds runtime preferences that can be set at system, user, or

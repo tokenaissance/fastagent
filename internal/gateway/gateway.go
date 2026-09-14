@@ -175,14 +175,18 @@ type Gateway struct {
 	// deferred holds automatic turn-start requests (cron / goal / heartbeat /
 	// subagent) that found their session busy; a drain loop retries them.
 	// See internal/gateway/deferred_turns.go.
-	deferred    *deferredTurns
-	store       store.Store
-	accounts    *users.Accounts
-	workspace   workspace.Store
-	sandboxPool sandbox.ExecutorPool
-	usage       usage.Meter
-	quotaStore  usage.QuotaStore
-	envCfg      *config.EnvConfig
+	deferred *deferredTurns
+	// cronTaskTimeout is the turn budget for cron-fired turns when the
+	// operator configured one (TaskQueueCfg.CronTimeoutSec); zero means the
+	// queue default. See docs/session-turn-integrity.md, P5.
+	cronTaskTimeout time.Duration
+	store           store.Store
+	accounts        *users.Accounts
+	workspace       workspace.Store
+	sandboxPool     sandbox.ExecutorPool
+	usage           usage.Meter
+	quotaStore      usage.QuotaStore
+	envCfg          *config.EnvConfig
 	// invalidator broadcasts cross-replica agent reloads over Redis
 	// pub/sub. nil when Redis is disabled (single-instance deployments
 	// only need the local ReloadAgents call).
@@ -257,6 +261,31 @@ func (g *Gateway) TaskQueue() *taskqueue.Queue { return g.taskQueue }
 
 // EnvConfig returns the bootstrap config (FASTAGENT_* env vars).
 func (g *Gateway) EnvConfig() *config.EnvConfig { return g.envCfg }
+
+// submitTask queues one inbound turn, applying the per-source budget policy.
+// All routing paths go through here so a source cannot silently get the wrong
+// budget by calling the queue directly.
+func (g *Gateway) submitTask(agentName, chatKey string, msg bus.InboundMessage, accountID string) string {
+	if g.taskQueue == nil {
+		return ""
+	}
+	return g.taskQueue.SubmitWithTimeout(agentName, chatKey, msg, accountID, g.taskTimeoutFor(msg))
+}
+
+// taskTimeoutFor resolves the turn budget for one inbound message. Zero means
+// "queue default"; only cron ticks can currently differ, and only when the
+// operator set TaskQueueCfg.CronTimeoutSec.
+//
+// Why cron alone: an interactive reply that outlives the default budget is a
+// wedged turn the user should be told about, while a scheduled tick is often
+// deliberately long agent work. Web turns never reach the queue — the dashboard
+// handler carries its own 45-minute budget.
+func (g *Gateway) taskTimeoutFor(msg bus.InboundMessage) time.Duration {
+	if msg.Source == bus.SourceCron && g.cronTaskTimeout > 0 {
+		return g.cronTaskTimeout
+	}
+	return 0
+}
 
 // sessionBusy reports whether the session an automatic message targets has a
 // turn in flight. The deferred-turn drain uses it to decide when a parked
@@ -445,6 +474,11 @@ func New(env *config.EnvConfig) (*Gateway, error) {
 		taskTimeoutSec = 300
 	}
 	taskTimeout := time.Duration(taskTimeoutSec) * time.Second
+	// Cron turns can be given their own budget; zero keeps the queue default.
+	var cronTaskTimeout time.Duration
+	if taskCfg.CronTimeoutSec > 0 {
+		cronTaskTimeout = time.Duration(taskCfg.CronTimeoutSec) * time.Second
+	}
 
 	// System-wide sandbox pool. Built once at boot from the system-
 	// scope sandbox config (env-merged) and shared across every
@@ -480,12 +514,13 @@ func New(env *config.EnvConfig) (*Gateway, error) {
 					g.NotifyAgentReload(userID, agentID)
 				}
 			}),
-		chanMgr:    chanMgr,
-		webChan:    webChan,
-		scheduler:  scheduler,
-		webhookSrv: webhookSrv,
-		pluginMgr:  pluginMgr,
-		envCfg:     env,
+		chanMgr:         chanMgr,
+		webChan:         webChan,
+		scheduler:       scheduler,
+		webhookSrv:      webhookSrv,
+		pluginMgr:       pluginMgr,
+		envCfg:          env,
+		cronTaskTimeout: cronTaskTimeout,
 	}
 
 	if webhookSrv != nil {
@@ -621,7 +656,7 @@ func New(env *config.EnvConfig) (*Gateway, error) {
 	// keep per-chat FIFO ordering and the queue's own concurrency limits.
 	g.deferred = newDeferredTurns(
 		func(agentID, chatKey string, msg bus.InboundMessage, accountID string) {
-			tq.Submit(agentID, chatKey, msg, accountID)
+			tq.SubmitWithTimeout(agentID, chatKey, msg, accountID, g.taskTimeoutFor(msg))
 		},
 		g.sessionBusy,
 	)

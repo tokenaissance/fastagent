@@ -34,6 +34,11 @@ type Task struct {
 	DoneAt      *time.Time
 	Result      string
 	Error       error
+	// Timeout overrides the queue's default turn budget for this task. Set by
+	// SubmitWithTimeout when the producer knows better than the global knob —
+	// e.g. a cron-fired turn, whose agent work is often longer than an
+	// interactive reply. Zero means "use the queue default".
+	Timeout time.Duration
 }
 
 // TaskHandler processes a task and returns a result or error.
@@ -92,6 +97,12 @@ func NewQueue(maxConcurrent int, taskTimeout time.Duration, handler TaskHandler)
 
 // Submit adds a task to the queue for processing.
 func (q *Queue) Submit(agentID, chatKey string, msg bus.InboundMessage, accountID string) string {
+	return q.SubmitWithTimeout(agentID, chatKey, msg, accountID, 0)
+}
+
+// SubmitWithTimeout is Submit with a per-task turn budget. timeout <= 0 falls
+// back to the queue's configured default.
+func (q *Queue) SubmitWithTimeout(agentID, chatKey string, msg bus.InboundMessage, accountID string, timeout time.Duration) string {
 	q.mu.Lock()
 
 	q.seq++
@@ -106,6 +117,7 @@ func (q *Queue) Submit(agentID, chatKey string, msg bus.InboundMessage, accountI
 		AccountID:   accountID,
 		Status:      TaskPending,
 		CreatedAt:   time.Now(),
+		Timeout:     timeout,
 	}
 	q.tasks[taskID] = task
 
@@ -183,8 +195,14 @@ func (q *Queue) executeTask(task *Task) {
 		"concurrent_count", concurrent,
 	)
 
-	// Create timeout context
-	ctx, cancel := context.WithTimeout(q.ctx, q.taskTimeout)
+	// Create timeout context. A per-task budget wins over the queue default so
+	// sources with different work shapes (cron vs interactive) do not have to
+	// share one number.
+	budget := q.taskTimeout
+	if task.Timeout > 0 {
+		budget = task.Timeout
+	}
+	ctx, cancel := context.WithTimeout(q.ctx, budget)
 	defer cancel()
 
 	result, err := q.handler(ctx, task)
