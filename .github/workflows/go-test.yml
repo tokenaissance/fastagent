@@ -73,6 +73,8 @@ jobs:
       # The offline tests run the composed launcher/probe/kill against a real
       # /bin/sh; the docker e2e runs the same flow through a real container, so
       # "the job outlives the tool call" is checked against a kernel rather
-      # than against a string.
+      # than against a string. -race because the job table is shared by
+      # concurrent tool calls and the sweeper/exec paths already race-tested
+      # elsewhere: a mutex bug here would only show up as a lost cursor.
       - name: Background exec tests (docker runner provides docker)
-        run: go test ./internal/agent/tools/ -run 'Sandbox|Background' -count=1 -v
+        run: go test ./internal/agent/tools/ -run 'Sandbox|Background' -count=1 -race -v
