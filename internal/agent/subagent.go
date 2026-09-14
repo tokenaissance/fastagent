@@ -11,6 +11,7 @@ import (
 
 	"github.com/fastclaw-ai/fastclaw/internal/agent/tools"
 	"github.com/fastclaw-ai/fastclaw/internal/provider"
+	"github.com/fastclaw-ai/fastclaw/internal/sandbox"
 )
 
 // subagentDefaultTimeout caps the wall time one subagent can spend on
@@ -266,6 +267,9 @@ func (a *Agent) runSubagentLoop(ctx context.Context, req tools.SubagentRequest) 
 		for idx, r := range results {
 			tc := resp.ToolCalls[idx]
 			resultContent, _ := extractToolMeta(r.result)
+			// Same backstop as the parent loop: a sub-agent's tool result becomes
+			// part of ITS next request too (see sandbox.ClipOutput).
+			resultContent = sandbox.ClipAndLog(resultContent, "subagent/"+r.toolName)
 			if !isFailedToolResult(r.err, resultContent) {
 				roundAllFailed = false
 			}
