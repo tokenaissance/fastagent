@@ -8,6 +8,7 @@ package sandbox
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -19,22 +20,22 @@ import (
 )
 
 // cutStreamTransport reproduces the r45 shape at the transport level: envd
-// answers 200, delivers the start frame, and then the runtime cancels the
-// request while the body is still open. That is exactly how io.ReadAll ends up
-// returning bytes AND context.Canceled.
+// answers 200, delivers the frames named in `frames`, and then the runtime
+// cancels the request while the body is still open. That is exactly how the
+// stream reader ends up returning bytes AND context.Canceled.
 type cutStreamTransport struct {
-	sandboxID string
+	// frames are raw frame payloads, streamed in order before the cut.
+	frames []string
 
 	once sync.Once
 }
 
 func (t *cutStreamTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	start, _ := json.Marshal(map[string]any{"event": map[string]any{
-		"start": map[string]any{"pid": 19038}}})
 	pr, pw := io.Pipe()
 	go func() {
-		// The 38 bytes production saw: one envelope, one start frame.
-		_, _ = pw.Write(connectEnvelope(start))
+		for _, f := range t.frames {
+			_, _ = pw.Write(connectEnvelope([]byte(f)))
+		}
 		<-req.Context().Done()
 		_ = pw.CloseWithError(req.Context().Err())
 	}()
@@ -49,7 +50,10 @@ func (t *cutStreamTransport) RoundTrip(req *http.Request) (*http.Response, error
 func TestE2BExecClockHints(t *testing.T) {
 	t.Run("cancelled mid-stream names the runtime clock, not the sandbox", func(t *testing.T) {
 		ex := testExecutor(&leaseCloseRecorder{}, "sb-1", "tok-1")
-		ex.client = &http.Client{Transport: &cutStreamTransport{sandboxID: "sb-1"}}
+		start, _ := json.Marshal(map[string]any{"event": map[string]any{
+			"start": map[string]any{"pid": 19038}}})
+		// The 38 bytes production saw: one envelope, one start frame.
+		ex.client = &http.Client{Transport: &cutStreamTransport{frames: []string{string(start)}}}
 
 		ctx, cancel := context.WithCancel(context.Background())
 		// Cancel once the start frame is in flight, the way a superseded turn
@@ -74,9 +78,40 @@ func TestE2BExecClockHints(t *testing.T) {
 		if strings.Contains(err.Error(), "the output above was delivered") {
 			t.Fatalf("nothing was delivered yet, so the output clause must not appear: %q", err.Error())
 		}
-		// The bytes that did arrive still travel back to the caller, as before.
-		if !strings.Contains(out, `"pid":19038`) {
-			t.Fatalf("partial body was dropped: %q", out)
+		// A start frame carries no output (only the pid), and the raw framed
+		// bytes are not what the model can use — so the partial is empty here,
+		// and the frames it did receive are named in the error instead.
+		if out != "" {
+			t.Fatalf("a start frame must not invent output: %q", out)
+		}
+		if !strings.Contains(err.Error(), `"pid":19038`) {
+			t.Fatalf("the frames that did arrive must survive into the error: %q", err.Error())
+		}
+	})
+
+	t.Run("output delivered before the cut travels back decoded", func(t *testing.T) {
+		ex := testExecutor(&leaseCloseRecorder{}, "sb-1", "tok-1")
+		start, _ := json.Marshal(map[string]any{"event": map[string]any{
+			"start": map[string]any{"pid": 19038}}})
+		// The r42/553 shape: the number the model needed had already arrived
+		// when envd cut the stream.
+		data, _ := json.Marshal(map[string]any{"event": map[string]any{
+			"data": map[string]any{"stdout": base64.StdEncoding.EncodeToString([]byte("553\n"))}}})
+		ex.client = &http.Client{Transport: &cutStreamTransport{frames: []string{string(start), string(data)}}}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() {
+			time.Sleep(50 * time.Millisecond)
+			cancel()
+		}()
+		defer cancel()
+
+		out, err := ex.Exec(ctx, "ls out | wc -l", 240*time.Second)
+		if err == nil {
+			t.Fatal("a cut stream must be an error")
+		}
+		if !strings.Contains(out, "553") {
+			t.Fatalf("the output that arrived must reach the caller decoded, got %q", out)
 		}
 	})
 
