@@ -323,11 +323,15 @@ def main():
     section(
         "D. Text injected into tool results",
         [
-            ("error suffix on every failed tool", "internal/agent/tools/registry.go:864", *range_text("internal/agent/tools/registry.go", 864, 864)),
+            # The suffix moved into the retry wrapper when the constant was
+            # extracted; 864 was a helper function by then, which the extractor
+            # renders as "(no literal text in this block)". Keep the pin on the
+            # line that actually appends the text to a result.
+            ("error suffix on every failed tool", "internal/agent/tools/registry.go:918", *range_text("internal/agent/tools/registry.go", 918, 918)),
             sym("internal/agent/tools/exec.go", "longWaitRefusal", "long foreground wait refusal"),
             sym("internal/sandbox/e2b_executor.go", "execCancelledHintText", "exec cancelled hint", False),
             sym("internal/sandbox/e2b_executor.go", "execStalledHint", "exec stalled hint"),
-            ("sandbox-absence hint", "internal/agent/tools/exec.go:634", *range_text("internal/agent/tools/exec.go", 634, 634)),
+            ("sandbox-absence hint", "internal/agent/tools/exec.go:642", *range_text("internal/agent/tools/exec.go", 642, 642)),
             sym("internal/agent/tools/sandbox_background.go", "startedMessage", "background job started"),
             ("background poll status lines", "internal/agent/tools/sandbox_background.go:330-360", *range_text("internal/agent/tools/sandbox_background.go", 330, 360)),
             ("interrupted-call placeholder", "internal/provider/provider.go:59", *range_text("internal/provider/provider.go", 59, 59)),
