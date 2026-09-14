@@ -69,7 +69,7 @@ func (a *Agent) subagentWallBudget(ctx context.Context, explicit time.Duration) 
 		budget = explicit
 	}
 
-	left, ok := turnRemaining(ctx)
+	left, ok := tools.TurnRemaining(ctx)
 	if !ok {
 		return budget, "", nil
 	}

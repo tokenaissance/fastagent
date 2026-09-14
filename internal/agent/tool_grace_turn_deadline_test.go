@@ -11,6 +11,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/fastclaw-ai/fastclaw/internal/agent/tools"
 )
 
 func TestToolContextCarriesTheTurnsDeadlineAsAValue(t *testing.T) {
@@ -23,12 +25,12 @@ func TestToolContextCarriesTheTurnsDeadlineAsAValue(t *testing.T) {
 	if _, ok := toolCtx.Deadline(); ok {
 		t.Fatal("a tool context must outlive its turn, so it must not inherit the deadline")
 	}
-	if _, ok := turnRemaining(toolCtx); ok {
+	if _, ok := tools.TurnRemaining(toolCtx); ok {
 		t.Fatal("an unstamped tool context has nothing to read — this is the shape that made the clamp dead code")
 	}
 
 	stamped := withTurnDeadline(toolCtx, turn)
-	left, ok := turnRemaining(stamped)
+	left, ok := tools.TurnRemaining(stamped)
 	if !ok {
 		t.Fatal("the stamped tool context must report the turn's clock")
 	}
@@ -39,14 +41,14 @@ func TestToolContextCarriesTheTurnsDeadlineAsAValue(t *testing.T) {
 	// Cancelling the turn does not erase the fact of when it ends: the tool is
 	// still allowed to finish, and its own budget decision must not change.
 	cancel()
-	if _, ok := turnRemaining(stamped); !ok {
+	if _, ok := tools.TurnRemaining(stamped); !ok {
 		t.Fatal("a cancelled turn still has an end time")
 	}
 
 	// A caller with no turn clock at all (cron tick, CLI, tests) reports
 	// nothing, which is not the same as "zero seconds left": nothing to clamp
 	// against means the configured budget stands.
-	if _, ok := turnRemaining(context.Background()); ok {
+	if _, ok := tools.TurnRemaining(context.Background()); ok {
 		t.Fatal("no deadline anywhere must not look like an expired one")
 	}
 }
