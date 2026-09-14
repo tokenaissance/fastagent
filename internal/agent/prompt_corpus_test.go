@@ -64,7 +64,9 @@ func TestToolDescriptionsDoNotRestateTheDeliveryRule(t *testing.T) {
 // module; the plan-mode nudge used to repeat the "first action" line, which is the
 // part nobody needs twice.
 func TestTodoRulesHaveOneOwner(t *testing.T) {
-	owners := blocksContaining(t, "Never call")
+	// The marker is the rule's meaning, not its wording: this test exists to catch
+	// a SECOND copy of the rule, not to freeze the sentence that carries it.
+	owners := blocksContaining(t, "more than once per turn")
 	if len(owners) != 1 || !strings.HasPrefix(owners[0], "a-system-prompt.md") {
 		t.Fatalf("the todo.md operational rules must live in one system-prompt block, found: %v", owners)
 	}
