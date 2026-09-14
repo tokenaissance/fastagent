@@ -191,6 +191,14 @@ func (a *Agent) runSubagentLoop(ctx context.Context, req tools.SubagentRequest) 
 				budgetErr := fmt.Errorf(
 					"subagent ran out of its %s wall-time budget at iteration %d — task was too large; the parent should retry with a tighter scope, a higher wall_timeout_sec, or both",
 					budget, i+1)
+				// The same expiry reaches the logs as well as the parent's
+				// tool_result: a cancellation that only shows up as a bare
+				// "context canceled" downstream (e.g. an exec stream cut
+				// mid-read) is otherwise indistinguishable from a sandbox or
+				// provider fault, and this name is the whole difference.
+				slog.Warn("subagent wall-time budget expired",
+					"agent", a.name, "iteration", i+1, "budget", budget.String(),
+					"cause", ctx.Err())
 				text, ferr := a.finalizeSubagent(parentCtx, messages, lastContent, budgetNudge(budget), i+1, budget)
 				if ferr != nil {
 					slog.Warn("subagent finalization after budget expiry failed",
@@ -254,7 +262,15 @@ func (a *Agent) runSubagentLoop(ctx context.Context, req tools.SubagentRequest) 
 			"tools":     toolNames,
 		}})
 
-		results := a.engine.executeToolsConcurrently(ctx, a.registry, resp.ToolCalls, a.workspacePath)
+		// Same contract as the main loop (loop.go): an in-flight tool gets the
+		// grace window to finish after this sub-agent's wall budget expires,
+		// instead of being cancelled the instant the budget is. finalizeSubagent
+		// already salvages in-flight MODEL work for exactly this reason, so
+		// without this the tool path was the one place the budget cut work off
+		// with nothing to show for it.
+		toolCtx, endToolGrace := toolGraceContext(ctx, a.graceWindow())
+		results := a.engine.executeToolsConcurrently(toolCtx, a.registry, resp.ToolCalls, a.workspacePath)
+		endToolGrace()
 		roundAllFailed := true
 		for idx, r := range results {
 			tc := resp.ToolCalls[idx]
