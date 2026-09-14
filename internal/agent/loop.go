@@ -104,12 +104,13 @@ type Agent struct {
 	// survives daemon restarts / UserSpace invalidations / idle
 	// evictions that all reset the in-memory turnCount.
 	dataStore store.Store
-	// mcpConfigNotify is invoked after an in-session `mcp add/remove`
-	// persists agent MCP config: it drops the affected agent from cached
-	// UserSpaces and stamps the per-user reload marker (DB epoch + Redis
-	// broadcast) so every replica picks the change up. Wired by the
-	// gateway; nil means config still persists but the change applies on
-	// the next agent build / user-space reload.
+	// mcpConfigNotify is invoked after an in-session write that changes the
+	// agent's resolved runtime config — `mcp add/remove` and `/model`, which
+	// both persist to configs rows the dashboards also write. It drops the
+	// affected agent from cached UserSpaces and stamps the per-user reload
+	// marker (DB epoch + Redis broadcast) so every replica picks the change up.
+	// Wired by the gateway; nil means config still persists but the change
+	// applies on the next agent build / user-space reload.
 	mcpConfigNotify func(userID, agentID string)
 	// workspaceStore is optional; when set, SkillsLoader hydrates per-agent
 	// and global skill dirs from the object store on every turn so skills

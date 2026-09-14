@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/fastclaw-ai/fastclaw/internal/bus"
+	"github.com/fastclaw-ai/fastclaw/internal/scope"
 	"github.com/fastclaw-ai/fastclaw/internal/usage"
 )
 
@@ -505,10 +507,71 @@ func (a *Agent) slashPersonalitySet(msg bus.InboundMessage, name string) slashRe
 }
 
 // slashModel switches the active model for this agent session.
+// agentDefaultsNamespace is the settings row an agent's model resolves from
+// (system ← user ← agent, most specific wins). Named here because the chat
+// command and the dashboard's model picker must write the same row — writing a
+// different one is how a switch can look applied in chat and absent everywhere
+// else.
+const agentDefaultsNamespace = "agents.defaults"
+
+// slashModel switches the agent's model. The switch is a config change, not a
+// runtime tweak, so it goes through the same write the dashboard's model picker
+// uses and then asks the runtime to drop the cached UserSpaces that hold this
+// agent.
+//
+// Before this it only assigned a.model in the one process that handled the
+// message: the change died on restart, and a chatter whose next message landed
+// on a sibling replica kept firing the previous model until that replica's
+// 30-minute idle eviction — which is indistinguishable from "the switch did not
+// work".
 func (a *Agent) slashModel(msg bus.InboundMessage, model string) slashResult {
 	old := a.model
+	persisted, err := a.persistAgentModel(model)
+	if err != nil {
+		return slashResult{handled: true, reply: fmt.Sprintf(
+			"⚠️ Model **not** switched — saving the agent default failed: %v\nStill on `%s`.", err, old)}
+	}
 	a.model = model
-	return slashResult{handled: true, reply: fmt.Sprintf("🤖 Model switched: `%s` → `%s`", old, model)}
+	if persisted && a.mcpConfigNotify != nil && a.ownerUserID != "" {
+		a.mcpConfigNotify(a.ownerUserID, a.agentID)
+	}
+	reply := fmt.Sprintf("🤖 Model switched: `%s` → `%s`", old, model)
+	if persisted {
+		reply += "\n\nSaved as this agent's default: it survives a restart and applies on every replica. Clear it from the dashboard's model page to fall back to the system default."
+	} else {
+		reply += "\n\n⚠️ Not persisted — this runtime has no config store, so the switch lasts only until the process restarts."
+	}
+	return slashResult{handled: true, reply: reply}
+}
+
+// persistAgentModel writes the agent-scope agents.defaults.model override.
+// Read-modify-write, because that row also carries promptMode / splitReplies /
+// autoPersist and a blind overwrite would drop them.
+//
+// persisted=false with a nil error means "nothing to write to" (a local run
+// with no store wired); the caller keeps the switch in memory and says so
+// rather than pretending it was saved.
+func (a *Agent) persistAgentModel(model string) (persisted bool, err error) {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return false, errors.New("empty model name")
+	}
+	if a.dataStore == nil || a.agentID == "" {
+		return false, nil
+	}
+	ctx := context.Background()
+	row, err := scope.SettingAt(ctx, a.dataStore, agentDefaultsNamespace, "", a.agentID)
+	if err != nil {
+		return false, err
+	}
+	if row == nil {
+		row = map[string]interface{}{}
+	}
+	row["model"] = model
+	if err := scope.SaveSettingByScope(ctx, a.dataStore, scope.Agent, a.agentID, agentDefaultsNamespace, row); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // listPersonalities finds SOUL-<name>.md files in workspace.
