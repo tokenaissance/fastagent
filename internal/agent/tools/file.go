@@ -521,26 +521,19 @@ func makeReadFile(r *Registry) ToolFunc {
 		// reading from a workspace dir where identity files don't live.
 		if r.systemFileStore != nil && r.agentID != "" && basenameIsSystemFile(args.Path) {
 			name := filepath.Base(filepath.Clean(args.Path))
-			if data, err := r.readSystemFileForUser(ctx, r.systemFileUserID(name), name); err == nil {
-				return string(data), nil
-			}
-			// Store miss: try the agent's systemRoot on disk directly,
-			// bypassing resolvePathSandboxed. systemRoot is the agent
-			// metadata dir (e.g. ~/.fastagent/agents/<id>/agent) which
-			// in K8s deployments lives OUTSIDE sandboxRoot, so the
-			// sandbox bound would always reject identity files even
-			// though the filename is a fixed whitelist with no escape
-			// surface. "Not found" is legitimate (a fresh agent may
-			// have no IDENTITY.md row yet) — return empty so the agent
-			// treats the field as unset, matching how
-			// ContextBuilder.loadFile loads identity files for the
-			// system prompt.
-			if r.systemRoot != "" {
-				if data, err := os.ReadFile(filepath.Join(r.systemRoot, name)); err == nil {
-					return string(data), nil
-				}
-			}
-			return "", nil
+			// DB first, then the agent's systemRoot on disk, then empty — the
+			// shared rule (registry.readSystemFileWithFallback) so this branch
+			// can't drift from edit_file's. The disk step bypasses
+			// resolvePathSandboxed deliberately: systemRoot is the agent
+			// metadata dir (e.g. ~/.fastagent/agents/<id>/agent) which in K8s
+			// deployments lives OUTSIDE sandboxRoot, so the sandbox bound would
+			// always reject identity files even though the filename is a fixed
+			// whitelist with no escape surface. "Not found" is legitimate (a
+			// fresh agent may have no IDENTITY.md row yet) — return empty so the
+			// agent treats the field as unset, matching how
+			// ContextBuilder.loadFile loads identity files for the system
+			// prompt.
+			return string(r.readSystemFileWithFallback(ctx, r.systemFileUserID(name), name)), nil
 		}
 
 		root := r.rootForPath(args.Path)
@@ -720,10 +713,13 @@ func makeEditFile(r *Registry) ToolFunc {
 		if r.systemFileStore != nil && r.agentID != "" && isSingleSegmentSystemFile(args.Path) {
 			name := filepath.Clean(args.Path)
 			uid := r.systemFileUserID(name)
-			data, err := r.readSystemFileForUser(ctx, uid, name)
-			if err != nil {
-				return "", fmt.Errorf("system file get: %w", err)
-			}
+			// Same resolution as read_file (registry.readSystemFileWithFallback):
+			// a never-saved per-chatter MEMORY.md / USER.md row, or an identity
+			// file that only exists on disk, is an EMPTY BASE — not the raw
+			// store error the model used to be handed ("system file get: store:
+			// not found"). When nothing exists at all the base is empty and
+			// applyEdit reports an actionable old_string miss instead.
+			data := r.readSystemFileWithFallback(ctx, uid, name)
 			updated, count, err := applyEdit(args.Path, string(data), args.OldString, args.NewString, args.ReplaceAll)
 			if err != nil {
 				return "", err
@@ -936,10 +932,10 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 		// /data/.fastagent/workspaces/<id>/IDENTITY.md still hits the DB.
 		if r.systemFileStore != nil && r.agentID != "" && basenameIsSystemFile(args.Path) {
 			name := filepath.Base(filepath.Clean(args.Path))
-			if data, err := r.readSystemFileForUser(ctx, r.systemFileUserID(name), name); err == nil {
-				return string(data), nil
-			}
-			return "", nil // miss → treat as unset (fresh agent)
+			// Same resolution as the host path: miss → unset (fresh agent),
+			// plus the owner-only disk fallback for a file that exists on the
+			// agent home but has no row yet.
+			return string(r.readSystemFileWithFallback(ctx, r.systemFileUserID(name), name)), nil
 		}
 		switch r.routeFor(args.Path, OpRead) {
 		case RouteWorkspaceStore:
@@ -1201,10 +1197,9 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 			}
 			name := filepath.Clean(args.Path)
 			uid := r.systemFileUserID(name)
-			data, err := r.readSystemFileForUser(ctx, uid, name)
-			if err != nil {
-				return "", fmt.Errorf("system file get: %w", err)
-			}
+			// See the store-backed branch above: missing row ⇒ empty base, not
+			// a leaked storage error.
+			data := r.readSystemFileWithFallback(ctx, uid, name)
 			updated, count, err := applyEdit(args.Path, string(data), args.OldString, args.NewString, args.ReplaceAll)
 			if err != nil {
 				return "", err
