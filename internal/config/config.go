@@ -373,6 +373,12 @@ type AgentDefaults struct {
 	MaxTokens         int     `json:"maxTokens,omitempty"`
 	Temperature       float64 `json:"temperature,omitempty"`
 	MaxToolIterations int     `json:"maxToolIterations,omitempty"`
+	// MaxToolIterationContinues is how many EXTRA segments a turn may run
+	// after it exhausts MaxToolIterations. A pointer because "unset" and
+	// "explicitly 0 (never auto-continue)" must be distinguishable — the
+	// zero value of an int cannot say both. Unset = DefaultToolIterationContinues
+	// (or 0 in chatbot mode).
+	MaxToolIterationContinues *int `json:"maxToolIterationContinues,omitempty"`
 	// MaxParallelToolCalls caps how many tool calls a single LLM
 	// response is allowed to execute concurrently in one round. The
 	// LLM still decides how many tools to emit; we just refuse to
@@ -423,19 +429,20 @@ type AgentEntry struct {
 	// Name mirrors agents.name (the operator-given display name) and is
 	// carried through to ResolvedAgent.DisplayName so the system prompt
 	// can stamp a fallback identity line when IDENTITY.md is empty.
-	Name                 string                     `json:"name,omitempty"`
-	Workspace            string                     `json:"workspace,omitempty"`
-	MaxTokens            int                        `json:"maxTokens,omitempty"`
-	Temperature          float64                    `json:"temperature,omitempty"`
-	MaxToolIterations    int                        `json:"maxToolIterations,omitempty"`
-	MaxParallelToolCalls int                        `json:"maxParallelToolCalls,omitempty"`
-	SubagentTimeoutSec   int                        `json:"subagentTimeoutSec,omitempty"`
-	Skills               []string                   `json:"skills,omitempty"`
-	MCPServers           map[string]MCPServerConfig `json:"mcpServers,omitempty"`
-	AlwaysLoadSkills     []string                   `json:"alwaysLoadSkills,omitempty"`
-	Thinking             string                     `json:"thinking,omitempty"`
-	Sandbox              SandboxCfg                 `json:"sandbox,omitempty"`
-	PolicyPreset         string                     `json:"policy,omitempty"`
+	Name                      string                     `json:"name,omitempty"`
+	Workspace                 string                     `json:"workspace,omitempty"`
+	MaxTokens                 int                        `json:"maxTokens,omitempty"`
+	Temperature               float64                    `json:"temperature,omitempty"`
+	MaxToolIterations         int                        `json:"maxToolIterations,omitempty"`
+	MaxToolIterationContinues *int                       `json:"maxToolIterationContinues,omitempty"`
+	MaxParallelToolCalls      int                        `json:"maxParallelToolCalls,omitempty"`
+	SubagentTimeoutSec        int                        `json:"subagentTimeoutSec,omitempty"`
+	Skills                    []string                   `json:"skills,omitempty"`
+	MCPServers                map[string]MCPServerConfig `json:"mcpServers,omitempty"`
+	AlwaysLoadSkills          []string                   `json:"alwaysLoadSkills,omitempty"`
+	Thinking                  string                     `json:"thinking,omitempty"`
+	Sandbox                   SandboxCfg                 `json:"sandbox,omitempty"`
+	PolicyPreset              string                     `json:"policy,omitempty"`
 	// PromptMode selects how heavily the framework system prompt
 	// participates AND which built-in tools the LLM sees. Empty =
 	// "agent" (current default) for backward compatibility. See
@@ -563,18 +570,19 @@ var AgentFileConfigLoader func(agentID, home string) (AgentFileConfig, bool) = f
 // (agents.config column). Per-agent providers/channels live in their own
 // scoped DB tables and are NOT persisted here.
 type AgentFileConfig struct {
-	Model                string                     `json:"model,omitempty"`
-	MaxTokens            int                        `json:"maxTokens,omitempty"`
-	Temperature          float64                    `json:"temperature,omitempty"`
-	MaxToolIterations    int                        `json:"maxToolIterations,omitempty"`
-	MaxParallelToolCalls int                        `json:"maxParallelToolCalls,omitempty"`
-	SubagentTimeoutSec   int                        `json:"subagentTimeoutSec,omitempty"`
-	Workspace            string                     `json:"workspace,omitempty"`
-	Skills               SkillsConfig               `json:"skills,omitempty"`
-	MCPServers           map[string]MCPServerConfig `json:"mcpServers,omitempty"`
-	ToolProviders        map[string]ToolProviderCfg `json:"toolProviders,omitempty"`
-	Tools                map[string]ToolCategoryCfg `json:"tools,omitempty"`
-	Providers            map[string]ProviderConfig  `json:"providers,omitempty"`
+	Model                     string                     `json:"model,omitempty"`
+	MaxTokens                 int                        `json:"maxTokens,omitempty"`
+	Temperature               float64                    `json:"temperature,omitempty"`
+	MaxToolIterations         int                        `json:"maxToolIterations,omitempty"`
+	MaxToolIterationContinues *int                       `json:"maxToolIterationContinues,omitempty"`
+	MaxParallelToolCalls      int                        `json:"maxParallelToolCalls,omitempty"`
+	SubagentTimeoutSec        int                        `json:"subagentTimeoutSec,omitempty"`
+	Workspace                 string                     `json:"workspace,omitempty"`
+	Skills                    SkillsConfig               `json:"skills,omitempty"`
+	MCPServers                map[string]MCPServerConfig `json:"mcpServers,omitempty"`
+	ToolProviders             map[string]ToolProviderCfg `json:"toolProviders,omitempty"`
+	Tools                     map[string]ToolCategoryCfg `json:"tools,omitempty"`
+	Providers                 map[string]ProviderConfig  `json:"providers,omitempty"`
 	// PromptMode mirrors AgentEntry.PromptMode at the file-config layer.
 	// Non-empty values override the entry-level setting.
 	PromptMode string `json:"promptMode,omitempty"`
@@ -631,23 +639,24 @@ type ResolvedAgent struct {
 	// operator gave the agent ("Bob", "tdj", "Sonny"). Used as a
 	// fallback identity line in the system prompt when IDENTITY.md
 	// is empty so the model doesn't introduce itself as "Claude".
-	DisplayName          string
-	Home                 string
-	Workspace            string
-	Model                string
-	MaxTokens            int
-	Temperature          float64
-	MaxToolIterations    int
-	MaxParallelToolCalls int
-	SubagentTimeoutSec   int
-	Thinking             string
-	Skills               SkillsConfig
-	MCPServers           map[string]MCPServerConfig
-	Sandbox              SandboxCfg
-	PolicyPreset         string
-	ToolProviders        map[string]ToolProviderCfg
-	Tools                map[string]ToolCategoryCfg
-	Providers            map[string]ProviderConfig
+	DisplayName               string
+	Home                      string
+	Workspace                 string
+	Model                     string
+	MaxTokens                 int
+	Temperature               float64
+	MaxToolIterations         int
+	MaxToolIterationContinues int
+	MaxParallelToolCalls      int
+	SubagentTimeoutSec        int
+	Thinking                  string
+	Skills                    SkillsConfig
+	MCPServers                map[string]MCPServerConfig
+	Sandbox                   SandboxCfg
+	PolicyPreset              string
+	ToolProviders             map[string]ToolProviderCfg
+	Tools                     map[string]ToolCategoryCfg
+	Providers                 map[string]ProviderConfig
 	// Admins is the per-channel admin allowlist for write-mode slash
 	// commands. See AgentFileConfig.Admins for semantics + default.
 	Admins map[string][]string
@@ -745,6 +754,13 @@ func ApplyDefaults(cfg *Config) {
 	}
 }
 
+// DefaultToolIterationContinues is how many extra segments a turn gets after
+// it burns MaxToolIterations rounds: one. Enough to finish a task that ran out
+// of rounds mid-flight (the failure the badge was invented to apologize for),
+// bounded so a spinning turn cannot extend itself forever. An operator turns
+// it off by setting 0 explicitly — see the pointer fields.
+const DefaultToolIterationContinues = 1
+
 // MergedAgentConfig merges defaults with an agent entry to produce a fully
 // resolved agent config.
 func (cfg *Config) MergedAgentConfig(entry AgentEntry) ResolvedAgent {
@@ -755,20 +771,30 @@ func (cfg *Config) MergedAgentConfig(entry AgentEntry) ResolvedAgent {
 	}
 
 	resolved := ResolvedAgent{
-		ID:                   entry.ID,
-		UserID:               entry.UserID,
-		DisplayName:          entry.Name,
-		Home:                 home,
-		Workspace:            workspace,
-		Model:                cfg.Agents.Defaults.Model,
-		MaxTokens:            cfg.Agents.Defaults.MaxTokens,
-		Temperature:          cfg.Agents.Defaults.Temperature,
-		MaxToolIterations:    cfg.Agents.Defaults.MaxToolIterations,
-		MaxParallelToolCalls: cfg.Agents.Defaults.MaxParallelToolCalls,
-		SubagentTimeoutSec:   cfg.Agents.Defaults.SubagentTimeoutSec,
-		Thinking:             cfg.Agents.Defaults.Thinking,
-		Sandbox:              cfg.Sandbox,
-		PolicyPreset:         cfg.Agents.Defaults.PolicyPreset,
+		ID:                        entry.ID,
+		UserID:                    entry.UserID,
+		DisplayName:               entry.Name,
+		Home:                      home,
+		Workspace:                 workspace,
+		Model:                     cfg.Agents.Defaults.Model,
+		MaxTokens:                 cfg.Agents.Defaults.MaxTokens,
+		Temperature:               cfg.Agents.Defaults.Temperature,
+		MaxToolIterations:         cfg.Agents.Defaults.MaxToolIterations,
+		MaxToolIterationContinues: DefaultToolIterationContinues,
+		MaxParallelToolCalls:      cfg.Agents.Defaults.MaxParallelToolCalls,
+		SubagentTimeoutSec:        cfg.Agents.Defaults.SubagentTimeoutSec,
+		Thinking:                  cfg.Agents.Defaults.Thinking,
+		Sandbox:                   cfg.Sandbox,
+		PolicyPreset:              cfg.Agents.Defaults.PolicyPreset,
+	}
+
+	// Auto-continuation budget — unlike the int knobs above, "unset" and
+	// "explicitly 0" mean different things (default vs never), so each layer
+	// only wins when it actually carries a value.
+	continuesSet := false
+	if cfg.Agents.Defaults.MaxToolIterationContinues != nil {
+		resolved.MaxToolIterationContinues = *cfg.Agents.Defaults.MaxToolIterationContinues
+		continuesSet = true
 	}
 
 	if entry.MaxTokens > 0 {
@@ -779,6 +805,10 @@ func (cfg *Config) MergedAgentConfig(entry AgentEntry) ResolvedAgent {
 	}
 	if entry.MaxToolIterations > 0 {
 		resolved.MaxToolIterations = entry.MaxToolIterations
+	}
+	if entry.MaxToolIterationContinues != nil {
+		resolved.MaxToolIterationContinues = *entry.MaxToolIterationContinues
+		continuesSet = true
 	}
 	if entry.MaxParallelToolCalls > 0 {
 		resolved.MaxParallelToolCalls = entry.MaxParallelToolCalls
@@ -845,6 +875,10 @@ func (cfg *Config) MergedAgentConfig(entry AgentEntry) ResolvedAgent {
 		if fileCfg.MaxToolIterations > 0 {
 			resolved.MaxToolIterations = fileCfg.MaxToolIterations
 		}
+		if fileCfg.MaxToolIterationContinues != nil {
+			resolved.MaxToolIterationContinues = *fileCfg.MaxToolIterationContinues
+			continuesSet = true
+		}
 		if fileCfg.MaxParallelToolCalls > 0 {
 			resolved.MaxParallelToolCalls = fileCfg.MaxParallelToolCalls
 		}
@@ -906,6 +940,12 @@ func (cfg *Config) MergedAgentConfig(entry AgentEntry) ResolvedAgent {
 		if resolved.MaxToolIterations > chatbotDefaultIter {
 			resolved.MaxToolIterations = chatbotDefaultIter
 		}
+	}
+	// Same reasoning for auto-continuation: a conversational turn that ran out
+	// of rounds should answer with what it has, not silently take a second
+	// budget. An explicit setting (any layer) still wins.
+	if resolved.PromptMode == PromptModeChatbot && !continuesSet {
+		resolved.MaxToolIterationContinues = 0
 	}
 
 	return resolved
