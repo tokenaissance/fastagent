@@ -78,3 +78,16 @@ jobs:
       # elsewhere: a mutex bug here would only show up as a lost cursor.
       - name: Background exec tests (docker runner provides docker)
         run: go test ./internal/agent/tools/ -run 'Sandbox|Background' -count=1 -race -v
+
+  prompt-inventory:
+    name: prompt snapshot matches the source
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The prompt corpus (docs/prompt-inventory/) is generated from the Go
+      # sources. Editing a prompt without regenerating it is the same debt as
+      # documenting a test that does not exist, so it fails the build instead of
+      # waiting for a reader to notice. Provenance line numbers are ignored by
+      # the check; prompt TEXT is not.
+      - name: Prompt inventory is up to date
+        run: python3 scripts/extract-prompt-inventory.py --check
