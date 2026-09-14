@@ -192,3 +192,29 @@ func TestExecRefusesLongForegroundSleepOnTheHostPath(t *testing.T) {
 		t.Fatal("the refused command ran on the host")
 	}
 }
+
+// The exec tool is registered twice (host closure + sandbox closure). Splitting
+// the descriptions into two constants that live side by side makes the divergence
+// reviewable; this test makes it impossible to forget one half — everything after
+// the opening clause must stay identical.
+func TestExecDescriptionsStayInSync(t *testing.T) {
+	const hostPrefix = "Execute a shell command and return stdout/stderr. "
+	const sandboxPrefix = "Execute a shell command in the sandbox and return stdout/stderr. "
+
+	if !strings.HasPrefix(execHostDescription, hostPrefix) {
+		t.Fatalf("host description lost its opening clause: %q", execHostDescription[:60])
+	}
+	if !strings.HasPrefix(execSandboxDescription, sandboxPrefix) {
+		t.Fatalf("sandbox description must say where it runs: %q", execSandboxDescription[:60])
+	}
+	hostBody := strings.TrimPrefix(execHostDescription, hostPrefix)
+	sandboxBody := strings.TrimPrefix(execSandboxDescription, sandboxPrefix)
+	if hostBody != sandboxBody {
+		t.Fatalf("the two exec descriptions drifted apart:\n host: %s\n sandbox: %s", hostBody, sandboxBody)
+	}
+	for _, want := range []string{"Files panel", "workspace"} {
+		if !strings.Contains(execHostDescription, want) {
+			t.Fatalf("exec description lost %q — check both registrations", want)
+		}
+	}
+}
