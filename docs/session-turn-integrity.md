@@ -543,6 +543,12 @@ split that landed:
   `run_in_background` recipe as the only guidance. The bet the refusal removes is
   "my turn outlives my wait" — five times it did not, and each loss cost the
   output, not just the time.
+  Two limits are accepted, not hidden: the predicate is lexical, so a wait hidden
+  inside a script the command invokes still slips through; and a genuinely
+  foreground wait has a door — `"allow_long_wait": true`, present in the tool
+  schema but deliberately absent from the refusal text, so the default answer
+  stays `run_in_background` and a bypass is visible in the log
+  (`long foreground wait allowed by allow_long_wait override`).
 * **The other budget is rounds, not seconds.** `maxToolIterations` (default 20)
   caps how many model rounds one turn may run; hitting it ends the turn with a
   forced synthesis and the chat panel's "Iteration limit reached" badge
