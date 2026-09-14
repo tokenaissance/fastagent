@@ -36,7 +36,12 @@ def join_lines(lines):
 
 
 def find_block(text, lines, symbol):
-    """Return (startIdx, endIdxExclusive) of a top-level func/const/var."""
+    """Return (startIdx, endIdxExclusive) of a top-level func/const/var.
+
+    Braces inside string literals and comments must not count: a raw-string
+    description containing `{...}` (every tool schema does) otherwise swallows the
+    next declaration, and the snapshot quietly stops being verbatim.
+    """
     # Methods carry a receiver: `func (j *sandboxJob) startedMessage() string`.
     pattern = re.compile(
         r"^(func\s+(\([^)]*\)\s*)?|const\s+|var\s+)" + re.escape(symbol) + r"\b"
@@ -46,13 +51,50 @@ def find_block(text, lines, symbol):
             continue
         depth = 0
         started = False
+        state = "code"  # code | dquote | raw
+        saw_literal = False
         for j in range(idx, len(lines)):
-            depth += lines[j].count("{") + lines[j].count("(") + lines[j].count("[")
-            depth -= lines[j].count("}") + lines[j].count(")") + lines[j].count("]")
-            if not started and depth > 0:
-                started = True
-            if started and depth <= 0:
-                return idx, j + 1
+            i = 0
+            body = lines[j]
+            while i < len(body):
+                c = body[i]
+                if state == "code":
+                    if c == "/" and i + 1 < len(body) and body[i + 1] == "/":
+                        break
+                    if c == '"':
+                        state, saw_literal = "dquote", True
+                    elif c == "`":
+                        state, saw_literal = "raw", True
+                    elif c == "{":
+                        depth += 1
+                        started = True
+                    elif c in "([":
+                        # Signature parens must not open the block: `func f(x) string {`
+                        # would otherwise "end" at `)`.
+                        depth += 1
+                    elif c in ")]}":
+                        depth -= 1
+                        if started and depth <= 0 and c == "}":
+                            return idx, j + 1
+                    elif c == "'":
+                        k = body.find("'", i + 1)
+                        if k > 0:
+                            i = k
+                elif state == "dquote":
+                    if c == "\\":
+                        i += 1
+                    elif c == '"':
+                        state = "code"
+                elif state == "raw":
+                    if c == "`":
+                        state = "code"
+                i += 1
+            # A const/var holding only string literals: the declaration ends at
+            # the end of the line once the literal is closed and nothing continues.
+            if not started and saw_literal and state == "code":
+                trailing = body.rstrip()
+                if not trailing.endswith(("+", "(", ",", "[", "{")):
+                    return idx, j + 1
             if not started and j > idx + 40:  # multi-line signature guard
                 break
         return idx, min(len(lines), idx + 60)
@@ -159,7 +201,9 @@ def section(title, blocks, out):
         chunk = "## %s\n\n<!-- source: %s -->\n" % (label, loc)
         if note:
             chunk += "\n<!-- NOTE: %d branch point(s) — literals concatenated in source order, not rendered -->\n" % note
-        chunk += "\n```text\n%s\n```\n" % text.strip("\n")
+        # Four backticks: prompt text legitimately contains ``` examples,
+        # and a three-backtick wrapper would close on them.
+        chunk += "\n````text\n%s\n````\n" % text.strip("\n")
         chunks.append(chunk)
     with open(os.path.join(OUT, out), "w", encoding="utf-8") as fh:
         fh.write("\n".join(chunks))
