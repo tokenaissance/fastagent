@@ -146,6 +146,7 @@ the build:
 |---|---|---|---|
 | File delivery: binary output → workspace, reference by path, never inline base64 | `modSandbox › Delivering Files to the User` (always-on) | the `exec` description's 327-char restatement (schema is sent every request) | `TestToolDescriptionsDoNotRestateTheDeliveryRule` + `TestExecDescriptionDoesNotRestateTheDeliveryRule` + `TestExecDescriptionsStayInSync` |
 | todo.md procedure (write once, flip with `edit_file`, bare filename) | `taskDelegationContent › Progress tracking via todo.md` | `planModeNudge`'s "first action writes todo.md" sentence (plan mode only) | `TestTodoRulesHaveOneOwner` |
+| When to delegate / how to write the `task` arg / the worked example | `taskDelegationContent` (always-on) | ~1.6 K chars of the `delegate_task` schema (it is sent with every request) | `TestDelegateTaskSchemaKeepsCallTimeFacts` + `TestDelegateTaskSchemaStaysUnderItsBudget` |
 
 The todo.md rules are load-bearing rather than verbose: the chat panel re-fetches
 on every `write_file`/`edit_file` that touches the file and hides itself when the
@@ -157,3 +158,20 @@ shrank: that section is now **1,540 chars (was 2,212)** with all nine rules
 intact, pinned by `TestTodoPromptKeepsEveryRule` and
 `TestTodoPromptStaysUnderItsBudget`. Going further would mean dropping a rule, not
 words.
+
+### Measured per-request payload (2026-09-14)
+
+Marshaling the real agent's tool definitions — not counting the description
+strings, counting what goes on the wire — put the tool schema at **13,159 chars
+(≈3.3 K tokens)** with `delegate_task` alone at 3,457 chars, the single most
+expensive line in the whole payload. After the trim above:
+
+| | before | after |
+|---|---|---|
+| `delegate_task` | 3,457 chars | **1,865 chars** |
+| tool schema (13 tools, real agent) | 13,159 chars ≈ 3.3 K tokens | **11,567 chars ≈ 2.9 K tokens** |
+| system prompt + tool schema | ≈9.0 K tokens | **≈8.6 K tokens** |
+
+For scale: Codex's own harness pays ≈1.9 K tokens of model prompt plus ≈2.3 K of
+tool specs (its everyday set), or ≈5.4 K + 2.3 K on a generic model — so
+fastagent's fixed overhead now sits between those two configurations.
