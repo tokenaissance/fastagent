@@ -30,6 +30,7 @@ package tools
 import (
 	"context"
 	"fmt"
+	mrand "math/rand/v2"
 	"regexp"
 	"strconv"
 	"strings"
@@ -81,15 +82,28 @@ type sandboxJob struct {
 // sandboxJobs is the per-Registry table of live sandbox jobs. It is the
 // sandbox counterpart of shellManager: shellManager holds process handles,
 // this holds how to reach the job again (runner + paths + read cursor).
+//
+// Every instance mints its own id namespace. A job's identity IS its two
+// files inside the sandbox, so two tables that both started at "sbg_1" would
+// share them: the second launcher's `rm -f …/sbg_1.exit` and `: > …/sbg_1.log`
+// would erase the first job's record while its process kept writing into the
+// now-truncated log. That is not hypothetical — it is what turned one test run
+// into `malformed status marker "fcbg exited 211 "`, and in production the
+// same collision is reachable whenever two registries (two agents in one
+// process, or two replicas holding the same session lease) start a job.
 type sandboxJobs struct {
 	mu     sync.Mutex
+	prefix string // "sbg_<4 hex>_", fixed for the life of this table
 	seq    int
 	live   map[string]*sandboxJob
 	closed bool
 }
 
 func newSandboxJobs() *sandboxJobs {
-	return &sandboxJobs{live: map[string]*sandboxJob{}}
+	return &sandboxJobs{
+		prefix: fmt.Sprintf("sbg_%04x_", mrand.Uint32()&0xffff),
+		live:   map[string]*sandboxJob{},
+	}
 }
 
 // get returns the job or nil. Safe on a nil table so callers that build a
@@ -121,7 +135,7 @@ func (s *sandboxJobs) start(ctx context.Context, runner sandboxRunner, command s
 		return nil, fmt.Errorf("sandbox job table closed")
 	}
 	s.seq++
-	id := "sbg_" + strconv.Itoa(s.seq)
+	id := s.prefix + strconv.Itoa(s.seq)
 	s.mu.Unlock()
 
 	out, err := runner.Exec(ctx, backgroundLaunchCommand(id, command), sandboxJobOpTimeout)
@@ -219,7 +233,11 @@ func backgroundProbeCommand(j *sandboxJob, cursor int) string {
 	return strings.Join([]string{
 		"if [ -f " + logPath + " ]; then",
 		"  __S=$(wc -c < " + logPath + " 2>/dev/null || echo 0)",
-		"  if [ -f " + exitPath + " ]; then __ST=exited; __C=$(cat " + exitPath + ` 2>/dev/null); else __ST=running; __C=-; fi`,
+		// `[ -n "$__C" ] || __C=?`: the exit-code file is created by the shell's
+		// own redirection and filled by the next statement, so a kill (or a
+		// foreign writer) can leave it empty. An empty field would then vanish
+		// into strings.Fields and take the whole status marker with it.
+		"  if [ -f " + exitPath + " ]; then __ST=exited; __C=$(cat " + exitPath + ` 2>/dev/null); [ -n "$__C" ] || __C=?; else __ST=running; __C=-; fi`,
 		"else",
 		"  __S=0; __ST=missing; __C=-",
 		"fi",
@@ -275,7 +293,10 @@ func parseBackgroundProbe(out string) (status, code string, size int, body strin
 		return "", "", 0, "", fmt.Errorf("sandbox background poll: unterminated status marker in output %q", firstN(strings.TrimSpace(out), 200))
 	}
 	fields := strings.Fields(rest[:endRel])
-	if len(fields) != 4 || fields[0] != "fcbg" {
+	// Three fields is a real shape — an exit code nobody managed to write — and
+	// a poll must still hand back the output it read. Losing the log over a
+	// cosmetic field is the worse failure.
+	if len(fields) < 3 || len(fields) > 4 || fields[0] != "fcbg" {
 		return "", "", 0, "", fmt.Errorf("sandbox background poll: malformed status marker %q", rest[:endRel])
 	}
 	// BSD wc pads its count with spaces; strings.Fields already dropped them.
@@ -283,7 +304,14 @@ func parseBackgroundProbe(out string) (status, code string, size int, body strin
 	if convErr != nil {
 		return "", "", 0, "", fmt.Errorf("sandbox background poll: unparsable log size %q", fields[2])
 	}
-	return fields[1], fields[3], size, rest[endRel+1:], nil
+	code = "-"
+	if len(fields) == 4 {
+		code = fields[3]
+	}
+	if fields[1] == "exited" && (code == "" || code == "-") {
+		code = "?"
+	}
+	return fields[1], code, size, rest[endRel+1:], nil
 }
 
 // output returns the log bytes produced since the previous call, followed by
