@@ -990,7 +990,7 @@ func execStalledHint(connectErr, output string) string {
 	if strings.TrimSpace(output) != "" {
 		b.WriteString("the output above was delivered, but ")
 	}
-	b.WriteString("a process this command started is still holding the exec stream open — envd ended the request at its own deadline. Redirect that process's stdin (</dev/null) and start it with exec({\"run_in_background\": true}), which returns immediately and hands back a bash_id for bash_output. Don't read this as a failed run: inspect the sandbox before re-running.]")
+	b.WriteString("a process this command started is still holding the exec stream open — envd ended the request at its own deadline. Run it with exec({\"run_in_background\": true}) instead: that hands back a bash_id immediately and bash_output reads it later, so the waiting happens in the sandbox while the turn stays free. Don't read this as a failed run: check the sandbox before re-running.]")
 	return b.String()
 }
 
