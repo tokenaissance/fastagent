@@ -795,6 +795,13 @@ func (g *Gateway) Run() error {
 					continue
 				}
 				for _, userID := range changed {
+					if userID == systemReloadKey {
+						// A system-scope save: every cached space on this replica
+						// holds a snapshot from before it.
+						slog.Info("system reload marker seen; dropping all cached user spaces")
+						_ = g.ReloadAgents()
+						continue
+					}
 					g.InvalidateUser(userID)
 				}
 			}
@@ -808,6 +815,11 @@ func (g *Gateway) Run() error {
 				// Mark the epoch as seen so the poller doesn't reload
 				// the same change a second time.
 				g.reloadEpochs.SyncUser(context.Background(), userID)
+				if userID == systemReloadKey {
+					slog.Info("system reload broadcast received; dropping all cached user spaces")
+					_ = g.ReloadAgents()
+					return
+				}
 				g.InvalidateUser(userID)
 			}); err != nil {
 				slog.Warn("reload invalidator stopped", "error", err)

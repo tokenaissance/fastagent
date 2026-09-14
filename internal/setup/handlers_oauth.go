@@ -312,6 +312,18 @@ func (s *Server) notifyAgentChanged(userID, agentID string) {
 		return
 	}
 	s.invalidateAgent(agentID)
+	s.notifyUserChanged(userID)
+}
+
+// notifyUserChanged stamps the per-user cross-replica reload markers without
+// touching this pod's caches — the caller has already invalidated what it
+// needs to (a user-scope write drops that user's space; an agent-scope write
+// drops every space holding the agent). Kept separate so a caller that only
+// changed user-scope config does not have to name an agent to get propagation.
+func (s *Server) notifyUserChanged(userID string) {
+	if userID == "" {
+		return
+	}
 	if b, ok := s.userResolver.(interface{ BumpAgentReloadEpoch(userID string) error }); ok {
 		if err := b.BumpAgentReloadEpoch(userID); err != nil {
 			slog.Warn("bump agent reload epoch after an agent config change", "user", userID, "error", err)

@@ -68,6 +68,11 @@ func (a *apiResolver) EnsureAgent(ctx context.Context, userID, agentID string) e
 // chat turn.
 func (a *apiResolver) ReloadAgents() error { return a.gw.ReloadAgents() }
 
+// NotifySystemReload is what a system-scope settings save calls: local cache
+// drop plus the fleet-wide marker, so other replicas stop serving the default
+// model / provider chain from before the save.
+func (a *apiResolver) NotifySystemReload() error { return a.gw.NotifySystemReload() }
+
 // BroadcastAgentReload publishes a per-user cross-replica invalidate over
 // Redis after an OAuth authorization/revocation.
 func (a *apiResolver) BroadcastAgentReload(userID string) error {
@@ -90,7 +95,6 @@ func (a *apiResolver) ReloadSandbox() error { return a.gw.ReloadSandbox() }
 // ReloadSandbox: an operator saving settings should not have to roll pods for
 // the change to take effect.
 func (a *apiResolver) ReloadTaskQueue() error { return a.gw.ReloadTaskQueue() }
-
 
 // RegisterChannelFromConfig hot-starts a freshly-saved channel row.
 // Called by setup handlers after they persist a new bot config so the

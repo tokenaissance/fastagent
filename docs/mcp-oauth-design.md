@@ -410,11 +410,29 @@ fastclaw mcp logout <name>
 >    消息的那个副本。现在它按面板同一条写路径落 `agents.defaults`（读-改-写，保留
 >    `promptMode` / `splitReplies` / `autoPersist` 同排键），落库成功后再触发同一
 >    广播；写失败时不会在内存里假装切换成功。
+> 3. **Cloud `/app` 的 settings 模型切换页**（`web/src/app/models/page.tsx` →
+>    `updateConfig({agents:{defaults:{model:…}}})` → `POST /api/config`）走的是第三条
+>    路：`handleUpdateConfig` → `saveUserConfigNamespaces` → `invalidateScope`。这个
+>    函数对三个 scope **都只做本 pod 失效**，所以它是最容易被忽略的一条——上面两处
+>    修好之后，这一条仍然会把兄弟副本留在旧 model 上。现在：
+>    - `scope.User`（普通用户自己的 settings）→ 本 pod `InvalidateUser` + 该 user 的
+>      epoch/Redis 广播；
+>    - `scope.Agent`（agent-scope provider/setting 写入）→ 本 pod `InvalidateAgent` +
+>      查 owner 后 stamp 该 user 的标记；
+>    - `scope.System`（super_admin 的全局默认模型/Provider/sandbox/taskqueue）→
+>      **系统级标记**：per-user 标记表达不了"所有人"，逐个 bump 是 O(用户数) 次写，
+>      所以在同一张 epoch 表里用保留键 `"*"`（`gateway.systemReloadKey`）表示"所有
+>      副本丢弃全部缓存"。写侧走 `Gateway.NotifySystemReload`（本 pod `ReloadAgents`
+>      + epoch + 广播），轮询/订阅侧把 `"*"` 映射为 `ReloadAgents`（本地原语，不再
+>      发布，避免自激）。`ReloadAgents` 本身仍是纯本地原语（SIGHUP reload 用它）。
 >
 > 回归：`agent` → `TestSlashModelPersistsTheAgentDefault`、
 > `TestSlashModelKeepsSiblingDefaultsKeys`、
 > `TestSlashModelReportsAFailedWriteAndStaysPut`；`setup` →
-> `TestUpdateAgentModelPropagatesToOtherReplicas`。
+> `TestUpdateAgentModelPropagatesToOtherReplicas`、
+> `TestConfigSettingsModelSwitchNotifiesUserReplicas`、
+> `TestConfigSettingsModelSwitchAtSystemScopeTellsTheFleet`；`gateway` →
+> `TestSystemReloadMarkerCrossesInstances`。
 
 **目标**：SKILL.md（或未来 catalog）声明 `{name, url, oauthResource?, scopes?}` → fastagent 把该 server 写入 **声明存储**（`agent_mcp_servers` 每行一 server；`agent.json` 已废弃，配置统一 DB）→ `notifyAgentChanged`（ReloadAgents + configs_kv epoch + Redis pub/sub，与 OAuth 完成同一条广播）→ 新会话里 `mcp_<name>_<tool>` 注册可用。skill 只负责“声明 + 使用说明”，连接仍走既有 `mcp.NewManager`。
 

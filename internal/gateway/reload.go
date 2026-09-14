@@ -10,6 +10,15 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/store"
 )
 
+// systemReloadKey is the reserved reload-epoch key for a change that is not
+// scoped to one user. System-scope config — the default model in
+// agents.defaults, the provider chain, sandbox, taskqueue — is read by every
+// user's UserSpace, so a per-user marker cannot express it and enumerating
+// every user to bump them one by one is O(users) writes for a single save.
+// One reserved row means "everyone": replicas see it exactly like a user's
+// marker and drop all of their cached spaces.
+const systemReloadKey = "*"
+
 // InvalidateUser drops a user's cached UserSpace so the next access reloads
 // it from the DB. Called by admin handlers after agent / provider /
 // channel writes so changes take effect without a process restart.
@@ -44,7 +53,9 @@ func (g *Gateway) InvalidateAgent(agentID string) {
 
 // ReloadAgents is kept on Gateway for callers (admin API after agent CRUD)
 // that want to force a refresh of every loaded space. The new model lazy-
-// loads on every auth, so the practical effect is just dropping caches.
+// loads on every auth, so the practical effect is just dropping caches — on
+// THIS replica. A write that other replicas must see goes through
+// NotifySystemReload.
 func (g *Gateway) ReloadAgents() error {
 	if g.users == nil {
 		return nil
@@ -53,6 +64,28 @@ func (g *Gateway) ReloadAgents() error {
 		g.users.invalidate(sp.UserID)
 	}
 	slog.Info("hot-reload: invalidated all loaded user spaces")
+	return nil
+}
+
+// NotifySystemReload is the write-side counterpart of ReloadAgents: it drops
+// this replica's caches and stamps the system-wide marker so every other
+// replica does the same — the DB epoch for replicas without Redis, the Redis
+// broadcast for the rest. System-scope settings saves (the dashboard's default
+// model, providers, sandbox, taskqueue) call it, because leaving siblings on
+// the pre-save snapshot is exactly "I changed the model and nothing happened".
+func (g *Gateway) NotifySystemReload() error {
+	if err := g.ReloadAgents(); err != nil {
+		return err
+	}
+	ctx := context.Background()
+	if err := g.BumpAgentReloadEpoch(ctx, systemReloadKey); err != nil {
+		slog.Warn("bump system reload epoch failed; replicas without redis keep the old config",
+			"error", err)
+	}
+	if err := g.BroadcastAgentReload(systemReloadKey); err != nil {
+		slog.Warn("broadcast system reload failed; replicas without redis still converge on the epoch poll",
+			"error", err)
+	}
 	return nil
 }
 

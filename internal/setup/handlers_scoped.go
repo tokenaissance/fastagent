@@ -647,10 +647,23 @@ func (s *Server) invalidateScope(sc, scopeID string) {
 		return
 	}
 	type globalInvalidator interface{ ReloadAgents() error }
+	type systemNotifier interface{ NotifySystemReload() error }
 	type userInvalidator interface{ InvalidateUser(string) }
 	type agentInvalidator interface{ InvalidateAgent(string) }
 	switch sc {
 	case scope.System:
+		// System-scope config (the default model, providers, sandbox, taskqueue)
+		// is read by every user's UserSpace, so the write has to reach every
+		// replica — a local-only drop leaves siblings on the pre-save snapshot,
+		// which is exactly "I switched the model and nothing happened".
+		if r, ok := s.userResolver.(systemNotifier); ok {
+			if err := r.NotifySystemReload(); err != nil {
+				slog.Warn("system reload notify failed", "error", err)
+			}
+			return
+		}
+		// Resolvers without the cross-replica hook (tests, embedded use) keep
+		// the local behavior.
 		if r, ok := s.userResolver.(globalInvalidator); ok {
 			_ = r.ReloadAgents()
 		}
@@ -658,15 +671,21 @@ func (s *Server) invalidateScope(sc, scopeID string) {
 		if r, ok := s.userResolver.(userInvalidator); ok {
 			r.InvalidateUser(scopeID)
 		}
+		s.notifyUserChanged(scopeID)
 	case scope.Agent:
 		// Agent-scoped writes (provider, channel, setting) affect every
 		// cached UserSpace that holds the agent — owner plus any foreign
 		// caller that lazy-attached it via EnsureAgent. InvalidateAgent
 		// walks the registry and drops them all; falling back to the
 		// owner-only invalidate keeps behavior consistent for resolvers
-		// that don't implement the newer hook.
+		// that don't implement the newer hook. Either way the owner's
+		// cross-replica marker is stamped, so a sibling replica that holds the
+		// agent rebuilds instead of serving the old resolved config.
 		if r, ok := s.userResolver.(agentInvalidator); ok {
 			r.InvalidateAgent(scopeID)
+			if owner := s.agentOwnerID(scopeID); owner != "" {
+				s.notifyUserChanged(owner)
+			}
 			return
 		}
 		ctx := context.Background()
@@ -676,11 +695,27 @@ func (s *Server) invalidateScope(sc, scopeID string) {
 					if r, ok := s.userResolver.(userInvalidator); ok {
 						r.InvalidateUser(ar.UserID)
 					}
+					s.notifyUserChanged(ar.UserID)
 					return
 				}
 			}
 		}
 	}
+}
+
+// agentOwnerID resolves an agent's owner for the cross-replica marker.
+// Best-effort: an unreadable row simply means no marker is stamped, which
+// leaves the sibling-replica convergence to idle eviction (the previous
+// behavior) rather than failing the caller's write.
+func (s *Server) agentOwnerID(agentID string) string {
+	if s.dataStore == nil || agentID == "" {
+		return ""
+	}
+	rec, err := s.dataStore.GetAgent(context.Background(), agentID)
+	if err != nil || rec == nil {
+		return ""
+	}
+	return rec.UserID
 }
 
 // hotRegisterChannel asks the gateway to start the channel adapter for
