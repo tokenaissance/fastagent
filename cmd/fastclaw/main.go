@@ -132,6 +132,7 @@ func main() {
 	rootCmd.AddCommand(agentsCmd())
 	rootCmd.AddCommand(mcpCmd())
 	rootCmd.AddCommand(sessionCmd())
+	rootCmd.AddCommand(doctorCmd())
 	rootCmd.AddCommand(cronCmd())
 	rootCmd.AddCommand(channelsCmd())
 	rootCmd.AddCommand(toolsCmd())

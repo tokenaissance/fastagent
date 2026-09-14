@@ -2777,6 +2777,61 @@ func scanAgents(rows *sql.Rows) ([]AgentRecord, error) {
 
 // --- Sessions ---
 
+// SessionSnapshot is one session row plus its stored working set. Unlike
+// SessionRecord it carries the identity columns, so a caller that reads across
+// sessions (the doctor scan) can name the session a finding came from.
+type SessionSnapshot struct {
+	UserID        string
+	AgentID       string
+	SessionKey    string
+	Channel       string
+	AccountID     string
+	ChatID        string
+	ProjectID     string
+	ChatterUserID string
+	UpdatedAt     time.Time
+	Messages      []SessionMessage
+}
+
+// ListSessionSnapshots reads sessions' working sets, newest first. Pass "" for
+// agentID to scan every agent, or a concrete id to narrow. limit <= 0 means no
+// limit. Read-only — the doctor CLI is the intended caller.
+func (d *DBStore) ListSessionSnapshots(ctx context.Context, agentID string, limit int) ([]SessionSnapshot, error) {
+	query := `SELECT user_id, agent_id, session_key, channel, account_id, chat_id, project_id, COALESCE(chatter_user_id, ''), messages, updated_at FROM sessions`
+	args := []any{}
+	if agentID != "" {
+		query += fmt.Sprintf(` WHERE agent_id = %s`, d.ph(1))
+		args = append(args, agentID)
+	}
+	query += ` ORDER BY updated_at DESC`
+	if limit > 0 {
+		query += fmt.Sprintf(` LIMIT %s`, d.ph(len(args)+1))
+		args = append(args, limit)
+	}
+
+	rows, err := d.handle().QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []SessionSnapshot
+	for rows.Next() {
+		var snap SessionSnapshot
+		var msgsStr string
+		if err := rows.Scan(&snap.UserID, &snap.AgentID, &snap.SessionKey, &snap.Channel,
+			&snap.AccountID, &snap.ChatID, &snap.ProjectID, &snap.ChatterUserID,
+			&msgsStr, &snap.UpdatedAt); err != nil {
+			return nil, err
+		}
+		if msgsStr != "" && msgsStr != "null" {
+			_ = json.Unmarshal([]byte(msgsStr), &snap.Messages)
+		}
+		out = append(out, snap)
+	}
+	return out, rows.Err()
+}
+
 func (d *DBStore) GetSession(ctx context.Context, userID, agentID, sessionKey string) (*SessionRecord, error) {
 	row := d.handle().QueryRowContext(ctx,
 		fmt.Sprintf(`SELECT messages, channel, account_id, chat_id, project_id, updated_at FROM sessions WHERE user_id = %s AND agent_id = %s AND session_key = %s`,

@@ -212,6 +212,18 @@ func sessionMessageFromProvider(m provider.Message) store.SessionMessage {
 }
 
 // providerMessageFromStored is the inverse of sessionMessageFromProvider.
+//
+// ProviderMessages applies it to a whole slice. Exported so offline tools
+// (fastagent doctor sessions) reuse this one conversion site instead of
+// re-implementing the JSON-tunnel semantics and drifting from it.
+func ProviderMessages(stored []store.SessionMessage) []provider.Message {
+	out := make([]provider.Message, len(stored))
+	for i, m := range stored {
+		out[i] = providerMessageFromStored(m)
+	}
+	return out
+}
+
 // JSON-tunnel ToolCalls / ContentParts back into typed provider slices,
 // otherwise the generic interface{} shape leaves them as map nests and
 // downstream callers see "no tool calls / no parts" on a populated row.
