@@ -15,7 +15,15 @@
 > loops · Q4 the loop persists no synthetic "interrupted" reply (the projection
 > writes it at prompt-build time) · P5 tool grace · P6 NUL-safe archive +
 > `fastagent doctor sessions`.
-> Test names live in [Implementation plan](#implementation-plan).
+> Test names live in [Implementation plan](#implementation-plan). Convention:
+> every `Test…` name cited in this document exists in the tree as
+> `func Test…` **unless it is marked `(planned)`** — those are the
+> design-first cases named but not written yet, and they are collected in
+> [Integration / e2e](#integration--e2e). Before closing a phase, grep the
+> names it claims rather than trusting this page:
+> `comm -23 <(grep -oh 'Test[A-Z][A-Za-z0-9_]*' docs/*.md | sort -u) <(grep -rho 'func Test[A-Za-z0-9_]*' --include='*_test.go' . | sed 's/func //' | sort -u)`
+> — every name it prints must carry `(planned)`, `(not in the tree)` or
+> `（已移除）` at the citation (same table row or bullet).
 > **Scope**: how a turn is admitted for a session, and how that session's
 > history stays structurally valid for every provider.
 > **Storage**: `sessions.messages` (working set the agent loop reads) plus
@@ -241,7 +249,7 @@ enforces it and the test that would catch a violation.
 |---|---|---|---|---|
 | **W** · single writer | At most one turn is executing against a session's history at any instant | two `HandleMessage` bodies are past admission for one session | session turn gate (P1, landed): FIFO waiter queue owned by the session | `TestAcquireTurnSerializesCallers`, `TestAcquireTurnHandsOffFIFO`, `TestAcquireTurnContextCancelDoesNotLeakSlot`, `TestHandleMessageWaitsForInFlightTurn`, `TestHandleMessageSerializesQueuedTurns` (gateway e2e still to come) |
 | **P** · pair integrity | For the model, every tool call has exactly one reply, and every reply belongs to a call | a request ships N replies for a call id, an unanswered call, or an orphan reply | `normalizeForPrompt` (P3, landed) + wire builder (`internal/provider/openai.go:148`, P0) | `TestNormalizeForPromptShapes` (7 shapes + idempotence + no mutation), `TestNormalizeForPromptReadsRawAssistantCalls`, `TestNormalizeForPromptStripsDuplicateCallDeclaration`, `TestToAPIMessagesDropsDuplicateToolReplies`, `TestToAPIMessagesDropsDanglingToolReplies` |
-| **O** · ordering | A turn's own messages append in order and are never interleaved with another turn's | a user message or tool reply from turn B lands between turn A's call and its reply | clause W (there is no other writer) | `TestHandleMessageSerializesHistory` (asserts full-sequence equality, not just counts) |
+| **O** · ordering | A turn's own messages append in order and are never interleaved with another turn's | a user message or tool reply from turn B lands between turn A's call and its reply | clause W (there is no other writer) | `TestHandleMessageSerializesQueuedTurns` (asserts the exact role sequence `user,assistant,user,assistant` and the user-message order, not just counts); `(planned)` `TestConcurrentWebAndCronTurnSerialize` for the cross-source pair |
 | **T** · truthful pad | Stored history carries **no** synthetic "interrupted" reply: an interrupted turn leaves its call open, and the projection answers each open call with exactly one synthetic reply at field-build time | a synthetic reply is persisted at all, an open call gets two of them in the projection, or a reply is emitted for a call that is already answered | Q4 (pad path removed) + `normalizeForPrompt` (P3) | `TestInterruptedTurnLeavesNoSyntheticReplyInHistory` (loop detection breaks out mid-tool: history has the open call, no pad; the projection is doctor-clean), `TestNormalizeForPromptShapes` (unanswered call indexed in place, duplicate collapses to one, idempotent), `TestTurnBudgetExpiryLetsInFlightToolRecordItsResult` |
 
 Accepted windows / known gaps (to keep the table honest):
@@ -593,7 +601,7 @@ working tree.
 | **P3** ✅ | `normalizeForPrompt` applied to the prompt in both loops; `provider.Message.EffectiveToolCalls()` added so a call declared only inside `RawAssistant` is still recognised, and the OpenAI wire scanner reuses it instead of parsing raw a second time | `internal/agent/normalize.go` (new), `internal/agent/loop.go`, `internal/provider/provider.go`, `internal/provider/openai.go` | `internal/agent/normalize_test.go` (7 shapes incl. the incident's legacy duplicate, raw-assistant declaration, duplicate declaration; each case also asserts idempotence and input immutability) |
 | **Q4** ✅ | The loop stops persisting synthetic "interrupted" replies: `padOrphanToolResults`, its defer sites and the per-turn `turnToolCallIDs` bookkeeping are deleted, so an interrupted turn leaves its call open and `normalizeForPrompt` answers it at request time. The doctor scanner keeps reporting an unanswered call but stops gating on it (`Finding.Expected`/`Unexpected`) | `internal/agent/loop.go`, `internal/provider/provider.go` (doc), `internal/provider/anthropic.go`, `internal/doctor/scan.go`, `cmd/fastclaw/cmd_doctor.go`, `web/src/components/chat-screen.tsx` (comments; the UI sweep was already the renderer) | `internal/agent/interrupted_turn_test.go` (new), `internal/doctor/scan_test.go` (+1), `cmd/fastclaw/cmd_doctor_test.go` (+1); `pad_orphan_tool_test.go` deleted with the code it pinned |
 | **P4** ✅ | Truncation cannot split a pair *and* the claim is now tested: compacted history, after `normalizeForPrompt`, carries no pairing findings — verified with the doctor scanner as the oracle, for a cutoff landing inside a pair, for a retained tail that itself holds a duplicate, and for a retained tail that holds an open call (Q4's shape). `safeCompactionCutoff` is documented as an optimisation (it keeps the prompt byte-identical to last turn's) rather than the correctness guarantee | `internal/agent/compaction.go` (comment), `internal/agent/compaction_pairs_test.go` (new) | `TestCompactionOutputNormalisesToAPairingCleanHistory` (three shapes, through prune + compress) |
-| **P5** ✅ | **Grace** (bounded, in-flight tools land their real result), **per-source budgets** (`TaskQueueCfg.CronTimeoutSec`; one policy site `Gateway.taskTimeoutFor` behind `submitTask`), and **hot reload** of the whole `taskqueue` namespace (`ReloadTaskQueue` + the `taskQueueReloader` hook, no pod roll; resize-safe semaphore swap) | `internal/agent/tool_grace.go` (new), `internal/agent/loop.go`, `internal/taskqueue/queue.go`, `internal/config/config.go`, `internal/gateway/gateway.go`, `internal/gateway/routing.go`, `internal/gateway/taskqueue_reload.go` (new), `internal/setup/handlers.go`, `cmd/fastclaw/main.go` | `TestToolGraceContext*` (3), `TestTurnBudgetExpiryLetsInFlightToolRecordItsResult`, `TestSubmitWithTimeoutOverridesQueueDefault`, `TestTaskTimeoutForSourcePolicy`, `TestSetDefaultTimeoutAppliesToTheNextTask`, `TestSetMaxConcurrentResizesWithoutStrandingInFlight`, `TestReloadTaskQueueAppliesSystemConfig`, `TestReloadTaskQueueDegradesQuietly`, `TestTaskQueue_HotReloadCloudPathE2E` |
+| **P5** ✅ | **Grace** (bounded, in-flight tools land their real result), **per-source budgets** (`TaskQueueCfg.CronTimeoutSec`; one policy site `Gateway.taskTimeoutFor` behind `submitTask`), and **hot reload** of the whole `taskqueue` namespace (`ReloadTaskQueue` + the `taskQueueReloader` hook, no pod roll; resize-safe semaphore swap) | `internal/agent/tool_grace.go` (new), `internal/agent/loop.go`, `internal/taskqueue/queue.go`, `internal/config/config.go`, `internal/gateway/gateway.go`, `internal/gateway/routing.go`, `internal/gateway/taskqueue_reload.go` (new), `internal/setup/handlers.go`, `cmd/fastclaw/main.go` | `TestToolGraceContextSurvivesCancellationForGrace`, `TestToolGraceContextStopEndsImmediately`, `TestToolGraceContextDisabled`, `TestTurnBudgetExpiryLetsInFlightToolRecordItsResult`, `TestSubmitWithTimeoutOverridesQueueDefault`, `TestTaskTimeoutForSourcePolicy`, `TestSetDefaultTimeoutAppliesToTheNextTask`, `TestSetMaxConcurrentResizesWithoutStrandingInFlight`, `TestReloadTaskQueueAppliesSystemConfig`, `TestReloadTaskQueueDegradesQuietly`, `TestTaskQueue_HotReloadCloudPathE2E` |
 | **P6** ✅ | `sanitizeNUL` at the persistence boundary (session_messages + session_events) so a NUL-bearing tool result can no longer vanish from the archive; `fastagent doctor sessions` reports duplicate/orphan/unanswered pairings, exits non-zero on the *actionable* ones (duplicates and orphans — an unanswered call is expected and only reported, see Q4), and `--fix` removes duplicate replies after backing the row up | `internal/store/database.go`, `internal/doctor/scan.go` (new), `internal/store` `ListSessionSnapshots`, `internal/session/store_adapter.go` (`ProviderMessages`), `cmd/fastclaw/cmd_doctor.go` (new) | `TestAppendSessionMessageStripsNUL`, `internal/doctor` shape table + RawAssistant declarations + `TestExpectedCoversOpenCallsOnly`, `TestListSessionSnapshotsOrderingAndFilter`, `TestDoctorSessionsFindsAndFixesDuplicateReplies` (CLI end to end: seed → scan fails → fix → backup → clean), `TestDoctorSessionsTreatsOpenCallAsExpected` |
 
 ## Test plan
@@ -638,8 +646,9 @@ working tree.
   `TestAppendSessionMessageStripsNUL`,
   `TestListSessionSnapshotsOrderingAndFilter`,
   `TestDoctorSessionsFindsAndFixesDuplicateReplies`.
-* **Tool grace** ✅ — `TestToolGraceContext*` (three cases) and
-  `TestTurnBudgetExpiryLetsInFlightToolRecordItsResult`.
+* **Tool grace** ✅ — `TestToolGraceContextSurvivesCancellationForGrace`,
+  `TestToolGraceContextStopEndsImmediately`, `TestToolGraceContextDisabled`
+  and `TestTurnBudgetExpiryLetsInFlightToolRecordItsResult`.
 * **Budgets** ✅ — `TestSubmitWithTimeoutOverridesQueueDefault` (a cron budget
   outlives the queue default; a default task is still cut on time),
   `TestTaskTimeoutForSourcePolicy` (cron with/without the knob, everything
@@ -653,7 +662,12 @@ working tree.
 
 ### Integration / e2e
 
-* `TestConcurrentWebAndCronTurnSerialize`: a web POST and a cron fire against
+Nothing in this list exists in the tree yet — these are the design-first cases
+that would close the last gaps, all `(planned)`. Everything cited elsewhere in
+this document is a real `func Test…`; if a name here shows up in a phase row
+without the marker, that is a documentation bug, not a passing test.
+
+* `(planned)` `TestConcurrentWebAndCronTurnSerialize`: a web POST and a cron fire against
   one session; asserts one turn at a time, no interleaving, and that the
   final history has no duplicate or missing replies.
 * **Queued chat POST** ✅ — `TestQueuedChatTurnIsAnnouncedAndWithdrawableE2E`
@@ -661,16 +675,19 @@ working tree.
   `queued` event, `/api/chat/cancel` returns 200, the turn never reaches the
   model and the session stays empty) and `TestStartedChatTurnCannotBeWithdrawnE2E`
   (once started, cancel returns 409 and the turn completes).
-* `TestQueuedTurnRunsAfterLongTool`: turn A holds the slot through a slow
+* `(planned)` `TestQueuedTurnRunsAfterLongTool`: turn A holds the slot through a slow
   tool; turn B (queued) must not append its user message until A released.
-* `TestGoalContinuationDoesNotDeadlock`: continuation fired from
+* `(planned)` `TestGoalContinuationDoesNotDeadlock`: continuation fired from
   `runPostTurn` while the slot is held by that same turn.
-* `TestCronTickDoesNotInterleaveWithWebTurn`: the incident's exact timing
+* `(planned)` `TestCronTickDoesNotInterleaveWithWebTurn`: the incident's exact timing
   (cron task in a long tool + user message during it), asserting the session
   never contains a second reply for one `tool_call_id`.
-* Replay harness: `FA_DIAG_HISTORY=<jsonl> go test ./internal/provider/ -run TestZZReplay`
-  (offline, not part of CI) for forensic runs; the incident's 13 snapshots
-  replay clean under both the deployed and the P3 rules.
+* Replay harness `(not in the tree)` `TestZZReplay`: run as
+  `FA_DIAG_HISTORY=<jsonl> go test ./internal/provider/ -run TestZZReplay`
+  (offline, never part of CI) ad hoc against the incident's snapshots — they
+  replay clean under both the rules deployed that day and the P3 rules. The
+  harness itself was not kept; re-create it from this line if a replay is
+  needed again.
 
 ### Verification against production
 
@@ -748,7 +765,8 @@ In rough order of how cheap they are to see:
    some other writer produced it.
 2. **Cross-turn interleaving.** Stored history shows turn B's user message or
    reply between turn A's call and its reply (the shape
-   `TestHandleMessageSerializesHistory` rejects). One process cannot do that.
+   `TestHandleMessageSerializesQueuedTurns` rejects). One process cannot do
+   that.
 3. **Two pods on one session.** Two replicas log
    `turn admission: waited for the in-flight turn` for the same session
    within one turn budget. Prep needed before this trigger is usable: that

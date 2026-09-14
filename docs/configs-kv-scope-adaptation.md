@@ -758,7 +758,7 @@ web_search，模型只能回 “Unknown tool: web_search”，而 owner 自己�
 
 涉及函数：`scope.Setting`、`scope.UserScopeSetting`、`scope.Providers`、
 `scope.AgentScopeProviders`、`scope.UserScopeProviders`。
-依赖 KV 数值优先的旧契约 `TestProvidersDualWriteReadsFromKV` 已按新语义
+依赖 KV 数值优先的旧契约 `TestProvidersDualWriteReadsFromKV`（已移除）已按新语义
 重写为 `TestProvidersDualWriteReadsFromBlob`。生产代码里没有任何「只写 KV」的
 业务路径：`SetConfigValue` 的调用点只有双写本身（setting / provider /
 plugin_enabled 三处）、`migrateConfigsToKV` 的回填，以及 mcp undo 游标。
@@ -990,7 +990,7 @@ tag 补不回来（`TestConfigValueNumberFloat64Boundary` 钉住这条边界）�
 ### 顺带删掉的
 
 `store.camelToSnake` 失去了最后一个生产调用者（`flattenJSON` 改用
-`EncodeConfigValue`），连同只测这个薄别名的 `TestCamelToSnakeAllCaps` 一起删除——
+`EncodeConfigValue`），连同只测这个薄别名的 `TestCamelToSnakeAllCaps`（已移除）一起删除——
 实现与测试都在 `kvkeys`，留着就是第二份会漂移的副本。
 `scope.camelToSnake` 在后续 review 里因为同样的理由删除（它已经没有生产调用者，
 只剩测试在用）；`scope.snakeToCamel` 保留，`kvFieldMap` 仍在用。
