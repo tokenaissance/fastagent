@@ -247,9 +247,9 @@ enforces it and the test that would catch a violation.
 
 | # | Clause | Violated when | Enforced by | Guarding test |
 |---|---|---|---|---|
-| **W** · single writer | At most one turn is executing against a session's history at any instant | two `HandleMessage` bodies are past admission for one session | session turn gate (P1, landed): FIFO waiter queue owned by the session | `TestAcquireTurnSerializesCallers`, `TestAcquireTurnHandsOffFIFO`, `TestAcquireTurnContextCancelDoesNotLeakSlot`, `TestHandleMessageWaitsForInFlightTurn`, `TestHandleMessageSerializesQueuedTurns` (gateway e2e still to come) |
+| **W** · single writer | At most one turn is executing against a session's history at any instant | two `HandleMessage` bodies are past admission for one session | session turn gate (P1, landed): FIFO waiter queue owned by the session | `TestAcquireTurnSerializesCallers`, `TestAcquireTurnHandsOffFIFO`, `TestAcquireTurnContextCancelDoesNotLeakSlot`, `TestHandleMessageWaitsForInFlightTurn`, `TestHandleMessageSerializesQueuedTurns`, `TestQueuedTurnRunsAfterLongTool`, `TestCronTickDoesNotInterleaveWithWebTurn`, `TestConcurrentWebAndCronTurnSerialize`, `TestGoalContinuationDoesNotDeadlock` (each of the last four was verified to fail with the gate neutered) |
 | **P** · pair integrity | For the model, every tool call has exactly one reply, and every reply belongs to a call | a request ships N replies for a call id, an unanswered call, or an orphan reply | `normalizeForPrompt` (P3, landed) + wire builder (`internal/provider/openai.go:148`, P0) | `TestNormalizeForPromptShapes` (7 shapes + idempotence + no mutation), `TestNormalizeForPromptReadsRawAssistantCalls`, `TestNormalizeForPromptStripsDuplicateCallDeclaration`, `TestToAPIMessagesDropsDuplicateToolReplies`, `TestToAPIMessagesDropsDanglingToolReplies` |
-| **O** · ordering | A turn's own messages append in order and are never interleaved with another turn's | a user message or tool reply from turn B lands between turn A's call and its reply | clause W (there is no other writer) | `TestHandleMessageSerializesQueuedTurns` (asserts the exact role sequence `user,assistant,user,assistant` and the user-message order, not just counts); `(planned)` `TestConcurrentWebAndCronTurnSerialize` for the cross-source pair |
+| **O** · ordering | A turn's own messages append in order and are never interleaved with another turn's | a user message or tool reply from turn B lands between turn A's call and its reply | clause W (there is no other writer) | `TestHandleMessageSerializesQueuedTurns` (asserts the exact role sequence `user,assistant,user,assistant` and the user-message order, not just counts), `TestQueuedTurnRunsAfterLongTool`, `TestCronTickDoesNotInterleaveWithWebTurn`, `TestConcurrentWebAndCronTurnSerialize` (the cross-source pair, through the real chat handler) |
 | **T** · truthful pad | Stored history carries **no** synthetic "interrupted" reply: an interrupted turn leaves its call open, and the projection answers each open call with exactly one synthetic reply at field-build time | a synthetic reply is persisted at all, an open call gets two of them in the projection, or a reply is emitted for a call that is already answered | Q4 (pad path removed) + `normalizeForPrompt` (P3) | `TestInterruptedTurnLeavesNoSyntheticReplyInHistory` (loop detection breaks out mid-tool: history has the open call, no pad; the projection is doctor-clean), `TestNormalizeForPromptShapes` (unanswered call indexed in place, duplicate collapses to one, idempotent), `TestTurnBudgetExpiryLetsInFlightToolRecordItsResult` |
 
 Accepted windows / known gaps (to keep the table honest):
@@ -595,7 +595,7 @@ working tree.
 |---|---|---|---|
 | **P0** ✅ | Drop duplicate tool replies at wire build; scope pads to the turn's own ids; thread a real ctx into the compaction summarizer; repair the incident session's stored history | `internal/provider/openai.go`, `internal/provider/provider.go`, `internal/agent/loop.go`, `internal/agent/compaction.go`, `internal/agent/slash.go` | `openai_dangling_tool_test.go` (+2), `pad_orphan_tool_test.go` (new, +2), `compaction_test.go` (+1) |
 | **P0.5** | Build and deploy P0 (`./build-image.sh dev` → verify → `prod`). Prod still runs `6345e2b`, i.e. the old pad path. | — | Appendix C checklist |
-| **P1** ✅ | `Session.AcquireTurn/ReleaseTurn` (FIFO, ctx-aware, no leak); acquired in `HandleMessage` + `HandleMessageStream` before the plan-mode branch, released outermost so the leftover-steer writer stays inside the turn (the pad writer it originally also covered is gone — Q4); admission waits >1 s logged | `internal/session/manager.go`, `internal/agent/loop.go` | `internal/session/turn_gate_test.go` (serialize, FIFO, cancel-while-queued, cancel-at-handoff race), `internal/agent/turn_gate_test.go` (waits for in-flight turn; queued turns serialized, roles `user,assistant,user,assistant`); gateway e2e still to come |
+| **P1** ✅ | `Session.AcquireTurn/ReleaseTurn` (FIFO, ctx-aware, no leak); acquired in `HandleMessage` + `HandleMessageStream` before the plan-mode branch, released outermost so the leftover-steer writer stays inside the turn (the pad writer it originally also covered is gone — Q4); admission waits >1 s logged | `internal/session/manager.go`, `internal/agent/loop.go` | `internal/session/turn_gate_test.go` (serialize, FIFO, cancel-while-queued, cancel-at-handoff race), `internal/agent/turn_gate_test.go` (waits for in-flight turn; queued turns serialized, roles `user,assistant,user,assistant`), plus the four e2e-level cases in [Integration / e2e](#integration--e2e): long tool, cron-vs-web, real POST vs cron tick, goal continuation |
 | **P1b** ✅ | Queued-state UX modelled on Codex's `PendingInputPreview`: `queued` event, queue block above the composer with `↳ text`, `(n ahead)`, and Edit/Cancel actions backed by a new withdraw endpoint (`/api/chat/cancel`, `agent.WithAdmissionSignal` marks the point of no return) | `internal/agent/loop.go`, `internal/agent/admission_signal.go` (new), `internal/setup/handlers.go`, `internal/setup/handlers_chat_cancel.go` (new), `internal/setup/server.go`, `web/src/components/chat-screen.tsx`, `web/src/lib/api.ts` | `TestRunTurnQueuesUserSourceAndEmitsQueuedEvent`, `TestWithAdmissionSignalClosesWhenTurnStarts`, `TestPendingTurnRegistryWithdrawContract`, `TestPendingTurnKeyIsolatesTabsAndSessions`, `TestQueuedChatTurnIsAnnouncedAndWithdrawableE2E`, `TestStartedChatTurnCannotBeWithdrawnE2E`; `tsc --noEmit` clean |
 | **P2** ✅ | `TurnMode` + `ErrTurnNotAdmitted` + `RunTurn`; gateway parks refused automatic turns and retries them at the next idle point instead of blocking a queue worker | `internal/agent/admission.go` (new), `internal/gateway/deferred_turns.go` (new), `internal/gateway/gateway.go` | `admission_test.go` (refusal, queued event + position, source policy), `deferred_turns_test.go` (FIFO drain, busy skip, budget expiry) |
 | **P3** ✅ | `normalizeForPrompt` applied to the prompt in both loops; `provider.Message.EffectiveToolCalls()` added so a call declared only inside `RawAssistant` is still recognised, and the OpenAI wire scanner reuses it instead of parsing raw a second time | `internal/agent/normalize.go` (new), `internal/agent/loop.go`, `internal/provider/provider.go`, `internal/provider/openai.go` | `internal/agent/normalize_test.go` (7 shapes incl. the incident's legacy duplicate, raw-assistant declaration, duplicate declaration; each case also asserts idempotence and input immutability) |
@@ -662,26 +662,32 @@ working tree.
 
 ### Integration / e2e
 
-Nothing in this list exists in the tree yet — these are the design-first cases
-that would close the last gaps, all `(planned)`. Everything cited elsewhere in
-this document is a real `func Test…`; if a name here shows up in a phase row
-without the marker, that is a documentation bug, not a passing test.
-
-* `(planned)` `TestConcurrentWebAndCronTurnSerialize`: a web POST and a cron fire against
-  one session; asserts one turn at a time, no interleaving, and that the
-  final history has no duplicate or missing replies.
+* **Web POST vs cron tick** ✅ — `TestConcurrentWebAndCronTurnSerialize`
+  (`internal/setup/concurrent_turn_e2e_test.go`): a cron tick parked inside a
+  long tool while a real dashboard POST arrives for the same session. Asserts
+  the POST is announced as `queued` on its own SSE stream, writes nothing while
+  the tick holds the slot, and that the history the two turns leave behind is
+  `user,assistant,tool,assistant,user,assistant` with one reply per call and a
+  clean `doctor.Scan`.
 * **Queued chat POST** ✅ — `TestQueuedChatTurnIsAnnouncedAndWithdrawableE2E`
   (real handler + real agent + fake provider: the POST is announced with a
   `queued` event, `/api/chat/cancel` returns 200, the turn never reaches the
   model and the session stays empty) and `TestStartedChatTurnCannotBeWithdrawnE2E`
   (once started, cancel returns 409 and the turn completes).
-* `(planned)` `TestQueuedTurnRunsAfterLongTool`: turn A holds the slot through a slow
-  tool; turn B (queued) must not append its user message until A released.
-* `(planned)` `TestGoalContinuationDoesNotDeadlock`: continuation fired from
-  `runPostTurn` while the slot is held by that same turn.
-* `(planned)` `TestCronTickDoesNotInterleaveWithWebTurn`: the incident's exact timing
-  (cron task in a long tool + user message during it), asserting the session
-  never contains a second reply for one `tool_call_id`.
+* **Queued turn behind a long tool** ✅ — `TestQueuedTurnRunsAfterLongTool`
+  (`internal/agent/turn_queue_test.go`): turn A holds the slot through a slow
+  tool; turn B must not append anything — not even its own user message —
+  until A released, and the two turns land as whole turns in arrival order.
+* **Goal continuation** ✅ — `TestGoalContinuationDoesNotDeadlock`
+  (`internal/agent/goal_continuation_gate_test.go`): the PostTurn hook fires
+  while the turn still holds the slot, so it publishes the continuation onto
+  the bus; the test asserts the turn returns, the continuation carries
+  `Source=goal_context` and the goal's chat id, and that the continuation can
+  then take the slot (which is what an inline call would have deadlocked on).
+* **The incident's timing, agent level** ✅ — `TestCronTickDoesNotInterleaveWithWebTurn`
+  (`internal/agent/turn_queue_test.go`): cron source in a long tool + a user
+  message during it; asserts the same serialized shape and that no
+  `tool_call_id` is answered twice — the second answer is what 400s a session.
 * Replay harness `(not in the tree)` `TestZZReplay`: run as
   `FA_DIAG_HISTORY=<jsonl> go test ./internal/provider/ -run TestZZReplay`
   (offline, never part of CI) ad hoc against the incident's snapshots — they
