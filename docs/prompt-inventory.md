@@ -120,9 +120,11 @@ the source file is the truth, and F lists the paths.
 3. **Language and identity**: the corpus is English except one Chinese example
    in `renderChannelHints`; `renderSender`'s own comment worries that English
    per-turn blocks dilute a Chinese-default SOUL.md.
-4. **Weight is concentrated**: `modSandbox` (98) + `taskDelegationContent` (104)
-   + `toolDisciplineContent` (96) are ~300 of the ~700 prompt lines; identity is
-   bookended by two ~20-line anchors.
+4. **Weight is concentrated** (measured on this snapshot, not estimated):
+   `toolDisciplineContent` 5.3K chars + `taskDelegationContent` 4.9K + `modSandbox`
+   4.8K ≈ **15.0K of the 23.6K-char agent system prompt (≈3.7K of its ≈5.9K
+   tokens, 63%)**, all of it sent on every request. Identity is bookended by two
+   ~400-char anchors.
 5. **Recently unified** (2026-09-14): the wait guard, both exec clock hints and
    the two `run_in_background` descriptions now name exactly one supported way to
    wait, pinned by `TestLongWaitRefusalNamesOnlyTheBackgroundPrimitive` and
