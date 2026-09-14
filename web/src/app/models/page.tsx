@@ -34,6 +34,7 @@ import {
   getAgent,
   getConfig,
   updateConfig,
+  updateAgent,
   getMe,
   testProvider,
   testStoredProvider,
@@ -135,6 +136,9 @@ export default function ModelsPage() {
   const [agentName, setAgentName] = useState("");
   const [agentScopeModel, setAgentScopeModel] = useState("");
   const [agentShares, setAgentShares] = useState(false);
+  // Owner of the agent in the URL ("" when there is none). Needed to decide
+  // WHICH row a model switch has to write — see writeModel below.
+  const [agentOwnerId, setAgentOwnerId] = useState("");
 
   const [providers, setProviders] = useState<ProviderEntry[]>([]);
   const [model, setModel] = useState("");
@@ -157,6 +161,30 @@ export default function ModelsPage() {
   const isSuperAdmin = me?.role === "super_admin";
   const writeScope: "system" | "user" = isSuperAdmin ? "system" : "user";
   const writeScopeId = isSuperAdmin ? "" : (me?.id || "");
+
+  // Which row carries the switch. The runtime resolves an agent's model as
+  // agent-scope → user → system (gateway/userspace.go: loadUserSpace lays the
+  // agent row on top of the system→user merge), so:
+  //
+  //   - the OWNER configuring the agent in the URL → the AGENT-scope row. That
+  //     is the layer that wins for the owner, and it is what makes a switch in
+  //     this page take effect immediately. Writing the caller's user row here
+  //     is exactly the bug being fixed: the agent's own row shadowed it.
+  //   - anyone else viewing a shared agent (a chatter) → their OWN user row.
+  //     The foreign-viewer path pins that row last ("MY tokens, MY model"), so
+  //     it wins for them, and it is not the owner's config to change anyway.
+  //   - the standalone /models page (no agent in the URL) → the caller's scope,
+  //     i.e. the default that un-overridden and future agents inherit.
+  const ownsActiveAgent = inAgentContext && !!me?.id && agentOwnerId === me.id;
+  const writeModel = async (value: string) => {
+    if (ownsActiveAgent) {
+      // PUT /api/agents/{id} → agent-scope agents.defaults.model, read-modify-write
+      // so promptMode / splitReplies / autoPersist survive. Empty string clears it.
+      await updateAgent(urlAgentId, { model: value });
+      return;
+    }
+    await updateConfig({ agents: { defaults: { model: value } } });
+  };
 
   // Dialog state
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -273,10 +301,11 @@ export default function ModelsPage() {
       setProviders(entries);
       setModel(cfg?.agents?.defaults?.model || "");
       setSystemDefault(cfg?.meta?.systemDefaultModel || "");
-      const ag = (agentRec as { agent?: { name?: string; model?: string; shareModelConfig?: boolean } } | null)?.agent;
+      const ag = (agentRec as { agent?: { name?: string; model?: string; shareModelConfig?: boolean; userId?: string } } | null)?.agent;
       setAgentName(ag?.name || "");
       setAgentScopeModel(ag?.model || "");
       setAgentShares(!!ag?.shareModelConfig);
+      setAgentOwnerId(ag?.userId || "");
     } finally {
       setLoading(false);
     }
@@ -544,14 +573,15 @@ export default function ModelsPage() {
     await fetchConfig(isSuperAdmin, me?.id || "");
   };
 
-  // Save button at the top persists the default-model setting. An empty
-  // value is a legitimate intent ("clear the default") — the backend's
-  // `omitempty` on AgentDefaults.Model drops the key from the saved row
-  // without disturbing sibling fields, so it's safe to send through.
+  // Save button at the top persists the model. Which row that lands on is
+  // decided by writeModel: the active agent's own row when the caller owns it,
+  // the caller's scope otherwise. An empty value is a legitimate intent ("clear
+  // it") — the backend drops the key from the saved row without disturbing
+  // sibling fields, so it is safe to send through.
   const handleSaveAll = async () => {
     setSaving(true);
     try {
-      await updateConfig({ agents: { defaults: { model: model.trim() } } });
+      await writeModel((ownsActiveAgent ? agentScopeModel : model).trim());
       flashSaved();
       await fetchConfig(isSuperAdmin, me?.id || "");
     } finally {
@@ -560,11 +590,14 @@ export default function ModelsPage() {
   };
 
   const handleDefaultModelChange = async (value: string) => {
-    setModel(value);
+    // Keep the input bound to the row we are about to write, so the field does
+    // not snap back to the caller-scope value on the next refresh.
+    if (ownsActiveAgent) setAgentScopeModel(value);
+    else setModel(value);
     if (!value.trim()) return;
     setSaving(true);
     try {
-      await updateConfig({ agents: { defaults: { model: value.trim() } } });
+      await writeModel(value.trim());
       flashSaved();
       // Refresh so Inheriting/Override badge reflects the new state.
       await fetchConfig(isSuperAdmin, me?.id || "");
@@ -573,14 +606,16 @@ export default function ModelsPage() {
     }
   };
 
-  // Clear the user-scope agents.defaults.model override so the agent
-  // runtime falls back to the system default. Writing an empty string
-  // just stores "" at user scope which still wins the merge — instead
-  // we send a null/undefined which the backend treats as "delete row".
+  // Clear the model override this page is editing — the active agent's own row
+  // for its owner, the caller's scope otherwise — so resolution falls through to
+  // the next layer. Writing an empty string would just store a value that still
+  // wins the merge; both backends treat the empty string as "delete the key".
   const handleClearOverride = async () => {
+    if (ownsActiveAgent) setAgentScopeModel("");
+    else setModel("");
     setSaving(true);
     try {
-      await updateConfig({ agents: { defaults: { model: "" } } });
+      await writeModel("");
       flashSaved();
       await fetchConfig(isSuperAdmin, me?.id || "");
     } finally {
@@ -649,14 +684,24 @@ export default function ModelsPage() {
           chatter-user → agent-scope → system, so we show the agent's
           model in the placeholder and caption when sharing is on. */}
       {(() => {
-        const inheriting = !isSuperAdmin && !model.trim();
+        // The card edits whichever row writeModel will write: the active agent's
+        // own row for its owner, the caller-scope row otherwise. Binding the
+        // input/badge to the same value keeps "what I see" equal to "what the
+        // runtime will resolve" — otherwise the field shows the caller-scope
+        // value while the agent row silently decides.
+        const shownModel = ownsActiveAgent ? agentScopeModel : model;
+        const inheriting = !isSuperAdmin && !shownModel.trim();
         const overridden = !isSuperAdmin && !inheriting;
         // What the runtime will actually use when the chatter has no
-        // override. EnsureAgent picks agent-scope first (only when the
-        // owner enabled sharing); otherwise it falls through to system.
-        const effectiveFallback = inAgentContext && agentShares && agentScopeModel
-          ? agentScopeModel
-          : systemDefault;
+        // override. For the owner editing their agent's row, that is the
+        // caller-scope value they'd fall back to (their user default, else
+        // system). For anyone else EnsureAgent picks agent-scope first (only
+        // when the owner enabled sharing); otherwise it falls through to system.
+        const effectiveFallback = ownsActiveAgent
+          ? (model.trim() || systemDefault)
+          : inAgentContext && agentShares && agentScopeModel
+            ? agentScopeModel
+            : systemDefault;
         const fallbackSource = inAgentContext && agentShares && agentScopeModel
           ? "agent"
           : "system";
@@ -687,7 +732,7 @@ export default function ModelsPage() {
           )}
         </div>
         {allModelOptions.length > 0 ? (
-          <Select value={inheriting ? "" : model} onValueChange={(v: string | null) => v && handleDefaultModelChange(v)}>
+          <Select value={inheriting ? "" : shownModel} onValueChange={(v: string | null) => v && handleDefaultModelChange(v)}>
             <SelectTrigger className="font-mono text-sm max-w-md">
               <SelectValue placeholder={inheriting ? `Inherit (${effectiveFallback || "no default"})` : "Select a model"} />
             </SelectTrigger>
@@ -704,16 +749,41 @@ export default function ModelsPage() {
               ))}
             </SelectContent>
           </Select>
+        ) : ownsActiveAgent ? (
+          <Input
+            value={inheriting ? "" : shownModel}
+            onChange={(e) => setAgentScopeModel(e.target.value)}
+            placeholder={inheriting ? `Inherit (${model.trim() || systemDefault || "no default"})` : "e.g. openai/gpt-4o"}
+            className="font-mono text-sm max-w-md"
+          />
         ) : (
           <Input
-            value={inheriting ? "" : model}
+            value={inheriting ? "" : shownModel}
             onChange={(e) => setModel(e.target.value)}
             placeholder={inheriting ? (effectiveFallback ? `Inherit (${effectiveFallback})` : "e.g. openai/gpt-4o") : "e.g. openai/gpt-4o"}
             className="font-mono text-sm max-w-md"
           />
         )}
         <p className="text-xs text-muted-foreground mt-2">
-          {isSuperAdmin ? (
+          {ownsActiveAgent ? (
+            <>
+              Writes the model at <strong>agent scope</strong> for{" "}
+              <strong>{agentName || "this agent"}</strong> — the layer the runtime
+              resolves first.{" "}
+              {inheriting ? (
+                <>
+                  Currently inheriting{" "}
+                  <code className="text-[11px]">{model.trim() || systemDefault || "nothing"}</code>.
+                </>
+              ) : (
+                <>
+                  Currently <code className="text-[11px]">{shownModel}</code>.
+                </>
+              )}{" "}
+              Other agents keep their own setting. Format{" "}
+              <code className="text-[11px]">provider/modelId</code>.
+            </>
+          ) : isSuperAdmin ? (
             <>Used by agents unless overridden in agent config.</>
           ) : inheriting ? (
             <>
