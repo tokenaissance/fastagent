@@ -292,7 +292,7 @@ func (g *Gateway) routeDM(ctx context.Context, msg bus.InboundMessage) {
 	if g.trySteer(ag, msg, msg.Text) {
 		return
 	}
-	g.taskQueue.Submit(ag.Name(), chatKey(msg.Channel, msg.AccountID, msg.ChatID), msg, msg.AccountID)
+	g.submitTask(ag.Name(), chatKey(msg.Channel, msg.AccountID, msg.ChatID), msg, msg.AccountID)
 }
 
 func (g *Gateway) routeGroup(ctx context.Context, msg bus.InboundMessage) {
@@ -317,7 +317,7 @@ func (g *Gateway) routeGroup(ctx context.Context, msg bus.InboundMessage) {
 				triggerMsg.Text = fmt.Sprintf("\\[%s\\]: %s", msg.SenderName, msg.Text)
 				triggerMsg.IsBotMessage = false
 				if !g.trySteer(target, triggerMsg, triggerMsg.Text) {
-					g.taskQueue.Submit(target.Name(), chatKey(triggerMsg.Channel, triggerMsg.AccountID, triggerMsg.ChatID), triggerMsg, g.accountIDForAgent(space, target.Name(), triggerMsg.Channel))
+					g.submitTask(target.Name(), chatKey(triggerMsg.Channel, triggerMsg.AccountID, triggerMsg.ChatID), triggerMsg, g.accountIDForAgent(space, target.Name(), triggerMsg.Channel))
 				}
 			}
 		}
@@ -334,7 +334,7 @@ func (g *Gateway) routeGroup(ctx context.Context, msg bus.InboundMessage) {
 				"user", msg.OwnerUserID, "channel", msg.Channel,
 				"chat_id", msg.ChatID, "agent", target.Name())
 			if !g.trySteer(target, msg, groupSteerText(msg)) {
-				g.taskQueue.Submit(target.Name(), chatKey(msg.Channel, msg.AccountID, msg.ChatID), msg, g.accountIDForAgent(space, target.Name(), msg.Channel))
+				g.submitTask(target.Name(), chatKey(msg.Channel, msg.AccountID, msg.ChatID), msg, g.accountIDForAgent(space, target.Name(), msg.Channel))
 			}
 			return
 		}
@@ -352,7 +352,7 @@ func (g *Gateway) routeGroup(ctx context.Context, msg bus.InboundMessage) {
 			}
 		}
 		if !g.trySteer(target, msg, groupSteerText(msg)) {
-			g.taskQueue.Submit(target.Name(), chatKey(msg.Channel, msg.AccountID, msg.ChatID), msg, g.accountIDForAgent(space, target.Name(), msg.Channel))
+			g.submitTask(target.Name(), chatKey(msg.Channel, msg.AccountID, msg.ChatID), msg, g.accountIDForAgent(space, target.Name(), msg.Channel))
 		}
 	default:
 		for _, ag := range boundAgents {
