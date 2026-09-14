@@ -433,19 +433,32 @@ that have no reply anywhere, and never twice (`TestPadOrphanToolResultsIsIdempot
   identical, and so the API never sees a synthetic id that collides with a
   real one.
 
-### P5 — Turn budgets and interruption semantics
+### P5 — Turn budgets and interruption semantics ✅ landed
 
-Today one number (`taskTimeoutSec`, default 300 s) both delimits an IM turn
-and hard-kills any tool execution in flight, which is what manufactures pads.
-Proposed split (needs product input, Q5):
+One number (`taskTimeoutSec`, default 300 s) used to delimit an IM turn *and*
+hard-kill any tool execution in flight, which is what manufactures pads. The
+split that landed:
 
-* per-source budget: web 15 min (`agentTurnTimeout`), IM 300 s, cron
-  configurable;
-* on budget expiry, stop *feeding* the turn but let the in-flight tool
-  finish and be recorded (bounded grace), so the history gets a real result
-  instead of a pad;
-* if the grace expires too, the pad is the correct outcome — and it is now
-  guaranteed to be a single, truthful, idempotent reply (P0+P3).
+* **Grace before the pad**: on budget expiry the turn stops being fed (its own
+  ctx is cancelled, so no further model round starts) while an in-flight tool
+  keeps running for `toolGraceDefault` (60 s) and lands its real result. The
+  pad remains the outcome when the grace also expires — and it is a single,
+  truthful, idempotent reply (P0+P3).
+* **Per-source budget** via the system `taskqueue` namespace
+  (`TaskQueueCfg`): `maxConcurrent` (global), `taskTimeoutSec` (every queued
+  turn — IM, cron, goal, webhook), `cronTimeoutSec` (cron ticks only; 0 = same
+  as `taskTimeoutSec`). Web turns never reach the queue: the dashboard handler
+  carries its own 45-minute budget.
+* **Hot reload**: saving that namespace (`POST /api/config` →
+  `{"taskQueue":{…}}`, system scope) re-reads it into the running queue —
+  `handleUpdateConfig` → `reloadSystemTaskQueue()` → `Gateway.ReloadTaskQueue()`
+  → `Queue.SetMaxConcurrent` / `SetDefaultTimeout` + the cron budget. No pod
+  roll needed. Semantics: a new default applies to the next task (in-flight
+  tasks keep the budget they started with), and a resize cannot strand a slot
+  because each task releases into the semaphore it acquired from.
+* **One policy site**: `Gateway.taskTimeoutFor` decides which budget an inbound
+  gets, and every routing path queues through `Gateway.submitTask` (including
+  the deferred-turn drain, so a parked tick keeps its budget when admitted).
 
 ### P6 — Archive integrity and operations ✅ landed
 
@@ -512,7 +525,7 @@ working tree.
 | **P2** ✅ | `TurnMode` + `ErrTurnNotAdmitted` + `RunTurn`; gateway parks refused automatic turns and retries them at the next idle point instead of blocking a queue worker | `internal/agent/admission.go` (new), `internal/gateway/deferred_turns.go` (new), `internal/gateway/gateway.go` | `admission_test.go` (refusal, queued event + position, source policy), `deferred_turns_test.go` (FIFO drain, busy skip, budget expiry) |
 | **P3** ✅ | `normalizeForPrompt` applied to the prompt in both loops (+ idempotent conditional pad); `provider.Message.EffectiveToolCalls()` added so a call declared only inside `RawAssistant` is still recognised, and the OpenAI wire scanner reuses it instead of parsing raw a second time | `internal/agent/normalize.go` (new), `internal/agent/loop.go`, `internal/provider/provider.go`, `internal/provider/openai.go` | `internal/agent/normalize_test.go` (7 shapes incl. the incident's pad+real duplicate, raw-assistant declaration, duplicate declaration; each case also asserts idempotence and input immutability), `pad_orphan_tool_test.go` (+1 idempotence) |
 | **P4** ✅ | Truncation cannot split a pair *and* the claim is now tested: compacted history, after `normalizeForPrompt`, carries no pairing findings — verified with the doctor scanner as the oracle, for a cutoff landing inside a pair and for a retained tail that itself holds a duplicate. `safeCompactionCutoff` is documented as an optimisation (it keeps the prompt byte-identical to last turn's) rather than the correctness guarantee | `internal/agent/compaction.go` (comment), `internal/agent/compaction_pairs_test.go` (new) | `TestCompactionOutputNormalisesToAPairingCleanHistory` (both shapes, through prune + compress) |
-| **P5** ✅ | **Grace**: tool rounds run on a context that outlives the turn's cancellation for a bounded window (`toolGraceDefault` 60 s, per-agent override), so an expired budget records the tool's real result instead of a synthetic pad — and the loop still stops (its own ctx stays cancelled). **Per-source budgets**: `TaskQueueCfg.CronTimeoutSec` gives cron ticks their own budget (0 = queue default); every routing path queues through `Gateway.submitTask` → `taskTimeoutFor`, including the deferred-turn drain so a parked tick keeps its budget | `internal/agent/tool_grace.go` (new), `internal/agent/loop.go`, `internal/taskqueue/queue.go`, `internal/config/config.go`, `internal/gateway/gateway.go`, `internal/gateway/routing.go` | `TestToolGraceContext*` (3), `TestTurnBudgetExpiryLetsInFlightToolRecordItsResult`, `TestSubmitWithTimeoutOverridesQueueDefault`, `TestTaskTimeoutForSourcePolicy` |
+| **P5** ✅ | **Grace** (bounded, in-flight tools land their real result), **per-source budgets** (`TaskQueueCfg.CronTimeoutSec`; one policy site `Gateway.taskTimeoutFor` behind `submitTask`), and **hot reload** of the whole `taskqueue` namespace (`ReloadTaskQueue` + the `taskQueueReloader` hook, no pod roll; resize-safe semaphore swap) | `internal/agent/tool_grace.go` (new), `internal/agent/loop.go`, `internal/taskqueue/queue.go`, `internal/config/config.go`, `internal/gateway/gateway.go`, `internal/gateway/routing.go`, `internal/gateway/taskqueue_reload.go` (new), `internal/setup/handlers.go`, `cmd/fastclaw/main.go` | `TestToolGraceContext*` (3), `TestTurnBudgetExpiryLetsInFlightToolRecordItsResult`, `TestSubmitWithTimeoutOverridesQueueDefault`, `TestTaskTimeoutForSourcePolicy`, `TestSetDefaultTimeoutAppliesToTheNextTask`, `TestSetMaxConcurrentResizesWithoutStrandingInFlight`, `TestReloadTaskQueueAppliesSystemConfig`, `TestReloadTaskQueueDegradesQuietly`, `TestTaskQueue_HotReloadCloudPathE2E` |
 | **P6** ✅ | `sanitizeNUL` at the persistence boundary (session_messages + session_events) so a NUL-bearing tool result can no longer vanish from the archive; `fastagent doctor sessions` reports duplicate/orphan/unanswered pairings, exits non-zero while findings remain, and `--fix` removes duplicate replies after backing the row up | `internal/store/database.go`, `internal/doctor/scan.go` (new), `internal/store` `ListSessionSnapshots`, `internal/session/store_adapter.go` (`ProviderMessages`), `cmd/fastclaw/cmd_doctor.go` (new) | `TestAppendSessionMessageStripsNUL`, `internal/doctor` shape table + RawAssistant declarations, `TestListSessionSnapshotsOrderingAndFilter`, `TestDoctorSessionsFindsAndFixesDuplicateReplies` (CLI end to end: seed → scan fails → fix → backup → clean) |
 
 ## Test plan
@@ -560,7 +573,12 @@ working tree.
 * **Budgets** ✅ — `TestSubmitWithTimeoutOverridesQueueDefault` (a cron budget
   outlives the queue default; a default task is still cut on time),
   `TestTaskTimeoutForSourcePolicy` (cron with/without the knob, everything
-  else falls back).
+  else falls back), `TestSetDefaultTimeoutAppliesToTheNextTask`,
+  `TestSetMaxConcurrentResizesWithoutStrandingInFlight` (reload safe under a
+  running task), `TestReloadTaskQueueAppliesSystemConfig` /
+  `TestReloadTaskQueueDegradesQuietly` (gateway), and
+  `TestTaskQueue_HotReloadCloudPathE2E` (system-scope save fires the hook once;
+  a user-scope save and a resolver without the capability both stay silent).
 * **Compaction/pairing** ✅ — `TestCompactionOutputNormalisesToAPairingCleanHistory`.
 
 ### Integration / e2e
