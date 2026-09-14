@@ -53,4 +53,26 @@ jobs:
         env:
           E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
           E2B_TEMPLATE: ${{ secrets.E2B_TEMPLATE }}
-        run: go test ./internal/sandbox/ -run '^TestE2BPoolCrossPodAdoption$' -count=1 -v
+        # TestSandboxBackgroundE2BLive is the canary for the one claim the
+        # offline tests cannot make: that a detached job survives the exec
+        # request on the real hosted backend. If envd ever starts reaping
+        # detached sessions, this is where it shows up first.
+        run: >
+          go test ./internal/sandbox/ ./internal/agent/tools/
+          -run '^TestE2BPoolCrossPodAdoption$|^TestSandboxBackgroundE2BLive$'
+          -count=1 -v
+
+  sandbox-background:
+    name: sandbox background exec (unit + real-shell + docker)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+      # The offline tests run the composed launcher/probe/kill against a real
+      # /bin/sh; the docker e2e runs the same flow through a real container, so
+      # "the job outlives the tool call" is checked against a kernel rather
+      # than against a string.
+      - name: Background exec tests (docker runner provides docker)
+        run: go test ./internal/agent/tools/ -run 'Sandbox|Background' -count=1 -v
