@@ -151,12 +151,23 @@ that one request — the log/cursor/exit-file machinery stays as it is.
 | Log lives in `/tmp`, not `/workspace` | `/workspace` is flushed to durable storage after *every* exec; a growing log there would be re-uploaded on every poll and would pollute the Files panel | start message prints the path |
 | Log dies with the sandbox | A job cannot outlive the kernel it runs in | `[status] lost` |
 | No exit code when the job is killed from outside (OOM killer, sandbox kill) | the wrapper never gets to write it | `[status] running` with no growth — confirm with `exec({"command":"ps"})` |
-| Job table is per replica (in memory) | a later turn on another replica cannot see `bash_id`; the log path from the start message still works via `exec({"command":"tail /tmp/fastagent-bg/sbg_1.log"})` | `no such bash_id` |
+| Job table is per replica (in memory) | a later turn on another replica cannot see `bash_id`; the log path from the start message still works via `exec({"command":"tail /tmp/fastagent-bg/<id>.log"})` | `no such bash_id` |
 | One poll ≤ 64 KiB | bounds a single tool result | `[more output pending: N bytes unread]` |
 
 Revisit the per-replica row the moment cross-replica polling is actually
 needed: persisting the job row (id, pid, log path, owner) in the store is the
 same shape as the sandbox lease row.
+
+A job's identity **is** its two files, so ids are namespaced per registry
+(`sbg_<4 hex>_<n>`): two tables that both started counting at `sbg_1` would
+otherwise share `/tmp/fastagent-bg/sbg_1.*`, and the second launcher's
+`rm -f …/sbg_1.exit` + `: > …/sbg_1.log` would erase the first job's record
+while its process kept appending to the truncated log. Two agents in one
+process and two replicas holding one session lease are both ways to get two
+tables — `TestSandboxJobsIDSpace` pins this. And because the exit file is
+created before it is filled, a poll tolerates a missing code (`exited (code=?)`
+rather than failing): losing the log over a cosmetic field is the worse
+failure.
 
 ## When a hand-rolled start still gets cut off
 
