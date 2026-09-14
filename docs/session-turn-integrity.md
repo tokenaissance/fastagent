@@ -532,6 +532,11 @@ split that landed:
 * **One policy site**: `Gateway.taskTimeoutFor` decides which budget an inbound
   gets, and every routing path queues through `Gateway.submitTask` (including
   the deferred-turn drain, so a parked tick keeps its budget when admitted).
+* **The budget only bounds *waiting*.** Work that legitimately outlives a turn
+  does not need a bigger budget: `exec({"run_in_background": true})` detaches
+  the job inside the sandbox and `bash_output` polls it from later turns — the
+  r39–r42 incident was exactly a long job measured against a turn budget. See
+  `docs/sandbox-background-exec.md`.
 
 ### P6 — Archive integrity and operations ✅ landed
 
