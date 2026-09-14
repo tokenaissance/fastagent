@@ -537,6 +537,12 @@ split that landed:
   the job inside the sandbox and `bash_output` polls it from later turns — the
   r39–r42 incident was exactly a long job measured against a turn budget. See
   `docs/sandbox-background-exec.md`.
+  Since 2026-09-14 the tool enforces the shape rather than trusting the model to
+  remember it: a sandbox/host `exec` whose command waits in the foreground
+  (`sleep` ≥ 30 s at a command position) is refused before it runs, with the
+  `run_in_background` recipe as the only guidance. The bet the refusal removes is
+  "my turn outlives my wait" — five times it did not, and each loss cost the
+  output, not just the time.
 * **The other budget is rounds, not seconds.** `maxToolIterations` (default 20)
   caps how many model rounds one turn may run; hitting it ends the turn with a
   forced synthesis and the chat panel's "Iteration limit reached" badge
