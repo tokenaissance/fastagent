@@ -1182,6 +1182,12 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 // SSE. 200 {"buffered":true} when a turn was active; 409
 // {"buffered":false} when none is running, so the client falls back to
 // a normal /api/chat/stream send.
+//
+// Steer being an explicit call is the dashboard half of the product contract
+// in docs/session-turn-integrity.md: POST /api/chat/stream queues when the
+// session is busy, and only this endpoint (the UI's steer action) folds a
+// message into the running turn. IM is the opposite by design — its gateway
+// path calls trySteer before queueing.
 func (s *Server) handleChatSteer(w http.ResponseWriter, r *http.Request) {
 	var req chatRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
