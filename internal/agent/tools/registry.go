@@ -784,11 +784,25 @@ func (r *Registry) RegisterSerialFrom(name, description string, parameters inter
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
+		// The wait ends with the TURN, not with the tool's grace window. The loop
+		// hands tools a context that outlives its turn on purpose (so an in-flight
+		// tool can land its result), which means this context's Done fires ~60s
+		// after nobody is waiting for a call that never started. The turn's own
+		// deadline travels as a value (see turn_deadline.go).
+		waitCtx, cancelWait := ctx, context.CancelFunc(func() {})
+		if deadline, ok := TurnDeadline(ctx); ok {
+			waitCtx, cancelWait = context.WithDeadline(ctx, deadline)
+		}
+		defer cancelWait()
 		select {
 		case slot <- struct{}{}:
 			defer func() { <-slot }()
-		case <-ctx.Done():
-			return "", ctx.Err()
+		case <-waitCtx.Done():
+			// Name what happened. A bare "context deadline exceeded" reads like a
+			// provider fault; for a call that never started, the actionable fact
+			// is that its turn ended while it waited.
+			return "", fmt.Errorf("%s never started: its turn ended while it waited behind another invocation — re-issue it in a fresh turn (%w)",
+				name, waitCtx.Err())
 		}
 		return fn(ctx, args)
 	}
