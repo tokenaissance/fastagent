@@ -341,7 +341,13 @@ def main():
                 "iterationContinueNudge", "loopDetectedWarning", "failedRoundsNudge",
             ],
         )
-        + [("deferred tool result", "internal/agent/loop.go:2721-2725", *range_text("internal/agent/loop.go", 2721, 2725))]
+        # Single literals inside a function body move with every nearby edit, so
+        # these follow the text. (The multi-line block pins further down are
+        # still line ranges: a shift that lands on different text is the one
+        # drift this file cannot yet see, and a shift that lands on no literal
+        # fails the run — see PLACEHOLDERS.)
+        + [pinned("internal/agent/loop.go", "Deferred — this turn's parallel-tool cap",
+                  "deferred tool result")]
         + symbols("internal/agent/subagent.go", ["subagentSystemSuffix"]),
         "b-per-turn-blocks.md",
     )
@@ -367,7 +373,8 @@ def main():
                    "sandbox-absence hint"),
             sym("internal/agent/tools/sandbox_background.go", "startedMessage", "background job started"),
             ("background poll status lines", "internal/agent/tools/sandbox_background.go:330-360", *range_text("internal/agent/tools/sandbox_background.go", 330, 360)),
-            ("interrupted-call placeholder", "internal/provider/provider.go:59", *range_text("internal/provider/provider.go", 59, 59)),
+            pinned("internal/provider/provider.go", "StoppedToolResult =",
+                   "interrupted-call placeholder"),
         ],
         "d-tool-result-text.md",
     )
