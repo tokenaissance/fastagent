@@ -144,18 +144,18 @@ Return: the sub-agent's final text exactly as it produced it. You then assemble 
 
 ## exec
 
-<!-- source: internal/agent/tools/exec.go:42 (via execHostDescription) -->
+<!-- source: internal/agent/tools/exec.go:48 (via execHostDescription) -->
 
 ````text
-Execute a shell command and return stdout/stderr. For binary or image output (PNG, JPEG, PDF, audio, video), write the file into the workspace (e.g. ./out.png) and reference it by relative path in your reply — do NOT base64-encode it into stdout, and do NOT inline data: URLs in your response. The workspace file will be surfaced to the user via the Files panel.
+Execute a shell command and return stdout/stderr.
 ````
 
 ## exec
 
-<!-- source: internal/agent/tools/exec.go:44 (via execSandboxDescription) -->
+<!-- source: internal/agent/tools/exec.go:50 (via execSandboxDescription) -->
 
 ````text
-Execute a shell command in the sandbox and return stdout/stderr. For binary or image output (PNG, JPEG, PDF, audio, video), write the file into the workspace (e.g. ./out.png) and reference it by relative path in your reply — do NOT base64-encode it into stdout, and do NOT inline data: URLs in your response. The workspace file will be surfaced to the user via the Files panel.
+Execute a shell command in the sandbox and return stdout/stderr.
 ````
 
 ## read_file

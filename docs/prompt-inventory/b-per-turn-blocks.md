@@ -97,8 +97,6 @@ Tools are DISABLED for this response only — do not attempt to call any tool, i
 
 For multi-chunk fan-out work (find N leads in K categories, summarize each of M docs, draft P emails, etc.) explicitly plan to use `delegate_task` and write out the per-call task scope. That's the only way the execution turn stays inside its iteration budget; trying to do all of it directly will burn the cap on exploration and never reach synthesis.
 
-Your VERY FIRST execution action (next turn) should be `write_file('todo.md', <plan as - [ ] items>)` so the user sees a live progress panel as you work. Mention this in the plan as an explicit Step 0 (or fold it into Step 1) — the UI requires the file to render anything.
-
 Output a numbered plan with 3-7 steps. Each step is one or two sentences describing the action plus the tool you'll use, e.g. "Step 3: Use `delegate_task` to find 10 solo insurance agents in the US Sun Belt — owner-operated, mobile-phone preferred. Expected output: a markdown table.". Group related micro-actions into a single step — a plan is a roadmap, not a transcript.
 
 End with exactly one line: "Reply with 'go' to execute, or tell me what to change."
@@ -108,7 +106,7 @@ Do not start the work. Do not apologize for needing a plan. Just the plan.
 
 ## buildToolCatalogForPlan
 
-<!-- source: internal/agent/loop.go:2059 -->
+<!-- source: internal/agent/loop.go:2058 -->
 
 <!-- NOTE: 3 branch point(s) — literals concatenated in source order, not rendered -->
 
@@ -123,7 +121,7 @@ When your plan needs one of these, name it explicitly in the relevant step.
 
 ## capReachedNudge
 
-<!-- source: internal/agent/loop.go:3546 -->
+<!-- source: internal/agent/loop.go:3545 -->
 
 ````text
 systemYou've used all %d tool-call iterations available for this turn. Tools are now disabled for this final response — do not attempt to call any. Synthesize what you've already gathered into the most complete deliverable you can: if the user asked for a structured artifact (table, list, ICP summary, email drafts, etc.), produce it now from the existing tool results. For any fields you couldn't resolve, mark them as 'unknown' / 'not found' / 'partial' rather than dropping rows or skipping the structure — give the user something usable plus an honest note about what's missing. Do not apologize without delivering content.
@@ -131,7 +129,7 @@ systemYou've used all %d tool-call iterations available for this turn. Tools are
 
 ## iterationContinueNudge
 
-<!-- source: internal/agent/loop.go:3562 -->
+<!-- source: internal/agent/loop.go:3561 -->
 
 ````text
 systemYou used all %d tool-call iterations of segment %d of %d — the turn continues with a fresh %d, because the last round produced real results. Keep going toward what the user asked for: build on the tool results you already hold, target the specific gaps that are still open, and do not repeat a call whose answer you already have. Deliver as soon as you have enough instead of exploring further.
@@ -139,7 +137,7 @@ systemYou used all %d tool-call iterations of segment %d of %d — the turn cont
 
 ## loopDetectedWarning
 
-<!-- source: internal/agent/loop.go:3596 -->
+<!-- source: internal/agent/loop.go:3595 -->
 
 <!-- NOTE: 1 branch point(s) — literals concatenated in source order, not rendered -->
 
@@ -149,7 +147,7 @@ Loop detected: you called the same tool with the same arguments 3 times. Please 
 
 ## failedRoundsNudge
 
-<!-- source: internal/agent/loop.go:3608 -->
+<!-- source: internal/agent/loop.go:3607 -->
 
 <!-- NOTE: 1 branch point(s) — literals concatenated in source order, not rendered -->
 

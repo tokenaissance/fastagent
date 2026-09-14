@@ -119,7 +119,13 @@ the source file is the truth, and F lists the paths.
    loop-detection warnings with different wording.
 3. **Language and identity**: the corpus is English except one Chinese example
    in `renderChannelHints`; `renderSender`'s own comment worries that English
-   per-turn blocks dilute a Chinese-default SOUL.md.
+   per-turn blocks dilute a Chinese-default SOUL.md. **There is no language rule
+   anywhere in the corpus today** — SOUL.md is the only place a default language
+   is stated — so the question is measurement first: run
+   `scripts/prompt-language-audit.sql` (`psql "$FASTAGENT_STORAGE_DSN" -f …`) and
+   compare `zh_in_en_out_pct` across channels before touching any wording. The
+   query is itself tested against known fixtures by
+   `TestPromptLanguageAuditQueryOnFixtures`.
 4. **Weight is concentrated** (measured on this snapshot, not estimated):
    `toolDisciplineContent` 5.3K chars + `taskDelegationContent` 4.9K + `modSandbox`
    4.8K ≈ **15.0K of the 23.6K-char agent system prompt (≈3.7K of its ≈5.9K
@@ -129,3 +135,20 @@ the source file is the truth, and F lists the paths.
    the two `run_in_background` descriptions now name exactly one supported way to
    wait, pinned by `TestLongWaitRefusalNamesOnlyTheBackgroundPrimitive` and
    `TestE2BExecClockHints`.
+
+### Rules with one owner (2026-09-14)
+
+Two rules were stated twice and paid for twice on every request. Both cuts are
+pinned by a test that reads the corpus, so a later edit that re-states them fails
+the build:
+
+| Rule | Owner (kept) | Copy removed | Pinned by |
+|---|---|---|---|
+| File delivery: binary output → workspace, reference by path, never inline base64 | `modSandbox › Delivering Files to the User` (always-on) | the `exec` description's 327-char restatement (schema is sent every request) | `TestToolDescriptionsDoNotRestateTheDeliveryRule` + `TestExecDescriptionDoesNotRestateTheDeliveryRule` + `TestExecDescriptionsStayInSync` |
+| todo.md procedure (write once, flip with `edit_file`, bare filename) | `taskDelegationContent › Progress tracking via todo.md` | `planModeNudge`'s "first action writes todo.md" sentence (plan mode only) | `TestTodoRulesHaveOneOwner` |
+
+The todo.md rules are load-bearing rather than verbose: the chat panel re-fetches
+on every `write_file`/`edit_file` that touches the file and hides itself when the
+file is empty (`web/src/components/chat-screen.tsx:517-525`), so the operational
+details stay. Compressing that 2.3 K-char section is still open, pending the
+provenance of the "never write it twice in a turn" rule.

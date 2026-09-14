@@ -10,7 +10,7 @@
 
 ## long foreground wait refusal
 
-<!-- source: internal/agent/tools/exec.go:146 -->
+<!-- source: internal/agent/tools/exec.go:152 -->
 
 ````text
 Refused: this command waits ~%ds in the foreground, and a turn can end before that arrives (the smallest turn budget is 300s — the observation dies with it, the work does not). Anything that waits belongs on run_in_background:
@@ -45,8 +45,7 @@ deadline_exceeded [hint: the output above was delivered, but a process this comm
 <!-- source: internal/agent/tools/exec.go:634 -->
 
 ````text
-%w
-[hint: this looks like a sandbox-environment miss (binary or path not present in the container). If the command needs the user's actual host machine — e.g. `fastagent upgrade`, `~/Downloads`, host CLI tools — retry with the `host_exec` tool instead.]
+(no literal text in this block — it delegates to a constant listed above/below)
 ````
 
 ## background job started
