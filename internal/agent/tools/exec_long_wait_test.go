@@ -193,28 +193,35 @@ func TestExecRefusesLongForegroundSleepOnTheHostPath(t *testing.T) {
 	}
 }
 
-// The exec tool is registered twice (host closure + sandbox closure). Splitting
-// the descriptions into two constants that live side by side makes the divergence
-// reviewable; this test makes it impossible to forget one half — everything after
-// the opening clause must stay identical.
+// The exec tool is registered twice (host closure + sandbox closure). Its two
+// descriptions must stay one sentence each and differ only in where the command
+// runs — any added sentence is either the delivery rule again (owned by the
+// system prompt) or a new promise nobody made twice.
 func TestExecDescriptionsStayInSync(t *testing.T) {
-	const hostPrefix = "Execute a shell command and return stdout/stderr. "
-	const sandboxPrefix = "Execute a shell command in the sandbox and return stdout/stderr. "
+	const wantHost = "Execute a shell command and return stdout/stderr."
+	const wantSandbox = "Execute a shell command in the sandbox and return stdout/stderr."
+	if execHostDescription != wantHost {
+		t.Fatalf("host exec description = %q, want %q", execHostDescription, wantHost)
+	}
+	if execSandboxDescription != wantSandbox {
+		t.Fatalf("sandbox exec description = %q, want %q", execSandboxDescription, wantSandbox)
+	}
+}
 
-	if !strings.HasPrefix(execHostDescription, hostPrefix) {
-		t.Fatalf("host description lost its opening clause: %q", execHostDescription[:60])
-	}
-	if !strings.HasPrefix(execSandboxDescription, sandboxPrefix) {
-		t.Fatalf("sandbox description must say where it runs: %q", execSandboxDescription[:60])
-	}
-	hostBody := strings.TrimPrefix(execHostDescription, hostPrefix)
-	sandboxBody := strings.TrimPrefix(execSandboxDescription, sandboxPrefix)
-	if hostBody != sandboxBody {
-		t.Fatalf("the two exec descriptions drifted apart:\n host: %s\n sandbox: %s", hostBody, sandboxBody)
-	}
-	for _, want := range []string{"Files panel", "workspace"} {
-		if !strings.Contains(execHostDescription, want) {
-			t.Fatalf("exec description lost %q — check both registrations", want)
+// The file-delivery rule (write binary output into the workspace, reference it by
+// path, never inline base64) has exactly one owner: the sandbox module of the
+// system prompt. The exec description used to restate it — 300 characters sent on
+// every request, saying what the model already read — so it must not come back.
+// The system-prompt half of this contract is TestFileDeliveryRuleHasOneOwner.
+func TestExecDescriptionDoesNotRestateTheDeliveryRule(t *testing.T) {
+	for _, desc := range []string{execHostDescription, execSandboxDescription} {
+		for _, restated := range []string{"base64", "Files panel", "workspace file"} {
+			if strings.Contains(strings.ToLower(desc), strings.ToLower(restated)) {
+				t.Fatalf("exec description restates the delivery rule (%q): %q", restated, desc)
+			}
+		}
+		if len(desc) > 120 {
+			t.Fatalf("exec description grew back to %d chars — the schema is sent on every request: %q", len(desc), desc)
 		}
 	}
 }
