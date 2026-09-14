@@ -85,6 +85,13 @@ func (a *apiResolver) BumpAgentReloadEpoch(userID string) error {
 // system-scope sandbox settings change, avoiding a manual process restart.
 func (a *apiResolver) ReloadSandbox() error { return a.gw.ReloadSandbox() }
 
+// ReloadTaskQueue re-reads the system taskqueue namespace into the running
+// queue (concurrency, default budget, cron budget). Same reason as
+// ReloadSandbox: an operator saving settings should not have to roll pods for
+// the change to take effect.
+func (a *apiResolver) ReloadTaskQueue() error { return a.gw.ReloadTaskQueue() }
+
+
 // RegisterChannelFromConfig hot-starts a freshly-saved channel row.
 // Called by setup handlers after they persist a new bot config so the
 // adapter starts polling without a process restart.

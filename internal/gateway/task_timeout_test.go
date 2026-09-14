@@ -11,7 +11,8 @@ import (
 // differ, only when the operator configured a value, and everything else must
 // keep the queue default (zero = "queue default").
 func TestTaskTimeoutForSourcePolicy(t *testing.T) {
-	configured := &Gateway{cronTaskTimeout: 15 * time.Minute}
+	configured := &Gateway{}
+	configured.cronTaskTimeoutNs.Store(int64(15 * time.Minute))
 	cases := []struct {
 		name   string
 		gw     *Gateway

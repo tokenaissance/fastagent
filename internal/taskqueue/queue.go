@@ -172,21 +172,29 @@ func (q *Queue) processChatQueue(chatKey string, cq *chatQueue) {
 
 // executeTask runs a single task with concurrency control and timeout.
 func (q *Queue) executeTask(task *Task) {
-	// Acquire global semaphore
+	// Acquire global semaphore. Capture the channel locally: a hot reload may
+	// swap q.sem while this task runs, and releasing into the *new* channel
+	// would both strand a slot and inflate the new limit's occupancy.
+	sem := q.sem
 	select {
-	case q.sem <- struct{}{}:
+	case sem <- struct{}{}:
 	case <-q.ctx.Done():
 		return
 	}
-	defer func() { <-q.sem }()
+	defer func() { <-sem }()
 
-	// Mark running
+	// Mark running, and read the budget under the same lock so a reload can
+	// change it for the next task without racing this one.
 	now := time.Now()
 	q.mu.Lock()
 	task.Status = TaskRunning
 	task.StartedAt = &now
 	concurrent := len(q.sem)
+	budget := q.taskTimeout
 	q.mu.Unlock()
+	if task.Timeout > 0 {
+		budget = task.Timeout
+	}
 
 	slog.Info("task started",
 		"task_id", task.ID,
@@ -198,10 +206,6 @@ func (q *Queue) executeTask(task *Task) {
 	// Create timeout context. A per-task budget wins over the queue default so
 	// sources with different work shapes (cron vs interactive) do not have to
 	// share one number.
-	budget := q.taskTimeout
-	if task.Timeout > 0 {
-		budget = task.Timeout
-	}
 	ctx, cancel := context.WithTimeout(q.ctx, budget)
 	defer cancel()
 
@@ -334,4 +338,35 @@ func (q *Queue) pruneOldTasks() {
 // Stop shuts down the queue.
 func (q *Queue) Stop() {
 	q.cancel()
+}
+
+// SetDefaultTimeout changes the budget applied to tasks that did not bring
+// their own (Submits with a per-task budget win). Takes effect for the next
+// task; in-flight tasks keep the budget they started with.
+func (q *Queue) SetDefaultTimeout(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	q.mu.Lock()
+	q.taskTimeout = d
+	q.mu.Unlock()
+}
+
+// DefaultTimeout reports the current default budget.
+func (q *Queue) DefaultTimeout() time.Duration {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.taskTimeout
+}
+
+// SetMaxConcurrent resizes the global concurrency limit. Tasks already holding
+// a slot keep releasing into the semaphore they acquired from (see
+// executeTask), so a resize can neither strand a slot nor double-count one.
+func (q *Queue) SetMaxConcurrent(n int) {
+	if n <= 0 {
+		return
+	}
+	q.mu.Lock()
+	q.sem = make(chan struct{}, n)
+	q.mu.Unlock()
 }

@@ -19,6 +19,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -176,17 +177,19 @@ type Gateway struct {
 	// subagent) that found their session busy; a drain loop retries them.
 	// See internal/gateway/deferred_turns.go.
 	deferred *deferredTurns
-	// cronTaskTimeout is the turn budget for cron-fired turns when the
+	// cronTaskTimeoutNs is the turn budget for cron-fired turns when the
 	// operator configured one (TaskQueueCfg.CronTimeoutSec); zero means the
-	// queue default. See docs/session-turn-integrity.md, P5.
-	cronTaskTimeout time.Duration
-	store           store.Store
-	accounts        *users.Accounts
-	workspace       workspace.Store
-	sandboxPool     sandbox.ExecutorPool
-	usage           usage.Meter
-	quotaStore      usage.QuotaStore
-	envCfg          *config.EnvConfig
+	// queue default. Stored as atomic nanoseconds because every routing path
+	// reads it and the taskqueue namespace hot-reloads (Gateway.ReloadTaskQueue).
+	// See docs/session-turn-integrity.md, P5.
+	cronTaskTimeoutNs atomic.Int64
+	store             store.Store
+	accounts          *users.Accounts
+	workspace         workspace.Store
+	sandboxPool       sandbox.ExecutorPool
+	usage             usage.Meter
+	quotaStore        usage.QuotaStore
+	envCfg            *config.EnvConfig
 	// invalidator broadcasts cross-replica agent reloads over Redis
 	// pub/sub. nil when Redis is disabled (single-instance deployments
 	// only need the local ReloadAgents call).
@@ -281,8 +284,10 @@ func (g *Gateway) submitTask(agentName, chatKey string, msg bus.InboundMessage, 
 // deliberately long agent work. Web turns never reach the queue — the dashboard
 // handler carries its own 45-minute budget.
 func (g *Gateway) taskTimeoutFor(msg bus.InboundMessage) time.Duration {
-	if msg.Source == bus.SourceCron && g.cronTaskTimeout > 0 {
-		return g.cronTaskTimeout
+	if msg.Source == bus.SourceCron {
+		if ns := g.cronTaskTimeoutNs.Load(); ns > 0 {
+			return time.Duration(ns)
+		}
 	}
 	return 0
 }
@@ -514,14 +519,14 @@ func New(env *config.EnvConfig) (*Gateway, error) {
 					g.NotifyAgentReload(userID, agentID)
 				}
 			}),
-		chanMgr:         chanMgr,
-		webChan:         webChan,
-		scheduler:       scheduler,
-		webhookSrv:      webhookSrv,
-		pluginMgr:       pluginMgr,
-		envCfg:          env,
-		cronTaskTimeout: cronTaskTimeout,
+		chanMgr:    chanMgr,
+		webChan:    webChan,
+		scheduler:  scheduler,
+		webhookSrv: webhookSrv,
+		pluginMgr:  pluginMgr,
+		envCfg:     env,
 	}
+	g.cronTaskTimeoutNs.Store(int64(cronTaskTimeout))
 
 	if webhookSrv != nil {
 		webhookSrv.SetHandler(&webhookAgentHandler{gateway: g})
