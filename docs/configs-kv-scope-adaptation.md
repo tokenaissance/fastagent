@@ -470,6 +470,30 @@ agent 行写入路径 `setup` → `TestSettings_AllCapsKeyDualWriteE2E`；跨副
 `web/src/app/models/page.tsx` 的 `modelTarget`，handler 与卡片都从它取值——所以"字段显示的"
 与"开关写入的"不可能分叉。
 
+### 模型字符串里的 provider 前缀（2026-09-14）
+
+模型值有两种合法写法，而它们**打到上游的模型名完全一样**——前缀只决定「用谁的 key」：
+
+| 写法 | runtime 选谁 | 依据 |
+|---|---|---|
+| `<providerKey>/<modelId>`，且该 provider 行有 key | 用**那一行**的 key + base | `internal/agent/manager.go` `providerForAgent` |
+| 裸 `<modelId>`、前缀指向不存在的行、或该行没有 key | **静默回落**到共享 provider（user-space 级） | 同一函数的三条回落路径 |
+
+发往上游前前缀会被剥掉（`provider.StripProviderPrefix`，`internal/provider/provider.go`，
+`openai.go` / `anthropic.go` 各调用一次）。所以「模型名没错却报
+No available channel for model X under group Y」的成因不是名字，而是**这次请求走了另一个
+账号/分组**——裸名与带前缀打到同一个线上模型，但落在不同的 key 上。
+
+这三条回落现在都会在 **agent 构建时**打一条 WARN（模型名、三种情形各自的线索，以及
+`knownProviderKeys`），回归：`internal/agent` →
+`TestProviderForAgentLogsEverySilentFallback`。「构建时」这三个字要留意：写入配置 ≠ 立刻生效，
+还需要 UserSpace 缓存失效（`notifyAgentChanged` / `NotifySystemReload` 那条线）。
+
+写入面同样要留意：`/model` 命令与面板都是**原样写入**（`slash.go:119`；面板
+`models/page.tsx` 的下拉选项值是 `provider/modelId`，没有可选 provider 时退化成手填）。
+面板现在会对**生效值缺前缀**的情形显示「No provider prefix」告警，并把可见的 provider key
+做成一键补前缀（改的是同一个 `modelTarget`，不替用户偷偷改写）。
+
 ### 依赖面：store 的能力端口（`internal/store/ports.go`）
 
 `store.Store` 是 120 个方法的单一接口，而 configs 域实际只用十来个：读侧
