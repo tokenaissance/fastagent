@@ -61,12 +61,19 @@ cheap way to get more, so the model can re-ask narrowly instead of guessing —
 
 | Producer | File | Clip site |
 |---|---|---|
-| e2b exec stream | `internal/sandbox/e2b_executor.go` | `execOn`, after the frames are joined |
+| e2b exec (tool) | `internal/sandbox/e2b_executor.go` | `Exec`, on every return path — **not** in `execOn` |
+| e2b workspace snapshot | `internal/sandbox/e2b_executor.go` | not clipped; refused when over `snapshotBase64Cap` (below) |
 | docker exec | `internal/sandbox/docker.go` | `Exec`, after `CombinedOutput` |
 | host exec (sandbox-mode agent) | `internal/agent/tools/exec.go` | after `CombinedOutput` |
 | host exec (CLI bridge) | `internal/agent/tools/exec.go` | `registerHostExec` |
 | **every** tool, both loops | `internal/agent/loop.go` | the `for … range results` result handler |
 | every sub-agent tool | `internal/agent/subagent.go` | the sub-agent result handler |
+
+The bound sits on the **port**, not inside the shared interpreter. `execOn` is
+one function with two callers whose contracts differ, and the first draft of
+this fix clipped it — which would have turned the incident below from "the pod
+died" into "the workspace sync silently stopped", because a clipped base64 tar
+decodes to nothing. `Exec` clips; `SnapshotWorkspace` refuses.
 
 The last two are a backstop, not the fix. They exist because a producer can be
 added without a clip — a plugin tool, an MCP server that returns a dump,
@@ -76,6 +83,32 @@ all. Producers clip first; the loop catches what they miss.
 `bash_output` needs no clip: the background-exec probe already limits one
 payload to 64 KiB (`sandboxJobOutputCap`) and reports the unread remainder
 separately.
+
+## The other producer on the same transport: the workspace snapshot
+
+`SnapshotWorkspace` ships `tar -czf - -C /workspace . | base64 -w0` back over
+stdout after **every** exec (the pool's `post-exec` flush), and it is what the
+76 MB in the incident actually was:
+
+* `outputLen` 76,277,676 → 76,277,876 across calls seconds apart — the tar grows
+  because a file under `/workspace` grows;
+* `bodyBytes` 101.9 MB ≈ 76 MB × 4/3 — the base64 inflation, exactly;
+* each snapshot lands between the command's start and its "after tool call"
+  hook, because the flush is deferred inside `Exec`.
+
+So the payload is bounded too, at 32 MiB of base64 (`snapshotBase64Cap`,
+~24 MiB of gz), but it **fails** rather than truncates — and it names the
+largest paths under `/workspace` (`du -ak | sort -rn | head -3`) so the
+remedy is visible:
+
+```text
+workspace snapshot is 34.7 MB (over the 32.0 MB cap) — refusing to flush
+/workspace after every exec; move large or growing files out of /workspace
+(use /tmp for run logs) and retry. Largest entries: 26624 /workspace/kronos-wide-run.log, …
+```
+
+`internal/sandbox/lifecycle.go` turns that into
+`WARN sandbox sync: snapshot failed … cause=post-exec`.
 
 ## Observability
 
@@ -105,6 +138,10 @@ of the payload would have hidden this incident rather than bounded it.
   separate change with its own review; it is not needed to stop the OOM.
 * **No truncation of the model's own text.** Only tool results. Assistant
   output is bounded by `maxTokens` already.
+* **The snapshot still goes through exec as base64.** A files API PUT (the
+  shape the boxlite backend already uses) would avoid the 4/3 inflation and the
+  1 GiB-sized `[]byte` entirely. That is a transport change, not a bound; the
+  cap above is what stops it from killing a pod today.
 
 ## Tests
 
@@ -117,10 +154,16 @@ of the payload would have hidden this incident rather than bounded it.
 | `TestHostExecClipsHugeOutput` | the host exec path clips too |
 | `TestHostExecLeavesNormalOutputAlone` | …without touching normal output |
 | `TestToolResultIsClippedBeforeItReachesHistory` | a tool that bypasses every producer still lands in session history clipped, both ends intact |
+| `TestWorkspaceSnapshotIsNotClippedByTheToolResultCap` | a 270 KB snapshot round-trips byte-for-byte — the clip stays off the machine payload |
+| `TestWorkspaceSnapshotRefusesAnOversizedWorkspace` | over the cap it errors, names the cap and the biggest file, and is never truncated |
 
 The last one is the sensitivity check for the loop backstop: with
 `ClipAndLog` removed from `loop.go` it fails with
 `315020 bytes of tool output were stored unclipped`.
+
+Sensitivity for the snapshot pair: with the clip (wrongly) put back into
+`execOn`, `TestWorkspaceSnapshotIsNotClippedByTheToolResultCap` fails with
+`snapshot workspace decode: illegal base64 data at input byte 65538`.
 
 ## Where the code lives
 
@@ -130,12 +173,23 @@ The last one is the sensitivity check for the loop backstop: with
 * `internal/agent/tools/output_clip_unix_test.go` — host exec path.
 * `internal/agent/tool_result_clip_test.go` — the loop backstop, through
   session history.
+* `internal/sandbox/e2b_snapshot_cap_test.go` — the snapshot contract
+  (not clipped; refused when over cap).
 
 ## Advice to the job scripts (not a code change)
 
-The producer that triggered this incident was the model reading a job log
-through `exec`. The scripts should stop making that attractive: write
-per-item progress to a file (or a single summary line), so no `ls`, `tail` or
-`cat` of them can grow without bound. See
-[Background execution inside a sandbox](sandbox-background-exec.md) for the
-handle-based way to start and observe long jobs.
+The clip is a backstop, not a licence to print megabytes. What the job scripts
+should do so no answer ever needs to be 70 MB:
+
+| Do | Instead of |
+|---|---|
+| Write per-item progress into a file under `/tmp` | printing a line per item to stdout |
+| Print one summary line per run (`done=41/89 failed=1`) | printing the whole state on every poll |
+| Keep run artifacts under `/tmp`, copy only final results into `/workspace` | leaving a growing run log in `/workspace` — it is re-uploaded after *every* exec (see above) |
+| Be startable by a single command that is idempotent and resumable | requiring a status check between steps |
+| Read progress with `wc -l`, `tail -n 40`, `grep -c` | `cat`, or `ls -la` over a directory of thousands of files |
+
+Start the job with `exec({"command": …, "run_in_background": true})` and read it
+with `bash_output` — not a foreground `timeout 245 bash job.sh`, and never a
+`sleep` inside the start call. See
+[Background execution inside a sandbox](sandbox-background-exec.md).
