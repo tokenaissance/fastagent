@@ -210,11 +210,43 @@ def range_text(rel, start, end):
     return "".join(literals(body)), branchy(body)
 
 
+# Blocks whose pinned range holds no string literal render as a placeholder
+# sentence. That is right for the module entries (their text is assembled from
+# constants listed elsewhere in this inventory) and wrong for a text that is
+# supposed to be captured here — a drifted line number then erases a prompt
+# silently, which is how the tool-result error suffix left the inventory twice
+# (registry.go 864 → 918 → 931). Track them so the run says which ones they are.
+PLACEHOLDERS = []
+
+
+def pinned_text(rel, needle):
+    """Find the one line holding `needle` and return its number.
+
+    Content, not position: these pins name a single line of prompt text, and a
+    line number breaks on every insertion above it. Ambiguity is an error too —
+    a needle matching two lines would pin whichever came first.
+    """
+    hits = [i + 1 for i, line in enumerate(read(rel)) if needle in line]
+    if len(hits) != 1:
+        raise SystemExit(
+            "%s: pin %r matches %d lines (want exactly one) — the text moved or was "
+            "duplicated" % (rel, needle, len(hits)))
+    return hits[0]
+
+
+def pinned(rel, needle, label, note_override=None):
+    """A one-line prompt entry that finds its line by content, not by number."""
+    line = pinned_text(rel, needle)
+    text, note = range_text(rel, line, line)
+    return (label, "%s:%d" % (rel, line), text, note if note_override is None else note_override)
+
+
 def section(title, blocks, out):
     chunks = ["# %s\n" % title]
     for label, loc, text, note in blocks:
         if not text.strip():
             text = "(no literal text in this block — it delegates to a constant listed above/below)"
+            PLACEHOLDERS.append("%s (%s)" % (label, loc))
         chunk = "## %s\n\n<!-- source: %s -->\n" % (label, loc)
         if note:
             chunk += "\n<!-- NOTE: %d branch point(s) — literals concatenated in source order, not rendered -->\n" % note
@@ -323,15 +355,16 @@ def main():
     section(
         "D. Text injected into tool results",
         [
-            # The suffix moved into the retry wrapper when the constant was
-            # extracted; 864 was a helper function by then, which the extractor
-            # renders as "(no literal text in this block)". Keep the pin on the
-            # line that actually appends the text to a result.
-            ("error suffix on every failed tool", "internal/agent/tools/registry.go:918", *range_text("internal/agent/tools/registry.go", 918, 918)),
+            # Both of these name a single line of text, and both have already
+            # been lost once to a line number that drifted — so they follow the
+            # text instead.
+            pinned("internal/agent/tools/registry.go", "Analyze the error above and try a different approach.",
+                   "error suffix on every failed tool"),
             sym("internal/agent/tools/exec.go", "longWaitRefusal", "long foreground wait refusal"),
             sym("internal/sandbox/e2b_executor.go", "execCancelledHintText", "exec cancelled hint", False),
             sym("internal/sandbox/e2b_executor.go", "execStalledHint", "exec stalled hint"),
-            ("sandbox-absence hint", "internal/agent/tools/exec.go:642", *range_text("internal/agent/tools/exec.go", 642, 642)),
+            pinned("internal/agent/tools/exec.go", "this looks like a sandbox-environment miss",
+                   "sandbox-absence hint"),
             sym("internal/agent/tools/sandbox_background.go", "startedMessage", "background job started"),
             ("background poll status lines", "internal/agent/tools/sandbox_background.go:330-360", *range_text("internal/agent/tools/sandbox_background.go", 330, 360)),
             ("interrupted-call placeholder", "internal/provider/provider.go:59", *range_text("internal/provider/provider.go", 59, 59)),
@@ -361,6 +394,11 @@ def main():
         "review `skills/fastagent-skill-learner/SKILL.md`.\n"
     DOCS["f-skills.md"] = body
     print("%-32s %5d chars" % ("f-skills.md", len(body)))
+
+    if PLACEHOLDERS:
+        print("rendered as a placeholder instead of text (expected for the module entries):")
+        for p in PLACEHOLDERS:
+            print("  - %s" % p)
 
     if "--check" in sys.argv:
         check()
