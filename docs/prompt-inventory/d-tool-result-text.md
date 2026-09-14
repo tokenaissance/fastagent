@@ -2,7 +2,7 @@
 
 ## error suffix on every failed tool
 
-<!-- source: internal/agent/tools/registry.go:918 -->
+<!-- source: internal/agent/tools/registry.go:935 -->
 
 ````text
 [Analyze the error above and try a different approach.]
@@ -24,7 +24,7 @@ Re-issue the same command with run_in_background — do not sleep in a foregroun
 
 ## exec cancelled hint
 
-<!-- source: internal/sandbox/e2b_executor.go:969 -->
+<!-- source: internal/sandbox/e2b_executor.go:1016 -->
 
 ````text
  [hint: the exec request was cancelled by the runtime, not by the sandbox — the turn's budget expired, the turn was superseded, or the caller disconnected. A process this command started may still be running inside the sandbox: check it (ps, plus whatever log file it was redirected to) and adopt that result before re-running anything. To make that check possible next time, start it with exec({"run_in_background": true}) and read it with bash_output.]
@@ -32,7 +32,7 @@ Re-issue the same command with run_in_background — do not sleep in a foregroun
 
 ## exec stalled hint
 
-<!-- source: internal/sandbox/e2b_executor.go:984 -->
+<!-- source: internal/sandbox/e2b_executor.go:1031 -->
 
 <!-- NOTE: 2 branch point(s) — literals concatenated in source order, not rendered -->
 

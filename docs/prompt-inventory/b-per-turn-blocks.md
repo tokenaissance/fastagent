@@ -165,7 +165,7 @@ Deferred — this turn's parallel-tool cap is %d, and you emitted %d. Re-issue t
 
 ## subagentSystemSuffix
 
-<!-- source: internal/agent/subagent.go:346 -->
+<!-- source: internal/agent/subagent.go:396 -->
 
 ````text
 # Subagent mode
