@@ -38,7 +38,15 @@ jobs:
         # executor, so the interesting bugs are races. The rebuild tests drive
         # that concurrency deliberately, and the test doubles had to grow locks
         # of their own the first time this ran.
-        run: go test ./internal/sandbox/ ./internal/store/ ./internal/gateway/ -count=1 -race
+        # The live e2b tests (TestE2BPool…, TestSandboxBackgroundE2BLive) are owned
+        # by the credentials job below; they FAIL — by design, so a green run can't
+        # be mistaken for verified — when the secrets are absent, and this job has
+        # no secrets. Skipping them by name keeps that rule intact for the job that
+        # owns them instead of weakening it here.
+        run: >
+          go test ./internal/sandbox/ ./internal/store/ ./internal/gateway/
+          -skip '^TestE2BPoolCrossPodAdoption$|^TestE2BPoolCrossPodRebuild$|^TestSandboxBackgroundE2BLive$'
+          -count=1 -race
 
   sandbox-leases-e2b:
     name: Live E2B cross-pod adoption (credentials required)
@@ -86,7 +94,12 @@ jobs:
       # concurrent tool calls and the sweeper/exec paths already race-tested
       # elsewhere: a mutex bug here would only show up as a lost cursor.
       - name: Background exec tests (docker runner provides docker)
-        run: go test ./internal/agent/tools/ -run 'Sandbox|Background' -count=1 -race -v
+        # Same split as above: the live e2b background test belongs to the job that
+        # holds the credentials.
+        run: >
+          go test ./internal/agent/tools/ -run 'Sandbox|Background'
+          -skip '^TestSandboxBackgroundE2BLive$'
+          -count=1 -race -v
 
   prompt-inventory:
     name: prompt snapshot matches the source
