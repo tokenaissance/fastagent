@@ -413,7 +413,7 @@ func registerSandboxedExec(r *Registry, ex sandbox.Executor) {
 			},
 			"run_in_background": map[string]interface{}{
 				"type":        "boolean",
-				"description": "Launch the command in the sandbox and return a bash_id immediately, without waiting for it to finish. Use it for anything longer than the tool timeout (training runs, batch jobs, dev servers): read output later with bash_output(bash_id), stop it with kill_shell(bash_id). The job keeps running after this call returns and until it exits or is killed.",
+				"description": "Launch the command in the sandbox and return a bash_id immediately, without waiting for it to finish. Use it for anything longer than the tool timeout (training runs, batch jobs, dev servers): read output later with bash_output(bash_id), stop it with kill_shell(bash_id). The job keeps running after this call returns and until it exits or is killed — the `timeout` argument does not apply to it.",
 			},
 		},
 		"required": []string{"command"},
