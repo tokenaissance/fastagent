@@ -87,3 +87,41 @@ func TestDoctorSessionsFindsAndFixesDuplicateReplies(t *testing.T) {
 		t.Fatalf("post-fix scan still reports findings: %v", err)
 	}
 }
+
+// Since Q4 the loop leaves an interrupted turn's tool call open instead of
+// persisting a synthetic reply, so an unanswered call in stored history is the
+// expected shape, not debt. The command must still print it (an operator wants
+// to see the interruption) but must not fail a gate on it — only duplicates
+// and orphans are actionable.
+func TestDoctorSessionsTreatsOpenCallAsExpected(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "fastagent.db")
+	ctx := context.Background()
+
+	db, err := store.NewDBStore("sqlite", "file:"+dbPath+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if err := db.SaveSession(ctx, "u_1", "agt_1", "s-open", &store.SessionRecord{
+		Channel: "web", ChatID: "s-open",
+		Messages: []store.SessionMessage{
+			{Role: "user", Content: "run it"},
+			{Role: "assistant", ToolCalls: []provider.ToolCall{{
+				ID: "call_open", Type: "function", Function: provider.FunctionCall{Name: "exec"},
+			}}},
+			{Role: "user", Content: "you there?"},
+		},
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	_ = db.Close()
+
+	scan := doctorCmd()
+	scan.SetArgs([]string{"sessions", "--db", dbPath, "--json"})
+	if err := scan.Execute(); err != nil {
+		t.Fatalf("open call must not fail the gate: %v", err)
+	}
+}

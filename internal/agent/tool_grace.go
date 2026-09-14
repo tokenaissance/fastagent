@@ -11,11 +11,11 @@ import (
 // timeout, IM/web deadline) or a client Stop.
 //
 // Without a grace the cancellation reaches the tool immediately, the round
-// records nothing, and the turn ends with an orphan tool_use that
-// padOrphanToolResults has to answer with a synthetic "stopped" reply. That
-// synthetic reply is a truthful record of an interruption, but it is also
-// what a late real result collided with in the 2026-09-13 incident. A grace
-// lets the tool finish and the history record its actual answer instead.
+// records nothing and the turn ends with an unanswered tool_use that only
+// the prompt projection can fill with a synthetic "stopped" reply. A grace
+// lets the tool finish and the history record its actual answer instead —
+// the difference between "the model sees what the tool returned" and "the
+// model sees that it was interrupted".
 const toolGraceDefault = 60 * time.Second
 
 // toolGraceContext returns a context for one round of tool execution that

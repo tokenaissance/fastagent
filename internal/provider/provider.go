@@ -45,12 +45,17 @@ const (
 	OriginGoalContext = "goal_context"
 )
 
-// StoppedToolResult is the synthetic `tool` reply the agent loop writes for
-// a tool_use that was still in flight when the turn exited (client Stop,
-// task-queue timeout, daemon restart). Shared with the wire builder so the
-// pad and the sanitizer can't drift apart on the literal — the sanitizer
-// has to be able to reason about these replies to keep exactly one of them
-// per tool_call_id (see findOrphanToolCalls).
+// StoppedToolResult is the literal the prompt projection
+// (internal/agent/normalize.go) uses to answer a tool call that stored
+// history left open — a turn that exited with a tool_use in flight (client
+// Stop, task-queue timeout, the loop detector breaking out) keeps that call
+// unanswered on purpose (docs/session-turn-integrity.md, Q4).
+//
+// Nothing writes it into a session: the projection is the only producer, so
+// the stored record keeps the truth (the call was never answered) and no
+// synthetic reply can collide with a late real result. Tests and the doctor
+// fixtures still name the literal to build pre-Q4 and incident-shaped
+// histories, which is why it lives in provider rather than agent.
 const StoppedToolResult = "(stopped — execution was interrupted before the tool returned)"
 
 // Message represents a chat message.

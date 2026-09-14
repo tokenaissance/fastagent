@@ -54,7 +54,10 @@ func TestCompactionOutputNormalisesToAPairingCleanHistory(t *testing.T) {
 			}),
 		},
 		{
-			// Duplicate replies inside the retained tail (the incident shape).
+			// Duplicate replies inside the retained tail (the incident
+			// shape). Only a pre-Q4 history can carry this: the loop no
+			// longer persists synthetic replies, so a duplicate needs an
+			// old session whose pad is still in storage.
 			name: "retained tail carries a duplicate reply",
 			msgs: build(func(msgs []provider.Message) []provider.Message {
 				return append(msgs,
@@ -63,6 +66,21 @@ func TestCompactionOutputNormalisesToAPairingCleanHistory(t *testing.T) {
 					}}},
 					provider.Message{Role: "tool", ToolCallID: "call_dup", Name: "exec", Content: provider.StoppedToolResult},
 					provider.Message{Role: "tool", ToolCallID: "call_dup", Name: "exec", Content: "real"},
+				)
+			}),
+		},
+		{
+			// The Q4 shape: a turn was interrupted, so the retained tail
+			// carries an assistant call that stored history never answers.
+			// Nothing was persisted to repair — the projection has to
+			// produce the reply, and compaction must not have changed the
+			// call into something it can't answer.
+			name: "retained tail carries an open call (interrupted turn)",
+			msgs: build(func(msgs []provider.Message) []provider.Message {
+				return append(msgs,
+					provider.Message{Role: "assistant", ToolCalls: []provider.ToolCall{{
+						ID: "call_open", Type: "function", Function: provider.FunctionCall{Name: "exec"},
+					}}},
 				)
 			}),
 		},

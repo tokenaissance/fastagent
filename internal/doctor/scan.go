@@ -25,6 +25,9 @@ const (
 	// OrphanReply — a tool reply whose call no assistant message declared.
 	OrphanReply Kind = "orphan_tool_reply"
 	// UnansweredCall — an assistant declared a call that no reply answers.
+	// Since Q4 (docs/session-turn-integrity.md) this is the shape stored
+	// history is SUPPOSED to show for an interrupted turn: the loop leaves
+	// the call open, and the prompt projection answers it at request time.
 	UnansweredCall Kind = "unanswered_tool_call"
 )
 
@@ -34,6 +37,29 @@ type Finding struct {
 	Index      int    `json:"index"`
 	ToolCallID string `json:"toolCallId"`
 	Detail     string `json:"detail,omitempty"`
+}
+
+// Expected reports whether the finding describes a shape the runtime leaves
+// in stored history on purpose, which the prompt projection
+// (internal/agent/normalize.go) repairs at request time. An open call is
+// exactly that: after Q4 the loop no longer persists a synthetic reply, so an
+// interrupted turn shows up here and needs no operator. Duplicates and
+// orphans do need one — nothing in the runtime writes them any more, so their
+// presence means old or foreign history (the incident's duplicate replies, a
+// compaction that dropped a declaring assistant).
+func (f Finding) Expected() bool { return f.Kind == UnansweredCall }
+
+// Unexpected returns the findings that need an operator: everything except
+// the shapes Expected classifies. `doctor sessions` gates on this, not on the
+// raw finding count.
+func Unexpected(findings []Finding) []Finding {
+	var out []Finding
+	for _, f := range findings {
+		if !f.Expected() {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 // Scan returns every tool-call pairing violation in msgs, ordered by message

@@ -276,8 +276,10 @@ function buildChatMessages(history: ChatHistoryMessage[]): ChatMessage[] {
       // we leave the tool-result run got orphaned (client aborted, server
       // crashed mid-turn, persistence path raced). Mark them stopped so
       // the UI shows a terminal state instead of spinning forever.
-      // Newer turns will have these padded server-side via
-      // padOrphanToolResults; this catches sessions that pre-date the fix.
+      // This derivation is the only source of that "(stopped)" state
+      // since Q4: the server deliberately leaves an interrupted call
+      // unanswered in history (the model gets a synthetic reply from the
+      // prompt projection, which is not persisted).
       for (const c of calls) {
         if (c.result === undefined) {
           c.result = "(stopped)";
@@ -1763,9 +1765,10 @@ export function ChatScreen() {
       // a confusing failure bubble.
       if (isAbort) {
         // Resolve any in-flight tools in the current tool-group so they
-        // stop spinning. Server-side padOrphanToolResults will write a
-        // matching record on its end; this just keeps the UI consistent
-        // until the next history fetch overwrites it.
+        // stop spinning. The server keeps the call open (no synthetic
+        // record is persisted), so the next history fetch re-derives this
+        // same "(stopped)" state from the unanswered call: this is what
+        // makes the turn look terminal now rather than after a reload.
         setMessages((prev) =>
           prev.map((m) =>
             m.role === "tool-group" && m.toolCalls

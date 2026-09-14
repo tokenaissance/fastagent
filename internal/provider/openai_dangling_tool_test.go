@@ -58,12 +58,12 @@ func TestToAPIMessagesKeepsAnsweredPairAndDropsStrayReply(t *testing.T) {
 
 // TestToAPIMessagesDropsDuplicateToolReplies pins the production incident
 // this file's sanitizer already claims to cover: a turn killed while a tool
-// was in flight (the 300s task-queue timeout) writes its synthetic
-// "stopped" reply via padOrphanToolResults, and the interrupted tool's real
-// result is appended afterwards for the SAME tool_call_id. Both replies sit
-// directly after the declaring assistant, so neither the orphan-assistant
-// nor the dangling-reply scan fires and the request ships two answers for
-// one tool_call_id. DeepSeek-style validators reject that with
+// was in flight (the 300s task-queue timeout) wrote a synthetic "stopped"
+// reply, and the interrupted tool's real result landed afterwards for the
+// SAME tool_call_id. Both replies sit directly after the declaring
+// assistant, so neither the orphan-assistant nor the dangling-reply scan
+// fires and the request ships two answers for one tool_call_id. DeepSeek-style
+// validators reject that with
 // "Messages with role 'tool' must be a response to a preceding message with
 // 'tool_calls'" — the second reply no longer answers an OPEN tool call.
 // Exactly one reply per tool_call_id may leave the wire builder.

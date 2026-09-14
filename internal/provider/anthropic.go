@@ -62,12 +62,14 @@ func toAnthropicMessages(msgs []Message) (string, []anthropicMessage) {
 	// in the immediately following message. The agent loop can produce
 	// this shape when loop detection / cap-reached synthesis injects a
 	// system or assistant message between the tool_use and the
-	// padOrphanToolResults pad. Reuse the openai-path scanner to flag
-	// orphan assistant tool_calls, then sweep the WHOLE message list
-	// for any tool replies whose tool_use we just decided to drop —
-	// the openai scanner only checks the immediate tool-run, which
-	// misses pad results that land after intervening non-tool messages.
-	// Session history stays untouched; this only affects wire build.
+	// tool result, and on histories that pre-date the prompt projection
+	// (normalizeForPrompt) — compaction can drop the declaring assistant
+	// while keeping its replies. Reuse the openai-path scanner to flag
+	// orphan assistant tool_calls, then sweep the WHOLE message list for
+	// any tool replies whose tool_use we just decided to drop — the openai
+	// scanner only checks the immediate tool-run, which misses replies
+	// that land after intervening non-tool messages. Session history stays
+	// untouched; this only affects wire build.
 	orphanAssistant, orphanTool := findOrphanToolCalls(msgs)
 	orphanIDs := map[string]bool{}
 	for i, m := range msgs {

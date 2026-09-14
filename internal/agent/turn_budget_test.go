@@ -69,10 +69,10 @@ func (p *streamProvider) ChatStream(ctx context.Context, _ []provider.Message, _
 // When a turn's budget expires mid-tool, the tool still gets its grace window
 // to produce a real result, and the turn then stops (the next model round is
 // refused because the turn's own context is done). Before the grace existed
-// the tool was aborted together with the turn, the round recorded nothing, and
-// padOrphanToolResults had to answer with a synthetic "stopped" reply — the
-// reply that collided with a late real result in the 2026-09-13 incident
-// (docs/session-turn-integrity.md, P5).
+// the tool was aborted together with the turn and the round recorded nothing,
+// so the call stayed open and the projection had to answer it with a synthetic
+// "stopped" reply — the same shape whose persisted form collided with a late
+// real result in the 2026-09-13 incident (docs/session-turn-integrity.md, P5).
 func TestTurnBudgetExpiryLetsInFlightToolRecordItsResult(t *testing.T) {
 	a, _ := newGateAgent(t)
 	// Budget expires quickly, the tool finishes well inside a generous grace:

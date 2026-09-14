@@ -34,6 +34,7 @@ type doctorSessionReport struct {
 	SessionKey string           `json:"sessionKey"`
 	Messages   int              `json:"messages"`
 	Findings   []doctor.Finding `json:"findings"`
+	Unexpected int              `json:"unexpected"`
 	Fixed      int              `json:"fixed,omitempty"`
 	BackupPath string           `json:"backupPath,omitempty"`
 }
@@ -63,13 +64,19 @@ The same shapes are repaired at request time by the prompt projection
 (internal/agent/normalize.go) and the wire builder, so findings are not
 necessarily user-visible — they are the history debt behind those repairs.
 
+An unanswered call is EXPECTED, not debt: a turn that exits with a tool in
+flight (client Stop, budget expiry, the loop detector breaking out) leaves
+the call open on purpose and the projection answers it at request time
+(docs/session-turn-integrity.md, Q4). It is reported, and it does not fail
+the command. Duplicate and orphan findings do.
+
 With --fix, duplicate replies (everything after the first reply for a
 tool_call_id) are removed from the stored working set; the row is backed up to
 <backup-dir>/<sessionKey>.json first. Orphan and unanswered findings are
 reported only: the projection handles them without rewriting history.
 
-Exits 1 when findings remain (so a check can gate on it), 0 when clean or
-after --fix.
+Exits 1 when unexpected findings remain (so a check can gate on it), 0 when
+only expected (unanswered) findings remain, when clean, or after --fix.
 
 Storage: --db <path> reads a local sqlite file (default ~/.fastagent/fastagent.db);
 without --db the store comes from the environment, which is how you point it at
@@ -93,7 +100,7 @@ Examples:
 			}
 
 			var reports []doctorSessionReport
-			var totalFixed int
+			var totalFixed, totalUnexpected, actionable int
 			for _, snap := range snaps {
 				if sessionKey != "" && snap.SessionKey != sessionKey {
 					continue
@@ -106,6 +113,11 @@ Examples:
 				report := doctorSessionReport{
 					UserID: snap.UserID, AgentID: snap.AgentID, SessionKey: snap.SessionKey,
 					Messages: len(snap.Messages), Findings: findings,
+					Unexpected: len(doctor.Unexpected(findings)),
+				}
+				totalUnexpected += report.Unexpected
+				if report.Unexpected > 0 {
+					actionable++
 				}
 
 				if fix {
@@ -123,6 +135,7 @@ Examples:
 				if err := enc.Encode(map[string]any{
 					"scanned":     len(snaps),
 					"affected":    len(reports),
+					"unexpected":  totalUnexpected,
 					"fixed":       totalFixed,
 					"generatedAt": time.Now().UTC().Format(time.RFC3339),
 					"sessions":    reports,
@@ -130,11 +143,11 @@ Examples:
 					return err
 				}
 			} else {
-				printDoctorReport(len(snaps), reports, totalFixed, fix)
+				printDoctorReport(len(snaps), reports, totalFixed, totalUnexpected, fix)
 			}
 
-			if len(reports) > 0 && !fix {
-				return fmt.Errorf("%d session(s) carry tool-call pairing findings", len(reports))
+			if actionable > 0 && !fix {
+				return fmt.Errorf("%d session(s) carry tool-call pairing findings that need an operator", actionable)
 			}
 			return nil
 		},
@@ -218,7 +231,7 @@ func repairDuplicateReplies(ctx context.Context, db *store.DBStore, snap store.S
 	return nil
 }
 
-func printDoctorReport(scanned int, reports []doctorSessionReport, fixed int, didFix bool) {
+func printDoctorReport(scanned int, reports []doctorSessionReport, fixed, unexpected int, didFix bool) {
 	if len(reports) == 0 {
 		fmt.Printf("doctor sessions: %d session(s) scanned, no tool-call pairing findings\n", scanned)
 		return
@@ -231,11 +244,11 @@ func printDoctorReport(scanned int, reports []doctorSessionReport, fixed int, di
 		}
 		for _, kind := range []doctor.Kind{doctor.DuplicateReply, doctor.OrphanReply, doctor.UnansweredCall} {
 			if counts[kind] > 0 {
-				fmt.Printf("  %-22s %d\n", kind, counts[kind])
+				fmt.Printf("  %-22s %d%s\n", kind, counts[kind], expectedNote(kind))
 			}
 		}
 		for _, f := range r.Findings {
-			fmt.Printf("    [%d] %s %s\n", f.Index, f.Kind, f.ToolCallID)
+			fmt.Printf("    [%d] %s %s%s\n", f.Index, f.Kind, f.ToolCallID, expectedNote(f.Kind))
 		}
 		if r.Fixed > 0 {
 			fmt.Printf("  fixed %d duplicate repl(y|ies); backup: %s\n", r.Fixed, r.BackupPath)
@@ -246,6 +259,21 @@ func printDoctorReport(scanned int, reports []doctorSessionReport, fixed int, di
 			scanned, len(reports), fixed)
 		return
 	}
-	fmt.Printf("doctor sessions: %d session(s) scanned, %d affected (re-run with --fix to remove duplicate replies)\n",
-		scanned, len(reports))
+	if unexpected == 0 {
+		fmt.Printf("doctor sessions: %d session(s) scanned, %d with findings, none needing an operator "+
+			"(unanswered calls are filled by the prompt projection at request time)\n", scanned, len(reports))
+		return
+	}
+	fmt.Printf("doctor sessions: %d session(s) scanned, %d affected, %d finding(s) needing an operator "+
+		"(re-run with --fix to remove duplicate replies)\n", scanned, len(reports), unexpected)
+}
+
+// expectedNote marks the shapes the runtime produces on purpose, so an
+// operator reading the report doesn't "fix" a session the projection is
+// already repairing (docs/session-turn-integrity.md, Q4).
+func expectedNote(kind doctor.Kind) string {
+	if kind == doctor.UnansweredCall {
+		return "  (expected: the prompt projection answers it)"
+	}
+	return ""
 }

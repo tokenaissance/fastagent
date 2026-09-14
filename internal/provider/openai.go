@@ -99,9 +99,12 @@ type sseUsage struct {
 // provider error. We strip orphan tool_calls AND dangling tool replies
 // at wire-build time so the request goes through — the session keeps
 // its historical record untouched. The third shape, one tool_call_id
-// answered twice (the synthetic "stopped" pad plus the real result),
-// is collapsed to a single reply for the same reason: the provider
-// rejects the second answer because that tool call is no longer open.
+// answered twice (the 2026-09-13 incident: a synthetic "stopped" reply
+// plus the interrupted tool's late real result), is collapsed to a
+// single reply for the same reason: the provider rejects the second
+// answer because that tool call is no longer open. The agent loop no
+// longer writes such replies, so this path now only matters for
+// histories that pre-date the fix.
 func toAPIMessages(msgs []Message) []json.RawMessage {
 	orphanAssistant, orphanTool := findOrphanToolCalls(msgs)
 	out := make([]json.RawMessage, 0, len(msgs))

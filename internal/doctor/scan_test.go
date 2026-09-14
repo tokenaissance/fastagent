@@ -99,3 +99,35 @@ func TestScanReadsDeclarationsFromRawAssistant(t *testing.T) {
 		t.Fatalf("Scan reported %+v; want clean", got)
 	}
 }
+
+// Since Q4 an unanswered call is the shape stored history is supposed to show
+// for an interrupted turn — the loop leaves the call open and the projection
+// answers it at request time. So it must be reported (an operator wants to
+// know) but classified as expected, i.e. not gated on. Duplicates and orphans
+// stay actionable: nothing in the runtime writes them any more.
+func TestExpectedCoversOpenCallsOnly(t *testing.T) {
+	in := []provider.Message{
+		dCall("A", "B"),         // A answered twice below, B never answered
+		dReply("A", "real"),     // first reply
+		dReply("A", "late"),     // duplicate
+		dReply("ghost", "late"), // orphan
+	}
+	findings := Scan(in)
+	if len(findings) != 3 {
+		t.Fatalf("Scan = %+v; want 3 findings", findings)
+	}
+
+	var actionable []Kind
+	for _, f := range Unexpected(findings) {
+		actionable = append(actionable, f.Kind)
+	}
+	if !reflect.DeepEqual(actionable, []Kind{DuplicateReply, OrphanReply}) {
+		t.Fatalf("Unexpected = %v; want [%s %s]", actionable, DuplicateReply, OrphanReply)
+	}
+	for _, f := range findings {
+		want := f.Kind == UnansweredCall
+		if f.Expected() != want {
+			t.Fatalf("Finding{%s}.Expected() = %v; want %v", f.Kind, f.Expected(), want)
+		}
+	}
+}
