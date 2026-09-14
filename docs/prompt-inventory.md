@@ -58,14 +58,19 @@ runs only `date` + `bootstrap_files` + `memory`.
 | `renderChannelHints` | `loop.go:1917` | IM + split enabled | one bubble per message, split marker (only Chinese example in the corpus) |
 | `renderSender` | `loop.go:1960` | group chats | who sent this turn |
 | `planModeNudge` + `buildToolCatalogForPlan` | `loop.go:2013` / `:2059` | plan mode | plan first, fan out via `delegate_task` |
-| failed-rounds nudge | `loop.go:2551` | N rounds all failed | stop calling tools, answer |
-| loop-detected warning | `loop.go:2658` | same call 3× | change approach |
+| `failedRoundsNudge` | `loop.go:3608` | N rounds all failed | stop calling tools (main answers the user, sub-agent delivers) |
+| `loopDetectedWarning` | `loop.go:3596` | same call 3× | change approach (main) / hand back what you have (sub-agent) |
 | deferred tool result | `loop.go:2716` | over parallel cap | re-issue next round |
-| `capReachedNudge` | `loop.go:3558` | rounds exhausted, no continuation | tools off, synthesize, badge |
-| `iterationContinueNudge` | `loop.go:3574` | rounds exhausted **with** progress | keep going, don't repeat |
-| `subagentSystemSuffix` | `subagent.go:364` | sub-agent | deliverable only, no preamble |
-| `budgetNudge` | `subagent.go:348` | sub-agent wall clock out | deliverable now |
-| sub-agent failed-rounds / loop-detected | `subagent.go:168` / `:237` | as above, sub-agent wording | — |
+| `capReachedNudge` | `loop.go:3546` | rounds exhausted, no continuation | tools off, synthesize, badge |
+| `iterationContinueNudge` | `loop.go:3562` | rounds exhausted **with** progress | keep going, don't repeat |
+| `budgetNudge` | `loop.go:3582` | sub-agent wall clock out | deliverable now |
+| `subagentSystemSuffix` | `subagent.go:342` | sub-agent | deliverable only, no preamble |
+
+The three budget messages live in one block (`loop.go:3546-3608`) and are pinned
+by `TestBudgetNudgesStateTheirOwnReason`; the two same-shape/two-audience warnings
+are `loopDetectedWarning` / `failedRoundsNudge`, pinned by their own cases. They
+are **not** merged: a sub-agent must not chat and a continued turn must not
+synthesize yet.
 
 ## C. Tool descriptions
 

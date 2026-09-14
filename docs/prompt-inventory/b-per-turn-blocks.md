@@ -123,7 +123,7 @@ When your plan needs one of these, name it explicitly in the relevant step.
 
 ## capReachedNudge
 
-<!-- source: internal/agent/loop.go:3558 -->
+<!-- source: internal/agent/loop.go:3546 -->
 
 ````text
 systemYou've used all %d tool-call iterations available for this turn. Tools are now disabled for this final response — do not attempt to call any. Synthesize what you've already gathered into the most complete deliverable you can: if the user asked for a structured artifact (table, list, ICP summary, email drafts, etc.), produce it now from the existing tool results. For any fields you couldn't resolve, mark them as 'unknown' / 'not found' / 'partial' rather than dropping rows or skipping the structure — give the user something usable plus an honest note about what's missing. Do not apologize without delivering content.
@@ -131,41 +131,43 @@ systemYou've used all %d tool-call iterations available for this turn. Tools are
 
 ## iterationContinueNudge
 
-<!-- source: internal/agent/loop.go:3574 -->
+<!-- source: internal/agent/loop.go:3562 -->
 
 ````text
 systemYou used all %d tool-call iterations of segment %d of %d — the turn continues with a fresh %d, because the last round produced real results. Keep going toward what the user asked for: build on the tool results you already hold, target the specific gaps that are still open, and do not repeat a call whose answer you already have. Deliver as soon as you have enough instead of exploring further.
 ````
 
-## failed-rounds nudge
+## loopDetectedWarning
 
-<!-- source: internal/agent/loop.go:2551-2561 -->
-
-````text
-disabling tools after consecutive failed roundsagentfailed_roundssystemThe last %d rounds of tool calls all failed (HTTP errors or empty results). Stop calling tools and answer the user directly with what you know — explain that authoritative sources weren't reachable and provide your best-effort response based on training knowledge, clearly marked as unverified.
-````
-
-## loop-detected warning
-
-<!-- source: internal/agent/loop.go:2658-2666 -->
+<!-- source: internal/agent/loop.go:3596 -->
 
 <!-- NOTE: 1 branch point(s) — literals concatenated in source order, not rendered -->
 
 ````text
-tool loop detectedagenttoolsystemLoop detected: you called the same tool with the same arguments 3 times. Please try a different approach.
+Loop detected: you called the same tool with the same arguments 3 times. Please try a different approach.Loop detected: same tool with same arguments 3 times. Stop and produce the deliverable from what you have.system
+````
+
+## failedRoundsNudge
+
+<!-- source: internal/agent/loop.go:3608 -->
+
+<!-- NOTE: 1 branch point(s) — literals concatenated in source order, not rendered -->
+
+````text
+The last %d rounds of tool calls all failed (HTTP errors or empty results). Stop calling tools and answer the user directly with what you know — explain that authoritative sources weren't reachable and provide your best-effort response based on training knowledge, clearly marked as unverified.The last %d rounds of tool calls all failed (HTTP 4xx/5xx or empty results). Stop calling tools and produce the deliverable from what you already gathered, with explicit gaps marked.system
 ````
 
 ## deferred tool result
 
-<!-- source: internal/agent/loop.go:2716-2721 -->
+<!-- source: internal/agent/loop.go:2721-2725 -->
 
 ````text
-(no literal text in this block — it delegates to a constant listed above/below)
+Deferred — this turn's parallel-tool cap is %d, and you emitted %d. Re-issue this exact call next round if you still need it; you'll have the other tools' results to inform the decision then.
 ````
 
 ## subagentSystemSuffix
 
-<!-- source: internal/agent/subagent.go:364 -->
+<!-- source: internal/agent/subagent.go:342 -->
 
 ````text
 # Subagent mode
@@ -177,30 +179,4 @@ You are running as a delegated sub-agent invoked by a parent agent via the `dele
 - If you can't complete the task, return a brief note explaining what you got and what blocked you. Partial structured output beats no output.
 - You have the parent's full tool set except `delegate_task` itself (no nesting). Use them as normal.
 - You don't see the parent's prior conversation. Everything you need to do this task is in the user message below.
-````
-
-## budgetNudge
-
-<!-- source: internal/agent/subagent.go:348 -->
-
-````text
-systemYour %s wall-time budget is exhausted. Tools are disabled for this final response — do not attempt to call any. Write the deliverable now from what you have already gathered, in the requested format, and mark anything you could not confirm as 'unknown' / 'partial' / [UNVERIFIED]. Producing a complete-but-shorter artifact beats apologizing or explaining what you would have done.
-````
-
-## subagent failed-rounds nudge
-
-<!-- source: internal/agent/subagent.go:168-178 -->
-
-````text
-agentfailed_roundssystemThe last %d rounds of tool calls all failed (HTTP 4xx/5xx or empty results). Stop calling tools and produce the deliverable from what you already gathered, with explicit gaps marked.
-````
-
-## subagent loop-detected warning
-
-<!-- source: internal/agent/subagent.go:237-244 -->
-
-<!-- NOTE: 1 branch point(s) — literals concatenated in source order, not rendered -->
-
-````text
-subagent tool-loop detectedagenttoolsystemLoop detected: same tool with same arguments 3 times. Stop and produce the deliverable from what you have.
 ````
