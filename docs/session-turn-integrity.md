@@ -1,14 +1,16 @@
 # Session turn integrity: one writer per session, non-pollutable history
 
-> **Status**: P0, P1, P1b, P2 and P3 landed in the working tree on branch
-> `fastagent` (not yet committed or deployed); P4, P5 and P6 planned.
+> **Status**: P0–P3 landed and deployed to dev + prod
+> (`20260913232348-fastagent-2301484`); P5's grace window and P6 (both halves)
+> landed after that deploy; P4 and P5's per-source budgets are still open.
 > **Progress**: P0 wire dedupe + pad scoping + compaction ctx + production data
 > repair · P1 session turn gate (`Session.AcquireTurn/ReleaseTurn`, wired into
 > `HandleMessage` and `HandleMessageStream`) · P1b `queued` event +
 > Codex-style queue block with Edit/Cancel and a withdraw endpoint ·
 > P2 `TurnMode`/`RunTurn` + gateway parking of
 > automatic turns · P3 `normalizeForPrompt` applied to the prompt in both
-> loops. Test names live in [Implementation plan](#implementation-plan).
+> loops · P5 tool grace · P6 NUL-safe archive + `fastagent doctor sessions`.
+> Test names live in [Implementation plan](#implementation-plan).
 > **Scope**: how a turn is admitted for a session, and how that session's
 > history stays structurally valid for every provider.
 > **Storage**: `sessions.messages` (working set the agent loop reads) plus
@@ -445,20 +447,27 @@ Proposed split (needs product input, Q5):
 * if the grace expires too, the pad is the correct outcome — and it is now
   guaranteed to be a single, truthful, idempotent reply (P0+P3).
 
-### P6 — Archive integrity and operations
+### P6 — Archive integrity and operations ✅ landed
 
-* Fix the NUL-byte archive failure (`0x00` in tool output must be escaped or
-  stripped before `AppendSessionMessage`) so the archive and the working set
-  cannot diverge.
-* Add a checker the on-call can run against a live database (the analysis
-  used during the incident, productised):
+* NUL bytes are stripped at the persistence boundary (`sanitizeNUL` on
+  `AppendSessionMessage` and `AppendSessionEvent`), so a tool result that
+  carries `\x00` — sandbox exec frames its stream with four of them — can no
+  longer vanish from the archive while the JSON-escaped working set keeps it.
+* The incident's manual analysis is a command now:
 
 ```bash
-fastagent doctor sessions --agent <id>       # flags sessions with
-                                             # duplicate / orphan / missing replies
-fastagent doctor sessions --fix --agent <id> # drops duplicate pads (P0 repair,
-                                             # backed up first)
+fastagent doctor sessions                      # whole deployment, exits 1 on findings
+fastagent doctor sessions --agent <id> --json  # narrow + machine-readable
+fastagent doctor sessions --session-key <key> --fix   # withdraw duplicates, backing the row up
 ```
+
+It reads `sessions.messages` through `ListSessionSnapshots`, reports the three
+pairing shapes (`duplicate_tool_reply`, `orphan_tool_reply`,
+`unanswered_tool_call`), and with `--fix` removes duplicate replies — the same
+repair applied by hand during the incident — after writing
+`<backup-dir>/<sessionKey>.json`. Orphan and unanswered findings are reported
+only: the prompt projection (`normalizeForPrompt`) handles those without
+rewriting history.
 
 ## Alternatives considered
 
@@ -503,8 +512,8 @@ working tree.
 | **P2** ✅ | `TurnMode` + `ErrTurnNotAdmitted` + `RunTurn`; gateway parks refused automatic turns and retries them at the next idle point instead of blocking a queue worker | `internal/agent/admission.go` (new), `internal/gateway/deferred_turns.go` (new), `internal/gateway/gateway.go` | `admission_test.go` (refusal, queued event + position, source policy), `deferred_turns_test.go` (FIFO drain, busy skip, budget expiry) |
 | **P3** ✅ | `normalizeForPrompt` applied to the prompt in both loops (+ idempotent conditional pad); `provider.Message.EffectiveToolCalls()` added so a call declared only inside `RawAssistant` is still recognised, and the OpenAI wire scanner reuses it instead of parsing raw a second time | `internal/agent/normalize.go` (new), `internal/agent/loop.go`, `internal/provider/provider.go`, `internal/provider/openai.go` | `internal/agent/normalize_test.go` (7 shapes incl. the incident's pad+real duplicate, raw-assistant declaration, duplicate declaration; each case also asserts idempotence and input immutability), `pad_orphan_tool_test.go` (+1 idempotence) |
 | **P4** | Pair-aware truncation; retire `safeCompactionCutoff`'s special case; stable synthetic ids | `internal/agent/compaction.go`, `internal/agent/normalize.go` | `compaction_test.go` additions; `TestNormalizeForPromptIsStable` |
-| **P5** | Per-source turn budget + graceful interrupt (stop feeding the turn, let the tool finish within a grace window) | `internal/taskqueue/queue.go`, `internal/gateway/gateway.go`, `internal/agent/loop.go` | `TestTurnBudgetAllowsToolToFinish`, `TestTurnBudgetPadsWhenGraceExpires` |
-| **P6** | Escape NUL in archived tool output; `fastagent doctor sessions` (report + `--fix`) | `internal/session/store_adapter.go`, `internal/store/database.go`, `cmd/fastclaw/cmd_doctor.go` (or `cmd/session.go`) | store test for NUL round-trip; checker tests against the incident shapes |
+| **P5** ⚠️ | **Grace landed**: tool rounds run on a context that outlives the turn's cancellation for a bounded window (`toolGraceDefault` 60 s, per-agent override), so an expired budget records the tool's real result instead of a synthetic pad — and the loop still stops (its own ctx stays cancelled). **Per-source budgets still open**: the queue's timeout is system-wide (`TaskQueueCfg.TaskTimeoutSec`), so cron/IM/web cannot differ yet | `internal/agent/tool_grace.go` (new), `internal/agent/loop.go` | `TestToolGraceContextSurvivesCancellationForGrace`, `TestToolGraceContextStopEndsImmediately`, `TestToolGraceContextDisabled`, `TestTurnBudgetExpiryLetsInFlightToolRecordItsResult` (60 ms budget, 200 ms tool → real result kept, no pad, no second model round) |
+| **P6** ✅ | `sanitizeNUL` at the persistence boundary (session_messages + session_events) so a NUL-bearing tool result can no longer vanish from the archive; `fastagent doctor sessions` reports duplicate/orphan/unanswered pairings, exits non-zero while findings remain, and `--fix` removes duplicate replies after backing the row up | `internal/store/database.go`, `internal/doctor/scan.go` (new), `internal/store` `ListSessionSnapshots`, `internal/session/store_adapter.go` (`ProviderMessages`), `cmd/fastclaw/cmd_doctor.go` (new) | `TestAppendSessionMessageStripsNUL`, `internal/doctor` shape table + RawAssistant declarations, `TestListSessionSnapshotsOrderingAndFilter`, `TestDoctorSessionsFindsAndFixesDuplicateReplies` (CLI end to end: seed → scan fails → fix → backup → clean) |
 
 ## Test plan
 
@@ -541,6 +550,13 @@ working tree.
 * **Still to write** — a `toolu_*`/`call_*` mixed-provider snapshot fixture
   (the incident's real session mixed Anthropic and DeepSeek ids) and a
   multi-turn transcript with compaction in the middle.
+* **Doctor / archive** ✅ — `internal/doctor` shape table +
+  `TestScanReadsDeclarationsFromRawAssistant`,
+  `TestAppendSessionMessageStripsNUL`,
+  `TestListSessionSnapshotsOrderingAndFilter`,
+  `TestDoctorSessionsFindsAndFixesDuplicateReplies`.
+* **Tool grace** ✅ — `TestToolGraceContext*` (three cases) and
+  `TestTurnBudgetExpiryLetsInFlightToolRecordItsResult`.
 
 ### Integration / e2e
 
@@ -672,6 +688,9 @@ Post-deploy verification:
 ```bash
 kubectl logs -n production -l app=fastagent --since=24h | grep -c "must be a response to a preceding"
 # expect 0
+
+# History debt behind the request-time repairs (duplicates are what --fix removes):
+FASTAGENT_STORAGE_DSN=... fastagent doctor sessions --json
 ```
 
 ### Build-time gotcha (2026-09-14)
