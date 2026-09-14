@@ -110,6 +110,12 @@ func CompactMessages(ctx context.Context, messages []provider.Message, workspace
 // with assistant(tool_calls), that's fine — its tool replies (if any)
 // come AFTER it in the tail.
 //
+// This is an OPTIMISATION, not the correctness guarantee: whatever a cutoff
+// produces, normalizeForPrompt repairs before send (a summarised-away call's
+// replies are dropped, an unanswered call is padded in place). Keeping the
+// tail well-formed here means the common case needs no repair and the prompt
+// stays byte-identical to what the model saw last turn.
+//
 // Pure function; no allocation; safe with cutoff at any value.
 func safeCompactionCutoff(messages []provider.Message, cutoff int) int {
 	if cutoff < 0 {
