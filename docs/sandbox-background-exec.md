@@ -154,6 +154,10 @@ that one request — the log/cursor/exit-file machinery stays as it is.
 | Job table is per replica (in memory) | a later turn on another replica cannot see `bash_id`; the log path from the start message still works via `exec({"command":"tail /tmp/fastagent-bg/<id>.log"})` | `no such bash_id` |
 | One poll ≤ 64 KiB | bounds a single tool result | `[more output pending: N bytes unread]` |
 
+(The *other* way to read a job's log — `exec({"command":"cat /tmp/fastagent-bg/<id>.log"})`
+— is bounded too, but by the generic tool-output clip rather than by this
+machinery; see [Tool output limits](tool-output-limits.md).)
+
 Revisit the per-replica row the moment cross-replica polling is actually
 needed: persisting the job row (id, pid, log path, owner) in the store is the
 same shape as the sandbox lease row.
