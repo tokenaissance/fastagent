@@ -39,9 +39,15 @@ const MetaSandboxPrefix = "\x1fFC_META:sandbox\x1f\n"
 // so its description exists in two copies. Keep them side by side: everything
 // except the first clause must stay identical, and TestExecDescriptionsStayInSync
 // fails when an edit lands on only one of them.
-const execHostDescription = "Execute a shell command and return stdout/stderr. For binary or image output (PNG, JPEG, PDF, audio, video), write the file into the workspace (e.g. ./out.png) and reference it by relative path in your reply — do NOT base64-encode it into stdout, and do NOT inline data: URLs in your response. The workspace file will be surfaced to the user via the Files panel."
+//
+// One sentence each, deliberately. The file-delivery rule (write binary output
+// into the workspace, reference it by path, never inline base64) used to be
+// repeated here, 300 characters sent with the schema on every request while the
+// system prompt already stated it. Delivery is the system prompt's job; this
+// description only has to say what the tool does.
+const execHostDescription = "Execute a shell command and return stdout/stderr."
 
-const execSandboxDescription = "Execute a shell command in the sandbox and return stdout/stderr. For binary or image output (PNG, JPEG, PDF, audio, video), write the file into the workspace (e.g. ./out.png) and reference it by relative path in your reply — do NOT base64-encode it into stdout, and do NOT inline data: URLs in your response. The workspace file will be surfaced to the user via the Files panel."
+const execSandboxDescription = "Execute a shell command in the sandbox and return stdout/stderr."
 
 var dangerousCommands = []string{
 	"rm -rf /",
