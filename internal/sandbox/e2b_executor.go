@@ -893,56 +893,103 @@ func connectEnvelope(payload []byte) []byte {
 	return buf
 }
 
-// parseConnectStream reads Connect protocol streaming response.
-// Each frame: [1 byte flags][4 bytes length][payload]
+// connectFrameReader walks the Connect streaming frame layout —
+// [1 byte flags][4 bytes length][payload] — straight off the response body, one
+// frame at a time.
 //
-// Trailers (flags & 0x02) are returned rather than dropped. They used to be
-// skipped, which discarded the one place the protocol carries a server-side
-// error: a stream that fails mid-flight ends with an end-stream frame holding
-// {"error":{...}}, and throwing it away left callers with "the stream was
-// truncated" and no idea why.
-func parseConnectStream(data []byte) (messages, trailers []json.RawMessage) {
-	for len(data) >= 5 {
-		flags := data[0]
-		length := binary.BigEndian.Uint32(data[1:5])
-		data = data[5:]
-		if uint32(len(data)) < length {
-			break
-		}
-		payload := data[:length]
-		data = data[length:]
+// It used to be a function over a []byte: the caller read the whole body (101 MB
+// in the 2026-09-14 incident, base64 of a 76 MB tar) and then carved frames out
+// of it, so the peak was the body plus the decoded output plus its copies. Here
+// a frame is the unit: the payload buffer is reused, and the only bytes that
+// survive are the ones the sink decided to keep.
+type connectFrameReader struct {
+	r     io.Reader
+	frame []byte // reused payload buffer
+	// bytes is how much arrived on the wire. It is what the diagnostics report
+	// as bodyBytes / "got N bytes", and it is deliberately not the size of
+	// anything we kept.
+	bytes int
+	// sniff is the first few wire bytes, the only fallback left for a stream
+	// that died before a single complete frame arrived.
+	sniff []byte
+}
 
-		if flags&0x02 != 0 {
-			trailers = append(trailers, json.RawMessage(payload))
-			continue
-		}
-		messages = append(messages, json.RawMessage(payload))
+// connectMaxFrame bounds a length prefix before it is trusted. Real frames are
+// tens of KB; this is only here so a corrupt header cannot ask for a 4 GB
+// allocation.
+const connectMaxFrame = 32 << 20
+
+const connectSniffBytes = 300
+
+func newConnectFrameReader(r io.Reader) *connectFrameReader { return &connectFrameReader{r: r} }
+
+// next returns the next message frame, or a trailer when the frame carried the
+// end-stream flag. io.EOF means the stream ended on a frame boundary;
+// io.ErrUnexpectedEOF means it ended inside one. Both are how envd says "no
+// exit status", so the caller treats them as an end, not as a transport fault.
+func (c *connectFrameReader) next() (payload []byte, trailer bool, err error) {
+	var hdr [5]byte
+	if _, err := io.ReadFull(c.r, hdr[:]); err != nil {
+		return nil, false, err
 	}
-	return messages, trailers
+	c.note(hdr[:])
+
+	length := int(binary.BigEndian.Uint32(hdr[1:5]))
+	if length < 0 || length > connectMaxFrame {
+		return nil, false, fmt.Errorf("connect frame of %d bytes", length)
+	}
+	if cap(c.frame) < length {
+		c.frame = make([]byte, length)
+	}
+	c.frame = c.frame[:length]
+	if _, err := io.ReadFull(c.r, c.frame); err != nil {
+		return nil, false, err
+	}
+	c.note(c.frame)
+	return c.frame, hdr[0]&0x02 != 0, nil
+}
+
+func (c *connectFrameReader) note(b []byte) {
+	c.bytes += len(b)
+	if n := min(connectSniffBytes-len(c.sniff), len(b)); n > 0 {
+		c.sniff = append(c.sniff, b[:n]...)
+	}
 }
 
 // connectErrorFrom returns the server's own error text from an end-stream
-// frame, if it sent one.
-func connectErrorFrom(trailers []json.RawMessage) string {
-	for _, raw := range trailers {
-		var envelope struct {
-			Error *struct {
-				Code    string `json:"code"`
-				Message string `json:"message"`
-			} `json:"error"`
-		}
-		if err := json.Unmarshal(raw, &envelope); err != nil || envelope.Error == nil {
-			continue
-		}
-		if envelope.Error.Code != "" && envelope.Error.Message != "" {
-			return envelope.Error.Code + ": " + envelope.Error.Message
-		}
-		if envelope.Error.Message != "" {
-			return envelope.Error.Message
-		}
-		return string(raw)
+// frame, if it sent one. Trailers are not skipped: they are the one place the
+// protocol carries a server-side error, and throwing them away left callers
+// with "the stream was truncated" and no idea why.
+func connectErrorFrom(raw []byte) string {
+	var envelope struct {
+		Error *struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
 	}
-	return ""
+	if err := json.Unmarshal(raw, &envelope); err != nil || envelope.Error == nil {
+		return ""
+	}
+	if envelope.Error.Code != "" && envelope.Error.Message != "" {
+		return envelope.Error.Code + ": " + envelope.Error.Message
+	}
+	if envelope.Error.Message != "" {
+		return envelope.Error.Message
+	}
+	return string(raw)
+}
+
+// execOutput is where a command's output goes as the stream delivers it. The
+// two implementations are the two contracts on this transport: a tool result is
+// bounded (head+tail, middle dropped), a machine payload is capped and refused.
+// A write error stops the read at once.
+type execOutput interface {
+	writeStdout(b []byte) error
+	writeStderr(b []byte) error
+	// produced is the pre-bound size, for the completion log and the marker.
+	produced() int
+	// text renders what the caller gets. Safe to call only after the read.
+	text() string
 }
 
 // execStreamTruncatedError is an exec response that ended without its
@@ -1013,38 +1060,37 @@ func (e *E2BExecutor) Exec(ctx context.Context, command string, timeout time.Dur
 	// guaranteed to succeed here.
 	wrapped := "cd /workspace && " + command
 	observed := e.identSnapshot()
-	result, err := e.execOn(ctx, observed, wrapped, timeout)
+	// The tool-result port: whatever the command prints comes back bounded, and
+	// the bound is applied on every return path including the retries below.
+	result, err := e.execOn(ctx, observed, wrapped, timeout, newClipOutput("exec/e2b"))
 	if sandboxGone(err) {
 		if rerr := e.recreateIfCurrent(ctx, observed); rerr != nil {
 			return "", fmt.Errorf("sandbox recreate failed: %w (original: %v)", rerr, err)
 		}
-		return e.toolResult(e.execOnce(ctx, wrapped, timeout))
+		return e.execOnce(ctx, wrapped, timeout)
 	}
 	if staleEnvdToken(err) {
 		if rerr := e.refreshEnvdToken(ctx, observed); rerr != nil {
 			return "", fmt.Errorf("envd token refresh failed: %w (original: %v)", rerr, err)
 		}
-		return e.toolResult(e.execOnce(ctx, wrapped, timeout))
+		return e.execOnce(ctx, wrapped, timeout)
 	}
-	return e.toolResult(result, err)
-}
-
-// toolResult bounds what Exec hands back, on every path including the
-// recreate / token-refresh retries. This is the port that feeds the model, and
-// the production OOM came through it: 76 MB results assembled from this stream
-// killed two pods on 2026-09-14 (see output_clip.go).
-func (e *E2BExecutor) toolResult(out string, err error) (string, error) {
-	return ClipAndLog(out, "exec/e2b"), err
+	return result, err
 }
 
 func (e *E2BExecutor) execOnce(ctx context.Context, command string, timeout time.Duration) (string, error) {
-	return e.execOn(ctx, e.identSnapshot(), command, timeout)
+	return e.execOn(ctx, e.identSnapshot(), command, timeout, newClipOutput("exec/e2b"))
 }
 
-// execOn runs one command against an explicit identity. Callers that may want
-// to rebuild afterwards use this form so the identity they report as "the one
-// that just died" is exactly the one the request went to.
-func (e *E2BExecutor) execOn(ctx context.Context, id sandboxIdent, command string, timeout time.Duration) (string, error) {
+// execOn runs one command against an explicit identity, streaming its output
+// into out. Callers that may want to rebuild afterwards use this form so the
+// identity they report as "the one that just died" is exactly the one the
+// request went to.
+//
+// out decides the budget and owns the truncation log; what this function
+// guarantees is that the response body is never a variable in the peak — one
+// frame is held at a time, however large the command's output turns out to be.
+func (e *E2BExecutor) execOn(ctx context.Context, id sandboxIdent, command string, timeout time.Duration, out execOutput) (string, error) {
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
@@ -1084,32 +1130,51 @@ func (e *E2BExecutor) execOn(ctx context.Context, id sandboxIdent, command strin
 	}
 	defer resp.Body.Close()
 
-	// Don't drop ReadAll's error — when the connection is severed
-	// mid-stream (e.g. our deadline hit before the process finished
-	// streaming back its output), this is the only signal we have that
-	// the bytes we got are incomplete. Previously we silently kept the
-	// partial body, the parser saw zero complete frames, and the tool
-	// returned empty stdout — exactly the symptom we just hit with
-	// long-running exec calls.
-	body, readErr := io.ReadAll(resp.Body)
-	if readErr != nil {
-		return string(body), fmt.Errorf("e2b exec body read: %w (got %d bytes)%s",
-			readErr, len(body), execCancelledHint(readErr))
-	}
-
 	if resp.StatusCode != http.StatusOK {
-		return "", &sandboxHTTPError{op: "e2b exec", status: resp.StatusCode, body: string(body)}
+		// The body of a non-200 is an error page, not output: show it, bounded.
+		detail, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		return "", &sandboxHTTPError{op: "e2b exec", status: resp.StatusCode, body: string(detail)}
 	}
 
-	// Parse Connect streaming response frames
-	frames, trailers := parseConnectStream(body)
-	connectErr := connectErrorFrom(trailers)
-
-	var stdout, stderr strings.Builder
+	rd := newConnectFrameReader(resp.Body)
 	exitCode := 0
 	exited := false
+	frames, trailers := 0, 0
+	connectErr := ""
+	var firstFrame []byte
+	// Don't drop a mid-stream read error — when the connection is severed (our
+	// deadline hit before the process finished streaming its output), it is the
+	// only signal that what we got is incomplete. Previously we silently kept the
+	// partial body, the parser saw zero complete frames, and the tool returned
+	// empty stdout — exactly the symptom of the long-running exec calls.
+	var readErr error
 
-	for _, frame := range frames {
+	for {
+		frame, isTrailer, ferr := rd.next()
+		if ferr != nil {
+			// A stream that ends on a frame boundary (io.EOF) and one that ends
+			// inside a frame (ErrUnexpectedEOF) are both "envd stopped talking":
+			// the frames already delivered stay, and the missing exit trailer is
+			// the verdict. Neither is a transport failure — that split is what
+			// the read-everything version got by ignoring ReadAll's nil error on
+			// a partial body, and it is what hydrate's retry depends on.
+			if !errors.Is(ferr, io.EOF) && !errors.Is(ferr, io.ErrUnexpectedEOF) {
+				readErr = ferr
+			}
+			break
+		}
+		if isTrailer {
+			trailers++
+			if connectErr == "" {
+				connectErr = connectErrorFrom(frame)
+			}
+			continue
+		}
+		frames++
+		if firstFrame == nil {
+			firstFrame = append([]byte(nil), frame...)
+		}
+
 		// E2B response format: {"event":{"data":{"stdout":"base64..."}}}
 		var msg struct {
 			Event struct {
@@ -1132,12 +1197,16 @@ func (e *E2BExecutor) execOn(ctx context.Context, id sandboxIdent, command strin
 		if msg.Event.Data != nil {
 			if msg.Event.Data.Stdout != "" {
 				if decoded, err := base64.StdEncoding.DecodeString(msg.Event.Data.Stdout); err == nil {
-					stdout.Write(decoded)
+					if err := out.writeStdout(decoded); err != nil {
+						return out.text(), err
+					}
 				}
 			}
 			if msg.Event.Data.Stderr != "" {
 				if decoded, err := base64.StdEncoding.DecodeString(msg.Event.Data.Stderr); err == nil {
-					stderr.Write(decoded)
+					if err := out.writeStderr(decoded); err != nil {
+						return out.text(), err
+					}
 				}
 			}
 		}
@@ -1150,21 +1219,23 @@ func (e *E2BExecutor) execOn(ctx context.Context, id sandboxIdent, command strin
 		}
 	}
 
-	output := stdout.String()
-	if stderr.Len() > 0 {
-		if output != "" {
-			output += "\n"
+	if readErr != nil {
+		hint := execCancelledHint(readErr)
+		if out.produced() == 0 && firstFrame != nil {
+			// Nothing decoded arrived, so the only evidence the run ever started
+			// is its first frame — the pid an operator can go look for. (The
+			// read-everything version showed the raw framed body here, which the
+			// model cannot read.)
+			hint += "; first=" + snippet(firstFrame, 300)
 		}
-		output += stderr.String()
+		return out.text(), fmt.Errorf("e2b exec body read: %w (got %d bytes)%s",
+			readErr, rd.bytes, hint)
 	}
-	output = strings.TrimSpace(output)
-	// Deliberately NOT clipped here. execOn is shared by two contracts: the
-	// tool-result port (Exec → the model) and the machine-payload port
-	// (SnapshotWorkspace's base64 tar → the durable workspace.Store). A
-	// shortened tool result is a smaller message; a shortened tar is corrupt
-	// data. The bound belongs on the port, not on the shared interpreter —
-	// Exec clips, SnapshotWorkspace refuses (see output_clip.go).
-	slog.Info("e2b exec completed", "sandboxID", id.id, "exitCode", exitCode, "exited", exited, "outputLen", len(output), "frames", len(frames), "trailers", len(trailers), "bodyBytes", len(body), "connectError", connectErr)
+
+	output := out.text()
+	// outputLen stays the pre-bound size — that is the number operators grep for
+	// to spot a runaway command; resultLen is what actually leaves here.
+	slog.Info("e2b exec completed", "sandboxID", id.id, "exitCode", exitCode, "exited", exited, "outputLen", out.produced(), "resultLen", len(output), "frames", frames, "trailers", trailers, "bodyBytes", rd.bytes, "connectError", connectErr)
 
 	// Reject a stream that didn't deliver a proper "End/exited=true" trailer.
 	// Why this matters: when the request payload pushes envd past some
@@ -1188,19 +1259,17 @@ func (e *E2BExecutor) execOn(ctx context.Context, id sandboxIdent, command strin
 		// the trailer usually names it ("not found", "internal", …), and the raw
 		// body is the only clue when the stream simply died.
 		detail := fmt.Sprintf("e2b exec did not exit cleanly (frames=%d, trailers=%d, bodyBytes=%d): %s",
-			len(frames), len(trailers), len(body), output)
+			frames, trailers, rd.bytes, output)
 		if connectErr != "" {
 			detail += "; server error: " + connectErr
 		}
 		detail += clockHint
-		// Frames are already parsed JSON, so they read far better than the
-		// framed bytes; the raw body is the fallback when nothing parsed (which
-		// is itself the diagnosis: the stream died mid-frame).
-		if len(frames) > 0 {
-			if joined, err := json.Marshal(frames); err == nil {
-				detail += "; frames=" + snippet(joined, 300)
-			}
-		} else if raw := snippet(body, 300); raw != "" {
+		// One real frame reads far better than the framed bytes, and the stream
+		// that died before its first complete frame is itself the diagnosis: that
+		// is when the raw wire bytes get shown.
+		if firstFrame != nil {
+			detail += "; first=" + snippet(firstFrame, 300)
+		} else if raw := snippet(rd.sniff, 300); raw != "" {
 			detail += "; raw=" + raw
 		}
 		return output, &execStreamTruncatedError{detail: detail}
@@ -1469,17 +1538,21 @@ func (e *E2BExecutor) SnapshotWorkspace(ctx context.Context) (map[string][]byte,
 	cmd := "if [ -d /workspace ]; then " +
 		"tar -czf - -C /workspace . 2>/dev/null | base64 -w0; " +
 		"fi"
-	out, err := e.execOnce(ctx, cmd, 60*time.Second)
+	// payloadOutput, not the tool-result sink: this string is decoded and
+	// untarred by the caller, so it must be refused past the cap rather than
+	// shortened — and refused while reading, not after buffering the rest.
+	sink := newPayloadOutput(snapshotBase64Cap)
+	_, err := e.execOn(ctx, e.identSnapshot(), cmd, 60*time.Second, sink)
 	if err != nil {
-		return nil, fmt.Errorf("snapshot workspace exec: %w (output: %s)", err, out)
+		if errors.Is(err, errPayloadOverCap) {
+			return nil, fmt.Errorf("workspace snapshot is over the %s cap — refusing to flush /workspace after every exec; move large or growing files out of /workspace (use /tmp for run logs) and retry. Largest entries: %s",
+				humanBytes(snapshotBase64Cap), e.largestWorkspaceEntries(ctx))
+		}
+		return nil, fmt.Errorf("snapshot workspace exec: %w (output: %s)", err, snippet([]byte(sink.text()), 200))
 	}
-	out = strings.TrimSpace(out)
+	out := strings.TrimSpace(sink.text())
 	if out == "" {
 		return nil, nil
-	}
-	if len(out) > snapshotBase64Cap {
-		return nil, fmt.Errorf("workspace snapshot is %s (over the %s cap) — refusing to flush /workspace after every exec; move large or growing files out of /workspace (use /tmp for run logs) and retry. Largest entries: %s",
-			humanBytes(len(out)), humanBytes(snapshotBase64Cap), e.largestWorkspaceEntries(ctx))
 	}
 	gz, err := base64.StdEncoding.DecodeString(out)
 	if err != nil {
