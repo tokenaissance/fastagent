@@ -56,6 +56,10 @@ func newGateAgent(t *testing.T) (*Agent, *gateProvider) {
 		maxTokens:         256,
 		temperature:       0.7,
 		maxToolIterations: 2,
+		// Real tool execution lives behind the SDK bridge; without an engine
+		// a tool round has nothing to run it (production agents always have
+		// one — see NewAgent).
+		engine: newSDKEngine("gate-agent"),
 	}
 	return a, prov
 }

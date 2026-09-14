@@ -135,6 +135,10 @@ type Agent struct {
 	// so concurrent sessions of the same agent get isolated containers
 	// + isolated /workspace mounts.
 	sandboxPool sandbox.ExecutorPool
+	// toolGrace bounds how long an in-flight tool may keep running after
+	// this turn's context is cancelled (budget expiry, Stop). Zero means
+	// toolGraceDefault; tests set a small value to keep assertions tight.
+	toolGrace time.Duration
 
 	// goalStore is the /goal feature's per-Agent state. Wired by
 	// WireGoals; nil on agents whose Manager didn't provide a data
@@ -2702,7 +2706,13 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 			"agent", a.name,
 			"count", len(executeCalls),
 		)
-		results := a.engine.executeToolsConcurrently(ctx, a.registry, executeCalls, a.workspacePath)
+		// Let an in-flight tool finish (bounded) even when this turn's budget
+		// just expired: the round records its real result instead of leaving an
+		// orphan tool_use for the pad, and no further model round starts
+		// because the loop's own ctx is already cancelled.
+		toolCtx, endToolGrace := toolGraceContext(ctx, a.graceWindow())
+		results := a.engine.executeToolsConcurrently(toolCtx, a.registry, executeCalls, a.workspacePath)
+		endToolGrace()
 		// Append synthetic deferred results so every original tool_use
 		// id has a paired tool_result. The deferred message tells the
 		// model exactly why it didn't run — it can re-issue next
@@ -3427,7 +3437,9 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 		}
 
 		// Execute tools concurrently via SDK engine
-		results := a.engine.executeToolsConcurrently(ctx, a.registry, resp.ToolCalls, a.workspacePath)
+		toolCtx, endToolGrace := toolGraceContext(ctx, a.graceWindow())
+		results := a.engine.executeToolsConcurrently(toolCtx, a.registry, resp.ToolCalls, a.workspacePath)
+		endToolGrace()
 		totalToolCalls += len(results)
 
 		for idx, r := range results {
