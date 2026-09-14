@@ -42,7 +42,7 @@ func registerBashOutput(r *Registry) {
 		"properties": map[string]interface{}{
 			"bash_id": map[string]interface{}{
 				"type":        "string",
-				"description": "Identifier returned by exec(run_in_background=true), e.g. \"bash_3\".",
+				"description": "Identifier returned by exec(run_in_background=true): a host shell (\"bash_3\") or a job inside the sandbox (\"sbg_1a2b_3\").",
 			},
 			"filter": map[string]interface{}{
 				"type":        "string",
@@ -135,7 +135,7 @@ func registerKillShell(r *Registry) {
 		"properties": map[string]interface{}{
 			"bash_id": map[string]interface{}{
 				"type":        "string",
-				"description": "Identifier returned by exec(run_in_background=true).",
+				"description": "Identifier returned by exec(run_in_background=true) — a host shell (\"bash_3\") or a sandbox job (\"sbg_1a2b_3\").",
 			},
 		},
 		"required": []string{"bash_id"},
