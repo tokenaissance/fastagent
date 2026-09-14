@@ -1,8 +1,8 @@
 # Session turn integrity: one writer per session, non-pollutable history
 
-> **Status**: P0–P3 landed and deployed to dev + prod
-> (`20260913232348-fastagent-2301484`); P5's grace window and P6 (both halves)
-> landed after that deploy; P4 and P5's per-source budgets are still open.
+> **Status**: P0–P6 landed. P0–P3 are deployed to dev + prod
+> (`20260914015438-deploy-54b07f7`); P4, P5 (grace + per-source budgets), P6 and
+> the timing-margin test fix landed after that deploy.
 > **Progress**: P0 wire dedupe + pad scoping + compaction ctx + production data
 > repair · P1 session turn gate (`Session.AcquireTurn/ReleaseTurn`, wired into
 > `HandleMessage` and `HandleMessageStream`) · P1b `queued` event +
@@ -511,8 +511,8 @@ working tree.
 | **P1b** ✅ | Queued-state UX modelled on Codex's `PendingInputPreview`: `queued` event, queue block above the composer with `↳ text`, `(n ahead)`, and Edit/Cancel actions backed by a new withdraw endpoint (`/api/chat/cancel`, `agent.WithAdmissionSignal` marks the point of no return) | `internal/agent/loop.go`, `internal/agent/admission_signal.go` (new), `internal/setup/handlers.go`, `internal/setup/handlers_chat_cancel.go` (new), `internal/setup/server.go`, `web/src/components/chat-screen.tsx`, `web/src/lib/api.ts` | `TestRunTurnQueuesUserSourceAndEmitsQueuedEvent`, `TestWithAdmissionSignalClosesWhenTurnStarts`, `TestPendingTurnRegistryWithdrawContract`, `TestPendingTurnKeyIsolatesTabsAndSessions`, `TestQueuedChatTurnIsAnnouncedAndWithdrawableE2E`, `TestStartedChatTurnCannotBeWithdrawnE2E`; `tsc --noEmit` clean |
 | **P2** ✅ | `TurnMode` + `ErrTurnNotAdmitted` + `RunTurn`; gateway parks refused automatic turns and retries them at the next idle point instead of blocking a queue worker | `internal/agent/admission.go` (new), `internal/gateway/deferred_turns.go` (new), `internal/gateway/gateway.go` | `admission_test.go` (refusal, queued event + position, source policy), `deferred_turns_test.go` (FIFO drain, busy skip, budget expiry) |
 | **P3** ✅ | `normalizeForPrompt` applied to the prompt in both loops (+ idempotent conditional pad); `provider.Message.EffectiveToolCalls()` added so a call declared only inside `RawAssistant` is still recognised, and the OpenAI wire scanner reuses it instead of parsing raw a second time | `internal/agent/normalize.go` (new), `internal/agent/loop.go`, `internal/provider/provider.go`, `internal/provider/openai.go` | `internal/agent/normalize_test.go` (7 shapes incl. the incident's pad+real duplicate, raw-assistant declaration, duplicate declaration; each case also asserts idempotence and input immutability), `pad_orphan_tool_test.go` (+1 idempotence) |
-| **P4** | Pair-aware truncation; retire `safeCompactionCutoff`'s special case; stable synthetic ids | `internal/agent/compaction.go`, `internal/agent/normalize.go` | `compaction_test.go` additions; `TestNormalizeForPromptIsStable` |
-| **P5** ⚠️ | **Grace landed**: tool rounds run on a context that outlives the turn's cancellation for a bounded window (`toolGraceDefault` 60 s, per-agent override), so an expired budget records the tool's real result instead of a synthetic pad — and the loop still stops (its own ctx stays cancelled). **Per-source budgets still open**: the queue's timeout is system-wide (`TaskQueueCfg.TaskTimeoutSec`), so cron/IM/web cannot differ yet | `internal/agent/tool_grace.go` (new), `internal/agent/loop.go` | `TestToolGraceContextSurvivesCancellationForGrace`, `TestToolGraceContextStopEndsImmediately`, `TestToolGraceContextDisabled`, `TestTurnBudgetExpiryLetsInFlightToolRecordItsResult` (60 ms budget, 200 ms tool → real result kept, no pad, no second model round) |
+| **P4** ✅ | Truncation cannot split a pair *and* the claim is now tested: compacted history, after `normalizeForPrompt`, carries no pairing findings — verified with the doctor scanner as the oracle, for a cutoff landing inside a pair and for a retained tail that itself holds a duplicate. `safeCompactionCutoff` is documented as an optimisation (it keeps the prompt byte-identical to last turn's) rather than the correctness guarantee | `internal/agent/compaction.go` (comment), `internal/agent/compaction_pairs_test.go` (new) | `TestCompactionOutputNormalisesToAPairingCleanHistory` (both shapes, through prune + compress) |
+| **P5** ✅ | **Grace**: tool rounds run on a context that outlives the turn's cancellation for a bounded window (`toolGraceDefault` 60 s, per-agent override), so an expired budget records the tool's real result instead of a synthetic pad — and the loop still stops (its own ctx stays cancelled). **Per-source budgets**: `TaskQueueCfg.CronTimeoutSec` gives cron ticks their own budget (0 = queue default); every routing path queues through `Gateway.submitTask` → `taskTimeoutFor`, including the deferred-turn drain so a parked tick keeps its budget | `internal/agent/tool_grace.go` (new), `internal/agent/loop.go`, `internal/taskqueue/queue.go`, `internal/config/config.go`, `internal/gateway/gateway.go`, `internal/gateway/routing.go` | `TestToolGraceContext*` (3), `TestTurnBudgetExpiryLetsInFlightToolRecordItsResult`, `TestSubmitWithTimeoutOverridesQueueDefault`, `TestTaskTimeoutForSourcePolicy` |
 | **P6** ✅ | `sanitizeNUL` at the persistence boundary (session_messages + session_events) so a NUL-bearing tool result can no longer vanish from the archive; `fastagent doctor sessions` reports duplicate/orphan/unanswered pairings, exits non-zero while findings remain, and `--fix` removes duplicate replies after backing the row up | `internal/store/database.go`, `internal/doctor/scan.go` (new), `internal/store` `ListSessionSnapshots`, `internal/session/store_adapter.go` (`ProviderMessages`), `cmd/fastclaw/cmd_doctor.go` (new) | `TestAppendSessionMessageStripsNUL`, `internal/doctor` shape table + RawAssistant declarations, `TestListSessionSnapshotsOrderingAndFilter`, `TestDoctorSessionsFindsAndFixesDuplicateReplies` (CLI end to end: seed → scan fails → fix → backup → clean) |
 
 ## Test plan
@@ -557,6 +557,11 @@ working tree.
   `TestDoctorSessionsFindsAndFixesDuplicateReplies`.
 * **Tool grace** ✅ — `TestToolGraceContext*` (three cases) and
   `TestTurnBudgetExpiryLetsInFlightToolRecordItsResult`.
+* **Budgets** ✅ — `TestSubmitWithTimeoutOverridesQueueDefault` (a cron budget
+  outlives the queue default; a default task is still cut on time),
+  `TestTaskTimeoutForSourcePolicy` (cron with/without the knob, everything
+  else falls back).
+* **Compaction/pairing** ✅ — `TestCompactionOutputNormalisesToAPairingCleanHistory`.
 
 ### Integration / e2e
 
