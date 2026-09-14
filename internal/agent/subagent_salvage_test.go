@@ -82,24 +82,40 @@ func newSubagentTestAgent(t *testing.T, p provider.Provider) *Agent {
 // what the agent was configured with, then the built-in. Where the configured
 // value comes from (system → user → agent scope) is the config layer's job and
 // is covered by the merge tests there.
+//
+// A caller with no deadline has no turn clock to clamp against, which is what
+// these three cases exercise — the ceiling itself is pinned by the turn-budget
+// tests.
 func TestSubagentWallBudgetResolution(t *testing.T) {
 	t.Run("an explicit request wins", func(t *testing.T) {
 		a := newSubagentTestAgent(t, &scriptedProvider{})
 		a.subagentTimeout = 20 * time.Minute
-		if got := a.subagentWallBudget(45 * time.Second); got != 45*time.Second {
+		got, _, err := a.subagentWallBudget(context.Background(), 45*time.Second)
+		if err != nil {
+			t.Fatalf("no deadline must not refuse: %v", err)
+		}
+		if got != 45*time.Second {
 			t.Fatalf("budget = %s, want the requested 45s", got)
 		}
 	})
 	t.Run("the agent's configured default is used", func(t *testing.T) {
 		a := newSubagentTestAgent(t, &scriptedProvider{})
 		a.subagentTimeout = 30 * time.Minute
-		if got := a.subagentWallBudget(0); got != 30*time.Minute {
+		got, _, err := a.subagentWallBudget(context.Background(), 0)
+		if err != nil {
+			t.Fatalf("no deadline must not refuse: %v", err)
+		}
+		if got != 30*time.Minute {
 			t.Fatalf("budget = %s, want the configured 30m", got)
 		}
 	})
 	t.Run("an unconfigured agent falls back to the built-in", func(t *testing.T) {
 		a := newSubagentTestAgent(t, &scriptedProvider{})
-		if got := a.subagentWallBudget(0); got != subagentDefaultTimeout {
+		got, _, err := a.subagentWallBudget(context.Background(), 0)
+		if err != nil {
+			t.Fatalf("no deadline must not refuse: %v", err)
+		}
+		if got != subagentDefaultTimeout {
 			t.Fatalf("budget = %s, want %s", got, subagentDefaultTimeout)
 		}
 	})

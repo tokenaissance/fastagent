@@ -29,29 +29,46 @@ const subagentDefaultTimeout = 15 * time.Minute
 // the loop returned ("", err) and the parent only saw a failure note.
 const subagentSalvageTimeout = 90 * time.Second
 
-// subagentTurnMargin is what the clamp below leaves for the rest of the turn:
-// the sub-agent's salvage round (subagentSalvageTimeout) plus the parent's
-// final model call, which still has to answer after this tool returns.
+// subagentTurnMargin is what a delegating turn keeps for itself: the
+// sub-agent's salvage round (subagentSalvageTimeout) plus the parent's final
+// model call, which still has to answer after this tool returns.
 //
-// Without it the clamp would only move the kill to the same instant with no
-// budget left to write anything down — a budget that expires at the same moment
-// as the parent's is indistinguishable from "the parent gave up", and that
-// distinction is what decides whether salvaging is allowed at all.
-const subagentTurnMargin = 2 * time.Minute
+// Derived, not chosen. The two numbers express one relationship — whatever the
+// salvage round is given, the margin has to leave it — and a margin that drifted
+// below it would put the sub-agent's expiry back on the parent's clock, which is
+// the branch that skips salvaging entirely and returns nothing.
+const subagentTurnMargin = subagentSalvageTimeout + 30*time.Second
 
-// clampSubagentBudget keeps a sub-agent inside the turn it runs in. The
-// caller's request is a wish; the turn's clock is the ceiling, and nothing
-// looked at it before: two delegate_task calls in one round run serially, so
-// two 25-minute requests against a 45-minute turn meant the second could never
-// finish.
+// subagentWallBudget is the one owner of "how long may this sub-agent run": the
+// caller's explicit request, then this agent's configured default, then the
+// built-in — and then the turn's clock, which is the ceiling nobody may exceed.
 //
-// Returns the effective budget, a parenthetical naming the clamp when it bit
-// (empty otherwise), and an error when there is no room to start at all.
-func clampSubagentBudget(ctx context.Context, budget time.Duration) (time.Duration, string, error) {
+// The default is configuration, not ambient state: it arrives on the Agent from
+// the resolved config (system → user → agent scope) rather than being read from
+// the environment here, so the settings layers and the panel stay the single
+// place a default is decided.
+//
+// The ceiling is the newer half. The caller's number was a wish that nothing
+// checked, and since delegate_task runs serially, two 25-minute requests in a
+// 45-minute turn meant the second sub-agent could never finish (2026-09-14: the
+// turn ended with the tool row still reading "Queued (waiting on prior
+// sub-agent)…").
+//
+// A caller with no deadline (cron tick, CLI, tests) has no ceiling to clamp
+// against and keeps the configured budget. Returns the effective budget, a
+// parenthetical naming the clamp when it bit (empty otherwise), and an error
+// when the turn has no room to start at all.
+func (a *Agent) subagentWallBudget(ctx context.Context, explicit time.Duration) (time.Duration, string, error) {
+	budget := subagentDefaultTimeout
+	if a.subagentTimeout > 0 {
+		budget = a.subagentTimeout
+	}
+	if explicit > 0 {
+		budget = explicit
+	}
+
 	deadline, ok := ctx.Deadline()
 	if !ok {
-		// No turn clock to clamp against (cron, CLI, tests): the configured
-		// budget stands on its own.
 		return budget, "", nil
 	}
 	left := time.Until(deadline)
@@ -67,22 +84,6 @@ func clampSubagentBudget(ctx context.Context, budget time.Duration) (time.Durati
 	return clamped, fmt.Sprintf(
 		" (clamped from the requested %s to the %s left in this turn, %s of it reserved for finishing the turn)",
 		budget, clamped.Round(time.Second), subagentTurnMargin), nil
-}
-
-// subagentWallBudget resolves the wall-clock budget for one sub-agent: the
-// caller's explicit request, then this agent's configured default, then the
-// built-in. The default is configuration, not ambient state — it arrives on the
-// Agent from the resolved config (system → user → agent scope) rather than
-// being read from the environment here, so the settings layers and the panel
-// stay the single place a default is decided.
-func (a *Agent) subagentWallBudget(explicit time.Duration) time.Duration {
-	if explicit > 0 {
-		return explicit
-	}
-	if a.subagentTimeout > 0 {
-		return a.subagentTimeout
-	}
-	return subagentDefaultTimeout
 }
 
 // RunSubagent implements tools.SubagentRunner so the delegate_task tool
@@ -147,8 +148,7 @@ func (a *Agent) runSubagentLoop(ctx context.Context, req tools.SubagentRequest) 
 	// we're wrapping, not detaching. Keep the parent ctx: telling "my budget
 	// expired" from "the parent gave up" is what decides whether salvaging is
 	// allowed to spend one more round.
-	budget := a.subagentWallBudget(req.WallTimeout)
-	budget, budgetNote, err := clampSubagentBudget(ctx, budget)
+	budget, budgetNote, err := a.subagentWallBudget(ctx, req.WallTimeout)
 	if err != nil {
 		return "", err
 	}
