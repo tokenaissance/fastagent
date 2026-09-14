@@ -580,7 +580,7 @@ conversational replies. todo.md is for plans the user tracks, not chat overhead.
 
 ## toolDisciplineContent
 
-<!-- source: internal/agent/prompt_modules.go:810 -->
+<!-- source: internal/agent/prompt_modules.go:809 -->
 
 ````text
 # Tool Use
@@ -682,7 +682,7 @@ with what you know, marked clearly as unverified.
 
 ## workspaceUpdateContent
 
-<!-- source: internal/agent/prompt_modules.go:906 -->
+<!-- source: internal/agent/prompt_modules.go:905 -->
 
 ````text
 # Workspace Self-Update

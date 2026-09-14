@@ -130,16 +130,12 @@ Delete a scheduled task by ID.
 
 ## delegate_task
 
-<!-- source: internal/agent/tools/delegate.go:28 -->
+<!-- source: internal/agent/tools/delegate.go:50 -->
 
 ````text
-Spawn a sub-agent with its OWN context and OWN iteration budget to run a single bounded sub-task. Use this when the user's request decomposes into several large independent chunks (e.g. "find 10 leads matching X" then "find another 10 matching Y" then "write 5 emails from this data"). Each sub-agent gets a fresh tool-iteration budget so you don't burn yours exploring, and your own context stays clean of the dozens of intermediate tool results the sub-agent goes through. 
+Spawn a sub-agent with its own context and its own iteration budget to run one bounded sub-task. Sub-agents run SERIALLY: five calls in one round still execute one at a time (they share your sandbox and browser daemon), so a fan-out costs N × the single-run wall time — scope each call small rather than expecting parallel throughput.
 
-**Sub-agents run SERIALLY, not in parallel.** Even if you emit 5 delegate_task calls in one round, they execute one at a time — they share the single sandbox + single browser daemon, so parallel execution would trample each other's state. Expect the wall-clock time of a fan-out to be N × the single-sub-agent time, not 1× it. Plan accordingly: smaller per-sub-agent scope is better than fewer, larger calls.
-
-The sub-agent runs against the same tools and provider you have (minus delegate_task itself — no nesting). It cannot see your prior conversation, so pass everything it needs in the `task` arg: criteria, search hints, earlier findings to build on, output format. Sub-agents are best for tasks that produce a self-contained artifact (a table, a draft email, a structured summary). 
-
-Return: the sub-agent's final text exactly as it produced it. You then assemble multiple sub-agent results into the final deliverable for the user.
+Same tools and provider as you, minus delegate_task itself (no nesting). Return: the sub-agent's text as a tool result — you assemble the user's deliverable from it.
 ````
 
 ## exec
