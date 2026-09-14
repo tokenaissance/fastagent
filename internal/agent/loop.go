@@ -2281,8 +2281,8 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	// tool_call_id (docs/session-turn-integrity.md, clause W).
 	//
 	// Acquired before the plan-mode branch so plan turns are covered too, and
-	// released by the outermost defer so the pad and leftover-steer writers
-	// still run inside the slot that owns the turn's own tool_use ids.
+	// released by the outermost defer so a leftover-steer write still lands
+	// inside the turn that owned the session.
 	sess := a.sessions.Get(sessionTriple(msg, msg.ProjectID))
 	waitStart := time.Now()
 	if sess.TurnActive() {
@@ -2354,7 +2354,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		"agent", a.name, "channel", msg.Channel, "chat_id", msg.ChatID, "user", chatterUID)
 	a.refreshSkillsFromStore(chatterUID)
 	// sess was resolved when the turn slot was acquired above; reuse it so
-	// the whole turn (including the pad) writes through one session object.
+	// the whole turn writes through one session object.
 	// Bind chatter onto sess. Session.ctx() builds its own
 	// context.Background-rooted ctx for store calls, so the
 	// WithChatterUserID we stamped onto the caller ctx above does NOT
@@ -2692,7 +2692,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		)
 		// Let an in-flight tool finish (bounded) even when this turn's budget
 		// just expired: the round records its real result instead of leaving an
-		// orphan tool_use for the pad, and no further model round starts
+		// open tool_use for the projection to answer, and no further round starts
 		// because the loop's own ctx is already cancelled.
 		toolCtx, endToolGrace := toolGraceContext(ctx, a.graceWindow())
 		results := a.engine.executeToolsConcurrently(toolCtx, a.registry, executeCalls, a.workspacePath)
