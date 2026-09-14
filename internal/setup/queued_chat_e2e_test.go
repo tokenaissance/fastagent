@@ -93,11 +93,21 @@ func (r e2eResolver) IsCloudMode() bool                               { return f
 func newQueuedChatHarness(t *testing.T) (*Server, *agent.Agent, *e2eProvider) {
 	t.Helper()
 	prov := &e2eProvider{started: make(chan struct{}, 4), reply: "done"}
+	s, ag := newChatHarness(t, prov, 1)
+	return s, ag, prov
+}
+
+// newChatHarness builds the server + agent pair both chat e2e tests drive: the
+// real /api/chat handlers in front of a real agent runtime with a fake model.
+// Callers supply the provider so a test can script tool rounds; maxToolIterations
+// is 1 for the plain reply flows and higher when a turn has to run a tool.
+func newChatHarness(t *testing.T, prov provider.Provider, maxToolIterations int) (*Server, *agent.Agent) {
+	t.Helper()
 	home := t.TempDir()
 	rc := config.ResolvedAgent{
 		ID: "agt_e2e", UserID: "u_1", Home: home,
 		Workspace: filepath.Join(home, "workspace"), Model: "fake-model",
-		MaxTokens: 128, Temperature: 0.7, MaxToolIterations: 1,
+		MaxTokens: 128, Temperature: 0.7, MaxToolIterations: maxToolIterations,
 	}
 	mgr, err := agent.NewManager([]config.ResolvedAgent{rc}, prov, bus.New(), agent.WithUserID("u_1"))
 	if err != nil {
@@ -108,7 +118,7 @@ func newQueuedChatHarness(t *testing.T) (*Server, *agent.Agent, *e2eProvider) {
 		t.Fatal("agent not registered")
 	}
 	s := &Server{userResolver: e2eResolver{space: &api.UserSpaceView{UserID: "u_1", Agents: mgr}, agents: mgr}}
-	return s, ag, prov
+	return s, ag
 }
 
 func chatStreamRequest(t *testing.T, req chatRequest) *http.Request {
