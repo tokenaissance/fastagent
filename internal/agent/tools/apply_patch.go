@@ -507,15 +507,11 @@ func (r *Registry) readForPatch(ctx context.Context, path string) (string, error
 	}
 	if r.systemFileStore != nil && r.agentID != "" && basenameIsSystemFile(path) {
 		name := filepath.Base(filepath.Clean(path))
-		if data, err := r.readSystemFileForUser(ctx, r.systemFileUserID(name), name); err == nil {
-			return string(data), nil
-		}
-		if r.systemRoot != "" {
-			if data, err := os.ReadFile(filepath.Join(r.systemRoot, name)); err == nil {
-				return string(data), nil
-			}
-		}
-		return "", nil
+		// Same resolution as read_file / edit_file: store row first (a miss is
+		// "empty file", not an error), then the agent home's disk copy — which
+		// only the agent's own account may read for per-chatter files, so a
+		// visitor can't inherit the owner's MEMORY.md through a patch.
+		return string(r.readSystemFileWithFallback(ctx, r.systemFileUserID(name), name)), nil
 	}
 	root := r.rootForPath(path)
 	full, err := resolvePathSandboxed(root, r.effectiveSandboxRoot(root), path)
@@ -604,10 +600,9 @@ func (r *Registry) readForPatchSandbox(ctx context.Context, ex sandbox.Executor,
 	}
 	if r.systemFileStore != nil && r.agentID != "" && basenameIsSystemFile(path) {
 		name := filepath.Base(filepath.Clean(path))
-		if data, err := r.readSystemFileForUser(ctx, r.systemFileUserID(name), name); err == nil {
-			return string(data), nil
-		}
-		return "", nil
+		// Same resolution as the host path above — a store miss means "empty
+		// file", and the disk copy is owner-only for per-chatter files.
+		return string(r.readSystemFileWithFallback(ctx, r.systemFileUserID(name), name)), nil
 	}
 	if r.workspaceStore != nil && r.agentID != "" && r.isWorkspacePath(path) {
 		rc, err := r.workspaceStore.Get(ctx, r.agentID, r.projectID, r.sessionID, path)

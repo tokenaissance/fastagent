@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -475,6 +476,59 @@ func (r *Registry) readSystemFileForUser(ctx context.Context, userID, name strin
 		return r.systemFileStore.GetWorkspaceFileExact(ctx, r.agentID, userID, name)
 	}
 	return r.systemFileStore.GetWorkspaceFile(ctx, r.agentID, userID, name)
+}
+
+// readSystemFileWithFallback resolves a system/identity file the way the read
+// path always has: the durable store first, then the agent's systemRoot on
+// disk, then empty.
+//
+// A missing store row is NOT an error. Per-chatter files (USER.md / MEMORY.md)
+// have no row until the first save, and the shared identity files normally live
+// on disk — the store only holds the ones someone saved through the UI. Reading
+// those straight from the store surfaced "system file get: store: not found" to
+// the model on every edit of a never-saved file, while read_file read the very
+// same file happily (it always had this fallback). Both paths share this helper
+// so they cannot drift apart again.
+//
+// Who may see the disk copy follows the same split the store reads already
+// encode in readSystemFileForUser:
+//   - shared identity files (SOUL.md, IDENTITY.md, …) ARE the agent's template
+//     and every chatter inherits the owner's copy through the SQL overlay, so
+//     the disk copy is fair game for any caller;
+//   - per-chatter files are private, and systemRoot/MEMORY.md is ONE un-scoped
+//     mirror per agent (whoever wrote last owns its content — often the agent
+//     owner's private memory). Only the agent's own account may read that, the
+//     same rule ContextBuilder.loadFileForUser and
+//     memory_store_adapter.GetMemory apply: a visitor whose row doesn't exist
+//     yet sees an empty profile/memory, never the owner's.
+func (r *Registry) readSystemFileWithFallback(ctx context.Context, userID, name string) []byte {
+	if r.systemFileStore != nil && r.agentID != "" {
+		if data, err := r.readSystemFileForUser(ctx, userID, name); err == nil {
+			return data
+		}
+	}
+	if r.systemRoot != "" && (!isPerUserSystemFile(name) || r.ownsAgentHome(userID)) {
+		if data, err := os.ReadFile(filepath.Join(r.systemRoot, name)); err == nil {
+			return data
+		}
+	}
+	return nil
+}
+
+// ownsAgentHome reports whether userID is the account the agent's home
+// directory (systemRoot) belongs to: the agent owner, or — on installs that
+// predate agents.user_id — the UserSpace owner. Empty owner (single-user
+// legacy wiring) keeps the disk readable so those installs don't lose their
+// identity files.
+func (r *Registry) ownsAgentHome(userID string) bool {
+	if userID == "" {
+		return false
+	}
+	owner := r.agentOwnerUserID
+	if owner == "" {
+		owner = r.userID
+	}
+	return owner == "" || owner == userID
 }
 
 // SetSandboxRequired flips the exec tool's host-shell fallback off. Call
