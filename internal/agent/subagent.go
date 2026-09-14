@@ -52,7 +52,9 @@ const subagentTurnMargin = subagentSalvageTimeout + 30*time.Second
 // checked, and since delegate_task runs serially, two 25-minute requests in a
 // 45-minute turn meant the second sub-agent could never finish (2026-09-14: the
 // turn ended with the tool row still reading "Queued (waiting on prior
-// sub-agent)…").
+// sub-agent)…"). The ceiling is read through turnRemaining, not ctx.Deadline:
+// the tool context deliberately has no deadline of its own (P5 grace), so the
+// turn's clock has to travel as a value.
 //
 // A caller with no deadline (cron tick, CLI, tests) has no ceiling to clamp
 // against and keeps the configured budget. Returns the effective budget, a
@@ -67,11 +69,10 @@ func (a *Agent) subagentWallBudget(ctx context.Context, explicit time.Duration) 
 		budget = explicit
 	}
 
-	deadline, ok := ctx.Deadline()
+	left, ok := turnRemaining(ctx)
 	if !ok {
 		return budget, "", nil
 	}
-	left := time.Until(deadline)
 	if room := left - subagentTurnMargin; room <= 0 {
 		return 0, "", fmt.Errorf(
 			"this turn has %s left — less than the %s a sub-agent needs to start, work, and still leave you room to answer. Finish the deliverable from what you already have, or re-issue the delegation in a fresh turn (a long sweep belongs in its own turn, not at the end of this one)",
