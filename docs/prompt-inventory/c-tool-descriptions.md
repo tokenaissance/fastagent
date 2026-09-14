@@ -74,7 +74,7 @@ Rules:
 
 <!-- source: internal/agent/tools/bash_tools.go:25 (via bashOutputDescription) -->
 
-<!-- NOTE: branchy block — literals concatenated in source order, not as printed -->
+<!-- NOTE: 16 branch point(s) — literals concatenated in source order, not rendered -->
 
 ```text
 Read new stdout/stderr from a backgrounded shell since the last call. Use this to monitor a long-running process started with exec(run_in_background=true).
@@ -96,7 +96,7 @@ Notes:
 
 <!-- source: internal/agent/tools/bash_tools.go:37 (via killShellDescription) -->
 
-<!-- NOTE: branchy block — literals concatenated in source order, not as printed -->
+<!-- NOTE: 16 branch point(s) — literals concatenated in source order, not rendered -->
 
 ```text
 Terminate a backgrounded shell started by exec(run_in_background=true). Sends SIGKILL via process-group cancellation. Idempotent — calling it on an already-exited shell is a no-op and returns success.bash_outputtypeobjectpropertiesbash_idtypestringdescriptionIdentifier returned by exec(run_in_background=true), e.g. "bash_3".filtertypestringdescriptionOptional regex (RE2). Only output lines matching this pattern are returned.requiredbash_idbash_output: parse args: %wbash_output: bash_id is requiredbash_output: invalid filter regex: %wbash_output: shell manager not initialisedbash_output: no such bash_id %q (call exec(run_in_background=true) first; ids are valid only within the same agent process)[truncated] earlier output exceeded the 4 MiB session cap and was dropped

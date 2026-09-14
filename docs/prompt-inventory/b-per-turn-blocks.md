@@ -4,7 +4,7 @@
 
 <!-- source: internal/agent/loop.go:1710 -->
 
-<!-- NOTE: branchy block — literals concatenated in source order, not as printed -->
+<!-- NOTE: 2 branch point(s) — literals concatenated in source order, not rendered -->
 
 ```text
   ## Client Parameters
@@ -20,7 +20,7 @@ The user's client app submitted these parameters alongside the message. Forward 
 
 <!-- source: internal/agent/loop.go:1853 -->
 
-<!-- NOTE: branchy block — literals concatenated in source order, not as printed -->
+<!-- NOTE: 5 branch point(s) — literals concatenated in source order, not rendered -->
 
 ```text
 ## Your identity (per-turn anchor)
@@ -58,7 +58,7 @@ Long-term facts you've recorded about this chatter (from MEMORY.md):
 
 <!-- source: internal/agent/loop.go:1917 -->
 
-<!-- NOTE: branchy block — literals concatenated in source order, not as printed -->
+<!-- NOTE: 1 branch point(s) — literals concatenated in source order, not rendered -->
 
 ```text
 ## Reply Format
@@ -72,7 +72,7 @@ Use this when a short, conversational, multi-beat reply reads more naturally tha
 
 <!-- source: internal/agent/loop.go:1960 -->
 
-<!-- NOTE: branchy block — literals concatenated in source order, not as printed -->
+<!-- NOTE: 4 branch point(s) — literals concatenated in source order, not rendered -->
 
 ```text
 group## Current Sender
@@ -110,7 +110,7 @@ Do not start the work. Do not apologize for needing a plan. Just the plan.
 
 <!-- source: internal/agent/loop.go:2059 -->
 
-<!-- NOTE: branchy block — literals concatenated in source order, not as printed -->
+<!-- NOTE: 3 branch point(s) — literals concatenated in source order, not rendered -->
 
 ```text
 # Tool catalog (reference only — tools are disabled THIS turn, available next turn)
@@ -149,7 +149,7 @@ disabling tools after consecutive failed roundsagentfailed_roundssystemThe last 
 
 <!-- source: internal/agent/loop.go:2658-2666 -->
 
-<!-- NOTE: branchy block — literals concatenated in source order, not as printed -->
+<!-- NOTE: 1 branch point(s) — literals concatenated in source order, not rendered -->
 
 ```text
 tool loop detectedagenttoolsystemLoop detected: you called the same tool with the same arguments 3 times. Please try a different approach.
@@ -199,7 +199,7 @@ agentfailed_roundssystemThe last %d rounds of tool calls all failed (HTTP 4xx/5x
 
 <!-- source: internal/agent/subagent.go:237-244 -->
 
-<!-- NOTE: branchy block — literals concatenated in source order, not as printed -->
+<!-- NOTE: 1 branch point(s) — literals concatenated in source order, not rendered -->
 
 ```text
 subagent tool-loop detectedagenttoolsystemLoop detected: same tool with same arguments 3 times. Stop and produce the deliverable from what you have.

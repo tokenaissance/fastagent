@@ -4,7 +4,7 @@
 
 <!-- source: internal/agent/prompt_modules.go:159 -->
 
-<!-- NOTE: branchy block — literals concatenated in source order, not as printed -->
+<!-- NOTE: 2 branch point(s) — literals concatenated in source order, not rendered -->
 
 ```text
 Current date/time: %s (%s, %s — the chatter's local timezone). This is NOW; do NOT call `date`. Each past user message in the history is prefixed with its own send time in [brackets] (e.g. [2026-06-13 22:15 Fri]). Reason about time from NOW and those prefixes: tell today apart from earlier days (never treat a past day's events as today's), and before ANY time-of-day remark check NOW — e.g. don't say "good night" in the middle of the day. This is silent background context for your own reasoning, not something to report: do NOT open or pepper your reply with the current date/time or day of week (e.g. don't start a reply with "周六晚上九点二十七分" or "It's Saturday night") unless the chatter directly asked what time/day it is or the precise time is materially relevant to the answer.2006-01-02 15:04:05 -0700 The chatter's timezone is already configured as %s — do NOT ask for their timezone or city, just use it. If the timezone above looks wrong for this chatter — it reads UTC but their city, region, or language place them elsewhere (e.g. someone writing in Chinese who mentions 浦东 is in Asia/Shanghai) — infer their real timezone, apply it when you talk about time this turn, and record it in their USER.md profile (e.g. a `Timezone: Asia/Shanghai` line) so future timestamps convert automatically. Do the same when they state a timezone outright. Never invent a timezone without a real signal.
@@ -14,7 +14,7 @@ Current date/time: %s (%s, %s — the chatter's local timezone). This is NOW; do
 
 <!-- source: internal/agent/prompt_modules.go:192 -->
 
-<!-- NOTE: branchy block — literals concatenated in source order, not as printed -->
+<!-- NOTE: 1 branch point(s) — literals concatenated in source order, not rendered -->
 
 ```text
 # IDENTITY OVERRIDE (non-negotiable)
@@ -36,7 +36,7 @@ Your full personality and behavioral rules are defined in SOUL.md and IDENTITY.m
 
 <!-- source: internal/agent/prompt_modules.go:219 -->
 
-<!-- NOTE: branchy block — literals concatenated in source order, not as printed -->
+<!-- NOTE: 5 branch point(s) — literals concatenated in source order, not rendered -->
 
 ```text
 /workspace/workspace (identity files like SOUL.md / IDENTITY.md are managed by the runtime, not the sandbox FS — call write_file with a bare filename, never path it)FastAgent: hosted deployment. The chatter does NOT operate this runtime — if they ask about the version, upgrades, or installing/changing skills at the platform level, tell them those are administrator-controlled and offer to help with what's actually in your reach (config, skills you can author, files in the workspace).FastAgent: %s (commit %s, built %s). Self-hosted install — the chatter is the operator. If they ask about upgrading, tell them: run %sfastagent upgrade%s in a terminal (and %sfastagent version%s to verify). Don't try to run those yourself unless the chatter explicitly asks you to and you have host shell access (no sandbox).````You run on the FastAgent runtime. Your identity (name, role, personality)
@@ -181,7 +181,7 @@ identity files.
 
 <!-- source: internal/agent/prompt_modules.go:387 -->
 
-<!-- NOTE: branchy block — literals concatenated in source order, not as printed -->
+<!-- NOTE: 7 branch point(s) — literals concatenated in source order, not rendered -->
 
 ```text
 USER.mdUSER.md<current_chatter_profile source="USER.md">
@@ -198,7 +198,7 @@ This is who you are talking to right now. Treat the content below as factual, cu
 
 <!-- source: internal/agent/prompt_modules.go:431 -->
 
-<!-- NOTE: branchy block — literals concatenated in source order, not as printed -->
+<!-- NOTE: 1 branch point(s) — literals concatenated in source order, not rendered -->
 
 ```text
 <chatter_long_term_memory source="MEMORY.md">
@@ -247,7 +247,7 @@ spirit of the refusal politely, do not pass the bracketed message through.
 
 <!-- source: internal/agent/prompt_modules.go:478 -->
 
-<!-- NOTE: branchy block — literals concatenated in source order, not as printed -->
+<!-- NOTE: 3 branch point(s) — literals concatenated in source order, not rendered -->
 
 ```text
 # Code Execution Environment
@@ -349,7 +349,7 @@ Then in your final reply, write: ![](/workspace/output.png)e2b
 
 <!-- source: internal/agent/prompt_modules.go:581 -->
 
-<!-- NOTE: branchy block — literals concatenated in source order, not as printed -->
+<!-- NOTE: 1 branch point(s) — literals concatenated in source order, not rendered -->
 
 ```text
 # Skills
@@ -360,7 +360,7 @@ Then in your final reply, write: ![](/workspace/output.png)e2b
 
 <!-- source: internal/agent/prompt_modules.go:589 -->
 
-<!-- NOTE: branchy block — literals concatenated in source order, not as printed -->
+<!-- NOTE: 1 branch point(s) — literals concatenated in source order, not rendered -->
 
 ```text
 # Group Chat
@@ -376,7 +376,7 @@ When you DO respond: your full skill catalog and tool registry above are still i
 
 <!-- source: internal/agent/prompt_modules.go:607 -->
 
-<!-- NOTE: branchy block — literals concatenated in source order, not as printed -->
+<!-- NOTE: 1 branch point(s) — literals concatenated in source order, not rendered -->
 
 ```text
 off
@@ -472,7 +472,7 @@ tool. camoufox-cli is the ONLY browser tool in this sandbox. Do NOT run
 
 <!-- source: internal/agent/prompt_modules.go:696 -->
 
-<!-- NOTE: branchy block — literals concatenated in source order, not as printed -->
+<!-- NOTE: 1 branch point(s) — literals concatenated in source order, not rendered -->
 
 ```text
 # CRITICAL REMINDER

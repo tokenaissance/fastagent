@@ -34,7 +34,7 @@ Re-issue the same command with run_in_background — do not sleep in a foregroun
 
 <!-- source: internal/sandbox/e2b_executor.go:984 -->
 
-<!-- NOTE: branchy block — literals concatenated in source order, not as printed -->
+<!-- NOTE: 2 branch point(s) — literals concatenated in source order, not rendered -->
 
 ```text
 deadline_exceeded [hint: the output above was delivered, but a process this command started is still holding the exec stream open — envd ended the request at its own deadline. Run it with exec({"run_in_background": true}) instead: that hands back a bash_id immediately and bash_output reads it later, so the waiting happens in the sandbox while the turn stays free. Don't read this as a failed run: check the sandbox before re-running.]
@@ -62,7 +62,7 @@ The job keeps running after this call returns, and its output is captured at %s 
 
 <!-- source: internal/agent/tools/sandbox_background.go:330-360 -->
 
-<!-- NOTE: branchy block — literals concatenated in source order, not as printed -->
+<!-- NOTE: 6 branch point(s) — literals concatenated in source order, not rendered -->
 
 ```text
 sandbox background poll: %wmissing
