@@ -433,6 +433,9 @@ fastclaw mcp logout <name>
 > `TestConfigSettingsModelSwitchNotifiesUserReplicas`、
 > `TestConfigSettingsModelSwitchAtSystemScopeTellsTheFleet`；`gateway` →
 > `TestSystemReloadMarkerCrossesInstances`。
+>
+> 哪个设置面写哪一层（agent 行 vs caller 行）另有一张索引：
+> `configs-kv-scope-adaptation.md` → 「设置面 → 作用域索引」。
 
 **目标**：SKILL.md（或未来 catalog）声明 `{name, url, oauthResource?, scopes?}` → fastagent 把该 server 写入 **声明存储**（`agent_mcp_servers` 每行一 server；`agent.json` 已废弃，配置统一 DB）→ `notifyAgentChanged`（ReloadAgents + configs_kv epoch + Redis pub/sub，与 OAuth 完成同一条广播）→ 新会话里 `mcp_<name>_<tool>` 注册可用。skill 只负责“声明 + 使用说明”，连接仍走既有 `mcp.NewManager`。
 

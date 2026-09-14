@@ -406,6 +406,64 @@ provider 行的形状还有一条隐含前提：前缀 `<名字>.` 之后**每�
 另：`configs_kv_e2e_test.go` 里曾有一条陈旧注释（原写「handleListProviders
 reads through scope.Providers」），是 51780fa 之前的化石，已更正。
 
+### 设置面 → 作用域索引（哪个页面写哪一层，2026-09-14）
+
+同一件「设置」在面板上有两组入口，**作用域由入口决定，不由字段名决定**。判断只看两件事：
+URL 里在不在 `/agents/<id>/…` 之下，以及页面调的是 `/api/agents/{id}/…` 还是
+`/api/config` / `/api/providers?scope=`。cloud 的 `/app` 前缀不影响这条规则，它只改路由前缀。
+
+**A. 挂在 `/agents/<id>/…` 下的模块 → 读写活跃 agent 那一层**
+
+| 模块 | 写什么 | 端点 | 落点 |
+|---|---|---|---|
+| `models` | 模型、provider | `PUT /api/agents/{id}`、`/api/providers?scope=agent` | agent 行 |
+| `context` | promptMode / splitReplies / autoPersist / sharedIdentity | `updateAgent(id, …)` | agent 行（sharedIdentity 另改该 agent 的 channel 行） |
+| `plugins` | plugins.enabled | `updateAgent(id, {plugins})` | agent 行 |
+| `mcp` | MCP server 声明 / OAuth | `updateAgent` + `/api/agents/{id}/mcp-servers` | agent 表 |
+| `customize` | SOUL / IDENTITY / AGENTS 等 | `PUT/DELETE /api/agents/{id}/system-files/{name}` | agent 文件（按 owner+agent 键） |
+| `knowledge` | 知识文件 | `POST/DELETE /api/agents/{id}/knowledge-files` | agent 文件 |
+| `scheduler` | cron 任务 | `PUT/DELETE /api/agents/{id}/cron/{jobId}` | agent 行 |
+| `skills` | 安装/删除 skill | `POST /api/skills/install`（带 agent 目标）、`DELETE /api/agents/{id}/skills/{name}` | agent 作用域 |
+| `channels` | 频道绑定、微信登录 | `/api/agents/{id}/channels/…` | channel 行（带 agent_id） |
+| `chats` / `sessions` / `usage` | 会话删除/重命名、用量 | session 相关端点 | session 行（按 agent+session 键） |
+
+**B. 平台/用户级页面 → 读写 caller 的作用域，与活跃 agent 无关**
+
+| 模块 | 写什么 | 端点 | 落点 |
+|---|---|---|---|
+| `settings/runtime` | sandbox、taskqueue、prefs.timezone | `POST /api/config` | caller（super_admin → **system** 行，普通用户 → **user** 行） |
+| 独立 `/models` | 默认模型 + provider | `POST /api/config`、`/api/providers?scope=` | caller |
+| `/providers` | provider 列表 | `/api/providers?scope=system\|user` | caller |
+| `settings/general` | 主题等 | 仅浏览器本地（`setTheme`） | 本地 |
+| `settings/account` / `settings/about` | 账号、版本 | auth / 只读 | 用户账号 |
+
+**唯一有二义性的组件是 `/models`**：它既作独立路由（`/models`），也被 agent 设置弹窗复用
+（URL 变成 `/agents/<id>/…`）。在 `ba60ff0` 之前它无条件写 caller 行，于是在 agent 上下文里
+写进了**会被 agent 行遮住**的那一层——「面板切了模型没生效」就是这么来的。现在的判定是
+`useAgentIdFromURL()` + `agent.userId === me.id`：owner 且处于 agent 上下文 → `PUT /api/agents/{id}`
+（agent 行）；其余 → 原来的 caller 行（外来 chatter 写自己的 user 行，因为 runtime 对外来
+viewer 把这一行 pin 在最后）。
+
+**这条索引真正的用处**是下面这句：runtime 解析 agent 的模型/生成参数时，
+`loadUserSpace` 在 system→user 合并之后**再叠一层 agent 行**（`internal/gateway/userspace.go:957`），
+所以 agent 行永远赢；而 `chatterPin` 只在**外来 viewer** 路径上把该 viewer 的 user 行 pin 到最后
+（同文件 `:769`，注释原文 "MY tokens, MY model"）。**因此 caller 层永远是兜底层**：写在 caller 层
+而期望某个 agent 发生变化，只有在那个 agent 没有更具体的行时才成立。
+
+核验方法：聊天里发 `/version`（打印该 agent 实际用的 Model）；或直接查库
+
+```sql
+SELECT scope, scope_id, name, value FROM configs_kv
+WHERE kind = 'setting' AND name = 'agent.model';
+```
+
+（`agents.defaults` 在 KV 里的前缀是 `agent.`，见 `kvPrefixForNamespace`。）
+
+回归：agent 行写入路径 `setup` → `TestSettings_AllCapsKeyDualWriteE2E`；跨副本生效
+`setup` → `TestConfigSettingsModelSwitchNotifiesUserReplicas` /
+`TestConfigSettingsModelSwitchAtSystemScopeTellsTheFleet`。前端这条「写哪一层由入口决定」
+没有 UT，只有 `web/src/app/models/page.tsx` 的 `writeModel` 一处实现。
+
 ### 依赖面：store 的能力端口（`internal/store/ports.go`）
 
 `store.Store` 是 120 个方法的单一接口，而 configs 域实际只用十来个：读侧
