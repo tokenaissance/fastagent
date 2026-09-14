@@ -563,6 +563,32 @@ split that landed:
   the budget the turn actually had (segments × rounds), and sub-agents are
   excluded — their own cap plus the wall-clock budget already bound them.
 
+* **A sub-agent's wall budget is clamped to the turn it runs in.**
+  `delegate_task` is registered serial, so N calls in one round cost N × the
+  single-run wall time — against a web turn whose only clock is
+  `agentTurnTimeout` (45 m). Two 25-minute requests (`wall_timeout_sec: 1500`)
+  therefore cannot both finish, and nothing checked: the model asked, the tool
+  passed the number straight through, and the second sub-agent never got to
+  start. On 2026-09-14 that surfaced as a turn that ended with the tool row
+  still reading *"Queued (waiting on prior sub-agent)…"* — the result had
+  nowhere to go, and the row is what a reader sees for the whole wait.
+  `clampSubagentBudget` (subagent.go) now takes the turn's remaining time as
+  the ceiling, reserving `subagentTurnMargin` (2 m = the 90 s salvage round
+  plus the parent's final model call) so the sub-agent's *own* budget expires
+  first: that is what keeps it on the salvage path instead of being cut down
+  mid-flight by the parent, which is the difference between "partial result
+  with a reason" and "nothing". The clamp bit is named in the tool result and
+  in a warning log. When the turn has less than the margin left, delegating is
+  refused with the remaining time and the instruction to re-issue in a fresh
+  turn — starting a doomed sub-agent is worse than saying so, because the
+  parent still has to answer within the same clock.
+  The wait itself is bounded now too: `RegisterSerialFrom` serialises through a
+  one-slot channel instead of a `sync.Mutex`, so a queued call returns
+  `ctx.Err()` the moment its turn ends rather than staying blocked until the
+  running sibling finishes (and then entering the tool body with a dead ctx).
+  A deadline-less caller (cron tick, CLI, tests) has nothing to clamp against
+  and keeps its configured budget.
+
 ### P6 — Archive integrity and operations ✅ landed
 
 * NUL bytes are stripped at the persistence boundary (`sanitizeNUL` on
@@ -664,6 +690,14 @@ working tree.
 * **Gateway parking** ✅ — `TestDeferredTurnsDrainPolicy` (busy sessions are
   skipped, per-chat FIFO head only, one submission per idle observation),
   `TestDeferredTurnsDropsMessagesPastBudget`.
+* **Sub-agent wall budget** ✅ — `TestSubagentBudgetIsClampedToTheTurnDeadline`
+  (a 25 m request in a 10 m turn runs with ~8 m), 
+  `TestSubagentBudgetUnderTheTurnCeilingIsUntouched` (5 m in a 45 m turn stays
+  5 m), `TestSubagentBudgetWithoutATurnDeadlineIsUntouched` (cron/CLI keeps the
+  configured budget), `TestSubagentRefusesWhenTheTurnHasNoRoomLeft` (no model
+  round is ever spent), and the serial wait itself:
+  `TestRegisterSerialQueuedCallIsReleasedByItsContext`,
+  `TestRegisterSerialAlreadyCancelledCallNeverEnters`.
 * **Wire builder** ✅ — the P0 tests stay as defence-in-depth
   (`TestToAPIMessagesDropsDuplicateToolReplies`,
   `TestToAPIMessagesDropsDanglingToolReplies`,
