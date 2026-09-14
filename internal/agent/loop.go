@@ -2309,6 +2309,11 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	signalAdmission(ctx)
 	defer sess.ReleaseTurn()
 
+	// Turn start, used at the end of the turn to tell the web transcript which
+	// files THIS turn produced (see turn_files.go). Captured after admission so
+	// time spent queued behind another turn can't drag earlier writes in.
+	turnStart := time.Now()
+
 	// Plan mode short-circuits the ReAct loop: tools off, the model
 	// emits a numbered plan, the user reviews it and replies normally
 	// (no planMode flag) on the next turn to execute. Lets users catch
@@ -2566,9 +2571,14 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 				emitEvent(ctx, ChatEvent{Type: "done"})
 				return emptyMsg
 			}
-			asst := provider.Message{Role: "assistant", Content: resp.Content, Thinking: resp.Thinking, Metadata: knowledgeMeta, Timestamp: time.Now().UnixMilli(), RawAssistant: resp.RawAssistant}
+			// Stamp this turn's produced files onto the reply that closes it:
+			// the transcript renders "Files from this turn" from this list, and
+			// the same map is persisted with the message so a history reload
+			// shows exactly the same set instead of every file in the session.
+			turnMeta := mergeMetadata(knowledgeMeta, a.turnFilesMeta(ctx, msg.ProjectID, msg.ChatID, turnStart))
+			asst := provider.Message{Role: "assistant", Content: resp.Content, Thinking: resp.Thinking, Metadata: turnMeta, Timestamp: time.Now().UnixMilli(), RawAssistant: resp.RawAssistant}
 			sess.Append(asst)
-			emitEvent(ctx, ChatEvent{Type: "content", Data: map[string]any{"content": resp.Content, "metadata": knowledgeMeta}})
+			emitEvent(ctx, ChatEvent{Type: "content", Data: map[string]any{"content": resp.Content, "metadata": turnMeta}})
 			if resp.Content != "" {
 				replyParts = append(replyParts, resp.Content)
 			}
@@ -2872,7 +2882,13 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		// badge attached.
 		finalContent = fmt.Sprintf("I've reached the maximum number of tool iterations (%d) and couldn't synthesize a final response. The work above represents what I gathered before hitting the limit.", a.maxToolIterations)
 	}
-	capMeta := mergeMetadata(iterationCapMetadata(a.maxToolIterations), knowledgeMeta)
+	// The forced-final-delivery reply also closes the turn, so it carries the
+	// same produced-files list (the budget ran out mid-work, which is exactly
+	// when "what did it write" matters most).
+	capMeta := mergeMetadata(
+		mergeMetadata(iterationCapMetadata(a.maxToolIterations), knowledgeMeta),
+		a.turnFilesMeta(ctx, msg.ProjectID, msg.ChatID, turnStart),
+	)
 	sess.Append(provider.Message{
 		Role:      "assistant",
 		Content:   finalContent,
