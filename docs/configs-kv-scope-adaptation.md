@@ -979,10 +979,10 @@ tag 补不回来（`TestConfigValueNumberFloat64Boundary` 钉住这条边界）�
 `TestDecodeConfigValueMalformedObjectKeepsText`、`TestDecodeLegacyValue`
 （旧启发式逐例保留）、`TestConfigsKvValueKindRoundTrip`（tag 落库并读回）、
 `TestMigrateConfigsKvValueKindRetrofitsLegacyTable`（老表补列 + 幂等 + 老行仍可读）；
-`scope` → `TestMirrorFallbackRestoresValueTypes`（**端到端**：删掉 blob 行后从镜像
+`scope` → `TestConfigsKVFallbackRestoresValueTypes`（**端到端**：删掉 blob 行后从镜像
 解出 `int64` / `string "123"` / `bool` / 空串，未加 tag 时该测试失败）、
 `TestGetValuesScopePrecedence`（内层同时替换值与 tag）、
-`TestProvidersMirrorFallbackKeepsNumericKey`（标注行与未标注行各一例）、
+`TestProvidersConfigsKVFallbackKeepsNumericKey`（标注行与未标注行各一例）、
 `TestProvidersConfigsKVFallbackKeepsLegacyStructure`（未标注的 `models` 数组行必须
 解回结构——db043cd 把这条漏掉了，provider 会整个消失）、
 `TestSettingLargeIntThroughKVOnlyPath`（1e6 以上的 int 端到端）。
@@ -1088,7 +1088,7 @@ provider 名同时是两样东西：`configs_kv` 的 key 前缀（`<名>.<字段
 优化），有 blob 行的 namespace 不付额外查询，面板的 2 次查询快路径在常见情况下
 不变。「有没有 blob 行」看的是**行**，不是合并结果：`Enabled: false` 的行是
 「关掉这个 namespace」的决定，`mergeByNamespace` 已经把它排除，若按合并结果
-判断就会把它的值从镜像里复活。回归测试：`TestBatchSettingsFallsBackToMirror`
+判断就会把它的值从镜像里复活。回归测试：`TestBatchSettingsFallsBackToConfigsKV`
 （blob namespace 取 blob、镜像独有 namespace 取镜像、没人写过的 namespace 仍然
 缺席）与既有的 `TestBatchSettings_DisabledRowIgnored`。
 
