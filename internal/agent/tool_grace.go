@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 	"time"
 )
@@ -44,10 +45,19 @@ func toolGraceContext(ctx context.Context, grace time.Duration) (context.Context
 		case <-toolCtx.Done():
 			return
 		}
+		// Say it out loud: downstream this cancellation surfaces as a bare
+		// "context canceled" (e.g. an exec stream cut mid-read, reported as
+		// "e2b exec body read: context canceled"), which looks identical to a
+		// sandbox or provider fault. Naming the cause and the window here is
+		// what separates "the turn's budget ran out" from "the sandbox died".
+		slog.Warn("turn ctx ended with a tool in flight; letting it finish within the grace window",
+			"cause", ctx.Err(), "grace", grace.String())
 		timer := time.NewTimer(grace)
 		defer timer.Stop()
 		select {
 		case <-timer.C:
+			slog.Warn("tool still running after its grace window; cancelling it",
+				"grace", grace.String())
 			cancel()
 		case <-toolCtx.Done():
 		}
