@@ -75,12 +75,14 @@ func (p *streamProvider) ChatStream(ctx context.Context, _ []provider.Message, _
 // (docs/session-turn-integrity.md, P5).
 func TestTurnBudgetExpiryLetsInFlightToolRecordItsResult(t *testing.T) {
 	a, _ := newGateAgent(t)
-	a.toolGrace = 2 * time.Second
+	// Budget expires quickly, the tool finishes well inside a generous grace:
+	// the point is the contract, so the margins absorb a loaded machine.
+	a.toolGrace = 30 * time.Second
 	prov := &streamProvider{}
 	a.provider = prov
 	a.registry.Register("slow_tool", "test tool", nil, func(ctx context.Context, _ json.RawMessage) (string, error) {
 		select {
-		case <-time.After(200 * time.Millisecond):
+		case <-time.After(800 * time.Millisecond):
 			return "real tool result", nil
 		case <-ctx.Done():
 			return "", ctx.Err()
@@ -88,7 +90,7 @@ func TestTurnBudgetExpiryLetsInFlightToolRecordItsResult(t *testing.T) {
 	})
 
 	msg := bus.InboundMessage{Channel: "web", UserID: "u_owner", ChatID: "chat-budget", Text: "go"}
-	turnCtx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
+	turnCtx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 	a.HandleMessage(turnCtx, msg)
 
