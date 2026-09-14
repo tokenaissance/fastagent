@@ -321,6 +321,13 @@ type Registry struct {
 	// them via kill_shell. Sessions outlive individual turns; they die
 	// only on explicit kill or on Registry.Close.
 	shellMgr *shellManager
+	// sandboxJobs is the same idea for jobs that run INSIDE a sandbox:
+	// there is no host process handle, so the table stores how to reach
+	// the job again (the executor that owns it, its log path, and how
+	// much of that log the model has already read). bash_output and
+	// kill_shell fall back to this table when shellMgr has no such id —
+	// see sandbox_background.go.
+	sandboxJobs *sandboxJobs
 }
 
 type turnFailKey struct {
@@ -636,24 +643,33 @@ type registeredTool struct {
 // the legacy single-root behavior.
 func NewRegistry(systemRoot, userRoot string) *Registry {
 	r := &Registry{
-		tools:      make(map[string]registeredTool),
-		systemRoot: systemRoot,
-		userRoot:   userRoot,
-		shellMgr:   newShellManager(),
+		tools:       make(map[string]registeredTool),
+		systemRoot:  systemRoot,
+		userRoot:    userRoot,
+		shellMgr:    newShellManager(),
+		sandboxJobs: newSandboxJobs(),
 	}
 	r.registerBuiltins()
 	return r
 }
 
-// Close releases per-Registry resources. Currently terminates every
-// running background shell (started via exec with run_in_background)
-// so they don't outlive their owning agent. Safe to call multiple
-// times. Callers that don't have a clean shutdown hook can omit it —
-// the OS reaps zombies when the FastAgent process exits anyway.
+// Close releases per-Registry resources. Terminates every running
+// background shell started on this HOST (exec with run_in_background)
+// so they don't outlive their owning agent; sandbox jobs are left
+// running because they belong to a sandbox another replica can adopt
+// (see sandbox_background.go). Safe to call multiple times. Callers
+// that don't have a clean shutdown hook can omit it — the OS reaps
+// zombies when the FastAgent process exits anyway.
 func (r *Registry) Close() {
 	if r.shellMgr != nil {
 		r.shellMgr.Close()
 	}
+	// Sandbox jobs are NOT killed here: they run inside a sandbox this
+	// process doesn't own (the session lease can be served by another
+	// replica on the next turn), so tearing them down on shutdown would
+	// break the long-running work the feature exists for. Closing only
+	// stops this registry from launching more.
+	r.sandboxJobs.close()
 }
 
 // Register adds a tool to the registry (as a built-in tool).
