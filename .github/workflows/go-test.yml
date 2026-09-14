@@ -42,13 +42,18 @@ jobs:
 
   sandbox-leases-e2b:
     name: Live E2B cross-pod adoption (credentials required)
-    if: ${{ secrets.E2B_API_KEY != '' && secrets.E2B_TEMPLATE != '' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: "1.25"
+      # The credential gate is a STEP condition, not a job condition. `secrets` is
+      # not an available context in `jobs.<id>.if`, and an expression that names an
+      # unavailable context fails the whole run at evaluation time — which is what
+      # happened here: every push since this workflow was added (2026-09-07)
+      # produced a run with ZERO jobs, so no job ever ran. `secrets` IS available
+      # in a step's `env`, which is where the values are injected below.
       - name: Run live E2B cross-pod adoption e2e
         env:
           E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
@@ -57,10 +62,14 @@ jobs:
         # offline tests cannot make: that a detached job survives the exec
         # request on the real hosted backend. If envd ever starts reaping
         # detached sessions, this is where it shows up first.
-        run: >
-          go test ./internal/sandbox/ ./internal/agent/tools/
-          -run '^TestE2BPoolCrossPodAdoption$|^TestSandboxBackgroundE2BLive$'
-          -count=1 -v
+        run: |
+          if [ -z "$E2B_API_KEY" ] || [ -z "$E2B_TEMPLATE" ]; then
+            echo "no E2B credentials in this repository — skipping the live e2e"
+            exit 0
+          fi
+          go test ./internal/sandbox/ ./internal/agent/tools/ \
+            -run '^TestE2BPoolCrossPodAdoption$|^TestSandboxBackgroundE2BLive$' \
+            -count=1 -v
 
   sandbox-background:
     name: sandbox background exec (unit + real-shell + docker)
