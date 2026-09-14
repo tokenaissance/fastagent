@@ -254,6 +254,16 @@ func (g *Gateway) resolveChatter(ctx context.Context, ownerID string, msg bus.In
 // delivered. Returns true when the message was folded into a running
 // turn — the caller must then NOT also Submit. False means no turn is
 // active; fall back to taskQueue.Submit.
+//
+// This is the IM half of the product contract documented in
+// docs/session-turn-integrity.md ("who queues and who steers"): an IM user
+// cannot see the running turn and expects the bot to react to their newest
+// message, so an IM message steers automatically. The dashboard deliberately
+// does NOT come through here — its POST queues (StartOrQueue) and steering is
+// an explicit button, because a dashboard user can see the turn they are
+// interrupting. Flipping either half is a product change, not a tweak: route
+// IM through submitTask instead, or call PushSteerIfActive from the dashboard
+// handler.
 func (g *Gateway) trySteer(target *agent.Agent, msg bus.InboundMessage, text string) bool {
 	if target == nil || !target.SteerInbound(msg, text) {
 		return false

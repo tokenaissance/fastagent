@@ -388,6 +388,33 @@ Policy matrix as landed:
 | webhook / API-key completion | `StartOrQueue` | queue |
 | plan mode | `StartIfIdle` on a session with an active turn | queue, never preempt |
 
+### Product contract: who queues and who steers (decided 2026-09-14)
+
+The table above is a *product* decision, not an implementation detail, so it is
+stated as one here. Users should be able to predict what happens when they
+write into a session that is already working:
+
+| Surface | While the session is busy | What the user should expect |
+|---|---|---|
+| Dashboard chat | **the message queues** behind the running turn; it runs when that turn ends | your message is kept, in order, and answered in its own turn — the running turn is not redirected |
+| Dashboard "steer" (explicit action) | folds into the running turn | the mid-flight instruction reaches the model at its next tool boundary; the current turn answers it |
+| IM DM / group message | **steers** the running turn | the bot reacts to your newest message inside the work it is already doing (the IM convention: latest message wins) |
+| cron tick / goal continuation / heartbeat / subagent | never starts a second turn; parked and retried when the session is idle | scheduled work is deferred, not run in parallel with a human's turn |
+| webhook / API-key completion | queues like the dashboard | one turn per session, always |
+
+Rationale for the asymmetry: dashboard users can *see* the running turn and
+have an explicit control (the steer button), so queueing is the predictable
+default (D2); IM users cannot see it and expect a bot to react to their newest
+message, so steering stays automatic there (D3). Steering is not what caused
+the 2026-09-13 incident — steering writes into the running turn's own message
+list, it does not create a second writer — which is why this contract keeps it
+where it is useful.
+
+Changing either half is a product change, not a bug fix: making IM queue would
+mean routing IM messages through `submitTask` instead of `trySteer`
+(`internal/gateway/routing.go`); making the dashboard auto-steer would mean
+calling `PushSteerIfActive` in `handleChatStream` before starting a turn.
+
 ### P3 — `normalizeForPrompt` (the authoritative guard) ✅ landed
 
 A pure function applied where the prompt is assembled
