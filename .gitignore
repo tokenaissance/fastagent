@@ -61,6 +61,7 @@ deploy/docker/.state/
 internal/setup/web/
 web/out/
 web/.next/
+build-image.sh
 
 openclaw.json
 
