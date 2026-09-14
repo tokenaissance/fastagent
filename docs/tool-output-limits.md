@@ -110,6 +110,45 @@ workspace snapshot is 34.7 MB (over the 32.0 MB cap) — refusing to flush
 `internal/sandbox/lifecycle.go` turns that into
 `WARN sandbox sync: snapshot failed … cause=post-exec`.
 
+## P1: the response body is not a variable in the peak
+
+Clipping the assembled string fixed the conversation. It did not fix the
+allocation profile: the reader still did `io.ReadAll(resp.Body)` and then carved
+frames out of the result, so a 76 MB answer existed as the **101 MB body**, the
+**76 MB decoded string**, and the **copy `String()` made of it** — all
+simultaneously, on a pod with a 1 GiB limit.
+
+The reader now walks the frame layout `[1 byte flags][4 bytes length][payload]`
+straight off the socket, reusing one payload buffer, and hands each decoded
+chunk to an `execOutput` as it arrives:
+
+| | contract | on overflow |
+|---|---|---|
+| tool result | `clipOutput` — head + tail kept, middle counted and dropped | nothing to refuse: the size is the model's information |
+| machine payload | `payloadOutput` — everything kept | `errPayloadOverCap`, and the **read stops there** |
+
+Measured, 66 MB of body in 64 KiB frames (`TestExecStreamsA70MBResultWithoutHoldingIt`):
+
+| Shape | Allocated |
+|---|---|
+| read-everything then clip (pre-P1) | **860 MB** |
+| frame-at-a-time (now) | **125 MB** |
+
+The 860 MB figure is the incident: it is what a 1 GiB pod does not survive. The
+remaining 125 MB is the base64 decode of what was read; the sink itself holds at
+most 128 KiB however large the stream is (`TestHeadTailSinkNeverGrowsPastTheCap`).
+
+Two things fall out of streaming that the read-everything version could not do:
+
+* **The snapshot refusal is early.** Over-cap payloads stop the read at the cap
+  instead of downloading 101 MB and then rejecting it
+  (`TestPayloadStreamStopsReadingAtTheCap`).
+* **Partial output is decoded.** When a stream is cut mid-flight, what reached
+  the caller is now the command's own output rather than the raw framed JSON
+  (`{"event":{"start":{"pid":…}}}`), which nothing can read. The frames that did
+  arrive are still named in the error, because for a cut stream the pid is the
+  one lead an operator has.
+
 ## Observability
 
 One log line per clipping, and only when something was actually dropped:
@@ -132,10 +171,6 @@ of the payload would have hidden this incident rather than bounded it.
 * **No config knob.** Two constants, no environment variable. A deployment that
   needs different caps has a design problem, not a tuning problem; and the
   failure mode of a wrong knob (unbounded again) is the one we are fixing.
-* **No streaming rewrite here.** Reading the e2b body frame-by-frame and
-  emitting what fits (rather than assembling and then clipping) would lower the
-  peak further, from "body + decoded + copy" to "within the cap". That is a
-  separate change with its own review; it is not needed to stop the OOM.
 * **No truncation of the model's own text.** Only tool results. Assistant
   output is bounded by `maxTokens` already.
 * **The snapshot still goes through exec as base64.** A files API PUT (the
@@ -156,6 +191,15 @@ of the payload would have hidden this incident rather than bounded it.
 | `TestToolResultIsClippedBeforeItReachesHistory` | a tool that bypasses every producer still lands in session history clipped, both ends intact |
 | `TestWorkspaceSnapshotIsNotClippedByTheToolResultCap` | a 270 KB snapshot round-trips byte-for-byte — the clip stays off the machine payload |
 | `TestWorkspaceSnapshotRefusesAnOversizedWorkspace` | over the cap it errors, names the cap and the biggest file, and is never truncated |
+| `TestClipOutputMatchesTheStreamingSink` | the string form and the streaming form of the rule agree on seven input shapes |
+| `TestHeadTailSinkNeverGrowsPastTheCap` | 64 MiB written through the sink, at most 128 KiB held |
+| `TestCombinedStreamsKeepOneMarkerAndTheStderrTail` | stdout + stderr is one clipped string with one marker, stderr last |
+| `TestBothStreamsHugeStaysBounded` | two over-cap streams still produce one bounded result |
+| `TestExecStreamsA70MBResultWithoutHoldingIt` | 66 MB through the real reader comes back clipped inside 3× its own size |
+| `TestPayloadStreamStopsReadingAtTheCap` | the read stops at the cap; the server writes fewer frames than it had |
+| `TestStreamCutMidFrameStaysATruncatedExec` | a cut inside a frame is "no exit trailer", not a transport error (hydrate retries it) |
+| `TestFrameLargerThanTheReadBuffer` | a 300 KB frame decodes — the payload buffer grows to the frame |
+| `TestE2BExecClockHints` | the cut-stream partial is the decoded output; the delivered-frames clause still travels |
 
 The last one is the sensitivity check for the loop backstop: with
 `ClipAndLog` removed from `loop.go` it fails with
