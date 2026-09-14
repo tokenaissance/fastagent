@@ -118,3 +118,46 @@ func TestSubagentRefusesWhenTheTurnHasNoRoomLeft(t *testing.T) {
 		t.Fatalf("the sub-agent ran %d model rounds for a turn that had already ended", n)
 	}
 }
+
+// What the margin is for, end to end: the clamped sub-agent's OWN budget has to
+// end while the turn is still alive, because that is the branch that gets a
+// tools-free round to write down its findings. When the two clocks end together
+// the loop takes the parent-cancel path and returns nothing at all — the clamp
+// would then be trading "ran too long" for "delivered nothing".
+func TestClampedSubagentStillSalvagesWhenItsOwnBudgetEnds(t *testing.T) {
+	prov := &scriptedProvider{respond: func(ctx context.Context, call int, _ []provider.Tool) (*provider.Response, error) {
+		switch call {
+		case 1:
+			return &provider.Response{
+				Content:   "DRAFT: QuantConnect tiers",
+				ToolCalls: []provider.ToolCall{{ID: "t1", Function: provider.FunctionCall{Name: "no_such_tool", Arguments: "{}"}}},
+			}, nil
+		case 2:
+			<-ctx.Done() // the clamped budget ends here, not the turn's
+			return nil, ctx.Err()
+		default:
+			return &provider.Response{Content: "PARTIAL BRIEF: 1) plans 2) compute"}, nil
+		}
+	}}
+	a := newSubagentTestAgent(t, prov)
+
+	// Two seconds of sub-agent time, plus the margin the turn keeps for itself.
+	ctx, cancel := context.WithTimeout(context.Background(), subagentTurnMargin+2*time.Second)
+	defer cancel()
+
+	out, err := a.RunSubagent(ctx, tools.SubagentRequest{
+		Task: "research", MaxIterations: 3, WallTimeout: 25 * time.Minute,
+	})
+	if err == nil {
+		t.Fatal("a budget that expired is still a failure")
+	}
+	if !strings.Contains(err.Error(), "clamped from the requested") {
+		t.Fatalf("the expiry must name the clamp, got %q", err)
+	}
+	if !strings.Contains(out, "PARTIAL BRIEF") {
+		t.Fatalf("the clamped sub-agent must still salvage, got %q", out)
+	}
+	if !prov.sawToolsFreeRound(3) {
+		t.Fatalf("the salvage round must run tools-free, tool-counts=%v", prov.toolLen)
+	}
+}
