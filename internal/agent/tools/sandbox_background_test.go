@@ -163,6 +163,13 @@ func TestParseBackgroundProbe(t *testing.T) {
 	if err != nil || status != "exited" || code != "137" || size != 4096 || body != "tail" {
 		t.Fatalf("padded reply = %q %q %d %q %v", status, code, size, body, err)
 	}
+	// A marker whose exit-code field never made it out (the shell creates the
+	// file, then writes it; a kill can land in between, and an empty field
+	// disappears into Fields) must still yield the output.
+	status, code, size, body, err = parseBackgroundProbe("\x1ffcbg exited 211 \x1ftick 1\ntick 2")
+	if err != nil || status != "exited" || code != "?" || size != 211 || body != "tick 1\ntick 2" {
+		t.Fatalf("codeless reply = %q %q %d %q %v — a poll must not fail on a cosmetic field", status, code, size, body, err)
+	}
 	if _, _, _, _, err := parseBackgroundProbe("no marker here"); err == nil {
 		t.Fatal("a reply without the status marker must be an error, not empty output")
 	}
@@ -333,13 +340,13 @@ func TestSandboxJobsStartRegistersResolvableJob(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	if job.id != "sbg_1" || job.pid != "4242" || !job.grouped {
+	if !strings.HasPrefix(job.id, "sbg_") || job.pid != "4242" || !job.grouped {
 		t.Fatalf("job = %+v", job)
 	}
-	if got := runner.commands(); len(got) != 1 || got[0] != backgroundLaunchCommand("sbg_1", "bash job.sh") {
+	if got := runner.commands(); len(got) != 1 || got[0] != backgroundLaunchCommand(job.id, "bash job.sh") {
 		t.Fatalf("start did not send the launcher:\n%v", got)
 	}
-	if jobs.get("sbg_1") != job {
+	if jobs.get(job.id) != job {
 		t.Fatal("a started job must be reachable by its id — bash_output has no other way to find it")
 	}
 
@@ -351,6 +358,28 @@ func TestSandboxJobsStartRegistersResolvableJob(t *testing.T) {
 	}
 	if second.id == job.id || second.logPath == job.logPath {
 		t.Fatalf("jobs share identity: %q/%q vs %q/%q", job.id, job.logPath, second.id, second.logPath)
+	}
+}
+
+// A job's identity is its two files inside the sandbox, so two tables must
+// never mint the same id: the second launcher's `rm -f …/<id>.exit` and
+// `: > …/<id>.log` would erase the first job's record while its process kept
+// appending to the truncated log. Two registries in one process (and two
+// replicas holding one session lease) are both real ways to get two tables.
+func TestSandboxJobsIDSpace(t *testing.T) {
+	ctx := context.Background()
+	a, b := newSandboxJobs(), newSandboxJobs()
+
+	jobA, err := a.start(ctx, &fakeSandboxRunner{replies: []string{"fcbg 1 1\n"}}, "bash a.sh")
+	if err != nil {
+		t.Fatalf("start a: %v", err)
+	}
+	jobB, err := b.start(ctx, &fakeSandboxRunner{replies: []string{"fcbg 2 1\n"}}, "bash b.sh")
+	if err != nil {
+		t.Fatalf("start b: %v", err)
+	}
+	if jobA.id == jobB.id || jobA.logPath == jobB.logPath || jobA.exitPath == jobB.exitPath {
+		t.Fatalf("two tables share a job's files: %q vs %q", jobA.logPath, jobB.logPath)
 	}
 }
 
