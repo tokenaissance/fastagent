@@ -121,7 +121,7 @@ When your plan needs one of these, name it explicitly in the relevant step.
 
 ## capReachedNudge
 
-<!-- source: internal/agent/loop.go:3555 -->
+<!-- source: internal/agent/loop.go:3561 -->
 
 ````text
 systemYou've used all %d tool-call iterations available for this turn. Tools are now disabled for this final response — do not attempt to call any. Synthesize what you've already gathered into the most complete deliverable you can: if the user asked for a structured artifact (table, list, ICP summary, email drafts, etc.), produce it now from the existing tool results. For any fields you couldn't resolve, mark them as 'unknown' / 'not found' / 'partial' rather than dropping rows or skipping the structure — give the user something usable plus an honest note about what's missing. Do not apologize without delivering content.
@@ -129,7 +129,7 @@ systemYou've used all %d tool-call iterations available for this turn. Tools are
 
 ## iterationContinueNudge
 
-<!-- source: internal/agent/loop.go:3571 -->
+<!-- source: internal/agent/loop.go:3577 -->
 
 ````text
 systemYou used all %d tool-call iterations of segment %d of %d — the turn continues with a fresh %d, because the last round produced real results. Keep going toward what the user asked for: build on the tool results you already hold, target the specific gaps that are still open, and do not repeat a call whose answer you already have. Deliver as soon as you have enough instead of exploring further.
@@ -137,7 +137,7 @@ systemYou used all %d tool-call iterations of segment %d of %d — the turn cont
 
 ## loopDetectedWarning
 
-<!-- source: internal/agent/loop.go:3605 -->
+<!-- source: internal/agent/loop.go:3611 -->
 
 <!-- NOTE: 1 branch point(s) — literals concatenated in source order, not rendered -->
 
@@ -147,7 +147,7 @@ Loop detected: you called the same tool with the same arguments 3 times. Please 
 
 ## failedRoundsNudge
 
-<!-- source: internal/agent/loop.go:3617 -->
+<!-- source: internal/agent/loop.go:3623 -->
 
 <!-- NOTE: 1 branch point(s) — literals concatenated in source order, not rendered -->
 
@@ -157,7 +157,7 @@ The last %d rounds of tool calls all failed (HTTP errors or empty results). Stop
 
 ## deferred tool result
 
-<!-- source: internal/agent/loop.go:2721-2725 -->
+<!-- source: internal/agent/loop.go:2726 -->
 
 ````text
 Deferred — this turn's parallel-tool cap is %d, and you emitted %d. Re-issue this exact call next round if you still need it; you'll have the other tools' results to inform the decision then.
@@ -165,7 +165,7 @@ Deferred — this turn's parallel-tool cap is %d, and you emitted %d. Re-issue t
 
 ## subagentSystemSuffix
 
-<!-- source: internal/agent/subagent.go:396 -->
+<!-- source: internal/agent/subagent.go:397 -->
 
 ````text
 # Subagent mode
