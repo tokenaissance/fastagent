@@ -58,14 +58,6 @@ func registerBashOutput(r *Registry) {
 		if args.BashID == "" {
 			return "", fmt.Errorf("bash_output: bash_id is required")
 		}
-		if r.shellMgr == nil {
-			return "", fmt.Errorf("bash_output: shell manager not initialised")
-		}
-		s := r.shellMgr.Get(args.BashID)
-		if s == nil {
-			return "", fmt.Errorf("bash_output: no such bash_id %q (call exec(run_in_background=true) first; ids are valid only within the same agent process)", args.BashID)
-		}
-
 		var filter *regexp.Regexp
 		if args.Filter != "" {
 			re, err := regexp.Compile(args.Filter)
@@ -73,6 +65,24 @@ func registerBashOutput(r *Registry) {
 				return "", fmt.Errorf("bash_output: invalid filter regex: %w", err)
 			}
 			filter = re
+		}
+
+		// A bash_id can name either a host-mode shell (shellMgr) or a job
+		// running inside a sandbox (sandboxJobs). The sandbox table is
+		// consulted only when no host shell matches, so the host path —
+		// including its "no such bash_id" error — is unchanged.
+		var s *bashSession
+		if r.shellMgr != nil {
+			s = r.shellMgr.Get(args.BashID)
+		}
+		if s == nil {
+			if job := r.sandboxJobByID(args.BashID); job != nil {
+				return job.output(ctx, filter)
+			}
+			if r.shellMgr == nil {
+				return "", fmt.Errorf("bash_output: shell manager not initialised")
+			}
+			return "", fmt.Errorf("bash_output: no such bash_id %q (call exec(run_in_background=true) first; ids are valid only within the same agent process)", args.BashID)
 		}
 
 		raw2, dropped := s.readNew()
@@ -137,11 +147,19 @@ func registerKillShell(r *Registry) {
 		if args.BashID == "" {
 			return "", fmt.Errorf("kill_shell: bash_id is required")
 		}
-		if r.shellMgr == nil {
-			return "", fmt.Errorf("kill_shell: shell manager not initialised")
+		// Same two-table lookup as bash_output: host shell first, then a
+		// job inside a sandbox.
+		var s *bashSession
+		if r.shellMgr != nil {
+			s = r.shellMgr.Get(args.BashID)
 		}
-		s := r.shellMgr.Get(args.BashID)
 		if s == nil {
+			if job := r.sandboxJobByID(args.BashID); job != nil {
+				return job.kill(ctx)
+			}
+			if r.shellMgr == nil {
+				return "", fmt.Errorf("kill_shell: shell manager not initialised")
+			}
 			return "", fmt.Errorf("kill_shell: no such bash_id %q", args.BashID)
 		}
 		if s.done.Load() {
