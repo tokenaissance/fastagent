@@ -60,39 +60,30 @@ func RegisterDelegateTask(r *Registry, runner SubagentRunner) {
 		return
 	}
 	r.RegisterSerial("delegate_task",
-		"Spawn a sub-agent with its OWN context and OWN iteration budget to run a single bounded sub-task. "+
-			"Use this when the user's request decomposes into several large independent chunks "+
-			"(e.g. \"find 10 leads matching X\" then \"find another 10 matching Y\" then \"write 5 emails from this data\"). "+
-			"Each sub-agent gets a fresh tool-iteration budget so you don't burn yours exploring, and your own context "+
-			"stays clean of the dozens of intermediate tool results the sub-agent goes through. "+
-			"\n\n**Sub-agents run SERIALLY, not in parallel.** Even if you emit 5 delegate_task calls in one round, "+
-			"they execute one at a time — they share the single sandbox + single browser daemon, so parallel "+
-			"execution would trample each other's state. Expect the wall-clock time of a fan-out to be N × the single-"+
-			"sub-agent time, not 1× it. Plan accordingly: smaller per-sub-agent scope is better than fewer, larger calls.\n\n"+
-			"The sub-agent runs against the same tools and provider you have (minus delegate_task itself — no nesting). "+
-			"It cannot see your prior conversation, so pass everything it needs in the `task` arg: criteria, search hints, "+
-			"earlier findings to build on, output format. Sub-agents are best for tasks that produce a self-contained "+
-			"artifact (a table, a draft email, a structured summary). "+
-			"\n\nReturn: the sub-agent's final text exactly as it produced it. You then assemble multiple sub-agent "+
-			"results into the final deliverable for the user.",
+		"Spawn a sub-agent with its own context and its own iteration budget to run one bounded sub-task. "+
+			"Sub-agents run SERIALLY: five calls in one round still execute one at a time (they share your sandbox "+
+			"and browser daemon), so a fan-out costs N × the single-run wall time — scope each call small rather "+
+			"than expecting parallel throughput.\n\n"+
+			"Same tools and provider as you, minus delegate_task itself (no nesting). "+
+			"Return: the sub-agent's text as a tool result — you assemble the user's deliverable from it.",
 		map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"task": map[string]interface{}{
 					"type":        "string",
-					"description": "Self-contained task description. The sub-agent does NOT see your prior conversation — include all the context it needs to act: criteria, search hints, prior findings it should build on, region / language constraints, anything the sub-agent must respect.",
+					"description": "Self-contained task description: the sub-agent does not see this conversation, so include the criteria, search hints, prior findings to build on, and any constraints it must respect.",
 				},
 				"expected_output": map[string]interface{}{
 					"type":        "string",
-					"description": "Optional concrete format the sub-agent should produce — e.g. \"markdown table with columns: name, city, owner, phone, source_url; one row per business; no preamble\". Appended to the task verbatim so the format spec is unambiguous.",
+					"description": "Optional concrete format, appended to the task verbatim — e.g. \"markdown table: name, city, phone, source_url; one row each; no preamble\".",
 				},
 				"max_iterations": map[string]interface{}{
 					"type":        "integer",
-					"description": "Optional override for the sub-agent's tool-iteration budget. Default is the same cap as your turn (typically 20). REALISTIC BUDGETS: for browser-heavy sub-tasks (camoufox-cli — each open/snapshot/click is 1-30s real time, plus a 2-3 min cold-start on the first call) the wall clock binds long before the iteration count, so 12-18 is the practical ceiling and setting 40 just wastes the parameter. For quick web_search / web_fetch sub-tasks, 20-30 is fine. For pure synthesis (no tools), 3-5 is enough.",
+					"description": "Optional override for the sub-agent's tool-iteration budget (default: your own cap, typically 20). Browser-heavy work binds on wall time long before the iteration count, so 12-18 is the practical ceiling there; 20-30 for web_search/web_fetch; 3-5 for pure synthesis.",
 				},
 				"wall_timeout_sec": map[string]interface{}{
 					"type":        "integer",
-					"description": "Optional wall-clock budget for this sub-agent in seconds. Leave it unset to use the agent's configured default (15 minutes unless the operator changed subagentTimeoutSec). Set it when a sub-task is legitimately long — a multi-source research sweep, a browser-heavy crawl — instead of forcing the work into the default. Two constraints still apply: the whole fan-out is serial, so N sub-agents cost N × their budget, and the parent turn has its own 45-minute ceiling. When the budget expires the sub-agent gets one tools-free round to write down what it already gathered, and that partial text is returned with the failure note — so a truncated result is marked, never silently partial.",
+					"description": "Optional wall-clock budget in seconds; unset uses the agent's default (15 min unless the operator changed subagentTimeoutSec). Set it for legitimately long sweeps instead of forcing them into the default. On expiry the sub-agent gets one tools-free round to write down what it has, and that text returns with the failure note — a truncated result is marked partial, never silent. The parent turn's own ceiling still applies.",
 				},
 			},
 			"required": []string{"task"},
