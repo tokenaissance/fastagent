@@ -313,3 +313,23 @@ func (s *Server) handleChangedFiles(w http.ResponseWriter, r *http.Request) {
 	}
 	jsonResponse(w, http.StatusOK, map[string]any{"available": true, "files": files})
 }
+
+// handleRuntimeTemplates lists the template refs this deployment can boot a
+// project runtime from. The first entry is the default: `POST …/runtime/up`
+// falls back to it when a project's FIRST boot carries no `templateRef`
+// (later boots reuse the ref stored on the runtime record).
+//
+// Deployment-global and read-only — the chat workspace panel uses it to offer
+// an explicit template choice on first boot instead of hard-coding a list.
+func (s *Server) handleRuntimeTemplates(w http.ResponseWriter, r *http.Request) {
+	if s.runtimeMgr == nil {
+		jsonResponse(w, http.StatusOK, map[string]any{"templates": []string{}, "default": ""})
+		return
+	}
+	refs := s.runtimeMgr.Templates()
+	def := ""
+	if len(refs) > 0 {
+		def = refs[0]
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{"templates": refs, "default": def})
+}

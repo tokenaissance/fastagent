@@ -346,6 +346,10 @@ func (s *Server) Run(ctx context.Context) error {
 	// project — a long-lived dev-server sandbox + preview URL. The
 	// upstream SaaS shell drives a project entirely through these.
 	mux.HandleFunc("GET /api/agents/{id}/projects/{pid}/runtime", auth(s.handleGetRuntime))
+	// Template refs this deployment can boot a project runtime from (first =
+	// default). Read-only and deployment-global: the chat UI uses it to offer an
+	// explicit choice on a project's FIRST boot; afterwards the stored ref wins.
+	mux.HandleFunc("GET /api/runtime/templates", auth(s.handleRuntimeTemplates))
 	mux.HandleFunc("POST /api/agents/{id}/projects/{pid}/runtime/up", auth(s.handleRuntimeUp))
 	mux.HandleFunc("POST /api/agents/{id}/projects/{pid}/runtime/sleep", auth(s.handleRuntimeSleep))
 	mux.HandleFunc("POST /api/agents/{id}/projects/{pid}/runtime/wake", auth(s.handleRuntimeWake))
