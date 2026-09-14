@@ -49,6 +49,7 @@ func TestDelegateTaskSchemaKeepsCallTimeFacts(t *testing.T) {
 		{"no nesting", "without this line flash-tier models recurse and burn budgets exponentially"},
 		{"sub-agent", "what runs is a sub-agent, not a parallel copy of the agent"},
 		{"tool result", "the return value is a tool result the caller assembles, not a user-facing message"},
+		{"clamped to the time the turn has left", "a request the turn cannot afford is reduced, not run to the wall"},
 	} {
 		if !strings.Contains(lower, want.marker) {
 			t.Errorf("delegate_task description no longer states %q (%s)", want.marker, want.why)
