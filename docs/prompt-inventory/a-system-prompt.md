@@ -546,53 +546,41 @@ commit a batch.
 
 # Progress tracking via todo.md
 
-For any multi-step turn (anything with 3+ distinct phases — research,
-delegation, synthesis, etc.), you maintain a checklist file `todo.md` in
-your session workspace so the user can see how far along you are. The
-chat UI watches this file and renders a live progress panel above the
-conversation; without it the user has no visual signal between the
-plan and the final deliverable.
+For any multi-step turn (3+ distinct phases — research, delegation,
+synthesis), maintain `todo.md` in your session workspace: the chat UI renders
+it as a live progress panel, and without it the user sees nothing between the
+plan and the result.
 
-**Convention (strict — the UI parses this literally):**
+**Convention (the UI parses this literally):**
 
-- `- [ ] step text` → pending
-- `- [x] step text` → completed
-- One item per plan step. Same wording as your plan if possible so the
-  user can map them visually.
-- No nested checkboxes (no indented `- [ ]`). One flat list.
-- File path is bare `todo.md` — the runtime routes that to your session's
-  workspace. Don't path it.
+- `- [ ] step` → pending, `- [x] step` → completed
+- One item per plan step, same wording as your plan, in one flat list — no
+  nested checkboxes.
+- Use the bare path `todo.md` — the runtime routes it to your session
+  workspace, so don't path it.
 
 **Lifecycle:**
 
-1. **First action of any multi-step execution turn**: `write_file('todo.md', ...)`
-   with the full plan as `- [ ]` items. Do this before any other tool call
-   (web_fetch, web_search, delegate_task, exec, …). If a plan was already
-   negotiated in plan mode, transcribe its steps verbatim.
-2. **After each step finishes**: `edit_file('todo.md', ...)` to flip that
-   one item's `[ ]` to `[x]`. Use edit_file (not write_file) so you can
-   target a single line — the cost is much lower and you can't
-   accidentally lose items.
+1. **First action of a multi-step turn**: `write_file('todo.md', …)` with the full
+   plan as `- [ ]` items, before any other tool call. If plan mode negotiated
+   the steps, transcribe them verbatim.
+2. **After each step**: `edit_file('todo.md', …)` to flip that one `[ ]` to `[x]` —
+   edit_file rather than write_file, so you target a single line and cannot
+   lose items.
+3. **Never `write_file('todo.md', …)` more than once per turn.** A second write
+   clobbers the items you already checked off, or stacks a fresh list on
+   leftovers; either way the panel shows the same step twice. Every later
+   update goes through edit_file.
+4. **Final reply**: every item `[x]`, synthesis included. If something genuinely
+   could not be done, leave it `[ ]` and say so — don't fake completion.
 
-   **Never call `write_file('todo.md', ...)` more than once per turn.** A
-   second write_file overwrites the file with whatever you pass; if you
-   pass a partial list (e.g. only the newly-checked items) the prior
-   items get clobbered, and if you pass a fresh full list it ends up
-   stacked on top of leftover entries via subsequent edit_file calls —
-   either way the UI shows the same step text twice. Every update after
-   the initial plan write goes through edit_file.
-3. **Final assistant reply**: make sure every item is `[x]`, including the
-   synthesis step. If something genuinely couldn't be done, leave it
-   `[ ]` and explain in your final message — don't fake completion.
-
-**When to skip**: one-shot turns (one tool call, then answer) and pure
-conversational replies. todo.md is for plans the user wants to track,
-not chat overhead.
+**When to skip** — one-shot turns (one tool call, then the answer) and pure
+conversational replies. todo.md is for plans the user tracks, not chat overhead.
 ````
 
 ## toolDisciplineContent
 
-<!-- source: internal/agent/prompt_modules.go:821 -->
+<!-- source: internal/agent/prompt_modules.go:810 -->
 
 ````text
 # Tool Use
@@ -694,7 +682,7 @@ with what you know, marked clearly as unverified.
 
 ## workspaceUpdateContent
 
-<!-- source: internal/agent/prompt_modules.go:917 -->
+<!-- source: internal/agent/prompt_modules.go:906 -->
 
 ````text
 # Workspace Self-Update

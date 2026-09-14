@@ -127,9 +127,9 @@ the source file is the truth, and F lists the paths.
    query is itself tested against known fixtures by
    `TestPromptLanguageAuditQueryOnFixtures`.
 4. **Weight is concentrated** (measured on this snapshot, not estimated):
-   `toolDisciplineContent` 5.3K chars + `taskDelegationContent` 4.9K + `modSandbox`
-   4.8K ≈ **15.0K of the 23.6K-char agent system prompt (≈3.7K of its ≈5.9K
-   tokens, 63%)**, all of it sent on every request. Identity is bookended by two
+   `toolDisciplineContent` 5.3K chars + `modSandbox` 4.8K + `taskDelegationContent`
+   4.2K ≈ **14.3K of the 23.0K-char agent system prompt (≈3.6K of its ≈5.7K
+   tokens, 62%)**, all of it sent on every request. Identity is bookended by two
    ~400-char anchors.
 5. **Recently unified** (2026-09-14): the wait guard, both exec clock hints and
    the two `run_in_background` descriptions now name exactly one supported way to
@@ -149,6 +149,11 @@ the build:
 
 The todo.md rules are load-bearing rather than verbose: the chat panel re-fetches
 on every `write_file`/`edit_file` that touches the file and hides itself when the
-file is empty (`web/src/components/chat-screen.tsx:517-525`), so the operational
-details stay. Compressing that 2.3 K-char section is still open, pending the
-provenance of the "never write it twice in a turn" rule.
+file is empty (`web/src/components/chat-screen.tsx:517-525`), and the write-once
+rule has a traced origin — `04c33d5` *"dedup todo.md items, tighten prompt against
+duplicate writes"*, where a second `write_file` stacked an old plan on a partial
+new one and the panel showed the same step twice. So the rules stay and the prose
+shrank: that section is now **1,540 chars (was 2,212)** with all nine rules
+intact, pinned by `TestTodoPromptKeepsEveryRule` and
+`TestTodoPromptStaysUnderItsBudget`. Going further would mean dropping a rule, not
+words.
