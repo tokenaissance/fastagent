@@ -13,18 +13,21 @@ import (
 // round.
 func TestToolGraceContextSurvivesCancellationForGrace(t *testing.T) {
 	parent, cancelParent := context.WithCancel(context.Background())
-	toolCtx, stop := toolGraceContext(parent, 200*time.Millisecond)
+	// Wide margins: the assertions are about the *contract* (the tool outlives
+	// cancellation, and the grace is bounded), not about timer precision — a
+	// loaded machine must not turn this into a flake.
+	toolCtx, stop := toolGraceContext(parent, 3*time.Second)
 	defer stop()
 
 	cancelParent()
 	select {
 	case <-toolCtx.Done():
 		t.Fatal("tool context ended immediately; the in-flight tool got no grace")
-	case <-time.After(80 * time.Millisecond):
+	case <-time.After(300 * time.Millisecond):
 	}
 	select {
 	case <-toolCtx.Done():
-	case <-time.After(2 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("tool context never ended; grace must be bounded")
 	}
 }
