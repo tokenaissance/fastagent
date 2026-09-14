@@ -22,8 +22,14 @@ import os
 import re
 import subprocess
 
+import sys
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(ROOT, "docs", "prompt-inventory")
+
+# Rendered content by filename; main() writes it or — with --check — verifies that
+# what is on disk still matches the source.
+DOCS = {}
 
 
 def read(rel):
@@ -205,8 +211,7 @@ def section(title, blocks, out):
         # and a three-backtick wrapper would close on them.
         chunk += "\n````text\n%s\n````\n" % text.strip("\n")
         chunks.append(chunk)
-    with open(os.path.join(OUT, out), "w", encoding="utf-8") as fh:
-        fh.write("\n".join(chunks))
+    DOCS[out] = "\n".join(chunks)
     print("%-32s %5d chars" % (out, sum(len(c) for c in chunks)))
 
 
@@ -290,15 +295,11 @@ def main():
             [
                 "renderClientParams", "renderChatbotPersistenceReminder", "renderChannelHints",
                 "renderSender", "planModeNudge", "buildToolCatalogForPlan", "capReachedNudge",
-                "iterationContinueNudge",
+                "iterationContinueNudge", "loopDetectedWarning", "failedRoundsNudge",
             ],
         )
-        + [("failed-rounds nudge", "internal/agent/loop.go:2551-2561", *range_text("internal/agent/loop.go", 2551, 2561))]
-        + [("loop-detected warning", "internal/agent/loop.go:2658-2666", *range_text("internal/agent/loop.go", 2658, 2666))]
-        + [("deferred tool result", "internal/agent/loop.go:2716-2721", *range_text("internal/agent/loop.go", 2716, 2721))]
-        + symbols("internal/agent/subagent.go", ["subagentSystemSuffix", "budgetNudge"])
-        + [("subagent failed-rounds nudge", "internal/agent/subagent.go:168-178", *range_text("internal/agent/subagent.go", 168, 178))]
-        + [("subagent loop-detected warning", "internal/agent/subagent.go:237-244", *range_text("internal/agent/subagent.go", 237, 244))],
+        + [("deferred tool result", "internal/agent/loop.go:2721-2725", *range_text("internal/agent/loop.go", 2721, 2725))]
+        + symbols("internal/agent/subagent.go", ["subagentSystemSuffix"]),
         "b-per-turn-blocks.md",
     )
 
@@ -315,7 +316,7 @@ def main():
             sym("internal/agent/tools/exec.go", "longWaitRefusal", "long foreground wait refusal"),
             sym("internal/sandbox/e2b_executor.go", "execCancelledHintText", "exec cancelled hint", False),
             sym("internal/sandbox/e2b_executor.go", "execStalledHint", "exec stalled hint"),
-            ("sandbox-absence hint", "internal/agent/tools/exec.go:922-941", *range_text("internal/agent/tools/exec.go", 922, 941)),
+            ("sandbox-absence hint", "internal/agent/tools/exec.go:634", *range_text("internal/agent/tools/exec.go", 634, 634)),
             sym("internal/agent/tools/sandbox_background.go", "startedMessage", "background job started"),
             ("background poll status lines", "internal/agent/tools/sandbox_background.go:330-360", *range_text("internal/agent/tools/sandbox_background.go", 330, 360)),
             ("interrupted-call placeholder", "internal/provider/provider.go:59", *range_text("internal/provider/provider.go", 59, 59)),
@@ -343,9 +344,37 @@ def main():
         "\n## the skills-learner prompt\n\n`internal/agent/skills_learner.go` reads its instruction from the\n" \
         "`fastagent-skill-learner` skill (`loadSkillLearnerPrompt`), so that file is the prompt —\n" \
         "review `skills/fastagent-skill-learner/SKILL.md`.\n"
-    with open(os.path.join(OUT, "f-skills.md"), "w", encoding="utf-8") as fh:
-        fh.write(body)
+    DOCS["f-skills.md"] = body
     print("%-32s %5d chars" % ("f-skills.md", len(body)))
+
+    if "--check" in sys.argv:
+        check()
+        return
+    os.makedirs(OUT, exist_ok=True)
+    for name, text in DOCS.items():
+        with open(os.path.join(OUT, name), "w", encoding="utf-8") as fh:
+            fh.write(text)
+
+
+def strip_provenance(text):
+    """Provenance comments carry file:line, and line numbers move whenever code
+    above a prompt changes. The CI gate compares TEXT, so a comment edit does not
+    fail a build while a prompt edit does."""
+    return "\n".join(l for l in text.split("\n") if not l.startswith("<!-- source:"))
+
+
+def check():
+    stale = []
+    for name, text in DOCS.items():
+        path = os.path.join(OUT, name)
+        current = open(path, encoding="utf-8").read() if os.path.exists(path) else ""
+        if strip_provenance(current) != strip_provenance(text):
+            stale.append(name)
+    if stale:
+        print("prompt snapshot is stale: " + ", ".join(stale))
+        print("run: python3 scripts/extract-prompt-inventory.py")
+        sys.exit(1)
+    print("prompt inventory matches the source (%d files)" % len(DOCS))
 
 
 if __name__ == "__main__":
