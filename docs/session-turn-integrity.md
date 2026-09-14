@@ -712,12 +712,22 @@ working tree.
   itself:
   `TestRegisterSerialQueuedCallIsReleasedByItsContext`,
   `TestRegisterSerialAlreadyCancelledCallNeverEnters`.
-* **Fan-out turn** ✅ — `TestTurnFanOutOfTwoDelegateTasksAlwaysReturns`: one turn
-  emitting two `delegate_task` calls either runs both (serially — peak
-  concurrency 1) or refuses both with the remaining time named; in both cases
-  every call has a result and the turn returns. A call left pending is the
-  failure this exists to make impossible, and it is the one the first version of
-  the clamp produced under a short turn.
+* **Fan-out turn** ✅ — `TestTurnFanOutOfDelegateTasksIsScheduledAndAlwaysReturns`:
+  one turn emitting 1, 2 or 3 `delegate_task` calls either runs them all (one at
+  a time, in emission order — which is what the dashboard's "the first
+  unresolved one is live" reads) or refuses them all with the remaining time
+  named; either way every call has a result and the turn returns. A call left
+  pending is the failure this exists to make impossible, and it is the one the
+  first version of the clamp produced under a short turn. With one call's worth
+  of clock left, exactly one runs (and salvages) while the rest report.
+* **Slot across turns** ✅ —
+  `TestDelegateTaskSlotSpansTurnsAndReleasesOnTheWaiterClock` (`internal/agent`):
+  two sessions of one agent both delegate. The second waits for the first's
+  sub-agent instead of starting a sibling (peak concurrency 1) and then runs when
+  the slot frees; when the *waiting* turn's clock ends first, the call comes back
+  saying it never started — the wait belongs to the turn, not to the tool's grace
+  window, which `TestRegisterSerialWaitEndsWithTheTurnDeadline` pins directly in
+  `internal/agent/tools`.
 * **Grace boundary** ✅ — `TestToolContextCarriesTheTurnsDeadlineAsAValue`: the
   tool context outlives its turn (no deadline of its own) yet still reports the
   turn's remaining time once stamped, and a caller with no turn clock reports
@@ -750,6 +760,14 @@ working tree.
 
 ### Integration / e2e
 
+* **Delegate fan-out over the real endpoint** ✅ —
+  `TestDelegateTaskFanOutTurnE2E` (`internal/setup`): the real chat handler, agent
+  runtime, tool registry and sub-agent loop, with only the model faked. One turn
+  asks for 1, 2 and 3 `delegate_task` calls in separate cases; each is answered in
+  the session, in emission order, the stream carries one heartbeat per sub-agent
+  *and* one `phase:"done"` per call (so the dashboard's indicator clears), and the
+  turn delivers its answer. `seq:-1` on those events is this harness's missing
+  store, not a production shape.
 * **Web POST vs cron tick** ✅ — `TestConcurrentWebAndCronTurnSerialize`
   (`internal/setup/concurrent_turn_e2e_test.go`): a cron tick parked inside a
   long tool while a real dashboard POST arrives for the same session. Asserts
