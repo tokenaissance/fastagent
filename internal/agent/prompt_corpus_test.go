@@ -42,3 +42,78 @@ func TestPromptCorpusTeachesNoHandRolledWaits(t *testing.T) {
 		}
 	}
 }
+
+// A rule that lives in two places is paid for twice on every request, and the two
+// copies drift. The file-delivery rule (write binary output into the workspace,
+// reference it by path, never inline base64) belongs to the system prompt; the
+// tool SCHEMA must not restate it. Within the system prompt several sandbox
+// sections touch it, which is one owner, not four.
+func TestToolDescriptionsDoNotRestateTheDeliveryRule(t *testing.T) {
+	if got := blocksContainingIn(t, "c-tool-descriptions.md", "base64"); len(got) > 0 {
+		t.Fatalf("a tool description restates the delivery rule: %v", got)
+	}
+	if got := blocksContainingIn(t, "a-system-prompt.md", "base64"); len(got) == 0 {
+		t.Fatal("the delivery rule vanished from the system prompt — it must have exactly one home")
+	}
+}
+
+// todo.md's operational rules (write it once per turn, flip items with edit_file,
+// bare filename) are load-bearing: the chat panel re-fetches on every write that
+// touches the file and hides itself when the file is empty
+// (web/src/components/chat-screen.tsx:517-525). They live in the task-delegation
+// module; the plan-mode nudge used to repeat the "first action" line, which is the
+// part nobody needs twice.
+func TestTodoRulesHaveOneOwner(t *testing.T) {
+	owners := blocksContaining(t, "Never call")
+	if len(owners) != 1 || !strings.HasPrefix(owners[0], "a-system-prompt.md") {
+		t.Fatalf("the todo.md operational rules must live in one system-prompt block, found: %v", owners)
+	}
+	// The plan-mode nudge used to repeat the "first action writes todo.md" line.
+	// It is plan-mode-only, so the repetition is cheap in tokens but expensive in
+	// drift: two statements of one rule, updated separately.
+	if strings.Contains(planModeNudge(), "todo.md") {
+		t.Fatal("planModeNudge restates the todo.md rule that the system prompt already carries")
+	}
+}
+
+// blocksContaining returns "<file>:<block name>" for every extracted block whose
+// text contains needle (case-insensitive).
+func blocksContaining(t *testing.T, needle string) []string {
+	t.Helper()
+	files, err := filepath.Glob(filepath.Join("..", "..", "docs", "prompt-inventory", "*.md"))
+	if err != nil {
+		t.Fatalf("glob: %v", err)
+	}
+	var out []string
+	for _, path := range files {
+		out = append(out, scanBlocks(t, path, needle)...)
+	}
+	return out
+}
+
+func blocksContainingIn(t *testing.T, name, needle string) []string {
+	t.Helper()
+	return scanBlocks(t, filepath.Join("..", "..", "docs", "prompt-inventory", name), needle)
+}
+
+func scanBlocks(t *testing.T, path, needle string) []string {
+	t.Helper()
+	var out []string
+	{
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		block := ""
+		for _, line := range strings.Split(string(body), "\n") {
+			if strings.HasPrefix(line, "## ") {
+				block = strings.TrimSpace(strings.TrimPrefix(line, "## "))
+				continue
+			}
+			if strings.Contains(strings.ToLower(line), strings.ToLower(needle)) {
+				out = append(out, filepath.Base(path)+":"+block)
+			}
+		}
+	}
+	return out
+}
