@@ -167,13 +167,7 @@ func (a *Agent) runSubagentLoop(ctx context.Context, req tools.SubagentRequest) 
 			slog.Warn("subagent disabling tools after consecutive failed rounds",
 				"agent", a.name, "failed_rounds", allFailedRounds)
 			callTools = nil
-			llmMsgs = append(llmMsgs, provider.Message{
-				Role: "system",
-				Content: fmt.Sprintf(
-					"The last %d rounds of tool calls all failed (HTTP 4xx/5xx or empty results). Stop calling tools and produce the deliverable from what you already gathered, with explicit gaps marked.",
-					allFailedRounds,
-				),
-			})
+			llmMsgs = append(llmMsgs, failedRoundsNudge(allFailedRounds, true))
 		}
 
 		resp, err := a.provider.Chat(ctx, llmMsgs, callTools, a.model, a.maxTokens, a.temperature)
@@ -236,10 +230,7 @@ func (a *Agent) runSubagentLoop(ctx context.Context, req tools.SubagentRequest) 
 			}
 			if consecutiveCount >= 3 {
 				slog.Warn("subagent tool-loop detected", "agent", a.name, "tool", tc.Function.Name)
-				messages = append(messages, provider.Message{
-					Role:    "system",
-					Content: "Loop detected: same tool with same arguments 3 times. Stop and produce the deliverable from what you have.",
-				})
+				messages = append(messages, loopDetectedWarning(true))
 				loopDetected = true
 				break
 			}
@@ -341,19 +332,6 @@ func (a *Agent) finalizeSubagent(parentCtx context.Context, messages []provider.
 		return lastContent, nil
 	}
 	return "", err
-}
-
-// budgetNudge is finalizeSubagent's instruction for a run that ran out of
-// wall-clock rather than iterations — same contract, different stated reason.
-func budgetNudge(budget time.Duration) provider.Message {
-	return provider.Message{
-		Role: "system",
-		Content: fmt.Sprintf(
-			"Your %s wall-time budget is exhausted. Tools are disabled for this final response — do not attempt to call any. "+
-				"Write the deliverable now from what you have already gathered, in the requested format, and mark anything you could not confirm as 'unknown' / 'partial' / [UNVERIFIED]. "+
-				"Producing a complete-but-shorter artifact beats apologizing or explaining what you would have done.",
-			budget),
-	}
 }
 
 // subagentSystemSuffix is appended to the agent's normal system prompt
