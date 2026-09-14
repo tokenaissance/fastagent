@@ -3181,14 +3181,39 @@ func (d *DBStore) DeleteSession(ctx context.Context, userID, agentID, sessionKey
 // reads MAX after the first commits. Multi-pod safety relies on the
 // engine's write serialization (sqlite global, postgres MVCC + the
 // composite PK uniqueness check on commit).
+// sanitizeNUL strips U+0000, the one character Postgres text/jsonb cannot
+// hold and the one a raw tool stream can contain. It removes only the NUL
+// bytes: everything else in the payload survives byte for byte.
+func sanitizeNUL(s string) string {
+	if !strings.ContainsRune(s, 0) {
+		return s
+	}
+	return strings.ReplaceAll(s, "\x00", "")
+}
+
 func (d *DBStore) AppendSessionMessage(ctx context.Context, userID, agentID, sessionKey string, msg SessionMessage) error {
 	if userID == "" {
 		return errors.New("store: AppendSessionMessage requires user_id")
 	}
+	// A tool result can carry NUL bytes (sandbox exec frames its stream with
+	// "\x00\x00\x00\x00 {\"event\":…}"). Postgres text cannot hold U+0000, so
+	// the insert failed with `invalid byte sequence for encoding "UTF8": 0x00`
+	// and the row silently never reached the archive while the working set
+	// (JSON-escaped) kept it — the UI's history disagreed with what the model
+	// had been shown. sqlite tolerates NUL, which is why this only surfaced in
+	// production. Sanitise the text columns; the JSON ones are already
+	// escaped by encoding/json.
+	msg.Content = sanitizeNUL(msg.Content)
+	msg.Thinking = sanitizeNUL(msg.Thinking)
+	msg.Name = sanitizeNUL(msg.Name)
+	msg.ToolCallID = sanitizeNUL(msg.ToolCallID)
+	msg.Origin = sanitizeNUL(msg.Origin)
+	msg.Provider = sanitizeNUL(msg.Provider)
+	msg.Model = sanitizeNUL(msg.Model)
 	contentParts, _ := json.Marshal(msg.ContentParts)
 	toolCalls, _ := json.Marshal(msg.ToolCalls)
 	metadata, _ := json.Marshal(msg.Metadata)
-	rawAssistant := string(msg.RawAssistant)
+	rawAssistant := sanitizeNUL(string(msg.RawAssistant))
 	ts := msg.Timestamp
 	if ts.IsZero() {
 		ts = time.Now().UTC()
@@ -3248,7 +3273,7 @@ func (d *DBStore) AppendSessionEvent(ctx context.Context, userID, agentID, sessi
 		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO session_events (user_id, agent_id, session_key, seq, type, data, created_at, chatter_user_id)
 				VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-			userID, agentID, sessionKey, seq, eventType, string(data), time.Now().UTC(), chatterID); err != nil {
+			userID, agentID, sessionKey, seq, eventType, sanitizeNUL(string(data)), time.Now().UTC(), chatterID); err != nil {
 			return 0, err
 		}
 	} else {
@@ -3261,7 +3286,7 @@ func (d *DBStore) AppendSessionEvent(ctx context.Context, userID, agentID, sessi
 		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO session_events (user_id, agent_id, session_key, seq, type, data, created_at, chatter_user_id)
 				VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-			userID, agentID, sessionKey, seq, eventType, string(data), time.Now().UTC(), chatterID); err != nil {
+			userID, agentID, sessionKey, seq, eventType, sanitizeNUL(string(data)), time.Now().UTC(), chatterID); err != nil {
 			return 0, err
 		}
 	}
