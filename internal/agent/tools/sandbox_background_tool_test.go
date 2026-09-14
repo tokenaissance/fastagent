@@ -62,11 +62,12 @@ func TestExecRunInBackgroundInSandboxMode(t *testing.T) {
 	if !strings.HasPrefix(started, MetaSandboxPrefix) {
 		t.Errorf("sandbox results must stay marked as such: %q", started)
 	}
-	if !strings.Contains(started, "sbg_1") || !strings.Contains(started, "pid 4242") {
+	id := jobIDFromStart(t, started)
+	if !strings.HasPrefix(id, "sbg_") || !strings.Contains(started, "pid 4242") {
 		t.Errorf("start result must carry the job id and pid: %q", started)
 	}
-	if !strings.Contains(started, `bash_output(bash_id="sbg_1")`) ||
-		!strings.Contains(started, `kill_shell(bash_id="sbg_1")`) {
+	if !strings.Contains(started, `bash_output(bash_id="`+id+`")`) ||
+		!strings.Contains(started, `kill_shell(bash_id="`+id+`")`) {
 		t.Errorf("start result must tell the model how to poll and stop the job: %q", started)
 	}
 
@@ -87,7 +88,7 @@ func TestExecRunInBackgroundInSandboxMode(t *testing.T) {
 
 	// bash_output finds the job through the sandbox table, not shellMgr.
 	ex.replies = append(ex.replies, probeReply("running", 5, "-", "tick1"))
-	polled, err := r.Execute(ctx, "bash_output", `{"bash_id":"sbg_1"}`)
+	polled, err := r.Execute(ctx, "bash_output", `{"bash_id":"`+id+`"}`)
 	if err != nil {
 		t.Fatalf("bash_output(sbg_1): %v", err)
 	}
@@ -96,7 +97,7 @@ func TestExecRunInBackgroundInSandboxMode(t *testing.T) {
 	}
 
 	// kill_shell signals the job inside the sandbox.
-	killed, err := r.Execute(ctx, "kill_shell", `{"bash_id":"sbg_1"}`)
+	killed, err := r.Execute(ctx, "kill_shell", `{"bash_id":"`+id+`"}`)
 	if err != nil {
 		t.Fatalf("kill_shell(sbg_1): %v", err)
 	}
