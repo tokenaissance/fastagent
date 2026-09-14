@@ -31,9 +31,16 @@ func (localShellRunner) Exec(ctx context.Context, command string, timeout time.D
 	return string(out), err
 }
 
+// cleanupJobFiles stops the job and removes its files. Stopping is not
+// decoration: a job that outlives its test keeps appending to
+// /tmp/fastagent-bg/<id>.*, and the next test in the package walks the same
+// directory. Killing first is also what a caller is supposed to do.
 func cleanupJobFiles(t *testing.T, job *sandboxJob) {
 	t.Helper()
 	t.Cleanup(func() {
+		if _, err := job.kill(context.Background()); err != nil {
+			t.Errorf("cleanup kill(%s): %v", job.id, err)
+		}
 		_ = os.Remove(job.logPath)
 		_ = os.Remove(job.exitPath)
 	})
