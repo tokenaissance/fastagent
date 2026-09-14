@@ -1452,6 +1452,14 @@ func (e *E2BExecutor) ProvisionDir(ctx context.Context, localDir, destDir string
 //
 // Returns map of /workspace-relative path → contents. Skips silently
 // when /workspace is empty or doesn't exist.
+//
+// This is a machine payload, so it has a cap that FAILS rather than a clip
+// that truncates: a clipped base64 tar decodes to nothing. The cap exists
+// because a snapshot runs after every exec — on 2026-09-14 the agent had left a
+// growing run log under /workspace, so every command re-uploaded ~76 MB of
+// base64 (~101 MB of framed body) and two pods were OOMKilled inside an hour.
+const snapshotBase64Cap = 32 << 20
+
 func (e *E2BExecutor) SnapshotWorkspace(ctx context.Context) (map[string][]byte, error) {
 	// `2>/dev/null` swallows the "tar: ./: directory not found" noise
 	// when /workspace doesn't exist yet; we still want to proceed with
@@ -1468,6 +1476,10 @@ func (e *E2BExecutor) SnapshotWorkspace(ctx context.Context) (map[string][]byte,
 	out = strings.TrimSpace(out)
 	if out == "" {
 		return nil, nil
+	}
+	if len(out) > snapshotBase64Cap {
+		return nil, fmt.Errorf("workspace snapshot is %s (over the %s cap) — refusing to flush /workspace after every exec; move large or growing files out of /workspace (use /tmp for run logs) and retry. Largest entries: %s",
+			humanBytes(len(out)), humanBytes(snapshotBase64Cap), e.largestWorkspaceEntries(ctx))
 	}
 	gz, err := base64.StdEncoding.DecodeString(out)
 	if err != nil {
@@ -1516,6 +1528,21 @@ func (e *E2BExecutor) SnapshotWorkspace(ctx context.Context) (map[string][]byte,
 		out2[name] = data
 	}
 	return out2, nil
+}
+
+// largestWorkspaceEntries is the diagnosis attached to an over-cap snapshot:
+// naming the biggest paths is what turns "the sync stopped" into "this file is
+// 400 MB and it is under /workspace". Best effort — the cap has already refused
+// the payload, and failing to explain it must not change the outcome.
+func (e *E2BExecutor) largestWorkspaceEntries(ctx context.Context) string {
+	probeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	out, err := e.execOnce(probeCtx, "du -ak /workspace 2>/dev/null | sort -rn | head -3", 15*time.Second)
+	out = strings.TrimSpace(out)
+	if err != nil || out == "" {
+		return "(could not list)"
+	}
+	return strings.Join(strings.Split(out, "\n"), ", ")
 }
 
 // verifyWorkspaceWritable runs a one-shot probe against /workspace as
