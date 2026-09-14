@@ -29,6 +29,46 @@ const subagentDefaultTimeout = 15 * time.Minute
 // the loop returned ("", err) and the parent only saw a failure note.
 const subagentSalvageTimeout = 90 * time.Second
 
+// subagentTurnMargin is what the clamp below leaves for the rest of the turn:
+// the sub-agent's salvage round (subagentSalvageTimeout) plus the parent's
+// final model call, which still has to answer after this tool returns.
+//
+// Without it the clamp would only move the kill to the same instant with no
+// budget left to write anything down — a budget that expires at the same moment
+// as the parent's is indistinguishable from "the parent gave up", and that
+// distinction is what decides whether salvaging is allowed at all.
+const subagentTurnMargin = 2 * time.Minute
+
+// clampSubagentBudget keeps a sub-agent inside the turn it runs in. The
+// caller's request is a wish; the turn's clock is the ceiling, and nothing
+// looked at it before: two delegate_task calls in one round run serially, so
+// two 25-minute requests against a 45-minute turn meant the second could never
+// finish.
+//
+// Returns the effective budget, a parenthetical naming the clamp when it bit
+// (empty otherwise), and an error when there is no room to start at all.
+func clampSubagentBudget(ctx context.Context, budget time.Duration) (time.Duration, string, error) {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		// No turn clock to clamp against (cron, CLI, tests): the configured
+		// budget stands on its own.
+		return budget, "", nil
+	}
+	left := time.Until(deadline)
+	if room := left - subagentTurnMargin; room <= 0 {
+		return 0, "", fmt.Errorf(
+			"this turn has %s left — less than the %s a sub-agent needs to start, work, and still leave you room to answer. Finish the deliverable from what you already have, or re-issue the delegation in a fresh turn (a long sweep belongs in its own turn, not at the end of this one)",
+			left.Round(time.Second), subagentTurnMargin)
+	}
+	if budget <= left-subagentTurnMargin {
+		return budget, "", nil
+	}
+	clamped := left - subagentTurnMargin
+	return clamped, fmt.Sprintf(
+		" (clamped from the requested %s to the %s left in this turn, %s of it reserved for finishing the turn)",
+		budget, clamped.Round(time.Second), subagentTurnMargin), nil
+}
+
 // subagentWallBudget resolves the wall-clock budget for one sub-agent: the
 // caller's explicit request, then this agent's configured default, then the
 // built-in. The default is configuration, not ambient state — it arrives on the
@@ -108,6 +148,16 @@ func (a *Agent) runSubagentLoop(ctx context.Context, req tools.SubagentRequest) 
 	// expired" from "the parent gave up" is what decides whether salvaging is
 	// allowed to spend one more round.
 	budget := a.subagentWallBudget(req.WallTimeout)
+	budget, budgetNote, err := clampSubagentBudget(ctx, budget)
+	if err != nil {
+		return "", err
+	}
+	if budgetNote != "" {
+		// Operators see it too: a sweep that silently got a quarter of the wall
+		// time it asked for is otherwise indistinguishable from a slow provider.
+		slog.Warn("subagent budget clamped to the turn's remaining time",
+			"agent", a.name, "budget", budget.String(), "requested", req.WallTimeout.String())
+	}
 	parentCtx := ctx
 	subCtx, cancel := context.WithTimeout(parentCtx, budget)
 	defer cancel()
@@ -184,8 +234,8 @@ func (a *Agent) runSubagentLoop(ctx context.Context, req tools.SubagentRequest) 
 					return "", fmt.Errorf("subagent cancelled with its parent at iteration %d: %w", i+1, parentCtx.Err())
 				}
 				budgetErr := fmt.Errorf(
-					"subagent ran out of its %s wall-time budget at iteration %d — task was too large; the parent should retry with a tighter scope, a higher wall_timeout_sec, or both",
-					budget, i+1)
+					"subagent ran out of its %s wall-time budget at iteration %d%s — task was too large; the parent should retry with a tighter scope, a higher wall_timeout_sec, or both",
+					budget, i+1, budgetNote)
 				// The same expiry reaches the logs as well as the parent's
 				// tool_result: a cancellation that only shows up as a bare
 				// "context canceled" downstream (e.g. an exec stream cut
