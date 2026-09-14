@@ -132,14 +132,17 @@ def block_text(rel, symbol):
 
 
 def branchy(body):
-    """True when a block picks between strings — the joined text is then a rough
-    rendering (branches concatenated in source order), not what any single call
-    prints. Labelled so nobody quotes it as the runtime wording."""
+    """How many places a block chooses between strings. The joined text is a
+    rough rendering then (branches concatenated in source order), so the number is
+    printed: a one-arm guard reads almost like the runtime text, a three-way intro
+    does not — and a blanket "branchy" flag on every block with an `if` would cry
+    wolf until nobody reads the note."""
+    count = 0
     for line in body.split("\n"):
         stripped = line.strip()
         if stripped.startswith("if ") or stripped.startswith("switch ") or stripped.startswith("} else"):
-            return True
-    return False
+            count += 1
+    return count
 
 
 def range_text(rel, start, end):
@@ -155,7 +158,7 @@ def section(title, blocks, out):
             text = "(no literal text in this block — it delegates to a constant listed above/below)"
         chunk = "## %s\n\n<!-- source: %s -->\n" % (label, loc)
         if note:
-            chunk += "\n<!-- NOTE: branchy block — literals concatenated in source order, not as printed -->\n"
+            chunk += "\n<!-- NOTE: %d branch point(s) — literals concatenated in source order, not rendered -->\n" % note
         chunk += "\n```text\n%s\n```\n" % text.strip("\n")
         chunks.append(chunk)
     with open(os.path.join(OUT, out), "w", encoding="utf-8") as fh:
