@@ -731,8 +731,34 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Same contract for the turn-queue namespace: an operator changing
+	// maxConcurrent / taskTimeoutSec / cronTimeoutSec expects it to apply to
+	// the next turn, not at the next rollout. Gate on the touched-namespace set
+	// (not a typed field) because taskqueue has no special decode path.
+	if sc == scope.System && touched["taskqueue"] {
+		if err := s.reloadSystemTaskQueue(); err != nil {
+			jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+	}
 	s.invalidateScope(sc, scopeID)
 	jsonResponse(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// taskQueueReloader is the gateway-side hook that re-reads the taskqueue
+// namespace into the running queue. Optional capability: a resolver that does
+// not implement it degrades to a no-op (the change still applies at the next
+// boot), exactly like sandboxReloader.
+type taskQueueReloader interface{ ReloadTaskQueue() error }
+
+func (s *Server) reloadSystemTaskQueue() error {
+	if s.userResolver == nil {
+		return nil
+	}
+	if r, ok := s.userResolver.(taskQueueReloader); ok {
+		return r.ReloadTaskQueue()
+	}
+	return nil
 }
 
 func (s *Server) reloadSystemSandbox() error {
