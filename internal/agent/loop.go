@@ -2708,6 +2708,10 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		// open tool_use for the projection to answer, and no further round starts
 		// because the loop's own ctx is already cancelled.
 		toolCtx, endToolGrace := toolGraceContext(ctx, a.graceWindow())
+		// The turn's clock survives the grace boundary as a value: a tool that
+		// sizes its own work (delegate_task) has to know when the turn ends even
+		// though this context outlives it on purpose.
+		toolCtx = withTurnDeadline(toolCtx, ctx)
 		results := a.engine.executeToolsConcurrently(toolCtx, a.registry, executeCalls, a.workspacePath)
 		endToolGrace()
 		// Append synthetic deferred results so every original tool_use
@@ -3390,6 +3394,8 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 
 		// Execute tools concurrently via SDK engine
 		toolCtx, endToolGrace := toolGraceContext(ctx, a.graceWindow())
+		// See the note in HandleMessage: the turn's deadline travels as a value.
+		toolCtx = withTurnDeadline(toolCtx, ctx)
 		results := a.engine.executeToolsConcurrently(toolCtx, a.registry, resp.ToolCalls, a.workspacePath)
 		endToolGrace()
 		totalToolCalls += len(results)
