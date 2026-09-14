@@ -147,6 +147,8 @@ the build:
 | File delivery: binary output → workspace, reference by path, never inline base64 | `modSandbox › Delivering Files to the User` (always-on) | the `exec` description's 327-char restatement (schema is sent every request) | `TestToolDescriptionsDoNotRestateTheDeliveryRule` + `TestExecDescriptionDoesNotRestateTheDeliveryRule` + `TestExecDescriptionsStayInSync` |
 | todo.md procedure (write once, flip with `edit_file`, bare filename) | `taskDelegationContent › Progress tracking via todo.md` | `planModeNudge`'s "first action writes todo.md" sentence (plan mode only) | `TestTodoRulesHaveOneOwner` |
 | When to delegate / how to write the `task` arg / the worked example | `taskDelegationContent` (always-on) | ~1.6 K chars of the `delegate_task` schema (it is sent with every request) | `TestDelegateTaskSchemaKeepsCallTimeFacts` + `TestDelegateTaskSchemaStaysUnderItsBudget` |
+| web_search-vs-web_fetch routing (when to search, never fetch a search-results page, browser fallback on 403) | `toolDisciplineContent` + `modChatbotTools` | ~0.9 K chars of the `web_fetch` schema (a third copy) | `TestWebFetchSchemaKeepsCallTimeFacts` (asserts the routing text is gone) |
+| Background-job contract (`bash_output` / `kill_shell` semantics) | **the tool schemas — there is no other home** | nothing to remove: the corpus mentions `bash_output`/`kill_shell`/`run_in_background` zero times | `TestBashOutputSchemaCarriesTheWholeContract` + `TestKillShellSchemaCarriesItsContract` (locks, not budgets) |
 
 The todo.md rules are load-bearing rather than verbose: the chat panel re-fetches
 on every `write_file`/`edit_file` that touches the file and hides itself when the
@@ -169,9 +171,18 @@ expensive line in the whole payload. After the trim above:
 | | before | after |
 |---|---|---|
 | `delegate_task` | 3,457 chars | **1,865 chars** |
-| tool schema (13 tools, real agent) | 13,159 chars ≈ 3.3 K tokens | **11,567 chars ≈ 2.9 K tokens** |
-| system prompt + tool schema | ≈9.0 K tokens | **≈8.6 K tokens** |
+| `web_fetch` | 1,687 chars | **~760 chars** |
+| tool schema (13 tools, real agent) | 13,159 chars ≈ 3.3 K tokens | **10,655 chars ≈ 2.7 K tokens** |
+| system prompt + tool schema | ≈9.0 K tokens | **≈8.4 K tokens** |
 
 For scale: Codex's own harness pays ≈1.9 K tokens of model prompt plus ≈2.3 K of
 tool specs (its everyday set), or ≈5.4 K + 2.3 K on a generic model — so
 fastagent's fixed overhead now sits between those two configurations.
+
+Two tools were checked and deliberately left alone: `bash_output` and `kill_shell`
+carry the entire background-job contract (what "new output since the last call"
+means, which status line guarantees completion, how a rolled buffer announces
+itself) and the prompt corpus mentions that machinery zero times, so budgeting
+them would delete documentation rather than duplication. What did change there is
+accuracy: their `bash_id` docs now name both id shapes — a host shell (`bash_3`)
+and a sandbox job (`sbg_1a2b_3`).
