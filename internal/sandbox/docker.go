@@ -424,7 +424,7 @@ func (s *DockerSandbox) Exec(ctx context.Context, command string, workdir string
 
 	cmd := exec.CommandContext(ctx, "docker", args...)
 	output, err := cmd.CombinedOutput()
-	result := string(output)
+	result := ClipAndLog(string(output), "exec/docker")
 	if err != nil {
 		return fmt.Sprintf("%s\nError: %s", result, err.Error()), err
 	}
