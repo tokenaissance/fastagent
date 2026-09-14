@@ -76,16 +76,20 @@ func TestSandboxLeaseExpiryAllowsTakeover(t *testing.T) {
 	var st sandbox.SandboxLeaseStore = db
 
 	const scope = "agt_2:s:sess_2"
-	// Acquire with a zero TTL that still maps to a 1-second lease (store
-	// enforces minimum), then wait for expiry.
-	if _, acquired, err := st.AcquireSandboxLease(ctx, scope, "pod-a", "sb-old", "token-old", "tpl", time.Duration(0)); err != nil || !acquired {
+	// A zero TTL maps to a ONE-second lease (store minimum), and lease times have
+	// second granularity: if the clock ticks between the INSERT and the read-back,
+	// expires_at == now and the fresh row already reads as expired — the acquirer
+	// gets acquired=false on its own insert. That made this test flake on the CI
+	// runner (observed 2026-09-14, first run ever to execute it). Three seconds of
+	// slack keeps the intent (expiry allows takeover) without the boundary race.
+	if _, acquired, err := st.AcquireSandboxLease(ctx, scope, "pod-a", "sb-old", "token-old", "tpl", 3*time.Second); err != nil || !acquired {
 		t.Fatalf("acquire: %v acquired=%v", err, acquired)
 	}
 	if rec, err := st.GetSandboxLease(ctx, scope); err != nil || rec == nil {
 		t.Fatalf("expected live lease: rec=%+v err=%v", rec, err)
 	}
 
-	time.Sleep(1100 * time.Millisecond)
+	time.Sleep(3100 * time.Millisecond)
 	if rec, err := st.GetSandboxLease(ctx, scope); err != nil || rec != nil {
 		t.Fatalf("expired lease still returned: rec=%+v err=%v", rec, err)
 	}
