@@ -586,6 +586,46 @@ type UserSpace struct {
 	mu sync.Mutex
 }
 
+// resolveModel answers "which model will this agent actually run", given the
+// layer values a caller has gathered. It exists because this contract is
+// load-bearing and was previously encoded in statement order twice (the
+// owner's own space in loadUserSpace, a foreign viewer's lazy attach in
+// EnsureAgent) plus a prose table in docs/configs-kv-scope-adaptation.md —
+// nothing failed if the order was rearranged.
+//
+// Order, most specific last:
+//
+//	base     system ← the CALLER's user row (already merged by
+//	         assembleConfig/ResolveAgents, so the caller's own choice is in here)
+//	ownerRow the agent OWNER's user-scope model — a foreign viewer with sharing
+//	         on runs with the credentials the owner intended
+//	agentRow the agent-scope model — the agent's own configuration, which wins
+//	         over both user layers for everyone except the case below
+//	pinRow   the VIEWER's own explicit user-scope model, pinned last for a
+//	         foreign viewer ("MY tokens, MY model")
+//
+// An empty string means "this layer has no row"; callers pass "" for layers
+// that do not apply to them (the owner's own space passes no ownerRow and no
+// pinRow — its user row is already the base).
+//
+// Note on the pin: EnsureAgent applies it unconditionally today (it is only
+// non-empty when the viewer set an explicit row), and this function preserves
+// that rather than second-guessing it. Whether a NON-foreign caller should get
+// the same pin is a separate product decision, not a refactor.
+func resolveModel(base, ownerRow, agentRow, pinRow string) string {
+	model := base
+	if ownerRow != "" {
+		model = ownerRow
+	}
+	if agentRow != "" {
+		model = agentRow
+	}
+	if pinRow != "" {
+		model = pinRow
+	}
+	return model
+}
+
 // readUserScopeAgentDefaults reads the (user=X, agent=”) agents.defaults
 // row raw — distinct from assembleConfig, which merges system + user and
 // can't tell apart "user explicitly chose the system value" from "no
@@ -681,12 +721,17 @@ func (sp *UserSpace) EnsureAgent(ctx context.Context, st store.Store, mb *bus.Me
 		shareCfg = v
 	}
 	applyOwnerOverlays := !isForeign || shareCfg
+	// The model is collected from the three layers that can carry one and
+	// resolved once at the end (resolveModel), because "which layer wins" is a
+	// contract this file keeps in prose in two places and previously in
+	// statement order in both. The other fields stay inline: their unset
+	// semantics differ per field (>0 / non-nil), so folding them into one
+	// function would hide more than it explains.
+	var ownerModel string
 	if isForeign && applyOwnerOverlays {
 		if ownerCfg, err := assembleConfig(ctx, st, rec.UserID, ""); err == nil && ownerCfg != nil {
 			ovr := ownerCfg.Agents.Defaults
-			if ovr.Model != "" {
-				rc.Model = ovr.Model
-			}
+			ownerModel = ovr.Model
 			if ovr.MaxTokens > 0 {
 				rc.MaxTokens = ovr.MaxTokens
 			}
@@ -721,14 +766,13 @@ func (sp *UserSpace) EnsureAgent(ctx context.Context, st store.Store, mb *bus.Me
 			}
 		}
 	}
+	var agentModel string
 	if applyOwnerOverlays {
 		var ovr config.AgentDefaults
 		// Agent-scope read through the resolver: blob or mirror, whichever
 		// holds the row, and a disabled row means "no overlay here".
 		if err := scope.ExactSetting(ctx, st, "agents.defaults", "", rc.ID, &ovr); err == nil {
-			if ovr.Model != "" {
-				rc.Model = ovr.Model
-			}
+			agentModel = ovr.Model
 			if ovr.MaxTokens > 0 {
 				rc.MaxTokens = ovr.MaxTokens
 			}
@@ -766,9 +810,7 @@ func (sp *UserSpace) EnsureAgent(ctx context.Context, st store.Store, mb *bus.Me
 			}
 		}
 	}
-	if chatterPin.Model != "" {
-		rc.Model = chatterPin.Model
-	}
+	rc.Model = resolveModel(rc.Model, ownerModel, agentModel, chatterPin.Model)
 	// Overlay agent-scope providers — sp.Config.Providers carries only
 	// system+user rows (assembleConfig in loadUserSpace runs with
 	// agentID=""). Without this overlay, providerForAgent can't see the
@@ -954,9 +996,12 @@ func loadUserSpace(ctx context.Context, userID string, mb *bus.MessageBus, st st
 		rc := &resolved[i]
 		var agentOverride config.AgentDefaults
 		if err := scope.ExactSetting(ctx, st, "agents.defaults", "", rc.ID, &agentOverride); err == nil {
-			if agentOverride.Model != "" {
-				rc.Model = agentOverride.Model
-			}
+			// Owner path: base is already system←user (ResolveAgents merged it
+			// above), there is no owner row to layer (this IS the owner's own
+			// space) and no viewer pin. So the agent row is the only overlay the
+			// model can get — and it wins, which is the rule the settings page's
+			// agent-context write depends on.
+			rc.Model = resolveModel(rc.Model, "", agentOverride.Model, "")
 			if agentOverride.MaxTokens > 0 {
 				rc.MaxTokens = agentOverride.MaxTokens
 			}
