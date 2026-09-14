@@ -90,7 +90,7 @@ func registerExecFull(r *Registry, sbCfg *SandboxConfig, envProvider SkillEnvPro
 			},
 			"run_in_background": map[string]interface{}{
 				"type":        "boolean",
-				"description": "Launch the command in the background and return a bash_id immediately. Use this for long-running processes (dev servers, build watchers, migrations). Read output later via bash_output(bash_id); terminate via kill_shell(bash_id). Background sessions live until killed or the agent shuts down.",
+				"description": "Launch the command in the background and return a bash_id immediately. Use this for long-running processes (dev servers, build watchers, migrations, training runs). Read output later via bash_output(bash_id); terminate via kill_shell(bash_id). In sandbox mode the job runs detached inside the sandbox and outlives this call; on the host it lives until killed or the agent shuts down.",
 			},
 		},
 		"required": []string{"command"},
@@ -149,14 +149,16 @@ func makeExecToolFull(r *Registry, sbCfg *SandboxConfig, envProvider SkillEnvPro
 		// it, or admin flipped settings.sandbox.enabled mid-process).
 		useSandbox := args.Sandbox || (sbCfg != nil && sbCfg.Enabled) || (r != nil && r.sandboxRequired)
 
-		// Background mode is host-only in v1. Sandbox-mode background
-		// would need StartBackground / Poll / Kill on sandbox.Executor
-		// (or per-backend tmux-inside-container plumbing) — both are
-		// follow-ups. Until then, point the model at tmux as a
-		// workaround so it has a path forward inside sandboxes.
+		// Background mode. Host shells are owned by shellMgr; sandbox
+		// jobs are owned by the registry's job table and are wired in
+		// by registerSandboxedExec — the closure actually installed
+		// once a session has an executor bound (Registry.SetExecutor).
+		// Reaching the sandbox branch below means this deployment runs
+		// sandbox commands through the legacy pool shape instead, and
+		// that shape carries no job table for bash_output to poll.
 		if args.RunInBackground {
 			if useSandbox {
-				return "", fmt.Errorf("run_in_background is not yet supported in sandbox mode — start the long-running command via tmux inside the sandbox instead, e.g. exec({command: \"tmux new-session -d -s job '<your command>'\"}) then exec({command: \"tmux capture-pane -t job -p\"}) to read output and exec({command: \"tmux kill-session -t job\"}) to stop")
+				return "", fmt.Errorf("run_in_background is unavailable on this sandbox path: no session-bound executor is attached, so nothing would hand the job back to bash_output. Run the command in the foreground, or detach it yourself and poll its log: exec({command: \"nohup <cmd> > /tmp/job.log 2>&1 < /dev/null & echo $!\"})")
 			}
 			if r == nil || r.shellMgr == nil {
 				return "", fmt.Errorf("run_in_background unavailable: shell manager not initialised")
@@ -411,7 +413,7 @@ func registerSandboxedExec(r *Registry, ex sandbox.Executor) {
 			},
 			"run_in_background": map[string]interface{}{
 				"type":        "boolean",
-				"description": "Launch in background. NOT YET SUPPORTED in sandbox mode — use `tmux new-session -d -s NAME '<cmd>'` directly instead.",
+				"description": "Launch the command in the sandbox and return a bash_id immediately, without waiting for it to finish. Use it for anything longer than the tool timeout (training runs, batch jobs, dev servers): read output later with bash_output(bash_id), stop it with kill_shell(bash_id). The job keeps running after this call returns and until it exits or is killed.",
 			},
 		},
 		"required": []string{"command"},
@@ -422,9 +424,6 @@ func registerSandboxedExec(r *Registry, ex sandbox.Executor) {
 		}
 		if args.Command == "" {
 			return "", fmt.Errorf("command is required")
-		}
-		if args.RunInBackground {
-			return "", fmt.Errorf("run_in_background is not yet supported in sandbox mode — use tmux inside the sandbox instead: exec({command: \"tmux new-session -d -s job '<your command>'\"}) to start, exec({command: \"tmux capture-pane -t job -p\"}) to read, exec({command: \"tmux kill-session -t job\"}) to stop")
 		}
 		timeout := 120
 		if args.Timeout > 0 {
@@ -460,6 +459,12 @@ func registerSandboxedExec(r *Registry, ex sandbox.Executor) {
 				sb.WriteString(command)
 				command = sb.String()
 			}
+		}
+		// Background jobs go through the same env-injected command: a
+		// detached skill (image generation, a long scrape) needs its
+		// keys just as much as a foreground call does.
+		if args.RunInBackground {
+			return r.startSandboxBackground(ctx, ex, command)
 		}
 		slog.Info("sandboxed exec",
 			"backend", ex.Backend(),
