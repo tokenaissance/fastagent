@@ -28,6 +28,7 @@ type recordingAgentResolver struct {
 	invalidatedUsers  []string
 	epochBumps        []string
 	broadcasts        []string
+	systemNotifies    int
 }
 
 func (r *recordingAgentResolver) UserSpaceFor(string) (*api.UserSpaceView, error) {
@@ -47,6 +48,11 @@ func (r *recordingAgentResolver) BumpAgentReloadEpoch(userID string) error {
 }
 func (r *recordingAgentResolver) BroadcastAgentReload(userID string) error {
 	r.broadcasts = append(r.broadcasts, userID)
+	return nil
+}
+func (r *recordingAgentResolver) ReloadAgents() error { return nil }
+func (r *recordingAgentResolver) NotifySystemReload() error {
+	r.systemNotifies++
 	return nil
 }
 
@@ -99,11 +105,69 @@ func TestUpdateAgentModelWithoutCrossReplicaHooks(t *testing.T) {
 	}
 }
 
+// The cloud dashboard's settings model page does not go through the agent API:
+// it saves `{"agents":{"defaults":{"model":…}}}` to /api/config, which resolves
+// to the caller's scope (user, or system for a super_admin acting globally).
+// Both scopes have to reach the other replicas, and they use different markers:
+// a user-scope save is per-user, a system-scope save is fleet-wide.
+func TestConfigSettingsModelSwitchNotifiesUserReplicas(t *testing.T) {
+	s, uid, _ := setupFileUploadTest(t)
+	resolver := &recordingAgentResolver{}
+	s.userResolver = resolver
+
+	req := httptest.NewRequest(http.MethodPost, "/api/config",
+		strings.NewReader(`{"agents":{"defaults":{"model":"deepseek/deepseek-v4-flash"}}}`))
+	req.Header.Set("Content-Type", "application/json")
+	req = stampAuthAndUserID(req, uid)
+	rec := httptest.NewRecorder()
+	s.handleUpdateConfig(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("config save status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if len(resolver.invalidatedUsers) != 1 || resolver.invalidatedUsers[0] != uid {
+		t.Fatalf("InvalidateUser calls = %v, want [%s]", resolver.invalidatedUsers, uid)
+	}
+	if len(resolver.epochBumps) != 1 || resolver.epochBumps[0] != uid {
+		t.Fatalf("epoch bumps = %v, want [%s] (the marker other replicas poll)", resolver.epochBumps, uid)
+	}
+	if len(resolver.broadcasts) != 1 || resolver.broadcasts[0] != uid {
+		t.Fatalf("broadcasts = %v, want [%s]", resolver.broadcasts, uid)
+	}
+	if resolver.systemNotifies != 0 {
+		t.Fatalf("system notifies = %d, want 0 for a user-scope save", resolver.systemNotifies)
+	}
+}
+
+func TestConfigSettingsModelSwitchAtSystemScopeTellsTheFleet(t *testing.T) {
+	s, _, _ := setupFileUploadTest(t)
+	resolver := &recordingAgentResolver{}
+	s.userResolver = resolver
+
+	req := httptest.NewRequest(http.MethodPost, "/api/config",
+		strings.NewReader(`{"agents":{"defaults":{"model":"deepseek/deepseek-v4-flash"}}}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	s.handleUpdateConfig(rec, stampSystemAdmin(req))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("config save status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	// System scope is read by every user, so the per-user markers cannot express
+	// it: one fleet-wide notify instead of a user bump.
+	if resolver.systemNotifies != 1 {
+		t.Fatalf("system notifies = %d, want 1", resolver.systemNotifies)
+	}
+	if len(resolver.epochBumps) != 0 {
+		t.Fatalf("epoch bumps = %v, want none (the fleet marker carries it)", resolver.epochBumps)
+	}
+}
+
 // localOnlyResolver implements InvalidateAgent/InvalidateUser and nothing else.
 type localOnlyResolver struct{}
 
 func (localOnlyResolver) UserSpaceFor(string) (*api.UserSpaceView, error) { return nil, nil }
-func (localOnlyResolver) LocalAgentManager() *agent.Manager              { return nil }
-func (localOnlyResolver) IsCloudMode() bool                              { return false }
-func (localOnlyResolver) InvalidateUser(string)                          {}
-func (localOnlyResolver) InvalidateAgent(string)                         {}
+func (localOnlyResolver) LocalAgentManager() *agent.Manager               { return nil }
+func (localOnlyResolver) IsCloudMode() bool                               { return false }
+func (localOnlyResolver) InvalidateUser(string)                           {}
+func (localOnlyResolver) InvalidateAgent(string)                          {}

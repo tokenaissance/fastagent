@@ -24,6 +24,41 @@ func openEpochStore(t *testing.T) *store.DBStore {
 	return db
 }
 
+// A system-scope save cannot name a user, so it rides the same table under a
+// reserved key. Replicas must see it exactly once, like any user's marker —
+// this is the signal that replaces "wait for the 30-minute idle eviction".
+func TestSystemReloadMarkerCrossesInstances(t *testing.T) {
+	st := openEpochStore(t)
+	a := newAgentReloadEpochs(st)
+	b := newAgentReloadEpochs(st)
+	ctx := context.Background()
+
+	if err := a.Bump(ctx, systemReloadKey); err != nil {
+		t.Fatalf("bump system marker: %v", err)
+	}
+	if changed, _ := a.Poll(ctx); len(changed) != 0 {
+		t.Fatal("the writer must not react to its own marker")
+	}
+	changed, err := b.Poll(ctx)
+	if err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	if len(changed) != 1 || changed[0] != systemReloadKey {
+		t.Fatalf("replica B changed = %v, want [%s]", changed, systemReloadKey)
+	}
+	if changed, _ := b.Poll(ctx); len(changed) != 0 {
+		t.Fatal("replica B must not act on the marker twice")
+	}
+	// And it stays independent of the per-user markers.
+	if err := a.Bump(ctx, "u1"); err != nil {
+		t.Fatalf("bump user marker: %v", err)
+	}
+	changed, _ = b.Poll(ctx)
+	if len(changed) != 1 || changed[0] != "u1" {
+		t.Fatalf("replica B changed = %v, want [u1]", changed)
+	}
+}
+
 // TestAgentReloadEpochsPerUserCrossInstance simulates two gateway
 // replicas sharing one store: replica A bumps user u1, replica B
 // notices exactly u1 on its next poll, and neither reloads twice.
