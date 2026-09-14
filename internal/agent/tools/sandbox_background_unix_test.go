@@ -15,6 +15,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -186,15 +187,25 @@ func TestSandboxBackgroundMechanismKillStopsTheTree(t *testing.T) {
 // Without setsid the launcher falls back to a plain backgrounded shell. The
 // job must still start and still be observable — only the kill scope narrows.
 func TestSandboxBackgroundMechanismFallsBackWithoutSetsid(t *testing.T) {
-	// Hide setsid from `command -v` (a non-executable file earlier in PATH is
-	// enough — verified: dash's `command -v` checks executability) while
-	// leaving the rest of the PATH intact, since mkdir/tail/head are real
-	// binaries. This is what a minimal sandbox image looks like.
-	shadow := t.TempDir()
-	if err := os.WriteFile(shadow+"/setsid", nil, 0o644); err != nil {
-		t.Fatalf("shadow dir: %v", err)
+	// Build a PATH that simply does not contain setsid, rather than trying to
+	// hide it. Shadowing with a non-executable file works in some shells and not
+	// others (it hid setsid on macOS but not on the Linux CI runner, which failed
+	// this test), so the fixture symlinks exactly the binaries the launcher and
+	// probe need — a minimal sandbox image, minus setsid.
+	bin := t.TempDir()
+	for _, tool := range []string{"sh", "mkdir", "rm", "wc", "cat", "tail", "head"} {
+		path, err := exec.LookPath(tool)
+		if err != nil {
+			t.Skipf("%s is not available on this host: %v", tool, err)
+		}
+		if err := os.Symlink(path, filepath.Join(bin, tool)); err != nil {
+			t.Fatalf("symlink %s: %v", tool, err)
+		}
 	}
-	t.Setenv("PATH", shadow+":"+os.Getenv("PATH"))
+	t.Setenv("PATH", bin)
+	if _, err := exec.LookPath("setsid"); err == nil {
+		t.Fatal("the fixture PATH still resolves setsid — the test would prove nothing")
+	}
 
 	ctx := context.Background()
 	jobs := newSandboxJobs()
