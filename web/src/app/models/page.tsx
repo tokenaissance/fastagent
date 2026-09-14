@@ -137,7 +137,7 @@ export default function ModelsPage() {
   const [agentScopeModel, setAgentScopeModel] = useState("");
   const [agentShares, setAgentShares] = useState(false);
   // Owner of the agent in the URL ("" when there is none). Needed to decide
-  // WHICH row a model switch has to write — see writeModel below.
+  // WHICH row a model switch has to write — see modelTarget below.
   const [agentOwnerId, setAgentOwnerId] = useState("");
 
   const [providers, setProviders] = useState<ProviderEntry[]>([]);
@@ -176,15 +176,31 @@ export default function ModelsPage() {
   //   - the standalone /models page (no agent in the URL) → the caller's scope,
   //     i.e. the default that un-overridden and future agents inherit.
   const ownsActiveAgent = inAgentContext && !!me?.id && agentOwnerId === me.id;
-  const writeModel = async (value: string) => {
-    if (ownsActiveAgent) {
-      // PUT /api/agents/{id} → agent-scope agents.defaults.model, read-modify-write
-      // so promptMode / splitReplies / autoPersist survive. Empty string clears it.
-      await updateAgent(urlAgentId, { model: value });
-      return;
-    }
-    await updateConfig({ agents: { defaults: { model: value } } });
+  // ONE derivation, two consumers (the handlers and the card below). Deriving the
+  // target twice — once to decide where to write, once to decide what to display —
+  // is exactly how "the field shows X" and "the switch writes Y" drift apart, so
+  // the value, its setter and its write live in one object.
+  type ModelTarget = {
+    layer: "agent" | "caller";
+    value: string;
+    set: (v: string) => void;
+    write: (v: string) => Promise<unknown>;
   };
+  const modelTarget: ModelTarget = ownsActiveAgent
+    ? {
+        layer: "agent",
+        value: agentScopeModel,
+        set: setAgentScopeModel,
+        // PUT /api/agents/{id} → agent-scope agents.defaults.model, read-modify-write
+        // so promptMode / splitReplies / autoPersist survive. Empty string clears it.
+        write: (v: string) => updateAgent(urlAgentId, { model: v }),
+      }
+    : {
+        layer: "caller",
+        value: model,
+        set: setModel,
+        write: (v: string) => updateConfig({ agents: { defaults: { model: v } } }),
+      };
 
   // Dialog state
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -573,15 +589,15 @@ export default function ModelsPage() {
     await fetchConfig(isSuperAdmin, me?.id || "");
   };
 
-  // Save button at the top persists the model. Which row that lands on is
-  // decided by writeModel: the active agent's own row when the caller owns it,
-  // the caller's scope otherwise. An empty value is a legitimate intent ("clear
-  // it") — the backend drops the key from the saved row without disturbing
-  // sibling fields, so it is safe to send through.
+  // Save button at the top persists the model. Which row that lands on is decided
+  // by modelTarget: the active agent's own row when the caller owns it, the
+  // caller's scope otherwise. An empty value is a legitimate intent ("clear it") —
+  // the backend drops the key from the saved row without disturbing sibling
+  // fields, so it is safe to send through.
   const handleSaveAll = async () => {
     setSaving(true);
     try {
-      await writeModel((ownsActiveAgent ? agentScopeModel : model).trim());
+      await modelTarget.write(modelTarget.value.trim());
       flashSaved();
       await fetchConfig(isSuperAdmin, me?.id || "");
     } finally {
@@ -592,12 +608,11 @@ export default function ModelsPage() {
   const handleDefaultModelChange = async (value: string) => {
     // Keep the input bound to the row we are about to write, so the field does
     // not snap back to the caller-scope value on the next refresh.
-    if (ownsActiveAgent) setAgentScopeModel(value);
-    else setModel(value);
+    modelTarget.set(value);
     if (!value.trim()) return;
     setSaving(true);
     try {
-      await writeModel(value.trim());
+      await modelTarget.write(value.trim());
       flashSaved();
       // Refresh so Inheriting/Override badge reflects the new state.
       await fetchConfig(isSuperAdmin, me?.id || "");
@@ -611,11 +626,10 @@ export default function ModelsPage() {
   // the next layer. Writing an empty string would just store a value that still
   // wins the merge; both backends treat the empty string as "delete the key".
   const handleClearOverride = async () => {
-    if (ownsActiveAgent) setAgentScopeModel("");
-    else setModel("");
+    modelTarget.set("");
     setSaving(true);
     try {
-      await writeModel("");
+      await modelTarget.write("");
       flashSaved();
       await fetchConfig(isSuperAdmin, me?.id || "");
     } finally {
@@ -684,12 +698,11 @@ export default function ModelsPage() {
           chatter-user → agent-scope → system, so we show the agent's
           model in the placeholder and caption when sharing is on. */}
       {(() => {
-        // The card edits whichever row writeModel will write: the active agent's
-        // own row for its owner, the caller-scope row otherwise. Binding the
-        // input/badge to the same value keeps "what I see" equal to "what the
-        // runtime will resolve" — otherwise the field shows the caller-scope
-        // value while the agent row silently decides.
-        const shownModel = ownsActiveAgent ? agentScopeModel : model;
+        // The card edits whichever row modelTarget writes. Binding the
+        // input/badge to the SAME derivation keeps "what I see" equal to "what the
+        // runtime will resolve" — otherwise the field shows the caller-scope value
+        // while the agent row silently decides.
+        const shownModel = modelTarget.value;
         const inheriting = !isSuperAdmin && !shownModel.trim();
         const overridden = !isSuperAdmin && !inheriting;
         // What the runtime will actually use when the chatter has no
@@ -697,7 +710,7 @@ export default function ModelsPage() {
         // caller-scope value they'd fall back to (their user default, else
         // system). For anyone else EnsureAgent picks agent-scope first (only
         // when the owner enabled sharing); otherwise it falls through to system.
-        const effectiveFallback = ownsActiveAgent
+        const effectiveFallback = modelTarget.layer === "agent"
           ? (model.trim() || systemDefault)
           : inAgentContext && agentShares && agentScopeModel
             ? agentScopeModel
@@ -749,23 +762,16 @@ export default function ModelsPage() {
               ))}
             </SelectContent>
           </Select>
-        ) : ownsActiveAgent ? (
-          <Input
-            value={inheriting ? "" : shownModel}
-            onChange={(e) => setAgentScopeModel(e.target.value)}
-            placeholder={inheriting ? `Inherit (${model.trim() || systemDefault || "no default"})` : "e.g. openai/gpt-4o"}
-            className="font-mono text-sm max-w-md"
-          />
         ) : (
           <Input
             value={inheriting ? "" : shownModel}
-            onChange={(e) => setModel(e.target.value)}
+            onChange={(e) => modelTarget.set(e.target.value)}
             placeholder={inheriting ? (effectiveFallback ? `Inherit (${effectiveFallback})` : "e.g. openai/gpt-4o") : "e.g. openai/gpt-4o"}
             className="font-mono text-sm max-w-md"
           />
         )}
         <p className="text-xs text-muted-foreground mt-2">
-          {ownsActiveAgent ? (
+          {modelTarget.layer === "agent" ? (
             <>
               Writes the model at <strong>agent scope</strong> for{" "}
               <strong>{agentName || "this agent"}</strong> — the layer the runtime
