@@ -46,6 +46,11 @@ func doctorSessionsCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "sessions",
 		Short: "Scan session history for broken tool-call pairing",
+		// A non-zero exit is this command's contract (findings remain). The
+		// count still goes to stderr as "Error: …", but suppress cobra's usage
+		// dump: an operator grepping stderr, or a script merging streams, does
+		// not want the flag list appended to the report.
+		SilenceUsage: true,
 		Long: `Scan every session's working set for the three shapes that break
 providers or silently drop context:
 
