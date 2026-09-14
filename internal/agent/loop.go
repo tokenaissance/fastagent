@@ -2551,13 +2551,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 			slog.Warn("disabling tools after consecutive failed rounds",
 				"agent", a.name, "failed_rounds", allFailedRounds)
 			callTools = nil
-			llmMessages = append(llmMessages, provider.Message{
-				Role: "system",
-				Content: fmt.Sprintf(
-					"The last %d rounds of tool calls all failed (HTTP errors or empty results). Stop calling tools and answer the user directly with what you know — explain that authoritative sources weren't reachable and provide your best-effort response based on training knowledge, clearly marked as unverified.",
-					allFailedRounds,
-				),
-			})
+			llmMessages = append(llmMessages, failedRoundsNudge(allFailedRounds, false))
 		}
 		dumpLLMRequest(a.name, a.model, llmMessages, callTools)
 		resp, err := llmRetry(ctx, a.name, func(ctx context.Context) (*provider.Response, error) {
@@ -2658,10 +2652,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 			}
 			if consecutiveCount >= 3 {
 				slog.Warn("tool loop detected", "agent", a.name, "tool", tc.Function.Name)
-				warnMsg := provider.Message{
-					Role:    "system",
-					Content: "Loop detected: you called the same tool with the same arguments 3 times. Please try a different approach.",
-				}
+				warnMsg := loopDetectedWarning(false)
 				sess.Append(warnMsg)
 				messages = append(messages, warnMsg)
 				loopDetected = true
@@ -3377,10 +3368,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 			}
 			if consecutiveCount >= 3 {
 				slog.Warn("tool loop detected", "agent", a.name, "tool", tc.Function.Name)
-				warnMsg := provider.Message{
-					Role:    "system",
-					Content: "Loop detected: you called the same tool with the same arguments 3 times. Please try a different approach.",
-				}
+				warnMsg := loopDetectedWarning(false)
 				sess.Append(warnMsg)
 				messages = append(messages, warnMsg)
 				loopDetected = true
@@ -3579,6 +3567,54 @@ func iterationContinueNudge(rounds int, segment, segments int) provider.Message 
 			rounds, segment, segments, rounds,
 		),
 	}
+}
+
+// budgetNudge is the third of the "you are out of budget" messages, and it lives
+// here next to the other two so a reviewer reads all three at once and sees what
+// differs — the whole point of the family:
+//
+//   - capReachedNudge        rounds exhausted, no continuation left → synthesize
+//   - iterationContinueNudge rounds exhausted WITH progress        → keep going
+//   - budgetNudge            wall clock exhausted (sub-agent)      → deliver now
+//
+// They are deliberately not merged: each audience needs a different sentence
+// (a sub-agent must not chat, a continued turn must not synthesize yet).
+func budgetNudge(budget time.Duration) provider.Message {
+	return provider.Message{
+		Role: "system",
+		Content: fmt.Sprintf(
+			"Your %s wall-time budget is exhausted. Tools are disabled for this final response — do not attempt to call any. "+
+				"Write the deliverable now from what you have already gathered, in the requested format, and mark anything you could not confirm as 'unknown' / 'partial' / [UNVERIFIED]. "+
+				"Producing a complete-but-shorter artifact beats apologizing or explaining what you would have done.",
+			budget),
+	}
+}
+
+// loopDetectedWarning is the same warning for two audiences in one place: the
+// main loop wants another approach, a sub-agent must stop exploring and hand back
+// what it has (its caller cannot wait for a third attempt).
+func loopDetectedWarning(subagent bool) provider.Message {
+	content := "Loop detected: you called the same tool with the same arguments 3 times. Please try a different approach."
+	if subagent {
+		content = "Loop detected: same tool with same arguments 3 times. Stop and produce the deliverable from what you have."
+	}
+	return provider.Message{Role: "system", Content: content}
+}
+
+// failedRoundsNudge is the other pair with one shape and two audiences: the main
+// loop answers the user, a sub-agent produces the artifact its parent asked for.
+// Sharing one builder is what keeps the *reason* identical and the *instruction*
+// audience-appropriate.
+func failedRoundsNudge(rounds int, subagent bool) provider.Message {
+	content := fmt.Sprintf(
+		"The last %d rounds of tool calls all failed (HTTP errors or empty results). Stop calling tools and answer the user directly with what you know — explain that authoritative sources weren't reachable and provide your best-effort response based on training knowledge, clearly marked as unverified.",
+		rounds)
+	if subagent {
+		content = fmt.Sprintf(
+			"The last %d rounds of tool calls all failed (HTTP 4xx/5xx or empty results). Stop calling tools and produce the deliverable from what you already gathered, with explicit gaps marked.",
+			rounds)
+	}
+	return provider.Message{Role: "system", Content: content}
 }
 
 // iterationCapMetadata is the assistant-side metadata stamped on the
