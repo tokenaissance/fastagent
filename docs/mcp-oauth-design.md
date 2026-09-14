@@ -398,6 +398,24 @@ fastclaw mcp logout <name>
 
 > **状态（2026-09-04）**：阶段 1 的模型驱动路径已按 **最小实现** 落地——agent 工具 `mcp add/remove` 直接读写 **`agent_mcp_servers` per-key 行**（`internal/agent/mcp_config_tool.go` + store adapter），落库成功后才经 `mcpConfigNotify`（InvalidateAgent + configs_kv epoch + Redis pub/sub）跨实例收敛；未为单一调用方引入四层 usecase（YAGNI，见 §13.7）。阶段 2（SKILL.md frontmatter 自动声明）仍未实现，下述四层映射保留为阶段 2 / 出现第二个安装方时的蓝图。
 
+> **跨实例失效的写入方（2026-09-14 补齐）**：上面这条广播原来只覆盖 MCP 相关写入
+> （授权/吊销走 `notifyAgentChanged`，会话内 `mcp add/remove` 走 `mcpConfigNotify`），
+> 另有两类「改了 agent 生效配置」的写入没有走它，症状都是同一种——只有处理该请求的
+> 那个副本变了，兄弟副本继续用旧值直到 30 分钟空闲驱逐：
+>
+> 1. **`PUT /api/agents/{id}`（面板的模型页、promptMode、插件开关）** 此前只调用
+>    `invalidateAgent`（仅本 pod 的缓存），现在统一走 `notifyAgentChanged`：本 pod
+>    失效 + per-user DB epoch（无 Redis 的副本轮询）+ Redis 广播（即时）。
+> 2. **会话命令 `/model`** 此前只改运行进程的 `a.model`：重启即丢，且只影响收到该
+>    消息的那个副本。现在它按面板同一条写路径落 `agents.defaults`（读-改-写，保留
+>    `promptMode` / `splitReplies` / `autoPersist` 同排键），落库成功后再触发同一
+>    广播；写失败时不会在内存里假装切换成功。
+>
+> 回归：`agent` → `TestSlashModelPersistsTheAgentDefault`、
+> `TestSlashModelKeepsSiblingDefaultsKeys`、
+> `TestSlashModelReportsAFailedWriteAndStaysPut`；`setup` →
+> `TestUpdateAgentModelPropagatesToOtherReplicas`。
+
 **目标**：SKILL.md（或未来 catalog）声明 `{name, url, oauthResource?, scopes?}` → fastagent 把该 server 写入 **声明存储**（`agent_mcp_servers` 每行一 server；`agent.json` 已废弃，配置统一 DB）→ `notifyAgentChanged`（ReloadAgents + configs_kv epoch + Redis pub/sub，与 OAuth 完成同一条广播）→ 新会话里 `mcp_<name>_<tool>` 注册可用。skill 只负责“声明 + 使用说明”，连接仍走既有 `mcp.NewManager`。
 
 **字段语义**（与 §5.1 一致）：`url` = MCP 传输端点（HTTP 必填）；`oauthResource` = RFC 8707 resource + discovery 入口，仅 OAuth 保护 server 需要（通常与 url 相同）；`scopes` 可选——缺省取 provider `scopes_supported` 全集。无鉴权 / 静态 header server 只需要 `url`（+headers）。

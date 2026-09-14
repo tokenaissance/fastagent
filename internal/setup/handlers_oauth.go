@@ -300,7 +300,13 @@ func (s *Server) handleMcpOAuthRefresh(w http.ResponseWriter, r *http.Request) {
 // local InvalidateAgent (owner's space + any admin-attached space holding
 // the agent), then per-user DB epoch bump (no-Redis replicas poll it) and
 // per-user Redis broadcast (instant). Never a system-wide reload — one
-// tenant's authorization must not flush other tenants' caches.
+// tenant's write must not flush other tenants' caches.
+//
+// Two kinds of writer call it: an MCP OAuth authorization/revocation, and any
+// dashboard/API write that changes the agent's resolved runtime (see
+// handleUpdateAgent). Both are "#this agent's config changed", so both go
+// through one path — a second, local-only variant is how a write ends up
+// applying on one replica.
 func (s *Server) notifyAgentChanged(userID, agentID string) {
 	if userID == "" || agentID == "" {
 		return
@@ -308,12 +314,12 @@ func (s *Server) notifyAgentChanged(userID, agentID string) {
 	s.invalidateAgent(agentID)
 	if b, ok := s.userResolver.(interface{ BumpAgentReloadEpoch(userID string) error }); ok {
 		if err := b.BumpAgentReloadEpoch(userID); err != nil {
-			slog.Warn("bump agent reload epoch after mcp oauth", "user", userID, "error", err)
+			slog.Warn("bump agent reload epoch after an agent config change", "user", userID, "error", err)
 		}
 	}
 	if b, ok := s.userResolver.(interface{ BroadcastAgentReload(userID string) error }); ok {
 		if err := b.BroadcastAgentReload(userID); err != nil {
-			slog.Warn("broadcast agent reload after mcp oauth", "user", userID, "error", err)
+			slog.Warn("broadcast agent reload after an agent config change", "user", userID, "error", err)
 		}
 	}
 }
