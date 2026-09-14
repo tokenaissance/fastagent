@@ -585,6 +585,13 @@ split that landed:
   the instruction to re-issue in a fresh turn — starting a doomed sub-agent is
   worse than saying so, because the parent still has to answer within the same
   clock.
+  The ceiling has to cross the grace boundary to get there: `toolGraceContext`
+  deliberately drops the deadline (an in-flight tool may outlive its turn), so
+  the turn's deadline travels as a **value** (`withTurnDeadline` /
+  `turnRemaining`, both stamped onto every tool context in the loop). Reading
+  `ctx.Deadline()` inside a tool answers "no ceiling" for every call in
+  production — the first version of this clamp did exactly that and was dead
+  code with green tests, until a turn-level fan-out test refused to lie about it.
   The wait itself is bounded now too: `RegisterSerialFrom` serialises through a
   one-slot channel instead of a `sync.Mutex`, so a queued call returns
   `ctx.Err()` the moment its turn ends rather than staying blocked until the
@@ -705,6 +712,16 @@ working tree.
   itself:
   `TestRegisterSerialQueuedCallIsReleasedByItsContext`,
   `TestRegisterSerialAlreadyCancelledCallNeverEnters`.
+* **Fan-out turn** ✅ — `TestTurnFanOutOfTwoDelegateTasksAlwaysReturns`: one turn
+  emitting two `delegate_task` calls either runs both (serially — peak
+  concurrency 1) or refuses both with the remaining time named; in both cases
+  every call has a result and the turn returns. A call left pending is the
+  failure this exists to make impossible, and it is the one the first version of
+  the clamp produced under a short turn.
+* **Grace boundary** ✅ — `TestToolContextCarriesTheTurnsDeadlineAsAValue`: the
+  tool context outlives its turn (no deadline of its own) yet still reports the
+  turn's remaining time once stamped, and a caller with no turn clock reports
+  nothing rather than zero.
 * **Wire builder** ✅ — the P0 tests stay as defence-in-depth
   (`TestToAPIMessagesDropsDuplicateToolReplies`,
   `TestToAPIMessagesDropsDanglingToolReplies`,
