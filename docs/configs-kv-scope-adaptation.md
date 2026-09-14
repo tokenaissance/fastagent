@@ -459,10 +459,16 @@ WHERE kind = 'setting' AND name = 'agent.model';
 
 （`agents.defaults` 在 KV 里的前缀是 `agent.`，见 `kvPrefixForNamespace`。）
 
-回归：agent 行写入路径 `setup` → `TestSettings_AllCapsKeyDualWriteE2E`；跨副本生效
-`setup` → `TestConfigSettingsModelSwitchNotifiesUserReplicas` /
-`TestConfigSettingsModelSwitchAtSystemScopeTellsTheFleet`。前端这条「写哪一层由入口决定」
-没有 UT，只有 `web/src/app/models/page.tsx` 的 `writeModel` 一处实现。
+回归：**上面这条优先级本身**已从注释/表格变成可执行契约——`gateway` →
+`TestResolveModelPrecedence`（`resolveModel` 的表驱动用例：owner/user/system 的回落、
+agent 行压过两层 user 行、外来 viewer 的 owner 行、以及 viewer 自己的行 pin 在最后）。
+agent 行写入路径 `setup` → `TestSettings_AllCapsKeyDualWriteE2E`；跨副本生效 `setup` →
+`TestConfigSettingsModelSwitchNotifiesUserReplicas` /
+`TestConfigSettingsModelSwitchAtSystemScopeTellsTheFleet`。
+
+前端「写哪一层由入口决定」这条没有 UT（本仓前端无测试设施）：它的**唯一推导处**是
+`web/src/app/models/page.tsx` 的 `modelTarget`，handler 与卡片都从它取值——所以"字段显示的"
+与"开关写入的"不可能分叉。
 
 ### 依赖面：store 的能力端口（`internal/store/ports.go`）
 
