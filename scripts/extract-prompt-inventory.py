@@ -55,6 +55,7 @@ def find_block(text, lines, symbol):
     for idx, line in enumerate(lines):
         if not pattern.match(line):
             continue
+        kind = line.split(" ", 1)[0]  # func | const | var
         depth = 0
         started = False
         state = "code"  # code | dquote | raw
@@ -96,13 +97,23 @@ def find_block(text, lines, symbol):
                         state = "code"
                 i += 1
             # A const/var holding only string literals: the declaration ends at
-            # the end of the line once the literal is closed and nothing continues.
+            # the end of the expression. "This line is quiet" is not enough: the
+            # prompt constants are written as `... ` + "`todo.md`" + ` ...`, so the
+            # continuation often starts on the NEXT line with `+`.
             if not started and saw_literal and state == "code":
                 trailing = body.rstrip()
-                if not trailing.endswith(("+", "(", ",", "[", "{")):
+                nxt = next((l for l in lines[j + 1 :] if l.strip()), None)
+                continues = trailing.endswith(("+", "(", ",", "[", "{")) or (
+                    nxt is not None and nxt.lstrip().startswith(("+", ")", ",", "]", "}"))
+                )
+                if not continues:
                     return idx, j + 1
-            if not started and j > idx + 40:  # multi-line signature guard
+            # Guard only a multi-line FUNCTION signature. A const/var may legitimately
+            # run for a hundred lines (taskDelegationContent is 104); breaking on a
+            # line budget is how that block got truncated to 17 lines once already.
+            if kind == "func" and not started and j > idx + 40:
                 break
+        print("warning: could not find the end of %s (%s:%d) — falling back" % (symbol, "?", idx + 1), file=sys.stderr)
         return idx, min(len(lines), idx + 60)
     raise SystemExit("symbol not found: %s" % symbol)
 
