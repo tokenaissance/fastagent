@@ -718,6 +718,25 @@ export default function ModelsPage() {
         const fallbackSource = inAgentContext && agentShares && agentScopeModel
           ? "agent"
           : "system";
+        // The runtime picks a provider by the "<providerKey>/" prefix and falls
+        // back to the SHARED provider when there is none (providerForAgent,
+        // internal/agent/manager.go — it logs a warning when it does). A bare
+        // model therefore still works, on the shared account: that is how a
+        // correct model name produced "No available channel for model X under
+        // group Y". Surface it at the field, next to the picker that produces
+        // prefixed values.
+        const effectiveModelValue = (inheriting ? effectiveFallback : shownModel).trim();
+        const modelLacksProviderPrefix =
+          effectiveModelValue !== "" && !effectiveModelValue.includes("/");
+        // Only the keys the caller can actually see: suggesting one that
+        // resolves to nothing would trade a silent fallback for another one.
+        const visibleProviderKeys = Array.from(new Set(providers.map((p) => p.name).filter(Boolean)));
+        const modelSuffix = (v: string) => v.split("/").pop() || v;
+        const suggestProviderPrefix = (key: string) => {
+          const suffix = modelSuffix((shownModel.trim() || effectiveModelValue).trim());
+          if (!suffix) return;
+          modelTarget.set(`${key}/${suffix}`);
+        };
         return (
       <div className="rounded-lg border border-border bg-card p-5">
         <div className="flex items-center justify-between gap-2 mb-3">
@@ -769,6 +788,33 @@ export default function ModelsPage() {
             placeholder={inheriting ? (effectiveFallback ? `Inherit (${effectiveFallback})` : "e.g. openai/gpt-4o") : "e.g. openai/gpt-4o"}
             className="font-mono text-sm max-w-md"
           />
+        )}
+        {modelLacksProviderPrefix && (
+          <div className="mt-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 py-1.5 text-xs text-amber-900 dark:text-amber-200">
+            <span className="font-medium">No provider prefix</span>{" "}
+            <span className="opacity-80">
+              <code className="text-[11px]">{effectiveModelValue}</code> is sent on the{" "}
+              <strong>shared</strong> provider&apos;s account. The model name is fine; the
+              upstream account and group may not be the ones you meant (this is what makes
+              an upstream answer &ldquo;No available channel for model X under group
+              Y&rdquo;). Write it as <code className="text-[11px]">provider/modelId</code> to
+              pin one of your provider rows.
+            </span>
+            {visibleProviderKeys.length > 0 && (
+              <span className="mt-1 flex flex-wrap items-center gap-1">
+                {visibleProviderKeys.map((key) => (
+                  <button
+                    key={key}
+                    type="button"
+                    onClick={() => suggestProviderPrefix(key)}
+                    className="rounded border border-amber-500/40 px-1.5 py-0.5 font-mono text-[11px] hover:bg-amber-500/20"
+                  >
+                    {key}/{modelSuffix(effectiveModelValue)}
+                  </button>
+                ))}
+              </span>
+            )}
+          </div>
         )}
         <p className="text-xs text-muted-foreground mt-2">
           {modelTarget.layer === "agent" ? (
