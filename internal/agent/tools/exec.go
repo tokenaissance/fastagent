@@ -36,6 +36,106 @@ var dangerousCommands = []string{
 	"> /dev/sda",
 }
 
+// longForegroundWaitThreshold is where a foreground `sleep` stops being a
+// detail and becomes the whole call. The smallest turn budget in production is
+// 300 s (task queue default), so 30 s is already 10% of a turn spent waiting —
+// and the failures this guards (r39–r45) were all 45–175 s waits whose output
+// never arrived because a clock ended the turn first.
+const longForegroundWaitThreshold = 30
+
+// longForegroundWait reports whether a command parks in the foreground for at
+// least longForegroundWaitThreshold seconds, and for how long.
+//
+// Deliberately lexical — no shell parsing. A `sleep` only counts at a command
+// position (after `;` `&` `|` `(` or at the start), which is what keeps
+// `grep -c "sleep 175" file` from tripping it. Command substitution and sleeps
+// hidden inside a script the command invokes are invisible to this, and that is
+// an accepted limit: the supported way to wait is run_in_background.
+func longForegroundWait(command string) (int, bool) {
+	for i := 0; i+len("sleep") <= len(command); i++ {
+		if !strings.HasPrefix(command[i:], "sleep") {
+			continue
+		}
+		// Whole word only: "sleepy" and "xsleep" are not sleeps.
+		if i+len("sleep") < len(command) && isShellWordByte(command[i+len("sleep")]) {
+			continue
+		}
+		if !atCommandPosition(command, i) {
+			continue
+		}
+		if secs, ok := parseSleepDuration(command[i+len("sleep"):]); ok && secs >= longForegroundWaitThreshold {
+			return secs, true
+		}
+	}
+	return 0, false
+}
+
+// atCommandPosition reports whether index i starts a command rather than sitting
+// in the middle of one (an argument, a path, a quoted string's interior).
+func atCommandPosition(s string, i int) bool {
+	for j := i - 1; j >= 0; j-- {
+		switch s[j] {
+		case ' ', '\t':
+			continue
+		case ';', '&', '|', '(', '{', '\n', '\r':
+			return true
+		default:
+			return false
+		}
+	}
+	return true // nothing before it: the command opens with the sleep
+}
+
+// parseSleepDuration reads the argument of a `sleep` (`45`, `45.5`, `1m`, `90s`,
+// `2h`) and returns it in seconds. Anything else (`sleep "$N"`, `sleep $delay`)
+// is not something this guard can judge, so it is left alone.
+func parseSleepDuration(rest string) (int, bool) {
+	rest = strings.TrimLeft(rest, " \t")
+	end := 0
+	for end < len(rest) {
+		c := rest[end]
+		if (c >= '0' && c <= '9') || c == '.' {
+			end++
+			continue
+		}
+		break
+	}
+	if end == 0 {
+		return 0, false
+	}
+	num, err := strconv.ParseFloat(rest[:end], 64)
+	if err != nil || num < 0 {
+		return 0, false
+	}
+	unit := 1.0
+	if end < len(rest) {
+		switch rest[end] {
+		case 'm', 'M':
+			unit = 60
+		case 'h', 'H':
+			unit = 3600
+		}
+	}
+	return int(num * unit), true
+}
+
+func isShellWordByte(c byte) bool {
+	return c == '_' || c == '-' || c == '.' ||
+		(c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+}
+
+// longWaitRefusal is the whole guidance the model gets: one supported way to
+// wait. Anything that waits goes on run_in_background — a foreground sleep in a
+// turn is a bet that the turn outlives the wait, and r39–r45 lost that bet with
+// the output still inside the call.
+func longWaitRefusal(seconds int) error {
+	return fmt.Errorf("Refused: this command waits ~%ds in the foreground, and a turn can end before that arrives (the smallest turn budget is 300s — the observation dies with it, the work does not). Anything that waits belongs on run_in_background:\n\n"+
+		"  exec({\"command\": \"<the same command, waits included>\", \"run_in_background\": true})   → returns a bash_id immediately\n"+
+		"  bash_output({\"bash_id\": \"<id>\"})   → read its progress in a later call\n"+
+		"  kill_shell({\"bash_id\": \"<id>\"})    → stop it\n\n"+
+		"Re-issue the same command with run_in_background — do not sleep in a foreground call.", seconds)
+}
+
 // SandboxConfig holds sandbox settings passed to the exec tool registration.
 type SandboxConfig struct {
 	Enabled   bool
@@ -90,7 +190,7 @@ func registerExecFull(r *Registry, sbCfg *SandboxConfig, envProvider SkillEnvPro
 			},
 			"run_in_background": map[string]interface{}{
 				"type":        "boolean",
-				"description": "Launch the command in the background and return a bash_id immediately. Use this for long-running processes (dev servers, build watchers, migrations, training runs). Read output later via bash_output(bash_id); terminate via kill_shell(bash_id). In sandbox mode the job runs detached inside the sandbox and outlives this call; on the host it lives until killed or the agent shuts down.",
+				"description": "Run the command detached and return a bash_id immediately. ANY command that waits belongs here — sleeps, polling loops, build watchers, migrations, dev servers, training runs — because a foreground call is ended by the turn's clock and the observation (not the work) is what dies. Read progress later with bash_output(bash_id); terminate with kill_shell(bash_id).",
 			},
 		},
 		"required": []string{"command"},
@@ -123,6 +223,13 @@ func makeExecToolFull(r *Registry, sbCfg *SandboxConfig, envProvider SkillEnvPro
 		for _, dc := range dangerousCommands {
 			if strings.Contains(lower, dc) {
 				return "", fmt.Errorf("dangerous command blocked: %s", args.Command)
+			}
+		}
+		if !args.RunInBackground {
+			if secs, ok := longForegroundWait(args.Command); ok {
+				slog.Info("long foreground wait refused",
+					"seconds", secs, "cmdHead", firstN(args.Command, 80))
+				return "", longWaitRefusal(secs)
 			}
 		}
 
@@ -158,7 +265,7 @@ func makeExecToolFull(r *Registry, sbCfg *SandboxConfig, envProvider SkillEnvPro
 		// that shape carries no job table for bash_output to poll.
 		if args.RunInBackground {
 			if useSandbox {
-				return "", fmt.Errorf("run_in_background is unavailable on this sandbox path: no session-bound executor is attached, so nothing would hand the job back to bash_output. Run the command in the foreground, or detach it yourself and poll its log: exec({command: \"nohup <cmd> > /tmp/job.log 2>&1 < /dev/null & echo $!\"})")
+				return "", fmt.Errorf("run_in_background is unavailable on this sandbox path: no session-bound executor is attached, so nothing would hand the job back to bash_output. This is a deployment problem (the sandbox backend is unreachable or the executor pool never bound); run the command in the foreground for now and tell the operator.")
 			}
 			if r == nil || r.shellMgr == nil {
 				return "", fmt.Errorf("run_in_background unavailable: shell manager not initialised")
@@ -413,7 +520,7 @@ func registerSandboxedExec(r *Registry, ex sandbox.Executor) {
 			},
 			"run_in_background": map[string]interface{}{
 				"type":        "boolean",
-				"description": "Launch the command in the sandbox and return a bash_id immediately, without waiting for it to finish. Use it for anything longer than the tool timeout (training runs, batch jobs, dev servers): read output later with bash_output(bash_id), stop it with kill_shell(bash_id). The job keeps running after this call returns and until it exits or is killed — the `timeout` argument does not apply to it.",
+				"description": "Run the command detached in the sandbox and return a bash_id immediately, without waiting for it to finish. ANY command that waits belongs here — sleeps, polling loops, batch jobs, training runs, dev servers — because a foreground call is ended by the turn's clock and the observation (not the job) is what dies. Read progress later with bash_output(bash_id); stop it with kill_shell(bash_id). The `timeout` argument does not apply to a background job.",
 			},
 		},
 		"required": []string{"command"},
@@ -424,6 +531,13 @@ func registerSandboxedExec(r *Registry, ex sandbox.Executor) {
 		}
 		if args.Command == "" {
 			return "", fmt.Errorf("command is required")
+		}
+		if !args.RunInBackground {
+			if secs, ok := longForegroundWait(args.Command); ok {
+				slog.Info("long foreground wait refused",
+					"seconds", secs, "cmdHead", firstN(args.Command, 80))
+				return "", longWaitRefusal(secs)
+			}
 		}
 		timeout := 120
 		if args.Timeout > 0 {
