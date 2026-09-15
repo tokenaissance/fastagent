@@ -34,5 +34,11 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Types
         run: pnpm typecheck
+      # Errors only, not --max-warnings=0: 22 warnings remain (10 no-img-element
+      # on data-URL/preview images, 8 unused vars, 4 exhaustive-deps). They are
+      # real debt but they are not what this gate is for, and a gate that is red
+      # on arrival teaches people to ignore it.
+      - name: Lint
+        run: pnpm lint
       - name: Tests
         run: pnpm test
