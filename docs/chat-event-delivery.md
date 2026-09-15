@@ -199,3 +199,7 @@ under `web/` that ESLint handles, `--max-warnings=0` so the bar matches CI, no
 autofix, and a warning (not a block) when `web/node_modules` is absent. A commit
 that never touches `web/` costs nothing — the workflow above is what catches
 everything a local hook can be talked out of with `--no-verify`.
+
+The cleanup itself — the four shapes those 25 errors had, the one approved
+semantic change, and the two visible behaviour deltas (file-tree expansion, the
+theme store) — is written up in [webui-lint-cleanup.md](./webui-lint-cleanup.md).
