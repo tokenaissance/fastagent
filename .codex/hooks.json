@@ -1,0 +1,17 @@
+{
+  "description": "Project hooks. One job: when the agent is about to run `git commit`, point it at .codex/commit-check.conf before the commit exists.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 .codex/hooks/pre_tool_use.py 2>/dev/null || true",
+            "statusMessage": "Checking the commit check"
+          }
+        ]
+      }
+    ]
+  }
+}
