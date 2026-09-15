@@ -1,0 +1,45 @@
+# Dependabot was reporting alerts against this repository (164 of them on
+# 2026-09-15) without anything configured to act on them: alerts are a
+# repository setting, so they arrive whether or not this file exists, while
+# updates need to be asked for. That asymmetry is how a backlog like that grows
+# quietly. docs/dependency-alert-triage.md is what closing it looked like.
+#
+# Two ecosystems, both weekly, both grouped — and the security half is grouped
+# too, which is the part that matters before switching Dependabot security
+# updates on: with 87 open alerts on the web lockfile, ungrouped security
+# updates mean 87 pull requests, and a queue nobody can read is a queue nobody
+# reads. One grouped request per ecosystem per week is reviewable; each one
+# still lands as its own commit, so `git log` keeps the per-package story.
+#
+# Grouped because most of these are transitive and move together whenever pnpm
+# re-resolves. Minor and patch go in one pull request each; majors stay on their
+# own, because a major is a decision (next 16 -> 17, mermaid 11 -> 12) rather
+# than a chore, and burying one inside a grouped diff is how it gets merged
+# without being read.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      go-minor-patch:
+        applies-to: version-updates
+        update-types: ["minor", "patch"]
+      go-security:
+        applies-to: security-updates
+        patterns: ["*"]
+
+  - package-ecosystem: npm
+    directory: "/web"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      web-minor-patch:
+        applies-to: version-updates
+        update-types: ["minor", "patch"]
+      web-security:
+        applies-to: security-updates
+        patterns: ["*"]
