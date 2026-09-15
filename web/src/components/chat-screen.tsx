@@ -2876,10 +2876,6 @@ function ChatHeaderTitle({ title, fallback, onSave }: ChatHeaderTitleProps) {
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    if (!editing) setDraft(title);
-  }, [title, editing]);
-
-  useEffect(() => {
     if (editing) inputRef.current?.select();
   }, [editing]);
 
