@@ -23,6 +23,21 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    ignore:
+      # x/crypto 0.56.0 is where it starts requiring Go 1.26, and taking it
+      # would move the version line by itself: that is what made the first
+      # go-minor-patch group propose `go 1.25.0 -> go 1.26.0` inside what read
+      # as eight routine module bumps. Of those eight, only this one module
+      # needs 1.26 (pgx, minio-go and modernc/sqlite all declare 1.25.0), so
+      # ignoring this range keeps the rest of the group shippable and keeps the
+      # decision in docs/dependency-alert-triage.md §5.1 — stay on 1.25, and
+      # accept the three module-level advisories that leaves listed.
+      #
+      # Remove this the day the toolchain moves; the check in go-test.yml
+      # ("the Go version line is a decision, not a side effect") is what makes
+      # that move deliberate in the meantime.
+      - dependency-name: "golang.org/x/crypto"
+        versions: [">= 0.56.0"]
     groups:
       go-minor-patch:
         applies-to: version-updates
