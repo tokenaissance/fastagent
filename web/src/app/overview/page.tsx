@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Separator } from "@/components/ui/separator";
 import {
   getStatus,
@@ -26,8 +26,11 @@ export default function OverviewPage() {
   const [runtime, setRuntime] = useState<ConfigResponse["sandbox"] | null>(null);
   const [loading, setLoading] = useState(true);
 
-  const fetchStatus = () => {
-    setLoading(true);
+  // useCallback with an honest empty list (every setter is stable): the effect
+  // below lists both, and a fresh identity each render would re-arm the 10s
+  // timer on every render instead of once.
+  const loadStatus = useCallback(
+    () =>
     getStatus()
       .then((s) => {
         setStatus(s);
@@ -47,14 +50,24 @@ export default function OverviewPage() {
         }
       })
       .catch(() => setStatus(null))
-      .finally(() => setLoading(false));
-  };
+      .finally(() => setLoading(false)),
+    [],
+  );
+
+  const fetchStatus = useCallback(() => {
+    setLoading(true);
+    return loadStatus();
+  }, [loadStatus]);
 
   useEffect(() => {
-    fetchStatus();
+    // Mount load: the spinner already starts ON, so it must not be written
+    // synchronously here (react-hooks/set-state-in-effect). The 10s poll keeps
+    // calling fetchStatus, which is a timer callback — not an effect body — and
+    // keeps the behaviour it always had.
+    void loadStatus();
     const interval = setInterval(fetchStatus, 10000);
     return () => clearInterval(interval);
-  }, []);
+  }, [loadStatus, fetchStatus]);
 
   if (loading && !status) {
     return (
