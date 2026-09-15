@@ -40,35 +40,43 @@ export default function AgentAccessGate({
 }) {
   const pathname = usePathname();
   const agentId = agentIdFromPath(pathname);
-  const [state, setState] = useState<"checking" | "ok" | "denied">("checking");
+
+  // The "default" id is the prebuilt static-export placeholder, not a real
+  // agent — skip the probe and let children render. The real /agents/default/*
+  // route is super_admin's local-mode dashboard, which has its own server-side
+  // gating already.
+  const exempt = !agentId || agentId === "default";
+  // Derived, not synced: "checking" is simply "this agent's probe has not
+  // answered yet", so no effect has to write it. That also removes the frame
+  // where switching agents showed the previous agent's verdict, and it drops
+  // the two synchronous setState calls that
+  // react-hooks/set-state-in-effect flagged.
+  const [probe, setProbe] = useState<{ id: string; state: "ok" | "denied" } | null>(null);
+  const state: "checking" | "ok" | "denied" = exempt
+    ? "ok"
+    : probe?.id === agentId
+      ? probe.state
+      : "checking";
 
   useEffect(() => {
-    // The "default" id is the prebuilt static-export placeholder, not
-    // a real agent — skip the probe and let children render. The real
-    // /agents/default/* route is super_admin's local-mode dashboard
-    // which has its own server-side gating already.
-    if (!agentId || agentId === "default") {
-      setState("ok");
-      return;
-    }
+    if (exempt) return;
     let aborted = false;
-    setState("checking");
     getAgentStatus(agentId)
       .then(({ status, agent }) => {
         if (aborted) return;
         if (status === 200 && agent) {
-          setState("ok");
+          setProbe({ id: agentId, state: "ok" });
           return;
         }
-        setState("denied");
+        setProbe({ id: agentId, state: "denied" });
       })
       .catch(() => {
-        if (!aborted) setState("denied");
+        if (!aborted) setProbe({ id: agentId, state: "denied" });
       });
     return () => {
       aborted = true;
     };
-  }, [agentId]);
+  }, [agentId, exempt]);
 
   if (state === "checking") {
     // Full-viewport placeholder while the probe runs — z-50 lifts it
