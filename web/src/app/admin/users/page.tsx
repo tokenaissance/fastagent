@@ -76,11 +76,15 @@ export default function AdminUsersPage() {
   const [resetPwd, setResetPwd] = useState("");
   const [regOpen, setRegOpen] = useState<boolean | null>(null);
 
-  async function refresh() {
-    setError("");
-    const res = await adminListUsers();
-    if (res.users) setUsers(res.users);
-    if (res.error) setError(res.error);
+  // Promise chain, not async/await: see channels-config/page.tsx — the state
+  // writes must be visibly inside callbacks so they are not read as synchronous
+  // writes in the effect body. The error clears when the answer is in, so a
+  // previous error stays on screen while a retry is in flight.
+  function refresh() {
+    return adminListUsers().then((res) => {
+      if (res.users) setUsers(res.users);
+      setError(res.error || "");
+    });
   }
   useEffect(() => {
     refresh();
