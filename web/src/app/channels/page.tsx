@@ -34,16 +34,16 @@ export default function ChannelsPage() {
   const [loading, setLoading] = useState(true);
   const [editChannel, setEditChannel] = useState<ChannelInfo | null>(null);
 
-  const fetchChannels = () => {
-    setLoading(true);
+  // Same shape as plugins/page.tsx: the spinner starts ON, so the mount load
+  // must not set it — that synchronous write is exactly what
+  // react-hooks/set-state-in-effect flags, and it changed nothing.
+  const loadChannels = () =>
     getChannels()
       .then(setChannels)
-      .catch(() => setChannels([]))
-      .finally(() => setLoading(false));
-  };
+      .catch(() => setChannels([]));
 
   useEffect(() => {
-    fetchChannels();
+    void loadChannels().finally(() => setLoading(false));
   }, []);
 
   return (
