@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Save, Check, Loader2, RotateCcw } from "lucide-react";
@@ -40,37 +40,51 @@ export default function AgentCustomizePage() {
   const agentName = useAgentName(agentId);
   const [activeTab, setActiveTab] = useState("SOUL.md");
   const [files, setFiles] = useState<Record<string, FileState>>({});
-  const [loading, setLoading] = useState(true);
+  // Which agent the loaded files belong to, rather than a boolean: "loading"
+  // is then just "this agent's files have not arrived yet", so no effect has to
+  // write it (react-hooks/set-state-in-effect) and switching agents cannot show
+  // the previous agent's files as if they were loaded.
+  const [loadedFor, setLoadedFor] = useState<string | null>(null);
+  const loading = loadedFor !== agentId;
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
 
-  const loadAll = async () => {
-    const entries = await Promise.all(
-      CUSTOMIZE_FILES.map(async (f) => {
-        try {
-          const res = await apiFetch(`/api/agents/${agentId}/system-files/${f.name}`);
-          if (res.ok) {
-            const data = await res.json();
-            return [
-              f.name,
-              {
-                content: data.content || "",
-                source: (data.source || "default") as FileSource,
-                baseContent: data.baseContent,
-              },
-            ] as [string, FileState];
-          }
-        } catch {}
-        return [f.name, { content: "", source: "default" as FileSource }] as [string, FileState];
-      })
-    );
-    setFiles(Object.fromEntries(entries));
-  };
+  // Promise chain rather than `async`: the state write has to sit in a callback
+  // for react-hooks/set-state-in-effect to see it is not a synchronous effect
+  // write (the rule does not model await inside an async callee).
+  const loadAll = useCallback(
+    () =>
+      Promise.all(
+        CUSTOMIZE_FILES.map(async (f) => {
+          try {
+            const res = await apiFetch(`/api/agents/${agentId}/system-files/${f.name}`);
+            if (res.ok) {
+              const data = await res.json();
+              return [
+                f.name,
+                {
+                  content: data.content || "",
+                  source: (data.source || "default") as FileSource,
+                  baseContent: data.baseContent,
+                },
+              ] as [string, FileState];
+            }
+          } catch {}
+          return [f.name, { content: "", source: "default" as FileSource }] as [string, FileState];
+        })
+      ).then((entries) => setFiles(Object.fromEntries(entries))),
+    [agentId],
+  );
 
   useEffect(() => {
-    setLoading(true);
-    loadAll().then(() => setLoading(false));
-  }, [agentId]);
+    let cancelled = false;
+    loadAll().then(() => {
+      if (!cancelled) setLoadedFor(agentId);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [agentId, loadAll]);
 
   const active = files[activeTab];
 
