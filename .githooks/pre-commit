@@ -15,6 +15,10 @@
 #   git config core.hooksPath .githooks
 #
 # Bypass for one commit (WIP, rebase, CI is down):  git commit --no-verify
+#
+# Known limit: it does not check that web/node_modules matches pnpm-lock.yaml,
+# so a stale local install lints with the old plugin versions. CI is the half
+# that cannot be wrong about this.
 
 set -e
 
