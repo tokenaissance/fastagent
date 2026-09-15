@@ -33,16 +33,22 @@ export default function PluginsPage() {
   const [configJson, setConfigJson] = useState("");
   const [saving, setSaving] = useState(false);
 
-  const fetchPlugins = () => {
-    setLoading(true);
+  // The spinner starts ON (`useState(true)`), so the mount load must not turn it
+  // on again — a synchronous write in an effect body is what
+  // react-hooks/set-state-in-effect flags, and here it was pure redundancy:
+  // nothing had turned it off yet. The reload path below still raises it.
+  const loadPlugins = () =>
     getPlugins()
       .then(setPlugins)
-      .catch(() => setPlugins([]))
-      .finally(() => setLoading(false));
+      .catch(() => setPlugins([]));
+
+  const fetchPlugins = () => {
+    setLoading(true);
+    return loadPlugins().finally(() => setLoading(false));
   };
 
   useEffect(() => {
-    fetchPlugins();
+    void loadPlugins().finally(() => setLoading(false));
   }, []);
 
   const handleToggle = async (plugin: PluginInfo) => {
