@@ -95,6 +95,10 @@ export function NavUser({
             <DropdownMenuItem
               onClick={() => {
                 doLogout();
+                // Same reasoning as the password-change path: logging out has to
+                // discard the client cache, not hand it to a client-side route
+                // change that would keep rendering from it.
+                // eslint-disable-next-line @next/next/no-location-assign-relative-destination -- the reload IS the effect being asked for
                 window.location.href = "/";
               }}
             >

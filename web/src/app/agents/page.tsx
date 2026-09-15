@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -84,6 +85,7 @@ function AgentAvatar({
 }
 
 export default function AgentsPage() {
+  const router = useRouter();
   const [agents, setAgents] = useState<AgentDetail[]>([]);
   const [otherAgents, setOtherAgents] = useState<OtherAgent[]>([]);
   const [isAdmin, setIsAdmin] = useState(false);
@@ -357,7 +359,7 @@ export default function AgentsPage() {
             <div
               key={agent.id}
               className="group flex h-full flex-col rounded-lg border border-border bg-card p-5 transition-colors hover:bg-muted/50 cursor-pointer"
-              onClick={() => (window.location.href = `/agents/${agent.id}/chat/`)}
+              onClick={() => router.push(`/agents/${agent.id}/chat/`)}
             >
               <div className="flex items-start justify-between mb-4">
                 <AgentAvatar agent={agent} bust={avatarBust[agent.id]} size={48} />
@@ -436,9 +438,7 @@ export default function AgentsPage() {
                 <div
                   key={agent.id}
                   className="group flex h-full flex-col rounded-lg border border-border bg-card p-5 opacity-90 transition-colors hover:bg-muted/50 hover:opacity-100 cursor-pointer"
-                  onClick={() =>
-                    (window.location.href = `/agents/${agent.id}/chat/`)
-                  }
+                  onClick={() => router.push(`/agents/${agent.id}/chat/`)}
                 >
                   <div className="flex items-start justify-between mb-4">
                     <div className="flex shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-zinc-500 to-zinc-700 size-12">

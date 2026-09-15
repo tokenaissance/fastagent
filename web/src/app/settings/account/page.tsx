@@ -112,6 +112,10 @@ export default function AccountSettingsPage() {
     // off this device. Brief delay so the user sees the success state.
     setTimeout(() => {
       doLogout();
+      // Deliberately a full document load, not router.push: the point of this
+      // navigation is to drop every client-side cache alongside the session, so
+      // the RSC payloads holding the old password's data cannot be reused.
+      // eslint-disable-next-line @next/next/no-location-assign-relative-destination -- the reload IS the effect being asked for
       window.location.href = "/";
     }, 800);
   }
