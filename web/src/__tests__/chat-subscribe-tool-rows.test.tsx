@@ -133,4 +133,39 @@ describe("chat/subscribe renders tool rows (D4)", () => {
 
     expect(screen.getByText("Executed 1 tool")).toBeInTheDocument();
   });
+
+  it("canonicalises from history on `done` after painting tool rows", async () => {
+    // The other half of D4: rows rendered live are a preview — the durable
+    // record (padded tool results, the final round's text) is the history read,
+    // so `done` owes one whenever this connection painted rows. A tool-only
+    // turn has no content bubble, so the old condition (a transient bubble
+    // exists) missed exactly this case. The assertion is behavioural rather
+    // than a call count: this text exists ONLY in the second history read.
+    render(<ChatScreen />);
+    const es = await waitFor(() => {
+      expect(fakeEventSources.length).toBeGreaterThan(0);
+      return fakeEventSources[0];
+    });
+
+    await act(async () => {
+      es.emit({
+        seq: 6,
+        type: "tool_call",
+        data: { id: "t1", name: "exec", arguments: '{"command":"ls"}' },
+      });
+    });
+    expect(screen.getByText("Running tools (0/1)...")).toBeInTheDocument();
+
+    // The turn ends; the canonical transcript differs from what streamed.
+    api.getChatHistoryWithCursor.mockResolvedValue({
+      history: [{ role: "assistant", content: "canonical answer from history" }],
+      latestEventSeq: 8,
+    });
+    await act(async () => {
+      es.emit({ seq: 7, type: "done" });
+    });
+
+    expect(await screen.findByText("canonical answer from history")).toBeInTheDocument();
+    expect(screen.queryByText("Running tools (0/1)...")).not.toBeInTheDocument();
+  });
 });
