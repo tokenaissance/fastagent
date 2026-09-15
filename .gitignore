@@ -75,6 +75,9 @@ skills-lock.json
 # Runtime config
 env.toml
 
+# Python bytecode from repo scripts
+__pycache__/
+
 # Local data
 web/node_modules/
 web/pnpm-lock.yaml
