@@ -3362,7 +3362,9 @@ function sortFileTree(nodes: FileTreeNode[]) {
   for (const n of nodes) if (n.isDir) sortFileTree(n.children);
 }
 
-function FileTreeView({
+/** Exported for the expansion test: it is the unit whose behaviour changed when
+ *  the auto-expand set became derived (see docs/webui-lint-cleanup.md §3.1). */
+export function FileTreeView({
   files,
   rootPrefix,
   selectedPath,
