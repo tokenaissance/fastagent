@@ -31,7 +31,6 @@ export function ChannelIcon({
   if (!src) return null;
   const extra = channel === "wechat" ? "scale-150" : "";
   return (
-    // eslint-disable-next-line @next/next/no-img-element
     <img
       src={src}
       alt={channel ?? ""}
