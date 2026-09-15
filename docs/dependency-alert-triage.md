@@ -1,6 +1,6 @@
 # Dependency alerts: what the 164 actually are
 
-**日期**: 2026-09-15（§5、§7 于 09-16 补） · **状态**: 🚧 Go 侧已修、web 根因与 `next` 已修，剩 `@streamdown/mermaid` 一族 · **触发**: push 时 GitHub 报 default branch 164 条（11 critical / 57 high）
+**日期**: 2026-09-15（§5–§8 于 09-16 补） · **状态**: ✅ 生产口径 critical 归零，剩 87 条 dev/传递依赖交由 Dependabot 分组 PR · **触发**: push 时 GitHub 报 default branch 164 条（11 critical / 57 high）
 
 ---
 
@@ -11,7 +11,8 @@
 | GitHub Dependabot | 164（11 critical / 57 high） | 扫描**所有被识别的 lockfile**，含 dev |
 | `pnpm audit --prod`（web/） | 117（2 critical / 41 high） | 只算**生产**依赖树 |
 | `shadcn` 挪走之后 | **52**（2 critical / 21 high） | 同上 |
-| `next` 升到 16.3.5 之后 | **13**（0 critical / 2 high） | 同上，见 §7 |
+| `next` 升到 16.3.5 之后 | **13**（0 critical / 2 high） | 同上，见 §6 |
+| overrides 顶掉 mermaid / dompurify 一族（§7） | **0** | `pnpm audit --prod` 报 "No known vulnerabilities found" |
 
 ## 2. 两条根因（都已修）
 
@@ -36,12 +37,13 @@
 
 | 顶层包 | 条数 | 性质与下一步 |
 |---|---|---|
-| ~~`next`~~ | ~~43~~ | **已修**：16.1.6 → 16.3.5，见 §7 |
-| `@streamdown/mermaid` | 9 | 走 streamdown 家族的 mermaid 依赖；先查该家族的修补范围，再决定是升 streamdown 还是覆盖 mermaid。`next` 修完后仍留在生产口径里的就是它一族（mermaid 5 条 + dompurify 4 条） |
+| ~~`next`~~ | ~~43~~ | **已修**：16.1.6 → 16.3.5，见 §6 |
+| ~~`@streamdown/mermaid`~~ | ~~9~~ | **已修**：上游没有新版可升，改用 pnpm overrides 顶 mermaid 与 dompurify，见 §7 |
 
-dev 侧（Dependabot 计入、`--prod` 不计入）另有若干。`next` 修完后 `--prod` 剩下 13 条，
+dev 侧（Dependabot 计入、`--prod` 不计入）另有若干。`next` 修完后 `--prod` 曾剩 13 条，
 收敛成 5 个包：`mermaid`（low/moderate 5）、`dompurify`（low/moderate 4）、`browserslist`（high 2）、
-`baseline-browser-mapping`（moderate 1）、`@babel/core`（low 1）。
+`baseline-browser-mapping`（moderate 1）、`@babel/core`（low 1）—— 这 5 个已由 §7 的 overrides 收掉，
+生产口径归零。
 
 ## 4. 明确没做，以及为什么
 
@@ -145,8 +147,77 @@ web 是静态导出、再嵌进 Go 二进制，所以"构建成功"说明不了�
   模式行。拿两个版本的构建日志直接 diff，看起来像整棵 `/agents/[id]`（16 条路由）消失了；产物里
   一条不少。**日志 diff 不能当产物 diff 用**，这就是 §6.2 存在的原因。
 
-## 7. 门
+## 7. web：overrides 收掉 mermaid / dompurify 一族（2026-09-16）
+
+`next` 修完后，生产口径剩下的 13 条全部集中在这里：`mermaid` 5、`dompurify` 4、
+`browserslist` 2（high）、`baseline-browser-mapping` 1、`@babel/core` 1（low）。其中
+dompurify 那条是 **XSS**（`IN_PLACE` 钩子移除后留下可执行的游离子树），而聊天界面正是拿它
+过滤模型输出的；mermaid 那几条是配置 API 的原型污染、CSS 注入与 XY/radar 图的 DoS。
+
+**为什么不能靠升级**：`@streamdown/mermaid@1.0.2` 已经是该包最新版，而它把 `mermaid` 钉成
+**精确的 11.15.0**；`mermaid` 又精确钉 `dompurify@3.4.8`，`next@16.3.5` 精确钉
+`baseline-browser-mapping@2.10.8`，`@babel/helper-compilation-targets` 精确钉
+`browserslist@4.28.1`。四条链全是精确钉版，范围更新够不到，所以用 `pnpm.overrides`：
+
+| 包 | 被顶到 | 修补门槛 |
+|---|---|---|
+| `mermaid` | 11.15.0 → **11.17.2** | 11.16.1 —— 留在 11.x 线内，mermaid 12 是 breaking |
+| `dompurify` | 3.4.8 → **3.4.15** | 3.4.13 |
+| `browserslist` | 4.28.1 → **4.29.0** | 4.28.7 |
+| `baseline-browser-mapping` | 2.10.8 → **2.11.23** | 2.11.0 |
+| `@babel/core` | 7.29.0 → **7.29.7** | 7.29.6 |
+
+**门**：`typecheck` / `lint --max-warnings=0` / `test`（20 passed）/ `build` 全过，
+`install --frozen-lockfile` 与 Dockerfile、CI 同钉 pnpm 10.15.0。
+收完之后 `pnpm audit --prod` 报 **No known vulnerabilities found** —— 生产依赖树归零。
+
+**产物对拍**（对着 `next` 那一步的产物比）：42 个 HTML 逐页可见文本 **0 处不同**、
+**0 悬空引用**。代价是明确量出来的：`/` 与 `/settings` 的脚本字节数不变，
+`/chat` 与 `/agents/[id]/chat` 各 **+77.3 KiB**（+3 个脚本）——mermaid 与 dompurify 就在这条链路上。
+
+**两条用例**，因为它们防的不是同一件事：
+
+1. `src/__tests__/mermaid-render.test.tsx` 用聊天真正用的 `<ChatMarkdown>` 渲染 flowchart 与
+   sequenceDiagram，断言确实产出 `<svg>`。强制版本最典型的失败模式是"编译得过、打包得过、
+   chat 里变成一个空框"，构建看不出来，这条能。
+2. 同一文件里断言锁文件里这五个包都在修补门槛之上。第 1 条在旧版本上也会绿，只有第 2 条能
+   抓住"override 被删掉"——它同时对着**改过版本的锁文件文本**自检一次，证明自己不是空转。
+
+### 7.1 一个自己撞上的坑
+
+本机基础工具链是 **go1.25.0**，落后 14 个补丁版；`govulncheck` 在它下面报 **31 条标准库可达漏洞**，
+而 CI 用的 `go-version: "1.25"` 会装到 1.25.14，同一份代码报 **0 条**。所以这类红灯要先看清它
+怪的是依赖还是工具链——这也是 §8 把"工具链版本"写进 job 注释的原因。
+
+## 8. 两个口子（2026-09-16）
+
+### 8.1 `govulncheck` 进 CI
+
+`go-test.yml` 新增 `vulncheck` job：`go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...`。
+
+* 钉 **v1.7.0** 而不是 `@latest`：v1.8.0 要 Go 1.26，而本仓库（含 Dockerfile）钉 1.25。
+* 它只对**可达**漏洞返回非零——这正是要卡的那条线。它今天仍会列出 3 条 x/crypto 的 ssh advisory，
+  但不会因此变红（那三条在只用 bcrypt 的树上够不到）。
+* 加它的理由写进了 job 注释：那 164 条里**没有**真正可达的 compress 漏洞，是 govulncheck 找出来的。
+
+### 8.2 Dependabot 从"只报警"变成"会开 PR"
+
+之前的状态是：告警开着（那是仓库设置，默认就有），但既没有 `.github/dependabot.yml`，
+`automated-security-fixes` 也是 `false` —— 所以 164 条只会堆着，没有任何机制往下压。
+
+现在：
+
+* 新增 `.github/dependabot.yml`：`gomod`（`/`）与 `npm`（`/web`）周更，**minor/patch 分组**、
+  major 单独一个 PR（major 是决定，不是杂务）。
+* **安全更新也分组**（`applies-to: security-updates`）。这条是开启安全更新的前提：不解组就是
+  87 个 PR，而读不过来的队列等于没人读。
+* 仓库设置 `automated-security-fixes` 由 `false` 改为 `true`。
+
+剩余 87 条（`hono` 30、`brace-expansion` 9、`fast-uri` 7、mermaid/dompurify 之外的传递依赖等）
+从此每周以分组 PR 的形式送上门，而不是继续堆着。
+
+## 9. 门
 
 web 侧改动仍受 `web-test.yml`（typecheck + lint --max-warnings=0 + test）与
 `.githooks/pre-commit` 约束 —— 升级依赖也不例外。Go 侧对应 `go-test.yml`（含 `-race`）；
-目前**没有**把 `govulncheck` 接进 CI，所以 §5.3 那条漏报还会再发生一次。
+`govulncheck` 已按 §8.1 接上。
