@@ -73,7 +73,6 @@ function AgentAvatar({
   }
   const url = bust ? `${agent.avatarUrl}?v=${bust}` : agent.avatarUrl;
   return (
-    // eslint-disable-next-line @next/next/no-img-element
     <img
       src={url}
       alt={agent.name || agent.id}
@@ -507,7 +506,6 @@ export default function AgentsPage() {
                 aria-label="Upload avatar"
               >
                 {newAvatarPreview ? (
-                  // eslint-disable-next-line @next/next/no-img-element
                   <img src={newAvatarPreview} alt="avatar" className="size-full object-cover" />
                 ) : (
                   <ImagePlus className="size-6 text-muted-foreground" />
@@ -593,7 +591,6 @@ export default function AgentsPage() {
                 aria-label="Upload avatar"
               >
                 {editAvatarPreview ? (
-                  // eslint-disable-next-line @next/next/no-img-element
                   <img src={editAvatarPreview} alt="avatar" className="size-full object-cover" />
                 ) : editTarget ? (
                   <AgentAvatar agent={editTarget} bust={avatarBust[editTarget.id]} size={80} />
