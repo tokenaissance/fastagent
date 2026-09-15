@@ -3387,13 +3387,13 @@ function FileTreeView({
 }) {
   const tree = useMemo(() => buildFileTree(files, rootPrefix), [files, rootPrefix]);
   // Expansion state keys on stable relative paths, so it survives refreshes.
-  const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
-  // Auto-expand the first `defaultExpandDepth` folder levels once, when the
-  // tree first arrives (files load async). User toggles persist after that.
-  const initedRef = useRef(false);
-  useEffect(() => {
-    if (initedRef.current || tree.length === 0) return;
-    initedRef.current = true;
+  // Auto-expand the first `defaultExpandDepth` folder levels of whatever tree is
+  // on screen, with the user's own toggles layered on top. Deriving it means no
+  // effect seeds state when the tree arrives (which is what
+  // react-hooks/set-state-in-effect flags), and the one visible consequence is
+  // deliberate: a refresh that adds folders opens them, where the old
+  // "initialise once" ref left them shut.
+  const autoExpanded = useMemo(() => {
     const next = new Set<string>();
     const walk = (nodes: FileTreeNode[], depth: number) => {
       for (const n of nodes) {
@@ -3404,16 +3404,26 @@ function FileTreeView({
       }
     };
     walk(tree, 0);
-    setExpanded(next);
+    return next;
   }, [tree, defaultExpandDepth]);
+  /** Only the toggles the user actually made; absent = follow autoExpanded. */
+  const [toggled, setToggled] = useState<Map<string, boolean>>(() => new Map());
+  const expanded = useMemo(() => {
+    const next = new Set(autoExpanded);
+    for (const [path, open] of toggled) {
+      if (open) next.add(path);
+      else next.delete(path);
+    }
+    return next;
+  }, [autoExpanded, toggled]);
   const toggle = useCallback((path: string) => {
-    setExpanded((prev) => {
-      const next = new Set(prev);
-      if (next.has(path)) next.delete(path);
-      else next.add(path);
+    setToggled((prev) => {
+      const next = new Map(prev);
+      const effective = prev.has(path) ? prev.get(path)! : autoExpanded.has(path);
+      next.set(path, !effective);
       return next;
     });
-  }, []);
+  }, [autoExpanded]);
   return (
     <div className="text-sm">
       {tree.map((n) => (
