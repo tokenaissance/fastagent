@@ -1,0 +1,38 @@
+name: web-test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  web:
+    name: web UI (tests + types)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      # Same pnpm pin as the Dockerfile (which installs --frozen-lockfile), so a
+      # lockfile that only one of them accepts cannot pass here and break the
+      # image build later. Builds do NOT run here: docker.yml owns the web build
+      # and only fires on dev/main pushes and tags, which is exactly why this
+      # workflow exists on pull_request — before it, a PR could merge a broken
+      # web tree and nothing said so until the image build after merge.
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.15.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: Install (frozen lockfile, same pin as the image build)
+        run: pnpm install --frozen-lockfile
+      - name: Types
+        run: pnpm typecheck
+      - name: Tests
+        run: pnpm test
