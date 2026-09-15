@@ -102,9 +102,12 @@ describe("the overrides hold the versions that close the advisories", () => {
   // there before the override. Rewriting the real lockfile text (rather than
   // uninstalling) keeps the assertion honest without perturbing the tree.
   it("fails on the version this override replaced", () => {
-    // Every occurrence, not just the first: the lockfile names the version twice
-    // (the package entry and the snapshot key) and the reader takes the highest.
-    const asBefore = readLock().replaceAll("mermaid@11.17.2", "mermaid@11.15.0");
+    // The version is rewritten rather than named: the pinned one moves whenever
+    // the override is retargeted (11.17.2 became 11.16.1 the day pnpm 11's
+    // release-age policy ruled out the newer one), and a test that hard-codes it
+    // fails for the wrong reason. Every occurrence, since the lockfile names the
+    // version twice and the reader takes the highest.
+    const asBefore = readLock().replace(/mermaid@\d+\.\d+\.\d+/g, "mermaid@11.15.0");
     expect(atLeast(lockedVersion(asBefore, "mermaid"), "11.16.1")).toBe(false);
   });
 });
