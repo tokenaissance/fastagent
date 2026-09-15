@@ -1,5 +1,38 @@
 packages:
   - .
+
+# The overrides live here rather than in package.json's `pnpm` field, which is
+# the pre-v10 home: pnpm 10.15 (the version this repo pins) still reads that
+# field, but the newer pnpm inside Dependabot's updater does not — it logged
+# `The "pnpm" field in package.json is no longer read by pnpm. The following
+# keys were ignored: "pnpm.overrides"`, then disagreed with the lockfile's
+# overrides block and failed the whole group with HelperSubprocessFailed.
+# Same settings, one file both ends agree on. See docs/dependency-alert-triage.md §10 (this file is that move).
+overrides:
+  '@babel/core': ^7.29.6
+  '@hono/node-server': ^1.19.15
+  '@humanfs/node': ^0.16.8
+  baseline-browser-mapping: ^2.11.0
+  body-parser: ^2.3.0
+  brace-expansion@1: ^1.1.18
+  brace-expansion@5: ^5.0.9
+  browserslist: ^4.28.7
+  dompurify: ^3.4.15
+  fast-uri: ^3.1.6
+  flatted: ^3.4.2
+  hono: ^4.13.5
+  ip-address: ^10.3.1
+  js-yaml: ^4.3.2
+  mermaid: ^11.17.2
+  nanoid@3: ^3.3.19
+  picomatch@2: ^2.3.2
+  picomatch@4: ^4.0.7
+  path-to-regexp@8: ^8.4.2
+  postcss: ^8.5.23
+  postcss-selector-parser@6: ^6.0.11
+  postcss-selector-parser@7: ^7.1.4
+  qs: ^6.16.0
+
 allowBuilds:
   msw: true
   sharp: true

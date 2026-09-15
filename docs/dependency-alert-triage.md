@@ -298,7 +298,31 @@ dompurify 那条是 **XSS**（`IN_PLACE` 钩子移除后留下可执行的游离
 甚至不为它报任何东西（`msw` 在本仓库 `src/` 里零引用，它进树是因为 shadcn 真的依赖它、
 外加 `@vitest/mocker` 把它当 peer）。
 
-## 10. 门
+## 10. overrides 的家在 `pnpm-workspace.yaml`，不在 `package.json`（2026-09-16）
+
+§7–§9 的 overrides 一开始写在 `package.json` 的 `pnpm.overrides` 里。它本地完全有效——
+仓库钉的 pnpm **10.15.0** 照读不误，锁文件里也老老实实记着那 23 条。但 Dependabot 的 web
+版本更新组**连续失败**，16 个直接依赖全部报 `unknown_error`，日志里是
+`Dependabot::SharedHelpers::HelperSubprocessFailed`。
+
+根因在它自己的输出里：
+
+> `[WARN] The "pnpm" field in package.json is no longer read by pnpm. The following keys were ignored: "pnpm.overrides".`
+
+更新器里的 pnpm 比仓库钉的这个新。它按"没有 overrides"重算锁文件，而锁文件里带着那 23 条，
+两边对不上，整组就崩了——于是"把告警交给 Dependabot"这件事被我自己的配置反手掐掉了。
+
+**处置**：把 overrides 从 `package.json` 的 `pnpm.overrides` 搬到 `pnpm-workspace.yaml` 的
+`overrides:`（v10.6 起的新家，这个文件本来就放着 `onlyBuiltDependencies`），两个版本都读这里。
+
+**证据**：搬完之后 `pnpm install` 与 `install --frozen-lockfile` 都只说
+`Lockfile is up to date`，**锁文件一个字节没变**——是等价的搬家，不是改解析；
+解析结果仍是 `hono@4.13.8` / `mermaid@11.17.2` / `dompurify@3.4.15` / `fast-uri@3.1.8`。
+
+**教训**：这个仓库钉的 pnpm 版本不是唯一的消费者，Dependabot 容器里那个也算一个。
+配置文件要写在**两端都认**的位置，否则会出现"本地绿、机器人崩"这种最难查的组合。
+
+## 11. 门
 
 web 侧改动仍受 `web-test.yml`（typecheck + lint --max-warnings=0 + test）与
 `.githooks/pre-commit` 约束 —— 升级依赖也不例外。Go 侧对应 `go-test.yml`（含 `-race`）；
