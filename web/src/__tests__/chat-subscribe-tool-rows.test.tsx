@@ -100,6 +100,47 @@ describe("chat/subscribe renders tool rows (D4)", () => {
     api.uploadAgentFiles.mockResolvedValue([]);
   });
 
+  it("renders an unanswered call from history as interrupted — amber, not a spinner and not a check", async () => {
+    // The server keeps an interrupted call open in stored history (the synthetic
+    // reply lives only in the prompt projection), so this state is derived here.
+    // It used to be terminal-but-green: the row carried "(stopped)" as if it
+    // were a result, which counted the call as executed and drew a ✓.
+    api.getChatHistoryWithCursor.mockResolvedValue({
+      history: [
+        { role: "user", content: "look at that paper run" },
+        {
+          role: "assistant",
+          content: "",
+          toolCalls: [
+            { id: "call_1", name: "mcp_quandora_pt_get_run", arguments: '{"paper_run_id":"04029f19"}' },
+          ],
+        },
+      ],
+      latestEventSeq: 5,
+    });
+    const { container } = render(<ChatScreen />);
+
+    // The header counts it as not returned rather than as an executed tool…
+    await waitFor(() =>
+      expect(screen.getByText("Interrupted — 0 of 1 tools returned")).toBeInTheDocument(),
+    );
+    // Not the executed summary: nothing came back, so nothing was executed.
+    expect(screen.queryByText(/^Executed 1 tool/)).not.toBeInTheDocument();
+    // …and the glyph is the amber exclamation (lucide's triangle-alert).
+    expect(container.querySelector("svg.lucide-triangle-alert")).toBeTruthy();
+
+    // Expanded, the Output slot carries the full sentence the cloud prints —
+    // not the raw "(stopped)" sentinel that used to leak into it.
+    await act(async () => {
+      screen.getByText("Interrupted — 0 of 1 tools returned").click(); // open the group
+    });
+    await act(async () => {
+      screen.getByRole("button", { name: "mcp_quandora_pt_get_run tool call details" }).click();
+    });
+    expect(screen.getByText("Interrupted — this call never returned a result")).toBeInTheDocument();
+    expect(screen.queryByText("(stopped)")).not.toBeInTheDocument();
+  });
+
   it("shows a running tool row before `done`, then its result", async () => {
     render(<ChatScreen />);
 

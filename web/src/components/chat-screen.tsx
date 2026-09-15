@@ -6,9 +6,23 @@ import { useAgentIdFromURL } from "@/hooks/use-agent-id";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { fileUrl, getAgent, getAgentKnowledgeFile, getChangedFiles, getChatHistoryWithCursor, getChatSessions, getChatTodo, getMe, getScopePreview, getScopePreviewLogs, listAgentFiles, listProjects, renameChatSession, cancelQueuedTurn, revealAgentWorkspace, sendChatStream, steerChat, uploadAgentFiles, getSkills, type ChatHistoryMessage, type ChatStreamEvent, type KnowledgeSource, type ScopePreview, type SkillInfo, type TodoItem, type ToolResultMetadata, type WorkspaceFile } from "@/lib/api";
-import { Send, Copy, Check, Pencil, Wrench, ChevronDown, ChevronRight, Download, X, File, FileText, Folder, FolderSearch, Image as ImageIcon, FileCode, Film, Music, Puzzle, SlidersHorizontal, ShieldCheck, Paperclip, Square, FolderOpen, RefreshCw, Eye, Code2, RotateCcw, ListChecks, Terminal, ExternalLink, MoreHorizontal, PanelLeftClose, PanelLeftOpen, BookOpen } from "lucide-react";
+import { Send, Copy, Check, Pencil, Wrench, ChevronDown, ChevronRight, Download, X, File, FileText, Folder, FolderSearch, Image as ImageIcon, FileCode, Film, Music, Puzzle, SlidersHorizontal, ShieldCheck, Paperclip, Square, FolderOpen, RefreshCw, Eye, Code2, RotateCcw, ListChecks, Terminal, ExternalLink, MoreHorizontal, PanelLeftClose, PanelLeftOpen, BookOpen, AlertTriangle } from "lucide-react";
+
 import Link from "next/link";
 import { ChatMarkdown } from "@/components/chat-markdown";
+
+/**
+ * Client-side terminal marker for a tool call the server deliberately leaves
+ * open. An interrupted turn keeps its tool_use unanswered in stored history —
+ * the synthetic reply exists only in the prompt projection, never in the
+ * session (docs/session-turn-integrity.md, clause T) — so without a local
+ * terminal value the row spins forever.
+ *
+ * It is NOT a result: nothing came back. Rows and group headers render it as
+ * the amber exclamation, never as the green check a real result gets, and the
+ * header counts it as "not returned" rather than as an executed tool.
+ */
+const STOPPED_TOOL_RESULT = "(stopped)";
 
 // Split a string on `![alt](data:image/...;base64,...)` markdown.
 //
@@ -280,7 +294,7 @@ function buildChatMessages(history: ChatHistoryMessage[]): ChatMessage[] {
       // prompt projection, which is not persisted).
       for (const c of calls) {
         if (c.result === undefined) {
-          c.result = "(stopped)";
+          c.result = STOPPED_TOOL_RESULT;
         }
       }
       // If this assistant turn produced text alongside its tool calls
@@ -1863,7 +1877,7 @@ export function ChatScreen() {
               ? {
                   ...m,
                   toolCalls: m.toolCalls.map((tc) =>
-                    tc.result === undefined ? { ...tc, result: "(stopped)" } : tc,
+                    tc.result === undefined ? { ...tc, result: STOPPED_TOOL_RESULT } : tc,
                   ),
                 }
               : m,
@@ -2937,7 +2951,10 @@ function ToolCallGroup({ msg, surfacedSrcs, agentId, sessionId, nested = false, 
   const [expandedTool, setExpandedTool] = useState<Record<string, boolean>>({});
 
   const tools = msg.toolCalls || [];
-  const doneCount = tools.filter((tc) => tc.result != null).length;
+  // Only real results count as executed: a stopped row is terminal, but nothing
+  // came back from it, so the summary must not call it executed.
+  const doneCount = tools.filter((tc) => tc.result != null && tc.result !== STOPPED_TOOL_RESULT).length;
+  const stoppedCount = tools.filter((tc) => tc.result === STOPPED_TOOL_RESULT).length;
   const allDone = doneCount === tools.length;
 
   // delegate_task is registered serial, so only the FIRST not-yet-
@@ -2978,7 +2995,9 @@ function ToolCallGroup({ msg, surfacedSrcs, agentId, sessionId, nested = false, 
             onClick={() => setGroupOpen(!groupOpen)}
             className="flex w-full items-center gap-2 px-3 py-2 text-xs hover:bg-muted/50 transition-colors"
           >
-            {!allDone ? (
+            {stoppedCount > 0 ? (
+              <AlertTriangle className="h-5 w-5 shrink-0 text-amber-500" />
+            ) : !allDone ? (
               <div className="h-5 w-5 shrink-0 rounded-full border-2 border-amber-500 border-t-transparent animate-spin" />
             ) : roundIndex !== undefined ? (
               // When this group is a round inside a bundle, the leading
@@ -2992,9 +3011,11 @@ function ToolCallGroup({ msg, surfacedSrcs, agentId, sessionId, nested = false, 
               <Wrench className="h-3.5 w-3.5 text-amber-500 shrink-0" />
             )}
             <span className="font-medium text-foreground">
-              {allDone
-                ? `Executed ${tools.length} tool${tools.length > 1 ? "s" : ""}`
-                : `Running tools (${doneCount}/${tools.length})...`}
+              {stoppedCount > 0
+                ? `Interrupted — ${doneCount} of ${tools.length} tools returned`
+                : allDone
+                  ? `Executed ${tools.length} tool${tools.length > 1 ? "s" : ""}`
+                  : `Running tools (${doneCount}/${tools.length})...`}
             </span>
             <span className="text-muted-foreground/60 text-[11px] flex-1 text-left truncate">
               {tools.map((tc) => tc.name).join(", ")}
@@ -3013,8 +3034,12 @@ function ToolCallGroup({ msg, surfacedSrcs, agentId, sessionId, nested = false, 
                   <button
                     onClick={() => toggleTool(tc.id)}
                     className="flex w-full items-center gap-2 px-3 py-1.5 text-xs hover:bg-muted/30 transition-colors"
+                    aria-expanded={!!expandedTool[tc.id]}
+                    aria-label={`${tc.name} tool call details`}
                   >
-                    {tc.result === undefined ? (
+                    {tc.result === STOPPED_TOOL_RESULT ? (
+                      <AlertTriangle className="h-3 w-3 shrink-0 text-amber-500" />
+                    ) : tc.result === undefined ? (
                       <div className="h-3 w-3 shrink-0 rounded-full border-2 border-amber-500/60 border-t-transparent animate-spin" />
                     ) : (
                       <Check className="h-3 w-3 text-emerald-500 shrink-0" />
@@ -3072,9 +3097,17 @@ function ToolCallGroup({ msg, surfacedSrcs, agentId, sessionId, nested = false, 
                       {tc.result != null ? (
                         <div>
                           <p className="text-[10px] font-medium text-muted-foreground uppercase mb-1">Output</p>
-                          <pre className="text-xs font-mono bg-muted/50 rounded p-2 overflow-x-auto whitespace-pre-wrap break-all max-h-60">
-                            {tc.result.length > 2000 ? tc.result.slice(0, 2000) + "..." : tc.result}
-                          </pre>
+                          {tc.result === STOPPED_TOOL_RESULT ? (
+                            // Not a result, so it does not get the result box —
+                            // same sentence the cloud renders for this row.
+                            <p className="text-xs italic text-muted-foreground/70">
+                              Interrupted — this call never returned a result
+                            </p>
+                          ) : (
+                            <pre className="text-xs font-mono bg-muted/50 rounded p-2 overflow-x-auto whitespace-pre-wrap break-all max-h-60">
+                              {tc.result.length > 2000 ? tc.result.slice(0, 2000) + "..." : tc.result}
+                            </pre>
+                          )}
                         </div>
                       ) : tc.name === "delegate_task" && tc.id === activeDelegateId && subagentProgress ? (
                         <div className="text-xs text-muted-foreground/80 italic">
@@ -3142,7 +3175,8 @@ function ToolRoundsBundle({
   const [open, setOpen] = useState(false);
   const allTools = rounds.flatMap((r) => r.toolCalls || []);
   const totalTools = allTools.length;
-  const doneCount = allTools.filter((tc) => tc.result != null).length;
+  const doneCount = allTools.filter((tc) => tc.result != null && tc.result !== STOPPED_TOOL_RESULT).length;
+  const stoppedCount = allTools.filter((tc) => tc.result === STOPPED_TOOL_RESULT).length;
   const allDone = doneCount === totalTools;
   return (
     <div className="flex justify-start">
@@ -3152,15 +3186,19 @@ function ToolRoundsBundle({
             onClick={() => setOpen(!open)}
             className="flex w-full items-center gap-2 px-3 py-2 text-xs hover:bg-muted/50 transition-colors"
           >
-            {!allDone ? (
+            {stoppedCount > 0 ? (
+              <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-amber-500" />
+            ) : !allDone ? (
               <div className="h-3.5 w-3.5 shrink-0 rounded-full border-2 border-amber-500 border-t-transparent animate-spin" />
             ) : (
               <Wrench className="h-3.5 w-3.5 text-amber-500 shrink-0" />
             )}
             <span className="font-medium text-foreground">
-              {allDone
-                ? `Used ${totalTools} tool${totalTools === 1 ? "" : "s"} across ${rounds.length} round${rounds.length === 1 ? "" : "s"}`
-                : `Running tools… (${doneCount}/${totalTools} across ${rounds.length} rounds)`}
+              {stoppedCount > 0
+                ? `Interrupted — ${doneCount} of ${totalTools} tools returned across ${rounds.length} round${rounds.length === 1 ? "" : "s"}`
+                : allDone
+                  ? `Used ${totalTools} tool${totalTools === 1 ? "" : "s"} across ${rounds.length} round${rounds.length === 1 ? "" : "s"}`
+                  : `Running tools… (${doneCount}/${totalTools} across ${rounds.length} rounds)`}
             </span>
             <span className="ml-auto" />
             {open ? (
