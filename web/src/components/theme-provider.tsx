@@ -44,7 +44,16 @@ function apply(resolved: "dark" | "light") {
  * cross-tab sync for free, without a listener per provider.
  */
 const listeners = new Set<() => void>();
+/**
+ * Cached snapshot. React calls getSnapshot on every render, so it must be cheap
+ * and stable — reading localStorage each time is neither (and is exactly what
+ * `js-cache-storage` warns about). Anything that can change the answer clears
+ * it first: our own write, a storage event from another tab, an OS change.
+ */
+let cachedSnapshot: string | null = null;
+
 const notifyThemeChange = () => {
+  cachedSnapshot = null;
   for (const listener of listeners) listener();
 };
 
@@ -67,8 +76,10 @@ function subscribeToTheme(onChange: () => void) {
 
 /** "theme:resolved" — one stable primitive, so React can compare snapshots. */
 function themeSnapshot(): string {
+  if (cachedSnapshot !== null) return cachedSnapshot;
   const stored = readStoredTheme();
-  return `${stored}:${stored === "system" ? readSystem() : stored}`;
+  cachedSnapshot = `${stored}:${stored === "system" ? readSystem() : stored}`;
+  return cachedSnapshot;
 }
 
 /** Server (and pre-hydration) answer: the same default the old state used. */
