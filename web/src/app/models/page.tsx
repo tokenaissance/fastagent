@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -263,7 +263,10 @@ export default function ModelsPage() {
   // written back through the same endpoint. Keep the two writes split so
   // an empty default-model field doesn't blow away provider rows, and a
   // provider mutation doesn't accidentally clear the default model.
-  const fetchConfig = async (
+  // useCallback with an honest empty list: the body only touches setters (all
+  // stable), and the mount effect below needs a stable identity to list — an
+  // inline function would make that effect re-run on every render.
+  const fetchConfig = useCallback(async (
     asAdmin: boolean,
     userId: string,
   ) => {
@@ -325,7 +328,7 @@ export default function ModelsPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [inAgentContext, urlAgentId]);
 
   // Resolve identity first, then fetch — admin gets system only, regular
   // user gets the union (system inherited + own user-scope rows).
@@ -336,7 +339,7 @@ export default function ModelsPage() {
       setMe(meRec);
       fetchConfig(meRec.role === "super_admin", meRec.id);
     });
-  }, []);
+  }, [fetchConfig]);
 
   const openAddDialog = () => {
     setEditingName(null);
