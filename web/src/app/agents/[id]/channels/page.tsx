@@ -112,18 +112,25 @@ export default function AgentChannelsPage() {
   const [feishuOpen, setFeishuOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<AgentChannel | null>(null);
 
-  const refresh = useCallback(() => {
-    if (!agentId) return;
-    setLoading(true);
-    listAgentChannels(agentId)
+  // The spinner starts ON, so the mount load must not turn it on again — the
+  // synchronous write in the effect body is what
+  // react-hooks/set-state-in-effect flags. Handlers (and the dialogs'
+  // onConnected) still get the spinner-raising version.
+  const loadChannels = useCallback(() => {
+    if (!agentId) return Promise.resolve();
+    return listAgentChannels(agentId)
       .then((list) => setChannels(list))
-      .catch((e) => setError(e instanceof Error ? e.message : "Failed to load channels"))
-      .finally(() => setLoading(false));
+      .catch((e) => setError(e instanceof Error ? e.message : "Failed to load channels"));
   }, [agentId]);
 
+  const refresh = useCallback(() => {
+    setLoading(true);
+    return loadChannels().finally(() => setLoading(false));
+  }, [loadChannels]);
+
   useEffect(() => {
-    refresh();
-  }, [refresh]);
+    void loadChannels().finally(() => setLoading(false));
+  }, [loadChannels]);
 
   // First binding per channel type — the UI is currently single-bot,
   // even though the backend allows multiple. If multiple exist (legacy
@@ -423,14 +430,19 @@ function ConnectTelegramDialog({
   const [error, setError] = useState("");
   const [connected, setConnected] = useState<{ botUsername: string } | null>(null);
 
-  useEffect(() => {
-    if (!open) {
+  // Reset when the dialog closes rather than watching `open` in an effect:
+  // closing is an event, the parent only ever flips `open` through this
+  // callback, and the synchronous setState in an effect body is exactly what
+  // react-hooks/set-state-in-effect flags.
+  const handleOpenChange = (next: boolean) => {
+    if (!next) {
       setToken("");
       setError("");
       setSubmitting(false);
       setConnected(null);
     }
-  }, [open]);
+    onOpenChange(next);
+  };
 
   const submit = async () => {
     if (!token.trim() || !agentId) return;
@@ -447,7 +459,7 @@ function ConnectTelegramDialog({
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
@@ -548,14 +560,17 @@ function ConnectDiscordDialog({
   const [error, setError] = useState("");
   const [connected, setConnected] = useState<{ botUsername: string } | null>(null);
 
-  useEffect(() => {
-    if (!open) {
+  // Same reset-on-close as the Telegram dialog: the write belongs to the close
+  // event, not to an effect watching `open`.
+  const handleOpenChange = (next: boolean) => {
+    if (!next) {
       setToken("");
       setError("");
       setSubmitting(false);
       setConnected(null);
     }
-  }, [open]);
+    onOpenChange(next);
+  };
 
   const submit = async () => {
     if (!token.trim() || !agentId) return;
@@ -572,7 +587,7 @@ function ConnectDiscordDialog({
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
@@ -666,15 +681,16 @@ function ConnectSlackDialog({
   const [error, setError] = useState("");
   const [connected, setConnected] = useState<{ teamName: string } | null>(null);
 
-  useEffect(() => {
-    if (!open) {
+  const handleOpenChange = (next: boolean) => {
+    if (!next) {
       setBotToken("");
       setAppToken("");
       setError("");
       setSubmitting(false);
       setConnected(null);
     }
-  }, [open]);
+    onOpenChange(next);
+  };
 
   const submit = async () => {
     if (!botToken.trim() || !appToken.trim() || !agentId) return;
@@ -691,7 +707,7 @@ function ConnectSlackDialog({
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
@@ -809,15 +825,16 @@ function ConnectLINEDialog({
   const [error, setError] = useState("");
   const [connected, setConnected] = useState<{ botName: string; basicId: string; webhookUrl: string } | null>(null);
 
-  useEffect(() => {
-    if (!open) {
+  const handleOpenChange = (next: boolean) => {
+    if (!next) {
       setChannelToken("");
       setChannelSecret("");
       setError("");
       setSubmitting(false);
       setConnected(null);
     }
-  }, [open]);
+    onOpenChange(next);
+  };
 
   const submit = async () => {
     if (!channelToken.trim() || !agentId) return;
@@ -842,7 +859,7 @@ function ConnectLINEDialog({
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
@@ -991,10 +1008,16 @@ function ConnectWeChatDialog({
     }
   }, []);
 
-  // Cleanup on unmount and on dialog close.
+  // Cleanup on unmount (and on close, through the handler below).
   useEffect(() => () => stopPolling(), [stopPolling]);
-  useEffect(() => {
-    if (!open) {
+
+  // Closing resets, opening starts the QR handshake — both are things the user
+  // just did, so they belong in this callback rather than in an effect watching
+  // `open`. The auto-start used to be an effect that fired on `open` with no
+  // payload and no error, which is the state a close leaves behind, so opening
+  // starts the handshake either way.
+  const handleOpenChange = (next: boolean) => {
+    if (!next) {
       stopPolling();
       setQrPayload("");
       setSessionId("");
@@ -1002,8 +1025,11 @@ function ConnectWeChatDialog({
       setAccountId("");
       setError("");
       setLoading(false);
+    } else {
+      void startLogin();
     }
-  }, [open, stopPolling]);
+    onOpenChange(next);
+  };
 
   const startLogin = useCallback(async () => {
     if (!agentId) return;
@@ -1044,19 +1070,10 @@ function ConnectWeChatDialog({
     }, 3000);
   }, [agentId, onConnected, stopPolling]);
 
-  // Auto-fetch a QR as soon as the dialog opens (no separate "name"
-  // step — fastagent doesn't surface per-account names, accountID is
-  // ilink_bot_id).
-  useEffect(() => {
-    if (open && !qrPayload && !loading && !error) {
-      startLogin();
-    }
-  }, [open, qrPayload, loading, error, startLogin]);
-
   const connected = !!accountId;
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent className="sm:max-w-[420px]">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
@@ -1173,8 +1190,8 @@ function ConnectFeishuDialog({
     useLongConn: boolean;
   } | null>(null);
 
-  useEffect(() => {
-    if (!open) {
+  const handleOpenChange = (next: boolean) => {
+    if (!next) {
       setAppId("");
       setAppSecret("");
       setVerificationToken("");
@@ -1184,7 +1201,8 @@ function ConnectFeishuDialog({
       setSubmitting(false);
       setConnected(null);
     }
-  }, [open]);
+    onOpenChange(next);
+  };
 
   const submit = async () => {
     if (!appId.trim() || !appSecret.trim() || !agentId) return;
@@ -1212,7 +1230,7 @@ function ConnectFeishuDialog({
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
