@@ -47,5 +47,14 @@
     "tailwindcss": "^4",
     "typescript": "^5",
     "vitest": "^4.0.18"
+  },
+  "pnpm": {
+    "overrides": {
+      "@babel/core": "^7.29.6",
+      "baseline-browser-mapping": "^2.11.0",
+      "browserslist": "^4.28.7",
+      "dompurify": "^3.4.15",
+      "mermaid": "^11.17.2"
+    }
   }
 }
