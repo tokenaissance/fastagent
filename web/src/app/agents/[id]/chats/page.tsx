@@ -185,7 +185,6 @@ export default function AgentChatsPage() {
                     <TableCell className="font-medium">
                       <div className="flex items-center gap-2 min-w-0">
                         {s.thumbnailUrl ? (
-                          // eslint-disable-next-line @next/next/no-img-element
                           <img
                             src={s.thumbnailUrl}
                             alt=""
