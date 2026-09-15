@@ -1,6 +1,6 @@
 # Dependency alerts: what the 164 actually are
 
-**日期**: 2026-09-15（§5–§8 于 09-16 补） · **状态**: ✅ 生产口径 critical 归零，剩 87 条 dev/传递依赖交由 Dependabot 分组 PR · **触发**: push 时 GitHub 报 default branch 164 条（11 critical / 57 high）
+**日期**: 2026-09-15（§5–§9 于 09-16 补） · **状态**: ✅ `pnpm audit` 生产口径与全口径均为 0；Go 侧 0 可达 · **触发**: push 时 GitHub 报 default branch 164 条（11 critical / 57 high）
 
 ---
 
@@ -13,6 +13,7 @@
 | `shadcn` 挪走之后 | **52**（2 critical / 21 high） | 同上 |
 | `next` 升到 16.3.5 之后 | **13**（0 critical / 2 high） | 同上，见 §6 |
 | overrides 顶掉 mermaid / dompurify 一族（§7） | **0** | `pnpm audit --prod` 报 "No known vulnerabilities found" |
+| dev 侧 16 条 overrides（§9） | **0**（全口径也是 0） | `pnpm audit` 与 `pnpm audit --prod` 双双 "No known vulnerabilities found" |
 
 ## 2. 两条根因（都已修）
 
@@ -241,6 +242,7 @@ dompurify 那条是 **XSS**（`IN_PLACE` 钩子移除后留下可执行的游离
 | `path-to-regexp` | 6.3.0 | 7.0.0 —— **跨大版本**，不是 override 能随手顶的 |
 
 结论和 §7 是同一个：这棵树的传递依赖被上游精确钉版，**告警会到，PR 不会到**。
+这 15 条已于 §9 用同一把扳手收掉。
 这 15 条要收，得走 §7 那条路（逐个 override），而它们全是 **dev / 构建期**依赖
 （生产口径已经是 0）—— 影响面是本地与 CI 的工具链，不是用户请求路径。这值得单独一次，
 不该混在这次里顺手做完。
@@ -248,7 +250,45 @@ dompurify 那条是 **XSS**（`IN_PLACE` 钩子移除后留下可执行的游离
 另外：安全更新跑失败会在 Actions 里留下红色的 Dependabot 运行（它不影响 `go-test` /
 `web-test`，那两条是绿的），别把它当成 CI 挂了。
 
-## 9. 门
+## 9. dev 侧扫尾：同一把扳手，全口径归零（2026-09-16）
+
+§8.3 那 15 条"Dependabot 生不出更新"的链，最后是同一把扳手收掉的，但过程里有两个判断值得记。
+
+**一、`shadcn` 不能删。** §2.2 把它挪进 `devDependencies` 时，理由是"`src/` 里没有 import"——
+这句今天仍然成立，但它漏了一件事：`src/app/globals.css` 第 3 行是
+`@import "shadcn/tailwind.css";`，构建期真的要读这个包里的样式表。所以它不是纯 CLI，
+它那棵子树（`@modelcontextprotocol/sdk` → `hono` / `@hono/node-server` / `ajv` / `express` /
+`body-parser` / `qs` / `ip-address` / `router` / `path-to-regexp`）只能治，不能去。
+
+**二、那些"精确钉版"多半是锁文件的粘性解析，不是上游硬钉。** MCP SDK 对 hono 声明的是
+`^4.11.4`、express 对 qs 声明 `^6.14.0`、body-parser 声明 `^2.2.1` —— 锁文件里那个裸版本号
+是 pnpm 写下的解析结果，不是它的要求。所以同 major 内 override 是安全的；
+真正越不过去的是 `path-to-regexp@6.3.0`（见下）。
+
+**做法**：`pnpm.overrides` 再加 16 条，多 major 的分开写 —— `brace-expansion@1` / `@5`、
+`picomatch@2` / `@4`、`nanoid@3`、`postcss-selector-parser@6` / `@7`、`path-to-regexp@8`；
+单 major 的（`hono`、`@hono/node-server`、`fast-uri`、`qs`、`body-parser`、`ip-address`、
+`js-yaml`、`postcss`、`flatted`、`@humanfs/node`）直接顶。
+
+**结果**：
+
+| 检查 | 结果 |
+|---|---|
+| `pnpm audit --prod` | **No known vulnerabilities found** |
+| `pnpm audit`（全口径，含 dev） | **No known vulnerabilities found** |
+| `typecheck` / `lint --max-warnings=0` / `test` / `build` | 全过（20 tests） |
+| 产物对拍 | 42/42 页可见文本一致、引用 1275 条 0 悬空、**CSS 字节完全相同**（195054 字节 / 2 个文件） |
+
+最后一行是这次的重点：改了 postcss、brace-expansion 这些构建期工具之后，**发出去的产物一个字节没变**，
+说明这批 override 只是把工具链换到修补版，没有连带改动 UI。
+
+**唯一留着的一条**：`path-to-regexp@6.3.0`，来自 `msw`（它声明 `^6.3.0`，而 6.x 线到 6.3.0 就断了、
+修补要从 7.0.0 起，跨大版本会改掉 msw 的路由匹配语义）。msw 本地最新版 2.15.0 仍然钉 `^6.3.0`，
+所以这条路只有两个出口：等 msw 换依赖，或者接受它——注意它是 **dev-only**，`pnpm audit`
+甚至不为它报任何东西（`msw` 在本仓库 `src/` 里零引用，它进树是因为 shadcn 真的依赖它、
+外加 `@vitest/mocker` 把它当 peer）。
+
+## 10. 门
 
 web 侧改动仍受 `web-test.yml`（typecheck + lint --max-warnings=0 + test）与
 `.githooks/pre-commit` 约束 —— 升级依赖也不例外。Go 侧对应 `go-test.yml`（含 `-race`）；
