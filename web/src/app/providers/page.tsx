@@ -24,12 +24,17 @@ export default function ProvidersPage() {
     authType: "bearer-token",
   });
 
-  const refresh = useCallback(async () => {
-    setError("");
-    const r = await listProviders(scope, scopeId);
-    if (r.providers) setRows(r.providers);
-    if (r.error) setError(r.error);
-  }, [scope, scopeId]);
+  // Same shape as channels-config: a promise chain, so the state writes are
+  // visibly in the callbacks rather than synchronous writes in the effect body
+  // (react-hooks/set-state-in-effect). Error clears on the answer.
+  const refresh = useCallback(
+    () =>
+      listProviders(scope, scopeId).then((r) => {
+        if (r.providers) setRows(r.providers);
+        setError(r.error || "");
+      }),
+    [scope, scopeId],
+  );
 
   useEffect(() => {
     if (scope === "system" || scopeId) refresh();
