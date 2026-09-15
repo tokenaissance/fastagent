@@ -1066,7 +1066,7 @@ function ConnectWeChatDialog({
           <DialogDescription>
             Scan the QR code with the WeChat phone app to bind a personal
             WeChat account as the bot for this agent. Inbound DMs will be
-            relayed to the agent; the agent's replies are sent back as
+            relayed to the agent; the agent&apos;s replies are sent back as
             plain text.
           </DialogDescription>
         </DialogHeader>
