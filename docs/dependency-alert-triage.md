@@ -298,29 +298,61 @@ dompurify 那条是 **XSS**（`IN_PLACE` 钩子移除后留下可执行的游离
 甚至不为它报任何东西（`msw` 在本仓库 `src/` 里零引用，它进树是因为 shadcn 真的依赖它、
 外加 `@vitest/mocker` 把它当 peer）。
 
-## 10. overrides 的家在 `pnpm-workspace.yaml`，不在 `package.json`（2026-09-16）
+## 10. Dependabot 那边还有一个 pnpm，它比我钉的那个新（2026-09-16）
 
 §7–§9 的 overrides 一开始写在 `package.json` 的 `pnpm.overrides` 里。它本地完全有效——
 仓库钉的 pnpm **10.15.0** 照读不误，锁文件里也老老实实记着那 23 条。但 Dependabot 的 web
 版本更新组**连续失败**，16 个直接依赖全部报 `unknown_error`，日志里是
 `Dependabot::SharedHelpers::HelperSubprocessFailed`。
 
-根因在它自己的输出里：
+### 10.1 第一个原因：字段的家换了
+
+它自己的输出里就写着：
 
 > `[WARN] The "pnpm" field in package.json is no longer read by pnpm. The following keys were ignored: "pnpm.overrides".`
 
-更新器里的 pnpm 比仓库钉的这个新。它按"没有 overrides"重算锁文件，而锁文件里带着那 23 条，
-两边对不上，整组就崩了——于是"把告警交给 Dependabot"这件事被我自己的配置反手掐掉了。
+更新器跑的是 **pnpm 11.27.0**（`corepack pnpm@11 --version` 可复现），它按"没有 overrides"
+重算锁文件，而锁文件里带着那 23 条，两边对不上，整组就崩——"把告警交给 Dependabot"这件事，
+被我自己的配置反手掐掉了。
 
-**处置**：把 overrides 从 `package.json` 的 `pnpm.overrides` 搬到 `pnpm-workspace.yaml` 的
-`overrides:`（v10.6 起的新家，这个文件本来就放着 `onlyBuiltDependencies`），两个版本都读这里。
+**处置**：搬到 `pnpm-workspace.yaml` 的 `overrides:`（v10.6 起的新家，这个文件本来就放着
+`onlyBuiltDependencies`）。验证方式是拿 v11 单独试：同样一份 overrides，写在 package.json 里
+v11 忽略（写 `lodash: 4.17.21`，它装成 `4.18.1`），写在这个文件里 v11 照做。
 
-**证据**：搬完之后 `pnpm install` 与 `install --frozen-lockfile` 都只说
-`Lockfile is up to date`，**锁文件一个字节没变**——是等价的搬家，不是改解析；
-解析结果仍是 `hono@4.13.8` / `mermaid@11.17.2` / `dompurify@3.4.15` / `fast-uri@3.1.8`。
+### 10.2 第二个原因：它还有一条 release-age 策略
 
-**教训**：这个仓库钉的 pnpm 版本不是唯一的消费者，Dependabot 容器里那个也算一个。
-配置文件要写在**两端都认**的位置，否则会出现"本地绿、机器人崩"这种最难查的组合。
+搬完家再试，v11 换了个理由拒绝：
+
+> `[ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION] 7 lockfile entries failed verification`
+
+pnpm 11 会按 `minimumReleaseAge`（默认 24 小时）核对锁文件里的每一条。而我当时挑的是
+**最新**版本——`hono@4.13.8`、`fast-uri@3.1.8`、`ip-address@10.7.1` 这些是当天早上才发布的，
+全部落在窗口内。（连带 `browserslist` 拉进来的数据包 `electron-to-chromium@1.5.428` 也是，
+它跟 advisory 无关，纯粹是"太新"。）
+
+**处置**：override 从 `^` 改成**精确钉在"刚好修补"的那个版本**上，
+`hono: 4.13.5`、`fast-uri: 3.1.6`、`mermaid: 11.16.1`、`dompurify: 3.4.13` …… 外加
+`electron-to-chromium: 1.5.427`。这既满足 24 小时窗口，也更符合原意：
+**override 的目的是修掉 advisory，不是追新**。
+
+### 10.3 怎么确认它真的能过
+
+不猜，用对方那一版跑一遍：把三个清单文件拷进临时目录，用 **pnpm 11.27.0** 执行
+`install --frozen-lockfile --lockfile-only`。改之前是
+`✗ Lockfile failed supply-chain policy check`；改之后：
+
+```
+? Verifying lockfile against supply-chain policies (1036 entries)...
+✓ Lockfile passes supply-chain policies (1036 entries in 1m 10.9s)
+```
+
+两边口径都要保住：`pnpm audit --prod` 与 `pnpm audit`（全口径）在改完仍是
+**No known vulnerabilities found**；产物对拍（对着"所有 override 之前"的基线）42/42 页
+可见文本一致、**CSS 字节完全相同**（195054 字节）。
+
+**教训**：这个仓库钉的 pnpm 版本不是唯一的消费者，Dependabot 容器里那个也算一个，
+而且它更严格。配置文件要写在**两端都认**的位置、版本要选**两端都收**的区间，
+否则会出现"本地全绿、机器人全崩"这种最难查的组合。
 
 ## 11. 门
 

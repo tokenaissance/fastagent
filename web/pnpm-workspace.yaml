@@ -7,31 +7,45 @@ packages:
 # `The "pnpm" field in package.json is no longer read by pnpm. The following
 # keys were ignored: "pnpm.overrides"`, then disagreed with the lockfile's
 # overrides block and failed the whole group with HelperSubprocessFailed.
-# Same settings, one file both ends agree on. See docs/dependency-alert-triage.md §10 (this file is that move).
+# Verified against pnpm 11.27.0 (what that updater runs): this file is read.
+#
+# Every version below is the LOWEST one the advisory considers patched, pinned
+# exactly rather than with a caret. A caret resolves to the newest patch, and
+# pnpm 11 verifies lockfile entries against a minimumReleaseAge policy (24h by
+# default): the newest hono/fast-uri/ip-address/... were published hours before
+# this was written, so the lockfile failed that verification with
+# ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION. Taking the floor closes the advisory
+# and stays outside the window. Bumping one is a deliberate act, not drift —
+# see docs/dependency-alert-triage.md §10.
 overrides:
-  '@babel/core': ^7.29.6
-  '@hono/node-server': ^1.19.15
-  '@humanfs/node': ^0.16.8
-  baseline-browser-mapping: ^2.11.0
-  body-parser: ^2.3.0
-  brace-expansion@1: ^1.1.18
-  brace-expansion@5: ^5.0.9
-  browserslist: ^4.28.7
-  dompurify: ^3.4.15
-  fast-uri: ^3.1.6
-  flatted: ^3.4.2
-  hono: ^4.13.5
-  ip-address: ^10.3.1
-  js-yaml: ^4.3.2
-  mermaid: ^11.17.2
-  nanoid@3: ^3.3.19
-  picomatch@2: ^2.3.2
-  picomatch@4: ^4.0.7
-  path-to-regexp@8: ^8.4.2
-  postcss: ^8.5.23
-  postcss-selector-parser@6: ^6.0.11
-  postcss-selector-parser@7: ^7.1.4
-  qs: ^6.16.0
+  '@babel/core': 7.29.6
+  '@hono/node-server': 1.19.15
+  '@humanfs/node': 0.16.8
+  baseline-browser-mapping: 2.11.0
+  body-parser: 2.3.0
+  brace-expansion@1: 1.1.18
+  brace-expansion@5: 5.0.9
+  browserslist: 4.28.7
+  dompurify: 3.4.13
+  # Not an advisory fix: browserslist pulls this data package at its newest
+  # patch, which was published 16h before this lockfile was written and so
+  # trips pnpm 11's minimumReleaseAge check. One release back is outside the
+  # window and changes nothing but the Electron version table.
+  electron-to-chromium: 1.5.427
+  fast-uri: 3.1.6
+  flatted: 3.4.2
+  hono: 4.13.5
+  ip-address: 10.3.1
+  js-yaml: 4.3.2
+  mermaid: 11.16.1
+  nanoid@3: 3.3.18
+  picomatch@2: 2.3.2
+  picomatch@4: 4.0.4
+  path-to-regexp@8: 8.4.0
+  postcss: 8.5.23
+  postcss-selector-parser@6: 6.0.11
+  postcss-selector-parser@7: 7.1.3
+  qs: 6.16.0
 
 allowBuilds:
   msw: true
