@@ -1,4 +1,4 @@
-.PHONY: build build-web bundle-skills clean release-local install test dev
+.PHONY: build build-web bundle-skills clean release-local install test dev hooks
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
@@ -22,6 +22,14 @@ build-web:
 	cd web && pnpm install --frozen-lockfile && pnpm build
 	rm -rf internal/setup/web
 	cp -r web/out internal/setup/web
+
+# hooks points git at the versioned .githooks/ directory instead of the
+# untracked .git/hooks, so the pre-commit lint exists in every clone that runs
+# this once. It is a local git config, which is exactly why it needs a command
+# rather than a file: no hook can install itself.
+hooks:
+	git config core.hooksPath .githooks
+	@echo "==> pre-commit will lint staged web sources (bypass: git commit --no-verify)"
 
 # bundle-skills syncs skills the binary should ship with into the embed
 # tree under internal/agent/bundled_skills/. Source of truth lives at
