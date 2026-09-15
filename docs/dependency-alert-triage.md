@@ -216,6 +216,38 @@ dompurify 那条是 **XSS**（`IN_PLACE` 钩子移除后留下可执行的游离
 剩余 87 条（`hono` 30、`brace-expansion` 9、`fast-uri` 7、mermaid/dompurify 之外的传递依赖等）
 从此每周以分组 PR 的形式送上门，而不是继续堆着。
 
+### 8.3 第一次运行的结果：能报警 ≠ 能修
+
+分组配置生效了（job 定义里能看到 `web-security` 组，且安全更新确实按组合并成一次运行），
+但第一次安全更新**跑失败了**，原因不是配置写错，而是 Dependabot 自己给出的
+`security_update_not_possible`：父包把它们钉在修补版本之下，它想升也升不上去。完整清单 15 条：
+
+| 包 | 被钉在 | 需要 |
+|---|---|---|
+| `hono` | 4.12.8 | 4.13.5 |
+| `@hono/node-server` | 1.19.11 | 1.19.15 |
+| `nanoid` | 3.3.11 | 3.3.18 |
+| `js-yaml` | 4.1.1 | 4.3.2 |
+| `postcss` | 8.5.8 | 8.5.23 |
+| `postcss-selector-parser` | 6.0.10 | 6.0.11 |
+| `brace-expansion` | 1.1.12 | 1.1.18 |
+| `fast-uri` | 3.1.0 | 3.1.6 |
+| `picomatch` | 2.3.1 | 2.3.2 |
+| `qs` | 6.15.0 | 6.16.0 |
+| `ip-address` | 10.1.0 | 10.3.1 |
+| `body-parser` | 2.2.2 | 2.3.0 |
+| `@humanfs/node` | 0.16.7 | 0.16.8 |
+| `flatted` | 3.4.1 | 3.4.2 |
+| `path-to-regexp` | 6.3.0 | 7.0.0 —— **跨大版本**，不是 override 能随手顶的 |
+
+结论和 §7 是同一个：这棵树的传递依赖被上游精确钉版，**告警会到，PR 不会到**。
+这 15 条要收，得走 §7 那条路（逐个 override），而它们全是 **dev / 构建期**依赖
+（生产口径已经是 0）—— 影响面是本地与 CI 的工具链，不是用户请求路径。这值得单独一次，
+不该混在这次里顺手做完。
+
+另外：安全更新跑失败会在 Actions 里留下红色的 Dependabot 运行（它不影响 `go-test` /
+`web-test`，那两条是绿的），别把它当成 CI 挂了。
+
 ## 9. 门
 
 web 侧改动仍受 `web-test.yml`（typecheck + lint --max-warnings=0 + test）与
