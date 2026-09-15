@@ -234,7 +234,7 @@ export default function AgentContextPage() {
             learns about the chatter. Memory is the USER.md / MEMORY.md
             sections inlined in the system prompt; no{" "}
             <code className="text-[10px]">memory_search</code> escape
-            hatch (it scans logs chatbot mode doesn't write, returns
+            hatch (it scans logs chatbot mode doesn&apos;t write, returns
             empty, and confuses the model). Main reply emits as plain
             text, multi-bubble via the inline split marker. For
             companion / role-play / customer-support bots.
