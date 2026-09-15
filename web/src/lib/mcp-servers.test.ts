@@ -1,5 +1,8 @@
-import assert from "node:assert/strict";
-import { describe, test } from "node:test";
+// Ported from `node:test` to vitest with the runner landing. The old form never
+// actually ran: it imported `./api` without the extension Node's ESM resolver
+// wants, and no script pointed at it — so these four cases about concurrent
+// edits were dead weight. Same assertions, now on the path `pnpm test` takes.
+import { describe, test, expect } from "vitest";
 import type { MCPServerConfig } from "./api";
 import { mergeMCPServersForSave } from "./mcp-servers";
 
@@ -15,7 +18,7 @@ describe("mergeMCPServersForSave", () => {
       concurrent: http("https://concurrent.example/mcp"),
     };
     const merged = mergeMCPServersForSave(baseline, next, latest);
-    assert.deepEqual(Object.keys(merged).sort(), ["a", "b", "concurrent"]);
+    expect(Object.keys(merged).sort()).toEqual(["a", "b", "concurrent"]);
   });
 
   test("does not resurrect a server the user deleted from the baseline", () => {
@@ -26,7 +29,7 @@ describe("mergeMCPServersForSave", () => {
       stale: http("https://stale.example/mcp"), // still server-side until this PATCH lands
     };
     const merged = mergeMCPServersForSave(baseline, next, latest);
-    assert.deepEqual(Object.keys(merged), ["a"]);
+    expect(Object.keys(merged)).toEqual(["a"]);
   });
 
   test("user edits win over the latest value for a name they edited", () => {
@@ -34,7 +37,7 @@ describe("mergeMCPServersForSave", () => {
     const next = { a: http("https://edited.example/mcp") };
     const latest = { a: http("https://someone-else.example/mcp") };
     const merged = mergeMCPServersForSave(baseline, next, latest);
-    assert.equal(merged.a.url, "https://edited.example/mcp");
+    expect(merged.a.url).toBe("https://edited.example/mcp");
   });
 
   test("rename keeps a concurrent add on the new name", () => {
@@ -46,6 +49,6 @@ describe("mergeMCPServersForSave", () => {
       concurrent: http("https://concurrent.example/mcp"),
     };
     const merged = mergeMCPServersForSave(baseline, next, latest);
-    assert.deepEqual(Object.keys(merged).sort(), ["concurrent", "fresh"]);
+    expect(Object.keys(merged).sort()).toEqual(["concurrent", "fresh"]);
   });
 });
