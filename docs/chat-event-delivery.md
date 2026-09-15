@@ -135,3 +135,30 @@ about replicas.
 * `internal/setup/handlers.go` — `emitEventRecord`, replay, hub and tail paths.
 * `internal/setup/chat_event_delivery_e2e_test.go` — cross-replica delivery.
 * `internal/agent/event_hub.go` — the same-pod fast path (unchanged).
+
+## 9. The other side of the same gap: the webui's catch-up rows (D4, 2026-09-15)
+
+Delivery landing on the wire was only half of it. On the webui, `tool_call` and
+`tool_result` had **no case** in the `chat/subscribe` handler: the rows appeared
+only after `done` triggered the history reload. So the browser's half of the
+cross-replica story was "the event arrives and is dropped" — a watching tab sat
+on `Executing…` with no record of what was executing, and a turn that never
+wrote a closing message showed nothing at all until a manual refresh.
+
+cloud was the reference (its reducer renders both), so the webui grew the same
+two cases, grouped the way its POST path groups them, and `done` now owes a
+canonicalising reload whenever this connection painted tool rows — even when no
+content bubble was built.
+
+* Implementation: `web/src/components/chat-screen.tsx` — the subscription
+  handler's `tool_call` / `tool_result` cases (`resetToolRows` / `paintToolGroup`).
+* Gate: `web/src/__tests__/chat-subscribe-tool-rows.test.tsx` — one case that
+  first proves the connection renders (`content`) and then requires the running
+  row and its result. Red before the change: the row never appeared.
+* Contract: cloud `docs/fastagent/design/10-chat-client-parity.md` §2 D4.
+
+This is also where the webui got a test runner at all (vitest + happy-dom +
+testing-library, mirroring cloud's stack; `pnpm test`). The four cases in
+`web/src/lib/mcp-servers.test.ts` had been dead — `node:test` imports Node's ESM
+resolver rejects, and no script pointed at the file — and were ported so the
+runner starts with real assertions rather than none.
