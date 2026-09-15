@@ -4,10 +4,9 @@ import { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { useAgentIdFromURL } from "@/hooks/use-agent-id";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { fileUrl, getAgent, getAgentKnowledgeFile, getChangedFiles, getChatHistoryWithCursor, getChatSessions, getChatTodo, getMe, getScopePreview, getScopePreviewLogs, listAgentFiles, listProjects, renameChatSession, cancelQueuedTurn, revealAgentWorkspace, sendChatStream, steerChat, uploadAgentFiles, getSkills, type ChatHistoryMessage, type ChatStreamEvent, type KnowledgeSource, type ScopePreview, type SkillInfo, type TodoItem, type ToolResultMetadata, type WorkspaceFile } from "@/lib/api";
-import { Bot, Send, Copy, Check, Pencil, Wrench, ChevronDown, ChevronRight, Download, X, File, FileText, Folder, FolderSearch, Image as ImageIcon, FileCode, Film, Music, Puzzle, SlidersHorizontal, ShieldCheck, Paperclip, Square, FolderOpen, RefreshCw, Eye, Code2, RotateCcw, ListChecks, Terminal, ExternalLink, MoreHorizontal, PanelLeftClose, PanelLeftOpen, BookOpen } from "lucide-react";
+import { Send, Copy, Check, Pencil, Wrench, ChevronDown, ChevronRight, Download, X, File, FileText, Folder, FolderSearch, Image as ImageIcon, FileCode, Film, Music, Puzzle, SlidersHorizontal, ShieldCheck, Paperclip, Square, FolderOpen, RefreshCw, Eye, Code2, RotateCcw, ListChecks, Terminal, ExternalLink, MoreHorizontal, PanelLeftClose, PanelLeftOpen, BookOpen } from "lucide-react";
 import Link from "next/link";
 import { ChatMarkdown } from "@/components/chat-markdown";
 
@@ -80,7 +79,6 @@ function renderContentWithDataImages(
         if (p.type === "image") {
           if (suppressAllInlineImages || surfacedSrcs?.has(p.src)) return null;
           return (
-            // eslint-disable-next-line @next/next/no-img-element
             <img key={i} src={p.src} alt={p.alt} className="rounded-lg max-w-full h-auto my-2" />
           );
         }
@@ -606,6 +604,12 @@ export function ChatScreen() {
   // producing a duplicate bubble. The ref is reset to null at startNewGroup
   // and when a tool_call rolls the bubble into a tool-group.
   const streamingMsgIdRef = useRef<string | null>(null);
+  // applySteerEvent is declared far below the subscription effect that needs it
+  // (and listing it in that effect's deps would be a TDZ error besides). The
+  // handler travels through a ref so the connection's identity does not depend
+  // on it — the "event handler in a ref" pattern, which is also what keeps the
+  // SSE from re-opening whenever the handler changes.
+  const applySteerEventRef = useRef<((content: string) => void) | null>(null);
   // First-send navigation (`/chat/` -> `/chat/<sid>/`) triggers the
   // history-loading effect while the POST stream is still in flight.
   // Keep that fetch from clearing optimistic bubbles or advancing the
@@ -980,7 +984,7 @@ export function ChatScreen() {
           }
           case "steer": {
             claim();
-            applySteerEvent(data.data?.content || "");
+            applySteerEventRef.current?.(data.data?.content || "");
             break;
           }
           case "done": {
@@ -1081,6 +1085,10 @@ export function ChatScreen() {
     return () => {
       es.close();
     };
+    // Deliberately not listing applySteerEvent: this connection's identity must
+    // not depend on a handler, and the handler is read through a ref instead
+    // (assigned right after its declaration). Listing it would be a TDZ error
+    // anyway — the declaration is 250 lines below.
   }, [selectedAgent, sessionId, loadedSessionId]);
 
   // Reactively swap sessionId when the URL changes underneath us.
@@ -1340,6 +1348,17 @@ export function ChatScreen() {
       ];
     });
   }, []);
+  // Keep the subscription effect's ref pointing at the current handler.
+  applySteerEventRef.current = applySteerEvent;
+
+  // Declared before handleSend so handleSend can list it honestly without a
+  // temporal-dead-zone error; its only inputs are the agent id and the router.
+  const handleNewChat = useCallback(() => {
+    const newId = generateSessionId();
+    setSessionId(newId);
+    setMessages([]);
+    router.replace(`/agents/${selectedAgent}/chat/`);
+  }, [selectedAgent, router]);
 
   const handleSend = useCallback(async (overrideText?: string, force?: boolean) => {
     // overrideText lets caller post a message that didn't come from
@@ -1486,7 +1505,6 @@ export function ChatScreen() {
 
     let curGroupId = "";
     let curCalls: { id: string; name: string; arguments: string; result?: string; metadata?: ToolResultMetadata }[] = [];
-    let curContent = "";
     // streamingMsgIdRef tracks the in-flight assistant bubble for
     // content_delta accretion. Stored on a ref (declared above) so
     // the parallel /api/chat/subscribe SSE handler can observe it
@@ -1500,7 +1518,6 @@ export function ChatScreen() {
     const startNewGroup = () => {
       curGroupId = `tg-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
       curCalls = [];
-      curContent = "";
       streamingMsgIdRef.current = null;
     };
     startNewGroup();
@@ -1547,7 +1564,6 @@ export function ChatScreen() {
               // the previous tool-group's thinking text.
               startNewGroup();
             }
-            curContent += delta;
             if (!streamingMsgIdRef.current) {
               const id = `a-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
               streamingMsgIdRef.current = id;
@@ -1594,7 +1610,6 @@ export function ChatScreen() {
                   return updated;
                 });
               }
-              curContent = content;
               break;
             }
             // Metadata-only event with empty content: the backend uses
@@ -1620,8 +1635,6 @@ export function ChatScreen() {
               // Content after tool calls = new round. Finalize current group, start fresh.
               startNewGroup();
             }
-            // Store as thinking content (may become part of next tool-group, or stay as final answer)
-            curContent = content;
             setMessages((prev) => [
               ...prev,
               { id: `a-${Date.now()}`, role: "agent", content, timestamp: Date.now(), metadata: meta },
@@ -1897,7 +1910,7 @@ export function ChatScreen() {
       setSubagentProgress(null);
       textareaRef.current?.focus();
     }
-  }, [input, attachments, selectedAgent, sessionId, sending, isReadOnlyView, isReadOnlySafeSlashCommand, loadSessions, pathname, router, urlProjectId]);
+  }, [input, attachments, selectedAgent, sessionId, sending, isReadOnlyView, isReadOnlySafeSlashCommand, loadSessions, pathname, urlProjectId, applySteerEvent, handleNewChat]);
 
   const handleStop = useCallback(() => {
     abortRef.current?.abort();
@@ -2066,22 +2079,6 @@ export function ChatScreen() {
         el.setSelectionRange(end, end);
       }
     }, 0);
-  };
-
-  const handleNewChat = () => {
-    const newId = generateSessionId();
-    setSessionId(newId);
-    setMessages([]);
-    router.replace(`/agents/${selectedAgent}/chat/`);
-  };
-
-  const handleSelectSession = (sid: string) => {
-    setSessionId(sid);
-    // history.replaceState (not router.replace) for the same reason as
-    // handleSend: /chat/[session] is only pre-rendered for the `_`
-    // placeholder under output:'export', so router-driven navigation to
-    // a real sid hard-reloads. See the longer note in handleSend.
-    window.history.replaceState(null, "", `/agents/${selectedAgent}/chat/${sid}/`);
   };
 
   const formatTime = (ts: number) =>
@@ -2286,7 +2283,6 @@ export function ChatScreen() {
                       <div className="mb-1 flex items-center justify-end gap-2 text-xs text-muted-foreground">
                         <span className="font-medium text-foreground/80">{msg.sender.name}</span>
                         {msg.sender.avatarUrl ? (
-                          // eslint-disable-next-line @next/next/no-img-element
                           <img
                             src={msg.sender.avatarUrl}
                             alt={msg.sender.name}
@@ -2311,7 +2307,6 @@ export function ChatScreen() {
                         return attached && attached.length > 0 ? (
                           <div className="space-y-2 mb-2">
                             {attached.map((img, i) => (
-                              // eslint-disable-next-line @next/next/no-img-element
                               <img
                                 key={i}
                                 src={img.src}
@@ -2333,7 +2328,6 @@ export function ChatScreen() {
                                 className="block cursor-zoom-in"
                                 aria-label={`Preview ${att.name}`}
                               >
-                                {/* eslint-disable-next-line @next/next/no-img-element */}
                                 <img
                                   src={att.previewUrl}
                                   alt={att.name}
@@ -2625,7 +2619,6 @@ export function ChatScreen() {
                             className="block h-full w-full cursor-zoom-in"
                             aria-label={`Preview ${f.name}`}
                           >
-                            {/* eslint-disable-next-line @next/next/no-img-element */}
                             <img
                               src={preview}
                               alt={f.name}
@@ -2822,7 +2815,6 @@ export function ChatScreen() {
             aria-modal="true"
             aria-label="Image preview"
           >
-            {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
               src={lightboxSrc}
               alt="Preview"
@@ -3717,7 +3709,6 @@ function WorkspacePanel({
   // user can still drag narrower within the session; reopening re-widens.
   useEffect(() => {
     setWidth((w) => (w < PREVIEW_AUTO_WIDTH ? Math.min(PREVIEW_AUTO_WIDTH, FILES_PANEL_MAX) : w));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Also grow when entering Preview / opening a file (in case the user dragged
@@ -4044,18 +4035,6 @@ function WorkspacePanel({
       </aside>
     </>
   );
-}
-
-function formatRelativeTime(ts?: number): string {
-  if (!ts) return "—";
-  const d = new Date(ts * 1000);
-  const now = Date.now();
-  const diff = now - d.getTime();
-  if (diff < 60_000) return "just now";
-  if (diff < 3600_000) return `${Math.floor(diff / 60_000)}m ago`;
-  if (diff < 86400_000) return `${Math.floor(diff / 3600_000)}h ago`;
-  if (diff < 7 * 86400_000) return `${Math.floor(diff / 86400_000)}d ago`;
-  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
 // FileViewer renders a selected workspace file inline (right column of the
