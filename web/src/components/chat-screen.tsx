@@ -818,6 +818,39 @@ export function ChatScreen() {
     const since = subscribeSinceRef.current;
     const url = `/api/chat/subscribe?agentId=${encodeURIComponent(selectedAgent)}&sessionId=${encodeURIComponent(sessionId)}&since=${since}`;
     const es = new EventSource(url, { withCredentials: true });
+    // Catch-up tool rows (parity finding D4). A turn this client did not start
+    // streams its tool calls here, and this is the only place that can show
+    // them while the turn runs: the POST callback belongs to whoever sent the
+    // message. The accumulator mirrors the POST path's grouping so the live
+    // view and the post-`done` history reload describe the same rounds.
+    let toolGroupId: string | null = null;
+    let toolCalls: { id: string; name: string; arguments: string; result?: string; metadata?: ToolResultMetadata }[] = [];
+    // True once this connection put tool rows on screen, so `done` knows it owes
+    // a canonicalising reload even when no content bubble was built (a turn
+    // that only ran tools).
+    let renderedToolRows = false;
+    const resetToolRows = () => {
+      toolGroupId = null;
+      toolCalls = [];
+    };
+    /** Re-render the current round's group (create it on the first call). */
+    const paintToolGroup = () => {
+      if (!toolGroupId) return;
+      const groupId = toolGroupId;
+      const calls = [...toolCalls];
+      setMessages((prev) => {
+        const idx = prev.findIndex((m) => m.id === groupId);
+        if (idx >= 0) {
+          const updated = [...prev];
+          updated[idx] = { ...updated[idx], toolCalls: calls };
+          return updated;
+        }
+        return [
+          ...prev,
+          { id: groupId, role: "tool-group" as const, content: "", timestamp: Date.now(), toolCalls: calls },
+        ];
+      });
+    };
     es.onmessage = (ev) => {
       let data: {
         seq?: number;
@@ -826,6 +859,11 @@ export function ChatScreen() {
         data?: {
           content?: string;
           message?: string;
+          // tool_call / tool_result fields
+          id?: string;
+          name?: string;
+          arguments?: string;
+          result?: string;
           metadata?: ToolResultMetadata;
           // subagent_progress fields
           iteration?: number;
@@ -881,6 +919,10 @@ export function ChatScreen() {
               break;
             }
             claim();
+            // Content after tool rows closes that round: the next tool_call
+            // opens a new group, which is how buildChatMessages splits rounds
+            // on the reloaded view too.
+            resetToolRows();
             setMessages((prev) => {
               if (transientBubbleIdRef.current) {
                 const idx = prev.findIndex((m) => m.id === transientBubbleIdRef.current);
@@ -958,8 +1000,14 @@ export function ChatScreen() {
             // here would clobber any rendered error bubbles too,
             // because LLM-error turns never write an assistant
             // message to session_messages.
-            if (transientBubbleIdRef.current) {
+            // The reload is owed whenever THIS connection rendered the turn —
+            // a transient content bubble, or tool rows it painted itself (a
+            // turn that only ran tools has no bubble but still needs the
+            // canonical padded results).
+            if (transientBubbleIdRef.current || renderedToolRows) {
               transientBubbleIdRef.current = null;
+              resetToolRows();
+              renderedToolRows = false;
               getChatHistoryWithCursor(selectedAgent, sessionId)
                 .then(({ history, latestEventSeq }) => {
                   if (latestEventSeq > maxSeqRef.current) maxSeqRef.current = latestEventSeq;
@@ -979,9 +1027,36 @@ export function ChatScreen() {
             }
             break;
           }
-          // tool_call / tool_result during catch-up are skipped here —
-          // the next history reload (on `done`) will render them
-          // properly via buildChatMessages.
+          case "tool_call": {
+            // Parity finding D4: these used to be dropped here, so a watching
+            // tab showed "Executing..." with no record of what was executing,
+            // and a turn that never wrote a closing message showed nothing at
+            // all until a manual refresh. claim() is right now — this branch
+            // really does render the seq.
+            claim();
+            if (!toolGroupId) {
+              toolGroupId = `tg-resume-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+              toolCalls = [];
+            }
+            toolCalls.push({
+              id: data.data?.id || "",
+              name: data.data?.name || "",
+              arguments: data.data?.arguments || "{}",
+            });
+            renderedToolRows = true;
+            paintToolGroup();
+            break;
+          }
+          case "tool_result": {
+            claim();
+            const tc = toolCalls.find((c) => c.id === (data.data?.id || ""));
+            if (tc) {
+              tc.result = data.data?.result || "";
+              if (data.data?.metadata) tc.metadata = data.data.metadata;
+            }
+            paintToolGroup();
+            break;
+          }
         }
         return;
       }
