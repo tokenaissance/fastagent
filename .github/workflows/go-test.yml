@@ -142,3 +142,37 @@ jobs:
       # version it blamed before assuming the dependencies are at fault.
       - name: govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
+
+  toolchain-pin:
+    name: the Go version line is a decision, not a side effect
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Why this exists: on 2026-09-16 Dependabot's go-minor-patch group opened a
+      # pull request that was eight routine module bumps plus one quiet line —
+      # `go 1.25.0` became `go 1.26.0`, because golang.org/x/crypto v0.57.0
+      # requires it. Every test in the repo still passed. What failed was
+      # govulncheck, on 21 reachable standard-library findings in go1.26.0 that
+      # are fixed in go1.26.1 — a red check that reads like a dependency problem
+      # and is really a toolchain problem.
+      #
+      # This repository is private, so branch protection is not available
+      # ("Upgrade to GitHub Pro"): a red check is a signal, not a gate. And the
+      # version line is pinned in three places that have to agree — go.mod, the
+      # Dockerfile's builder image, and this workflow — so drifting one of them
+      # is the mistake worth a job.
+      #
+      # It asserts they agree rather than hard-coding a version: moving to Go
+      # 1.26 stays possible, it just has to be said out loud in all three.
+      - name: go.mod matches the image's Go version
+        run: |
+          want=$(grep -oE 'FROM golang:[0-9]+\.[0-9]+' Dockerfile | head -1 | sed 's/.*golang://')
+          have=$(awk '$1 == "go" { print $2; exit }' go.mod)
+          have_mm=${have%.*}
+          if [ "$have_mm" != "$want" ]; then
+            echo "go.mod says 'go $have' but the Dockerfile builds on Go $want." >&2
+            echo "Moving the Go version line is a decision: change go.mod, the Dockerfile" >&2
+            echo "and the go-version pins in this workflow together, and say why in the commit." >&2
+            exit 1
+          fi
+          echo "go.mod ($have) and the builder image (Go $want) agree."
