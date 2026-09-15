@@ -204,7 +204,7 @@ export default function AgentSkillsPage() {
               No agent-scoped skills yet
             </p>
             <p className="text-xs text-muted-foreground/60 mb-4 max-w-sm text-center">
-              Install a skill below — it lands in this agent's own skills
+              Install a skill below — it lands in this agent&apos;s own skills
               directory and only this agent sees it.
             </p>
             <Button variant="outline" size="sm" onClick={() => setInstallOpen(true)}>
