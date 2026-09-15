@@ -78,17 +78,25 @@ export default function ApikeysPage() {
   const [scopeTarget, setScopeTarget] = useState<ApiKey | null>(null);
   const [scopeAgents, setScopeAgents] = useState<string[]>([]);
 
-  async function refresh() {
-    setError("");
-    const r = await listApikeys();
-    if (r.apikeys) setKeys(r.apikeys);
-    if (r.error) setError(r.error);
-    const a = await apiFetch("/api/agents");
-    const aj = await a.json();
-    if (aj.agents) setAgents(aj.agents);
-    const me = await apiFetch("/api/me");
-    const mj = (await me.json()) as MeResponse;
-    setIsSuperAdmin(mj?.user?.role === "super_admin");
+  // One chain rather than three awaits: the state writes have to sit in
+  // callbacks for react-hooks/set-state-in-effect to see they are not
+  // synchronous writes in the effect body (same reason as channels-config).
+  function refresh() {
+    return listApikeys()
+      .then((r) => {
+        if (r.apikeys) setKeys(r.apikeys);
+        setError(r.error || "");
+      })
+      .then(() => apiFetch("/api/agents"))
+      .then((a) => a.json())
+      .then((aj) => {
+        if (aj?.agents) setAgents(aj.agents);
+      })
+      .then(() => apiFetch("/api/me"))
+      .then((me) => me.json())
+      .then((mj: MeResponse) => {
+        setIsSuperAdmin(mj?.user?.role === "super_admin");
+      });
   }
   useEffect(() => {
     refresh();
