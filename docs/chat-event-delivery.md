@@ -166,10 +166,19 @@ resolver rejects, and no script pointed at the file — and were ported so the
 runner starts with real assertions rather than none.
 
 The runner is wired to CI in `.github/workflows/web-test.yml`: it runs
-`pnpm typecheck` and `pnpm test` on every push and pull request, with the pnpm
-pin (10.15.0) taken from the Dockerfile so a lockfile only one of them accepts
-cannot pass here and break the image build later. That workflow is the first web gate in this repo —
-`docker.yml` owns the web *build* but only fires on `dev`/`main` pushes and tags,
-so before it a pull request could merge a broken web tree silently. **Lint is
-not in the gate yet**: 11 `react-hooks/set-state-in-effect` findings remain in
-the web tree, and a gate that is red on arrival is worse than no gate.
+`pnpm typecheck`, `pnpm lint` and `pnpm test` on every push and pull request,
+with the pnpm pin (10.15.0) taken from the Dockerfile so a lockfile only one of
+them accepts cannot pass here and break the image build later. That workflow is
+the first web gate in this repo — `docker.yml` owns the web *build* but only
+fires on `dev`/`main` pushes and tags, so before it a pull request could merge a
+broken web tree silently.
+
+Lint joined the gate only after it was green: the tree carried 25
+`react-hooks/set-state-in-effect` errors, all the same shape (a synchronous
+`setState` in an effect body — a spinner raised for a value it already had, an
+error cleared before the answer arrived, a dialog reset while watching `open`,
+expansion seeded once). They are gone, each replaced by the derived or
+event-driven form rather than by a disable comment; the 22 warnings that remain
+(`no-img-element` on data URLs and previews, unused vars, `exhaustive-deps`) are
+deliberately **not** gated, because `--max-warnings=0` would make the gate red
+on arrival.
