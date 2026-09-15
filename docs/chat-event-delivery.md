@@ -192,3 +192,10 @@ inline disables went with it — one policy instead of sixteen private ones.
 listing it: the declaration is 250 lines below (listing it is a
 temporal-dead-zone error) and the connection's identity must not depend on a
 handler anyway.
+
+The same lint also runs **before the commit exists**, from `.githooks/pre-commit`
+(install with `make hooks`). It is the narrow half of the gate: staged files
+under `web/` that ESLint handles, `--max-warnings=0` so the bar matches CI, no
+autofix, and a warning (not a block) when `web/node_modules` is absent. A commit
+that never touches `web/` costs nothing — the workflow above is what catches
+everything a local hook can be talked out of with `--no-verify`.
