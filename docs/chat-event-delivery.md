@@ -173,12 +173,22 @@ the first web gate in this repo — `docker.yml` owns the web *build* but only
 fires on `dev`/`main` pushes and tags, so before it a pull request could merge a
 broken web tree silently.
 
-Lint joined the gate only after it was green: the tree carried 25
-`react-hooks/set-state-in-effect` errors, all the same shape (a synchronous
-`setState` in an effect body — a spinner raised for a value it already had, an
-error cleared before the answer arrived, a dialog reset while watching `open`,
-expansion seeded once). They are gone, each replaced by the derived or
-event-driven form rather than by a disable comment; the 22 warnings that remain
-(`no-img-element` on data URLs and previews, unused vars, `exhaustive-deps`) are
-deliberately **not** gated, because `--max-warnings=0` would make the gate red
-on arrival.
+Lint joined the gate only after it was green, and it is green in both senses:
+the tree carried 25 `react-hooks/set-state-in-effect` errors (all one shape — a
+synchronous `setState` in an effect body: a spinner raised for a value it
+already had, an error cleared before the answer arrived, a dialog reset while
+watching `open`, expansion seeded once) plus 22 warnings, and both counts are
+now zero. The gate runs `pnpm lint --max-warnings=0` so a new one cannot land
+silently.
+
+Two decisions inside that cleanup are worth knowing, because both chose a
+structural answer over a silencing one:
+
+* `next/image` is a no-op in this app (`output: "export"` +
+`images.unoptimized: true`), so `@next/next/no-img-element` is off in
+`eslint.config.mjs` with that premise written down, and the sixteen now-dead
+inline disables went with it — one policy instead of sixteen private ones.
+* The subscription effect reads its steer handler through a ref rather than
+listing it: the declaration is 250 lines below (listing it is a
+temporal-dead-zone error) and the connection's identity must not depend on a
+handler anyway.
