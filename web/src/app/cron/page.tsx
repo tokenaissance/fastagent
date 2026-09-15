@@ -66,8 +66,10 @@ export default function CronPage() {
   const [newAgentId, setNewAgentId] = useState("");
   const [newMessage, setNewMessage] = useState("");
 
-  const fetchData = () => {
-    setLoading(true);
+  // The spinner starts ON, so the mount load must not turn it on again — that
+  // synchronous write in an effect body is what
+  // react-hooks/set-state-in-effect flags, and it set the value it already had.
+  const loadData = () =>
     Promise.all([getCronJobs(), getAgents()])
       .then(([j, a]) => {
         setJobs(j);
@@ -76,12 +78,15 @@ export default function CronPage() {
       .catch(() => {
         setJobs([]);
         setAgents([]);
-      })
-      .finally(() => setLoading(false));
+      });
+
+  const fetchData = () => {
+    setLoading(true);
+    return loadData().finally(() => setLoading(false));
   };
 
   useEffect(() => {
-    fetchData();
+    void loadData().finally(() => setLoading(false));
   }, []);
 
   const handleCreate = async () => {
