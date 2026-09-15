@@ -1,0 +1,45 @@
+#!/bin/sh
+# Pre-commit: lint the web sources this commit actually touches.
+#
+# Scope is deliberately narrow. The full gate — types, lint, tests — lives in
+# .github/workflows/web-test.yml and runs on every pull request; a hook is for
+# the mistake that is cheapest to fix before the commit exists. So: staged
+# files only (a commit that never leaves Go costs nothing), `--max-warnings=0`
+# (the same bar CI holds, so a warning cannot be committed and cleaned up
+# "later"), and no autofix (rewriting staged content underfoot is how a hook
+# loses people's trust).
+#
+# Versioned here rather than in .git/hooks so it travels with the repo. Install
+# once per clone — either `make hooks` or:
+#
+#   git config core.hooksPath .githooks
+#
+# Bypass for one commit (WIP, rebase, CI is down):  git commit --no-verify
+
+set -e
+
+cd "$(git rev-parse --show-toplevel)"
+
+# Added/copied/modified/renamed, not deleted, and only what ESLint handles.
+files=$(git diff --cached --name-only --diff-filter=ACMR -- \
+  'web/**/*.ts' 'web/**/*.tsx' 'web/**/*.mts' 'web/**/*.cts' \
+  'web/**/*.js' 'web/**/*.jsx' 'web/**/*.mjs' 'web/**/*.cjs' || true)
+
+[ -z "$files" ] && exit 0
+
+if [ ! -x web/node_modules/.bin/eslint ]; then
+  # A fresh clone has no dependencies yet; blocking the commit would be worse
+  # than the missing lint, and CI will run it anyway.
+  echo "pre-commit: web/node_modules missing — skipping lint (run 'pnpm install' in web/)"
+  exit 0
+fi
+
+# Strip the web/ prefix: ESLint has to run from web/ so its flat config and
+# tsconfig resolve, and it wants paths relative to that cwd.
+relative=$(printf '%s\n' "$files" | sed 's|^web/||')
+
+count=$(printf '%s\n' "$relative" | wc -l | tr -d ' ')
+echo "pre-commit: eslint on $count staged file(s)"
+
+printf '%s\n' "$relative" | tr '\n' '\0' | \
+  (cd web && xargs -0 ./node_modules/.bin/eslint --max-warnings=0)
