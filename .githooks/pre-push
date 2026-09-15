@@ -1,0 +1,254 @@
+#!/bin/sh
+# Pre-push: hand the commits that are about to leave the machine to an agent
+# running the project's review skill.
+#
+# Why here and not in pre-commit. The pre-commit slot is the one place a long
+# wait is unforgivable - it fires on every WIP commit and on every rebase step.
+# This half is a model call: tens of seconds, real tokens, needs auth and a
+# network. Push is the boundary where that cost buys something: the code is
+# finished, the reviewer is not under time pressure, and nothing has left the
+# machine yet. .githooks/pre-commit keeps the deterministic half (eslint on the
+# staged web sources) exactly as it was.
+#
+# Off by default. On for one push:
+#
+#   FASTAGENT_COMMIT_CHECK=1 git push
+#
+# On for every clone: `enabled=1` in .codex/commit-check.conf, which also names
+# the skill. Whatever the config says, only an explicit `VERDICT: FAIL` blocks
+# the push - a missing CLI, a missing skill, an auth failure, or an answer we
+# cannot parse is reported and allowed through, because a hook that turns a
+# network outage into a blocked release is worse than the check it replaces. Set
+# FASTAGENT_COMMIT_CHECK_ON_ERROR=block to fail closed on those.
+#
+# Bypass: git push --no-verify
+
+set -u
+
+root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+cd "$root" || exit 0
+
+# The agent that edits this repo runs inside the same worktree. If the check
+# itself ever commits or pushes, this hook must not answer with another run.
+[ "${FASTAGENT_COMMIT_CHECK_ACTIVE:-}" = "1" ] && exit 0
+
+conf=".codex/commit-check.conf"
+conf_value() {
+  [ -f "$conf" ] || return 0
+  sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" "$conf" \
+    | head -n 1 | sed 's/[[:space:]]*$//'
+}
+
+enabled="${FASTAGENT_COMMIT_CHECK:-$(conf_value enabled)}"
+case "$enabled" in
+  1 | true | yes) ;;
+  *) exit 0 ;;
+esac
+
+skill="${FASTAGENT_COMMIT_CHECK_SKILL:-$(conf_value skill)}"
+if [ -z "$skill" ]; then
+  echo "pre-push: commit check is enabled but $conf names no skill - skipping" >&2
+  exit 0
+fi
+focus=$(conf_value focus)
+
+cli="${FASTAGENT_COMMIT_CHECK_CLI:-}"
+if [ -z "$cli" ]; then
+  if command -v codex >/dev/null 2>&1; then
+    cli=codex
+  elif command -v claude >/dev/null 2>&1; then
+    cli=claude
+  fi
+fi
+if [ -z "$cli" ]; then
+  echo "pre-push: commit check is enabled but no agent CLI (codex, claude) is on PATH - skipping" >&2
+  exit 0
+fi
+
+# A stuck agent CLI must not hang the push. macOS ships neither timeout nor
+# gtimeout, so this is best effort: absent both, the call is unbounded and the
+# reader can still ^C.
+if command -v timeout >/dev/null 2>&1; then
+  set -- timeout "${FASTAGENT_COMMIT_CHECK_TIMEOUT:-600}"
+elif command -v gtimeout >/dev/null 2>&1; then
+  set -- gtimeout "${FASTAGENT_COMMIT_CHECK_TIMEOUT:-600}"
+else
+  set --
+fi
+
+on_error="${FASTAGENT_COMMIT_CHECK_ON_ERROR:-allow}"
+
+zero=0000000000000000000000000000000000000000
+
+# pre-push reads `<local ref> <local sha> <remote ref> <remote sha>` per line.
+# A manual run has no stdin, so fall back to the upstream.
+stdin_lines=$(cat 2>/dev/null || true)
+commits=$(printf '%s\n' "$stdin_lines" | while read -r _lref local_sha _rref remote_sha; do
+  [ -n "${local_sha:-}" ] || continue
+  [ "$local_sha" = "$zero" ] && continue
+  if [ "${remote_sha:-$zero}" = "$zero" ]; then
+    # New branch: everything it carries that the default branch does not. If
+    # there is no origin/HEAD to compare against, fall back to "not on any
+    # remote" and let the commit cap below bound the cost.
+    base=$(git merge-base "$local_sha" origin/HEAD 2>/dev/null || true)
+    if [ -n "$base" ]; then
+      git rev-list "$base..$local_sha" 2>/dev/null
+    else
+      git rev-list "$local_sha" --not --remotes 2>/dev/null
+    fi
+  else
+    git rev-list "$remote_sha..$local_sha" 2>/dev/null
+  fi
+done | sed '/^$/d' | sort -u)
+
+# No stdin at all means a manual run, so fall back to the upstream. Empty
+# commits *with* stdin is a real answer - a branch deletion, or a push of
+# commits the remote already has - and reviewing the current branch then would
+# be inventing work nobody asked for.
+if [ -z "$stdin_lines" ]; then
+  upstream=$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || true)
+  if [ -n "$upstream" ]; then
+    commits=$(git rev-list "$upstream..HEAD" 2>/dev/null | sed '/^$/d')
+  else
+    commits=$(git rev-list HEAD --not --remotes 2>/dev/null | sed '/^$/d')
+  fi
+fi
+[ -z "$commits" ] && exit 0
+
+# Newest first, so a cap keeps the commits a reviewer should actually read.
+ordered=$(printf '%s\n' "$commits" \
+  | git log --no-walk --pretty='%ct %H' --stdin 2>/dev/null \
+  | sort -rn | cut -d' ' -f2)
+[ -n "$ordered" ] && commits="$ordered"
+
+max_commits="${FASTAGENT_COMMIT_CHECK_MAX_COMMITS:-20}"
+queued=$(printf '%s\n' "$commits" | wc -l | tr -d ' ')
+if [ "$queued" -gt "$max_commits" ]; then
+  echo "pre-push: $queued commits queued for the commit check; reviewing the newest $max_commits" >&2
+  commits=$(printf '%s\n' "$commits" | head -n "$max_commits")
+fi
+checked=$(printf '%s\n' "$commits" | wc -l | tr -d ' ')
+
+tmpdir=$(mktemp -d)
+trap 'rm -rf "$tmpdir"' EXIT INT TERM
+
+# Export the pushed commits as a diff. The agent must judge what is being
+# pushed, not the working tree - it never sees the index, and a dirty checkout
+# would otherwise silently widen the review to unstaged work.
+diff_file="$tmpdir/pushed.diff"
+# shellcheck disable=SC2086 # word splitting is how the hash list becomes argv
+git --no-pager log --patch --stat --no-color --find-renames --pretty=medium \
+  $commits >"$diff_file" 2>/dev/null
+if [ ! -s "$diff_file" ]; then
+  echo "pre-push: could not export the pushed diff - skipping the commit check" >&2
+  exit 0
+fi
+
+max_bytes="${FASTAGENT_COMMIT_CHECK_MAX_BYTES:-400000}"
+bytes=$(wc -c <"$diff_file" | tr -d ' ')
+if [ "$bytes" -gt "$max_bytes" ]; then
+  truncated="$tmpdir/pushed.diff.truncated"
+  head -c "$max_bytes" "$diff_file" >"$truncated" && mv "$truncated" "$diff_file"
+  printf '\n[truncated: the full diff was %s bytes]\n' "$bytes" >>"$diff_file"
+fi
+
+project=$(basename "$root")
+
+prompt_file="$tmpdir/prompt.txt"
+{
+  cat <<'PROMPT'
+Run the project's pre-push commit check as an independent reviewer.
+PROMPT
+  printf 'Project: %s\n' "$project"
+  printf 'Required skill(s): %s\n' "$skill"
+  [ -n "$focus" ] && printf 'Focus from .codex/commit-check.conf: %s\n' "$focus"
+  printf 'Commits under check: %s\n' "$checked"
+  printf 'Diff to review: %s\n' "$diff_file"
+  cat <<'PROMPT'
+
+That diff file is the exact set of commits about to be pushed, already
+exported. Read it; do not reconstruct the change set from the working tree.
+Read repository files only where the diff alone cannot support a judgement.
+
+Rules:
+- Report only problems this change introduces. Pre-existing issues are out of scope.
+- Change nothing. This is a read-only review.
+- Never run git commit, git push, or any other command that writes to the repo.
+- Judge against the skill above. If it is not available to you, say so and fall
+  back to the criteria its name implies.
+
+End your answer with exactly one line, and nothing after it:
+
+VERDICT: PASS
+
+or
+
+VERDICT: FAIL: <one sentence, naming the file and the problem>
+PROMPT
+} >"$prompt_file"
+
+answer_file="$tmpdir/answer.txt"
+log_file="$tmpdir/agent.log"
+
+echo "pre-push: running skill '$skill' over $checked commit(s) via $cli"
+
+status=0
+case "$cli" in
+  codex)
+    FASTAGENT_COMMIT_CHECK_ACTIVE=1 PLANNING_DISABLED=1 \
+      "$@" codex exec -C "$root" -s read-only --ephemeral \
+      -o "$answer_file" "$(cat "$prompt_file")" \
+      >"$log_file" 2>&1 || status=$?
+    ;;
+  claude)
+    # `claude -p` refuses to nest inside a Claude Code session unless the
+    # CLAUDECODE marker is cleared, so an agent running this hook does not
+    # deadlock on its own parent.
+    FASTAGENT_COMMIT_CHECK_ACTIVE=1 PLANNING_DISABLED=1 \
+      "$@" env -u CLAUDECODE -u CLAUDECODE_CODE_SESSION_ID \
+      claude -p "$(cat "$prompt_file")" \
+      >"$answer_file" 2>"$log_file" || status=$?
+    ;;
+  *)
+    echo "pre-push: unsupported FASTAGENT_COMMIT_CHECK_CLI='$cli' - skipping" >&2
+    exit 0
+    ;;
+esac
+
+verdict=""
+if [ -s "$answer_file" ]; then
+  verdict=$(grep -E '^VERDICT: (PASS|FAIL)' "$answer_file" | tail -n 1 || true)
+fi
+
+case "$verdict" in
+  "VERDICT: PASS")
+    echo "pre-push: commit check passed ($skill)"
+    exit 0
+    ;;
+  VERDICT:\ FAIL*)
+    reason=$(printf '%s\n' "$verdict" | sed 's/^VERDICT: FAIL:[[:space:]]*//')
+    {
+      echo "pre-push: commit check FAILED - '$skill' rejected $checked commit(s)"
+      [ -n "$reason" ] && echo "  $reason"
+      echo
+      echo "  the reviewer's answer was:"
+      head -c 4000 "$answer_file" | sed 's/^/  /'
+      echo
+      echo "  fix it and push again, or push anyway with: git push --no-verify"
+    } >&2
+    exit 1
+    ;;
+esac
+
+# No verdict: the CLI failed, timed out, or answered off-script. Decide by the
+# error policy rather than by guessing what the silence meant.
+echo "pre-push: the commit check returned no verdict (agent exited $status)" >&2
+if [ -s "$log_file" ]; then
+  tail -n 20 "$log_file" | sed 's/^/  /' >&2
+fi
+if [ "$on_error" = "block" ]; then
+  echo "pre-push: FASTAGENT_COMMIT_CHECK_ON_ERROR=block - refusing the push" >&2
+  exit 1
+fi
+echo "pre-push: letting the push through (set FASTAGENT_COMMIT_CHECK_ON_ERROR=block to refuse)" >&2
+exit 0
