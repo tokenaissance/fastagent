@@ -1502,23 +1502,19 @@ func (s *Server) handleChatSubscribe(w http.ResponseWriter, r *http.Request) {
 	live, unsubscribeLive := hub.Subscribe(uid, agentID, sessionID)
 	defer unsubscribeLive()
 
+	// One writer for every source — replay, hub, and the tail below — so the
+	// cursor advances in exactly one place and an event cannot be sent twice
+	// (the rule and the race it closes live in chat_event_writer.go).
+	events := newChatEventWriter(w, flusher, sinceSeq)
+
 	// Replay missed events from the persistent log.
 	if s.dataStore != nil {
-		rows, err := s.dataStore.ListSessionEventsSince(r.Context(), uid, agentID, sessionID, sinceSeq)
+		rows, err := s.dataStore.ListSessionEventsSince(r.Context(), uid, agentID, sessionID, events.cursor())
 		if err != nil {
-			slog.Warn("session_events replay failed", "agent", agentID, "session", sessionID, "since", sinceSeq, "error", err)
+			slog.Warn("session_events replay failed", "agent", agentID, "session", sessionID, "since", events.cursor(), "error", err)
 		}
 		for _, rec := range rows {
-			fmt.Fprintf(w, "id: %d\n", rec.Seq)
-			if len(rec.Data) == 0 || string(rec.Data) == "null" {
-				fmt.Fprintf(w, "data: {\"seq\":%d,\"type\":%q}\n\n", rec.Seq, rec.Type)
-			} else {
-				fmt.Fprintf(w, "data: {\"seq\":%d,\"type\":%q,\"data\":%s}\n\n", rec.Seq, rec.Type, string(rec.Data))
-			}
-			flusher.Flush()
-			if rec.Seq > sinceSeq {
-				sinceSeq = rec.Seq
-			}
+			events.emit(rec.Seq, rec.Type, rec.Data)
 		}
 	}
 
@@ -1535,6 +1531,13 @@ func (s *Server) handleChatSubscribe(w http.ResponseWriter, r *http.Request) {
 	keepalive := time.NewTicker(30 * time.Second)
 	defer keepalive.Stop()
 
+	// The tail: the store is the transport of record, the hub is the same-pod
+	// fast path. Without this, a subscription that landed on a different replica
+	// than the turn sees nothing at all — not slowly, permanently, because its
+	// long-lived connection never reconnects (see docs/chat-event-delivery.md).
+	tail := time.NewTicker(chatEventTailInterval)
+	defer tail.Stop()
+
 	ctx := r.Context()
 	for {
 		select {
@@ -1543,42 +1546,24 @@ func (s *Server) handleChatSubscribe(w http.ResponseWriter, r *http.Request) {
 		case <-keepalive.C:
 			fmt.Fprintf(w, ": ping\n\n")
 			flusher.Flush()
+		case <-tail.C:
+			for _, rec := range s.tailSessionEvents(ctx, uid, agentID, sessionID, events.cursor()) {
+				if isLiveOnlyEventType(rec.Type) {
+					continue
+				}
+				events.emit(rec.Seq, rec.Type, rec.Data)
+			}
 		case env, ok := <-live:
 			if !ok {
 				return
 			}
-			// content_delta is the high-volume token-by-token stream
-			// that drives the active turn's bubble. It is intentionally
-			// NOT persisted (see emitEvent), arrives with seq=-1, and is
-			// already delivered to the initiating tab via the POST
-			// /api/chat/stream subscription on the same hub. Forwarding
-			// it here would double-render on the active tab; reloaders
-			// who join mid-turn miss the partial reveal but still get
-			// the trailing `content` event with the full text.
-			if env.Event.Type == "content_delta" {
+			// Live-only types belong to the tab that started the turn (see
+			// liveOnlyEventTypes): forwarding them here double-renders.
+			if isLiveOnlyEventType(env.Event.Type) {
 				continue
 			}
-			// Drop replay-overlap events: any event with seq <= the
-			// highest seq we already streamed during replay. Without
-			// this, a browser that reconnects at exactly the wrong
-			// moment would render the same content chunk twice.
-			if env.Seq >= 0 && env.Seq <= sinceSeq {
-				continue
-			}
-			if env.Seq >= 0 {
-				sinceSeq = env.Seq
-				fmt.Fprintf(w, "id: %d\n", env.Seq)
-			}
-			payload := map[string]any{
-				"seq":  env.Seq,
-				"type": env.Event.Type,
-			}
-			if env.Event.Data != nil {
-				payload["data"] = env.Event.Data
-			}
-			data, _ := json.Marshal(payload)
-			fmt.Fprintf(w, "data: %s\n\n", data)
-			flusher.Flush()
+			eventData, _ := json.Marshal(env.Event.Data)
+			events.emit(env.Seq, env.Event.Type, eventData)
 		case msg, ok := <-outbound:
 			if !ok {
 				outbound = nil
