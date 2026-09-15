@@ -564,6 +564,10 @@ split that landed:
   excluded — their own cap plus the wall-clock budget already bound them.
 
 * **A sub-agent's wall budget is clamped to the turn it runs in.**
+  (Product-facing design record with the historical comparison:
+  `tokenaissance-cloud/docs/fastagent/design/09-delegate-task-scheduling-and-budget.md`.
+  This section stays the implementation record — test names and line references
+  live here, the intent and the before/after table live there.)
   `delegate_task` is registered serial, so N calls in one round cost N × the
   single-run wall time — against a web turn whose only clock is
   `agentTurnTimeout` (45 m). Two 25-minute requests (`wall_timeout_sec: 1500`)
