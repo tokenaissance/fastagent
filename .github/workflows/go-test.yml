@@ -113,3 +113,32 @@ jobs:
       # the check; prompt TEXT is not.
       - name: Prompt inventory is up to date
         run: python3 scripts/extract-prompt-inventory.py --check
+
+  vulncheck:
+    name: govulncheck (reachable vulnerabilities)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+      # Why this exists: Dependabot's 164 alerts did not include the one finding
+      # that was actually reachable — klauspost/compress/s2's out-of-bounds read
+      # (GO-2026-5841, fixed in v1.18.7) — because it only tracks advisories it
+      # has a GHSA for, on packages it can see declared. govulncheck walks the
+      # call graph instead, and it is the reason the module now sits at v1.20.0.
+      #
+      # It gates on REACHABLE findings only, which is the bar that matters: the
+      # three it still lists for x/crypto are ssh/agent-forwarding advisories in
+      # a module this tree uses for bcrypt, and it does not fail on them.
+      #
+      # Pinned to v1.7.0 rather than @latest: v1.8.0 requires Go 1.26 and this
+      # workflow (and the Dockerfile) pin 1.25. Bumping this pin is part of the
+      # toolchain move, not a drive-by.
+      #
+      # One thing this job cannot see: it reports against the toolchain's own
+      # standard library, so a stale local Go shows findings that CI does not
+      # (1.25.0 has 31; 1.25.14 has none). If this job goes red, check which
+      # version it blamed before assuming the dependencies are at fault.
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
