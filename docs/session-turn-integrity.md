@@ -576,6 +576,11 @@ split that landed:
   start. On 2026-09-14 that surfaced as a turn that ended with the tool row
   still reading *"Queued (waiting on prior sub-agent)…"* — the result had
   nowhere to go, and the row is what a reader sees for the whole wait.
+  **Scope of "serial":** one *Agent object*, not one pod and not one agent ID —
+  a pod holds an Agent object per user space (plus rebuilds), each with its own
+  slot, so cross-tenant calls do not serialize while same-tenant cross-session
+  ones do. The table and its evidence live in
+  [09 §5.3](tokenaissance-cloud/docs/fastagent/design/09-delegate-task-design.md#53-并发上限与串行关系按对象而不是pod--agent).
   `subagentWallBudget(ctx, explicit)` (subagent.go) is now the one owner of that
   number — resolve the caller's request / the configured default / the built-in,
   then hold it inside the turn. It reserves `subagentTurnMargin`, derived as
