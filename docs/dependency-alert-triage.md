@@ -214,8 +214,9 @@ dompurify 那条是 **XSS**（`IN_PLACE` 钩子移除后留下可执行的游离
   87 个 PR，而读不过来的队列等于没人读。
 * 仓库设置 `automated-security-fixes` 由 `false` 改为 `true`。
 
-剩余 87 条（`hono` 30、`brace-expansion` 9、`fast-uri` 7、mermaid/dompurify 之外的传递依赖等）
-从此每周以分组 PR 的形式送上门，而不是继续堆着。
+当时剩下的 87 条（`hono` 30、`brace-expansion` 9、`fast-uri` 7 等）本来是打算交给它的，
+结果发现它们 Dependabot 也修不动（§8.3），最后由 §9 的 overrides 收掉 —— 这条例子的结论是：
+**Dependabot 负责"知道"，override 负责"改掉"**，两者缺一不可。
 
 ### 8.3 第一次运行的结果：能报警 ≠ 能修
 
