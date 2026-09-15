@@ -29,7 +29,6 @@ import {
   Radio,
   Plus,
   Trash2,
-  Send,
   CheckCircle2,
   ExternalLink,
   Loader2,
@@ -994,7 +993,6 @@ function ConnectWeChatDialog({
 }) {
   type WechatStatus = "wait" | "scaned" | "confirmed" | "expired" | "";
   const [qrPayload, setQrPayload] = useState("");
-  const [sessionId, setSessionId] = useState("");
   const [status, setStatus] = useState<WechatStatus>("");
   const [accountId, setAccountId] = useState("");
   const [error, setError] = useState("");
@@ -1020,7 +1018,6 @@ function ConnectWeChatDialog({
     if (!next) {
       stopPolling();
       setQrPayload("");
-      setSessionId("");
       setStatus("");
       setAccountId("");
       setError("");
@@ -1045,7 +1042,6 @@ function ConnectWeChatDialog({
       setError(res.error || "Failed to fetch QR code");
       return;
     }
-    setSessionId(res.sessionId);
     setQrPayload(res.qrCodeImg);
     setStatus("wait");
     pollRef.current = setInterval(async () => {
