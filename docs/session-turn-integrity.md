@@ -565,7 +565,7 @@ split that landed:
 
 * **A sub-agent's wall budget is clamped to the turn it runs in.**
   (Product-facing design record with the historical comparison:
-  `tokenaissance-cloud/docs/fastagent/design/09-delegate-task-scheduling-and-budget.md`.
+  `tokenaissance-cloud/docs/fastagent/design/09-delegate-task-design.md`.
   This section stays the implementation record — test names and line references
   live here, the intent and the before/after table live there.)
   `delegate_task` is registered serial, so N calls in one round cost N × the
