@@ -152,9 +152,11 @@ content bubble was built.
 
 * Implementation: `web/src/components/chat-screen.tsx` — the subscription
   handler's `tool_call` / `tool_result` cases (`resetToolRows` / `paintToolGroup`).
-* Gate: `web/src/__tests__/chat-subscribe-tool-rows.test.tsx` — one case that
-  first proves the connection renders (`content`) and then requires the running
-  row and its result. Red before the change: the row never appeared.
+* Gate: `web/src/__tests__/chat-subscribe-tool-rows.test.tsx` — two cases. The
+  first proves the connection renders (`content`) before requiring the running
+  row and its result (red before the change: the row never appeared); the second
+  pins the other half — a tool-only turn still owes the canonicalising history
+  read on `done` (red when `|| renderedToolRows` comes out of that condition).
 * Contract: cloud `docs/fastagent/design/10-chat-client-parity.md` §2 D4.
 
 This is also where the webui got a test runner at all (vitest + happy-dom +
@@ -163,10 +165,10 @@ testing-library, mirroring cloud's stack; `pnpm test`). The four cases in
 resolver rejects, and no script pointed at the file — and were ported so the
 runner starts with real assertions rather than none.
 
-The runner is wired to CI in `.github/workflows/web-test.yml`: `pnpm typecheck`
-+ `pnpm test` on every push and pull request, with the pnpm pin (10.15.0) taken
-from the Dockerfile so a lockfile only one of them accepts cannot pass here and
-break the image build later. That workflow is the first web gate in this repo —
+The runner is wired to CI in `.github/workflows/web-test.yml`: it runs
+`pnpm typecheck` and `pnpm test` on every push and pull request, with the pnpm
+pin (10.15.0) taken from the Dockerfile so a lockfile only one of them accepts
+cannot pass here and break the image build later. That workflow is the first web gate in this repo —
 `docker.yml` owns the web *build* but only fires on `dev`/`main` pushes and tags,
 so before it a pull request could merge a broken web tree silently. **Lint is
 not in the gate yet**: 11 `react-hooks/set-state-in-effect` findings remain in
