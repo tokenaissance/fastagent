@@ -230,7 +230,6 @@ function SessionRow({
         onClick={onOpen}
       >
         {session.thumbnailUrl ? (
-          // eslint-disable-next-line @next/next/no-img-element
           <img
             src={session.thumbnailUrl}
             alt=""
