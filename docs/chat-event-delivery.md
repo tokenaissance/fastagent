@@ -123,7 +123,7 @@ about replicas.
 
 | Item | Why it is not in this change |
 |---|---|
-| **Third terminal state in the panel** ("this turn ended without a result") | Delivery cannot fix a result that was never produced (turn killed by OOM, crash, cancel-without-grace). Needs a UI state derived from *persisted* history so it survives reload, and it is the Q4 contract's UI counterpart. **Next change**, cloud repo |
+| **Third terminal state in the panel** ("this turn ended without a result") | **Landed** (cloud `b566bbe5`): an unresolved row inside a bubble that is no longer `streaming` renders `Interrupted — this call never returned a result`. The signal is the bubble's own flag — exactly "still being written" — so no new state was needed. The server cannot supply this: `normalizeForPrompt` pads an interrupted call only in the *prompt* projection (*"the stored session is left untouched"*). The reference webui still says `Executing...` — recorded in the cloud design doc as an intentional divergence until it grows the same message-level flag |
 | `content_delta` across replicas | Would need persisting deltas or a real pub/sub; both cost more than the gap (typing feel only) |
 | `subagent_progress` volume | Currently one row per iteration per sub-agent. If the table grows, persist only `start`/`done` and keep iterations live-only — decided by measurement, not now |
 | Same session written by two replicas (Q6) | Decided-deferred; `seq` dedupe hides duplicates, not semantic interleaving |
