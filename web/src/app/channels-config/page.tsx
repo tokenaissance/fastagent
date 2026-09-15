@@ -25,12 +25,19 @@ export default function ChannelsConfigPage() {
     appToken: "",
   });
 
-  const refresh = useCallback(async () => {
-    setError("");
-    const r = await listScopedChannels(scope, scopeId);
-    if (r.channels) setRows(r.channels);
-    if (r.error) setError(r.error);
-  }, [scope, scopeId]);
+  // Promise chain rather than async/await on purpose: the state writes have to
+  // live in the callbacks for react-hooks/set-state-in-effect to see that they
+  // are not synchronous writes in the effect body — the same shape React's own
+  // data-fetching example uses. The error is cleared when the answer lands, so
+  // a previous scope's error stays readable while the new read is in flight.
+  const refresh = useCallback(
+    () =>
+      listScopedChannels(scope, scopeId).then((r) => {
+        if (r.channels) setRows(r.channels);
+        setError(r.error || "");
+      }),
+    [scope, scopeId],
+  );
 
   useEffect(() => {
     if (scope === "system" || scopeId) refresh();
