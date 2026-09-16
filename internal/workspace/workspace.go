@@ -33,7 +33,14 @@ import (
 //
 //	projectID="", sessionID=""   → <root>/<agentID>/<path>
 //	projectID="", sessionID="x"  → <root>/<agentID>/sessions/x/<path>
-//	projectID="p", *             → <root>/<agentID>/projects/p/<path>
+//	projectID="p", sessionID=""  → <root>/<agentID>/projects/p/<path>
+//	projectID="p", sessionID="x" → <root>/<agentID>/projects/p/x/<path>
+//
+// A project chat keeps its own subdirectory under the project
+// ("projects/<pid>/<chat_id>/"), so dragging a chat into a project moves its
+// files rather than merging them into the project's shared root — that root
+// stays for deliberately shared files. Both stores implement this, and
+// stripScopePrefix in internal/setup reads it back.
 //
 // List with both empty returns EVERY object under the agent regardless
 // of project/session — used by the admin file browser. List with a
