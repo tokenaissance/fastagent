@@ -258,3 +258,29 @@ if sw, ok := ex.(interface{ WorkspaceStale() bool }); ok && sw.WorkspaceStale() 
 3. **只在 `WorkspaceStale()` 为真时出现**，且**只在触碰工作区的工具上出现** —— 不碰工作区的调用（纯计算、纯网络）不该被这行字污染上下文。
 
 **下次开工需要先读的一处**：工作区类工具的**结果拼装点**（`internal/agent/tools/exec.go` / `file.go` 一侧），以及 sandbox 包暴露 `WorkspaceStale()` 的接口形态（见 §9.3 的 ①）。读完即可把声明接上，与机制侧同一刀落地。
+
+### 9.6 命名修正：`Stale` → `Unhydrated`（下一刀必做，与 §9.4 余下三条同一批）
+
+**问题**：`WorkspaceStale()` 里的 **stale 在技术语境里默认读作"陈旧"** —— 即"里面有旧数据"。而这里的真实语义恰恰相反：
+
+> **这份 `/workspace` 从未成功从持久层填充（列举失败、重试耗尽）—— 可能一个文件都没有，而不是"有旧副本"。**
+
+中文同理：**不要译成「陈旧/过期」**，应译作 **「未水合」**（文档 §9 全程用的就是这个词，与代码命名目前**不一致**）。这一族词的区分值得写在注释里当对照：
+
+| 英文 | 中文 | 含义 |
+|---|---|---|
+| stale | 陈旧 | 曾经有效、现在可能不是最新 —— **数据还在** |
+| expired | 过期 | 超过 TTL，明确失效 |
+| invalid | 失效 | 被显式作废 |
+| dirty | 脏 | 有未同步的本地修改 |
+| **unhydrated / incomplete** | **未水合 / 不完整** | **从未成功从真源填充** ← 本处语义 |
+
+**为什么值得改而不是只加注释**：本次事故的伤害本体就是"把基础设施故障读成了关于世界的事实"。一个读作"陈旧"的字段，会让人下意识认为"里面是旧副本"，从而继续在错误的假设上推理 —— **命名是第一道防误读的门**。
+
+**改动清单（3 个文件，纯机械）**
+
+1. `e2b_executor.go`：字段 `workspaceStale atomic.Bool` → `workspaceUnhydrated`；方法 `WorkspaceStale()` → `WorkspaceUnhydrated()`；doc 注释补一句对照 —— *"unhydrated here means the listing failed, never 'the scope is empty': there may be no files at all, not old ones."*
+2. `lifecycle.go`：类型断言 `interface{ WorkspaceStale() bool }` → `WorkspaceUnhydrated()`；注释同步。
+3. 文档：§9 各处 `WorkspaceStale()` 改为 `WorkspaceUnhydrated()`（本文件现有措辞「未水合」即可，不必改中文）。
+
+**约束**：与 §9.4 余下三条用例、§9.5 的 ⓑ 声明**同一刀**落地 —— 改名单开一个提交会让"半成品"多一处（类型断言与实现短暂不一致）。
