@@ -599,6 +599,52 @@ func (e *E2BExecutor) SetHydrationSources(skillDirs []string, ws workspace.Store
 // failure of 2026-09-16 was an intermittent `context deadline exceeded`, which
 // a retry is exactly the right answer for; the attempts and interval mirror the
 // hydrate exec loop's, so a slow store is treated the same in both phases.
+// hydrateWorkspaceEntries copies the listed workspace objects into the bundle
+// and returns how many made it.
+//
+// Per-file failures stay best-effort — one unreadable object must not sink the
+// whole hydrate — but the SHORTFALL is not allowed to be silent. "Listed 1228"
+// and "bundled 1228" are two different claims, and until now nothing sat
+// between them: a failed Get/Read/tar was a warn and a `continue`, so a partial
+// archive went out looking exactly like a complete one
+// (docs/sandbox-scope-leak.md §5 P1, §9.3). A shortfall marks the executor
+// unhydrated, the same signal a failed listing raises, so the scope lands on
+// the existing rebuild path.
+//
+// Extracted from Hydrate so the invariant is testable without a live sandbox.
+func (e *E2BExecutor) hydrateWorkspaceEntries(
+	ctx context.Context, objs []workspace.ObjectInfo, bundle *tarBundle,
+	projectID, sessionID string,
+) int {
+	bundled := 0
+	for _, obj := range objs {
+		rc, err := e.workspace.Get(ctx, e.agentID, projectID, sessionID, obj.Path)
+		if err != nil {
+			slog.Warn("e2b hydrate: workspace get", "path", obj.Path, "error", err)
+			continue
+		}
+		data, rerr := io.ReadAll(rc)
+		rc.Close()
+		if rerr != nil {
+			slog.Warn("e2b hydrate: workspace read", "path", obj.Path, "error", rerr)
+			continue
+		}
+		rel := strings.TrimPrefix(obj.Path, "/")
+		if err := bundle.addBytes("workspace/"+rel, data, 0o644, obj.ModTime); err != nil {
+			slog.Warn("e2b hydrate: workspace tar", "path", obj.Path, "error", err)
+			continue
+		}
+		bundled++
+	}
+	if bundled != len(objs) {
+		slog.Warn("e2b hydrate: workspace bundle is INCOMPLETE — some files could not be read into the archive",
+			"agent", e.agentID, "project", projectID, "session", sessionID,
+			"listed", len(objs), "bundled", bundled, "skipped", len(objs)-bundled)
+		e.workspaceUnhydrated.Store(true)
+	}
+	return bundled
+}
+
 func (e *E2BExecutor) listWorkspaceWithRetry(ctx context.Context, listProject, listSession string) ([]workspace.ObjectInfo, error) {
 	for attempt := 1; ; attempt++ {
 		objs, err := e.workspace.List(ctx, e.agentID, listProject, listSession)
@@ -693,25 +739,7 @@ func (e *E2BExecutor) Hydrate(ctx context.Context) error {
 				"attempts", hydrateAttempts, "error", err)
 			e.workspaceUnhydrated.Store(true)
 		} else {
-			for _, obj := range objs {
-				rc, err := e.workspace.Get(ctx, e.agentID, listProject, listSession, obj.Path)
-				if err != nil {
-					slog.Warn("e2b hydrate: workspace get", "path", obj.Path, "error", err)
-					continue
-				}
-				data, rerr := io.ReadAll(rc)
-				rc.Close()
-				if rerr != nil {
-					slog.Warn("e2b hydrate: workspace read", "path", obj.Path, "error", rerr)
-					continue
-				}
-				rel := strings.TrimPrefix(obj.Path, "/")
-				if err := bundle.addBytes("workspace/"+rel, data, 0o644, obj.ModTime); err != nil {
-					slog.Warn("e2b hydrate: workspace tar", "path", obj.Path, "error", err)
-					continue
-				}
-				workspaceCount++
-			}
+			workspaceCount += e.hydrateWorkspaceEntries(ctx, objs, bundle, listProject, listSession)
 		}
 	}
 
