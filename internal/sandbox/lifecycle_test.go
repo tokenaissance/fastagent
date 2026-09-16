@@ -24,6 +24,11 @@ type fakeExecutor struct {
 
 	mu     sync.Mutex
 	writes map[string]string
+
+	// workspaceUnhydrated is what WorkspaceUnhydrated() reports. The zero value
+	// — a workspace that was filled from the store — is what every test written
+	// before Policy C assumes, so they keep exercising the plain path.
+	workspaceUnhydrated atomic.Bool
 }
 
 func (f *fakeExecutor) Exec(ctx context.Context, command string, timeout time.Duration) (string, error) {
@@ -42,6 +47,7 @@ func (f *fakeExecutor) WriteFile(ctx context.Context, p, c string) (string, erro
 }
 func (f *fakeExecutor) ListDir(ctx context.Context, path string) (string, error) { return "", nil }
 func (f *fakeExecutor) Backend() string                                          { return "fake" }
+func (f *fakeExecutor) WorkspaceUnhydrated() bool                                { return f.workspaceUnhydrated.Load() }
 func (f *fakeExecutor) Close() error {
 	atomic.AddInt32(&f.closed, 1)
 	return nil
@@ -53,6 +59,11 @@ type fakePool struct {
 	creates   int32
 	releases  int32
 	closedAll int32
+	// unhydrated arms every executor this pool creates to report a workspace
+	// whose listing never succeeded — the prod shape of 2026-09-16, where the
+	// store answered `context deadline exceeded` and the sandbox came up with
+	// an empty /workspace (docs/sandbox-scope-leak.md §8).
+	unhydrated atomic.Bool
 	// liveMu guards live. The lifecycle pool sweeps on a background goroutine,
 	// so a test goroutine calling Get/Release runs concurrently with the
 	// sweeper's own Get — an unsynchronised map here is a data race, not just
@@ -72,6 +83,7 @@ func (p *fakePool) Get(ctx context.Context, agentID, projectID, sessionID string
 	}
 	atomic.AddInt32(&p.creates, 1)
 	ex := &fakeExecutor{agentID: key}
+	ex.workspaceUnhydrated.Store(p.unhydrated.Load())
 	p.live[key] = ex
 	return ex, nil
 }
@@ -331,6 +343,213 @@ func TestE2BHydrateEmptyScopeIsNotStale(t *testing.T) {
 	}
 	if ex.WorkspaceUnhydrated() {
 		t.Fatal("empty scope marked stale: listing nothing successfully is not a failure")
+	}
+}
+
+// hydratedFor reports what the lifecycle pool believes about a scope's hydrate.
+// Read under the pool's mutex: the sweeper goroutine touches the same map.
+func hydratedFor(lp *LifecyclePool, agentID, projectID, sessionID string) bool {
+	lp.mu.Lock()
+	defer lp.mu.Unlock()
+	return lp.hydrated[poolKey(agentID, projectID, sessionID)]
+}
+
+// liveExecutor returns the instance the fake pool currently holds for a scope.
+func liveExecutor(t *testing.T, p *fakePool, agentID, projectID, sessionID string) *fakeExecutor {
+	t.Helper()
+	key := poolKey(agentID, projectID, sessionID)
+	p.liveMu.Lock()
+	defer p.liveMu.Unlock()
+	ex, ok := p.live[key]
+	if !ok {
+		t.Fatalf("no live executor for %q", key)
+	}
+	return ex
+}
+
+// Policy C's bookkeeping (docs/sandbox-scope-leak.md §9.4 case 2): when the
+// store keeps failing to list, the call still goes through — a store hiccup
+// must not cost the scope its instance, and must not fail the user's command —
+// but the scope is NOT recorded as hydrated. That flag is what separates "we
+// served an empty /workspace" from "we served an empty /workspace and will try
+// again"; without it the incident of 2026-09-16 is silent.
+func TestLifecycle_UnhydratedWorkspaceIsNotRecordedHydrated(t *testing.T) {
+	inner := newFakePool()
+	inner.unhydrated.Store(true) // every instance this pool creates comes up empty
+	lp := NewLifecyclePool(inner, 0, 0)
+	lp.Start()
+	defer lp.CloseAll()
+
+	ex, err := lp.Get(context.Background(), "erin", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ex.Exec(context.Background(), "cat /workspace/refresh_paper_review.py", time.Second); err != nil {
+		t.Fatalf("an unhydrated workspace must not fail the call: %v", err)
+	}
+
+	uw, ok := ex.(UnhydratedWorkspace)
+	if !ok {
+		t.Fatal("the executor handed to the tools must report its workspace state")
+	}
+	if !uw.WorkspaceUnhydrated() {
+		t.Fatal("a sandbox whose listing never succeeded reported a hydrated workspace")
+	}
+	if hydratedFor(lp, "erin", "", "") {
+		t.Fatal("scope recorded as hydrated although the listing never succeeded — the next use would reuse the empty workspace without retrying")
+	}
+}
+
+// Case 4 of docs/sandbox-scope-leak.md §9.4: a scope whose workspace WAS filled
+// and then comes back empty is a contradiction — the instance in hand is not
+// the one this scope's files live in. It must be destroyed and replaced, not
+// handed to the model as an empty world.
+//
+// (This is the general repair as well as the contradiction case: a live E2B
+// instance is never re-hydrated, so a destroy + recreate is the only path that
+// runs the hydrate again at all.)
+func TestLifecycle_UnhydratedWorkspaceIsRebuilt(t *testing.T) {
+	inner := newFakePool()
+	lp := NewLifecyclePool(inner, 0, 0)
+	lp.rebuildCooldown = 0
+	lp.Start()
+	defer lp.CloseAll()
+
+	ex, err := lp.Get(context.Background(), "frank", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ex.Exec(context.Background(), "ls /workspace", time.Second); err != nil {
+		t.Fatal(err)
+	}
+	first := liveExecutor(t, inner, "frank", "", "")
+
+	// The store starts failing: the same instance now reports that its
+	// /workspace was never filled.
+	first.workspaceUnhydrated.Store(true)
+	if _, err := ex.Exec(context.Background(), "cat /workspace/refresh_paper_review.py", time.Second); err != nil {
+		t.Fatalf("the call itself must still go through: %v", err)
+	}
+
+	if got := atomic.LoadInt32(&inner.releases); got != 1 {
+		t.Fatalf("releases = %d, want 1 (the empty instance must be destroyed, not paused)", got)
+	}
+	if got := atomic.LoadInt32(&first.closed); got != 1 {
+		t.Fatalf("the empty instance was not closed (closed = %d)", got)
+	}
+	if got := atomic.LoadInt32(&inner.creates); got != 2 {
+		t.Fatalf("creates = %d, want 2 (a replacement must be built so the hydrate runs again)", got)
+	}
+	if replacement := liveExecutor(t, inner, "frank", "", ""); replacement == first {
+		t.Fatal("the unhydrated instance was handed out again")
+	}
+	if uw, ok := ex.(UnhydratedWorkspace); !ok || uw.WorkspaceUnhydrated() {
+		t.Fatal("the scope still reports an unfilled workspace after a rebuild that listed successfully")
+	}
+	if !hydratedFor(lp, "frank", "", "") {
+		t.Fatal("the rebuilt instance was hydrated, but the scope is not recorded as hydrated")
+	}
+}
+
+// The other half of the repair: a store that stays down must not become a
+// sandbox factory (one instance per tool call), and a store that comes back
+// must not leave the scope empty until the idle sweeper happens to recycle it.
+func TestLifecycle_UnhydratedRebuildIsRateLimitedButRepeatable(t *testing.T) {
+	inner := newFakePool()
+	inner.unhydrated.Store(true) // the store is down
+	lp := NewLifecyclePool(inner, 0, 0)
+	lp.rebuildCooldown = time.Minute
+	lp.Start()
+	defer lp.CloseAll()
+
+	ex, err := lp.Get(context.Background(), "gwen", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ex.Exec(context.Background(), "ls /workspace", time.Second); err != nil {
+		t.Fatal(err)
+	}
+	// The first call escalates: create, rebuild, create again — and both
+	// instances are empty, so the scope is handed out unhydrated and says so.
+	if got := atomic.LoadInt32(&inner.creates); got != 2 {
+		t.Fatalf("creates = %d, want 2 (one build + one rebuild)", got)
+	}
+	uw, ok := ex.(UnhydratedWorkspace)
+	if !ok || !uw.WorkspaceUnhydrated() {
+		t.Fatal("the scope must report its workspace as unhydrated while the store is down")
+	}
+	if hydratedFor(lp, "gwen", "", "") {
+		t.Fatal("scope recorded as hydrated while the store was down")
+	}
+
+	// Further calls inside the cooldown do not rebuild.
+	for i := 0; i < 3; i++ {
+		if _, err := ex.Exec(context.Background(), "ls /workspace", time.Second); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := atomic.LoadInt32(&inner.creates); got != 2 {
+		t.Fatalf("creates = %d after three more calls, want 2: a store outage must not mint a sandbox per tool call", got)
+	}
+
+	// The store comes back. The cooldown is what lets us find out: without a
+	// rebuild we would keep serving the instance that came up empty, and the
+	// scope would stay empty until idle eviction recycled it.
+	inner.unhydrated.Store(false)
+	lp.mu.Lock()
+	lp.rebuildAt[poolKey("gwen", "", "")] = time.Now().Add(-2 * time.Minute)
+	lp.mu.Unlock()
+	if _, err := ex.Exec(context.Background(), "ls /workspace", time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if got := atomic.LoadInt32(&inner.creates); got != 3 {
+		t.Fatalf("creates = %d, want 3 (the scope must retry the hydrate once the cooldown lapses)", got)
+	}
+	if uw, ok := ex.(UnhydratedWorkspace); !ok || uw.WorkspaceUnhydrated() {
+		t.Fatal("scope still unhydrated after the store recovered and the instance was rebuilt")
+	}
+	if !hydratedFor(lp, "gwen", "", "") {
+		t.Fatal("scope not recorded as hydrated after the store recovered")
+	}
+}
+
+// Destroying an instance underneath a running command truncates that command's
+// stream — the M2 failure mode of the same incident (§4). So the repair waits
+// for the scope to be idle. White-box (inUse is otherwise only non-zero from
+// inside an in-flight Exec) because the assertion is about the guard itself.
+func TestLifecycle_UnhydratedRebuildWaitsForInFlightWork(t *testing.T) {
+	inner := newFakePool()
+	inner.unhydrated.Store(true)
+	lp := NewLifecyclePool(inner, 0, 0)
+	lp.rebuildCooldown = 0
+	lp.Start()
+	defer lp.CloseAll()
+
+	ex, err := lp.Get(context.Background(), "hana", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ex.Exec(context.Background(), "ls /workspace", time.Second); err != nil {
+		t.Fatal(err)
+	}
+	inner.liveMu.Lock()
+	before := inner.live[poolKey("hana", "", "")]
+	inner.liveMu.Unlock()
+
+	lp.mu.Lock()
+	lp.inUse[poolKey("hana", "", "")] = 1
+	lp.mu.Unlock()
+	if _, err := ex.Exec(context.Background(), "ls /workspace", time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if got := atomic.LoadInt32(&inner.releases); got != 1 {
+		t.Fatalf("releases = %d, want 1 (still just the first rebuild): a busy scope must not be destroyed underneath its own command", got)
+	}
+	inner.liveMu.Lock()
+	after := inner.live[poolKey("hana", "", "")]
+	inner.liveMu.Unlock()
+	if before != after {
+		t.Fatal("the busy scope's instance was replaced while an operation was in flight")
 	}
 }
 
