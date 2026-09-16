@@ -3,6 +3,7 @@ package sandbox
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"sync"
@@ -271,6 +272,49 @@ func scopeForKey(projectID, sessionID string) string {
 // TestLifecycle_HydrateOnCreate proves that the first tool call triggers
 // a copy from workspace.Store into the sandbox, and that a second call on
 // the same live sandbox does not re-hydrate.
+// flakyList fails its first N List calls, then defers to the fake. That is the
+// prod shape this guards: an intermittent `context deadline exceeded` on the
+// store listing, which a retry is exactly the right answer for. Without the
+// retry the hydrate uploads an EMPTY workspace and reports success
+// (docs/sandbox-scope-leak.md §8).
+type flakyList struct {
+	*fakeWorkspace
+	remainingFailures int32
+	calls             int32
+}
+
+func (f *flakyList) List(ctx context.Context, agentID, projectID, sessionID string) ([]workspace.ObjectInfo, error) {
+	atomic.AddInt32(&f.calls, 1)
+	if atomic.AddInt32(&f.remainingFailures, -1) >= 0 {
+		return nil, errors.New("context deadline exceeded")
+	}
+	return f.fakeWorkspace.List(ctx, agentID, projectID, sessionID)
+}
+
+func TestE2BHydrateListRetriesThenSucceeds(t *testing.T) {
+	ws := newFakeWorkspace()
+	ws.put("agent-retry", "report.pdf", []byte("pdf-bytes"))
+	flaky := &flakyList{fakeWorkspace: ws, remainingFailures: 1}
+	ex := &E2BExecutor{workspace: flaky, agentID: "agent-retry"}
+
+	// Same scope the fake stored under: its put() keys on the agent alone.
+	objs, err := ex.listWorkspaceWithRetry(context.Background(), "", "")
+	if err != nil {
+		t.Fatalf("a listing that fails once must be retried, got %v", err)
+	}
+	if len(objs) != 1 {
+		t.Fatalf("workspace files = %d, want 1 (the retry must return the real listing)", len(objs))
+	}
+	if got := atomic.LoadInt32(&flaky.calls); got != 2 {
+		t.Fatalf("List calls = %d, want 2 (one failure, one success)", got)
+	}
+	// A hydrate that eventually listed is NOT stale: staleness means "the
+	// workspace may be missing files", and this one is complete.
+	if ex.WorkspaceStale() {
+		t.Fatal("executor marked stale after a successful retry")
+	}
+}
+
 func TestLifecycle_HydrateOnCreate(t *testing.T) {
 	inner := newFakePool()
 	ws := newFakeWorkspace()
