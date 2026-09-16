@@ -274,11 +274,24 @@ func runGateway(port int) error {
 	webSrv.SetAPIServer(apiSrv)
 
 	// Coding-agent project runtime: long-lived dev-server sandbox +
-	// preview URL, layered on top of the existing project feature. Wired
-	// for the docker sandbox backend; other backends leave it nil and the
-	// /runtime endpoints return 503. Template scaffold/dev commands are
-	// env-overridable so fastclaw stays template-agnostic — the default
-	// targets a ShipAny image with the template baked at /template.
+	// preview URL, layered on top of the existing project feature.
+	//
+	// Backend-agnostic: the backend argument below only picks the preview
+	// *path* — docker keeps its dedicated long-lived container, e2b/boxlite
+	// run the dev server inside the agent's shared turn-sandbox pool (the note
+	// on the call says the same). An earlier version of this comment called the
+	// manager docker-only and nil elsewhere; that stopped being true when the
+	// pooled path landed (ede73d3), and a reader who hits the stale sentence
+	// first will look for a docker requirement that isn't there.
+	//
+	// It is nil only if this branch never runs. The project-runtime endpoints
+	// then answer 503 "project runtime not enabled on this deployment", while
+	// the session-scoped preview / logs / changed-files reads degrade to empty
+	// 200s instead.
+	//
+	// Template scaffold/dev commands are env-overridable so fastclaw stays
+	// template-agnostic — the default targets a ShipAny image with the
+	// template baked at /template.
 	if home, herr := config.HomeDir(); herr == nil {
 		// backend + shared pool let the runtime host previews through the
 		// agent's pooled executor on non-docker backends (e2b/boxlite);
