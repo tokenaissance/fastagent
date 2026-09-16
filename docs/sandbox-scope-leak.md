@@ -200,38 +200,59 @@ E2B 的批量 hydrate **正是一次 `List` 之后打 tar**（`workspace_hydrate
 | **列不出来** | `List` **报错**（prod 实测 `context deadline exceeded`） | 这才是故障，今天被吞成 `workspaceFiles=0` |
 | **以为空、实际有** | store 里有 N 个文件、容器却空 | **最危险**：模型把基础设施故障当成"文件不存在"的世界事实 |
 
-### 9.2 选定策略：**C（放行 + 标注 + 下次重试）**
+### 9.2 选定策略：**C（放行 + 标注 + 重建）** —— ✅ 已实现
 
 `List` 失败 → **有界重试** → 仍失败：
 
 1. **不返回 error**（那是策略 A：`inner.Get` 报错就没有 executor 可交）；
 2. **把 executor 标记为 `workspaceUnhydrated`**，并打一条响亮日志（含 agent/project/session + 原因 + 重试次数）；
-3. **`p.hydrated[k]` 回到 false** → 下一次 `Get` 自动重试 hydrate；
-4. **把"工作区未水合"声明进这一轮**（③，注入点待定）；
-5. **只有与已知基线矛盾时**（曾成功列举过非空、如今列不出来）才升级为销毁重建（A 的分支）。
+3. **scope 不再记为已水合**（`p.hydrated[k] = false`），并在池上记下"这个 scope 当前的实例是空的"，供工具层读取；
+4. **把"工作区未水合"声明进这一轮**（③ → ⓑ，已落 `1b0b77e`，契约见 §9.5）；
+5. **销毁重建**：把未水合的实例拆掉、重建一个新的，让 hydrate 真正再跑一次。
 
-理由：本次故障的伤害不是"容器是空的"，而是**"空得没人知道"**；C 消灭这个伤害，同时不为瞬时抖动付冷启动代价（销毁 = 丢热实例 + 重传 42–95MB 的 tar）。
+理由：本次故障的伤害不是"容器是空的"，而是**"空得没人知道"**；C 消灭这个伤害，同时不为瞬时抖动付冷启动代价（销毁 = 丢热实例 + 重传 42–95MB 的 tar）—— 所以重建本身是**受控**的，见下。
 
-### 9.3 机制侧的两处改动（①②，可离线验证）
+#### 9.2.1 与原计划的唯一偏离：第 5 条从"只在矛盾时"改成"一律重建"
+
+原计划第 5 条写的是「**只有与已知基线矛盾时**（曾成功列举过非空、如今列不出来）才升级为销毁重建」，它建立在一个假设上：
+
+> `p.hydrated[k] = false` → 下一次 `Get` **自动重试 hydrate**。
+
+**这个假设在 E2B 上不成立**：`E2BExecutorPool.Get` 命中缓存实例时直接 `return ex`（`e2b_executor.go:1951-1961`，`cachedExecutor` 分支），不会重跑 hydrate。也就是说，一个 listing 失败的实例会**一直被发出去**，直到空闲 TTL 偶然把它回收 —— `hydrated[k] = false` 在 E2B 上因此是个**不产生任何重试的空转**：唯一会重跑 hydrate 的路径就是「实例被重建」。
 
 ```go
-// ① e2b_executor.go:633 附近 —— 现在只有 slog.Warn 然后继续
-objs, err := e.workspace.List(ctx, e.agentID, listProject, listSession)
-if err != nil {
-    if objs, err = e.listWorkspaceWithRetry(...); err != nil {   // 复用 hydrateAttempts / hydrateRetryInterval
-        slog.Warn("e2b hydrate: workspace list failed after retries — handing out an EMPTY workspace",
-            "agent", e.agentID, "project", e.projectID, "session", e.sessionID, "error", err)
-        e.markWorkspaceUnhydrated()                                    // 新增：atomic bool + 访问器
+// E2BExecutorPool.Get —— 有缓存就交出去，不重新 hydrate
+if ex, ok := p.cachedExecutor(key); ok {
+    if p.leaseStore != nil {
+        return p.reconcileLocalLease(ctx, key, ex, agentID, projectID, sessionID)
     }
-}
-
-// ② lifecycle.go getInner（:479-501）—— hydrate 失败必须让 hydrated 回到 false
-if sw, ok := ex.(interface{ WorkspaceUnhydrated() bool }); ok && sw.WorkspaceUnhydrated() {
-    p.hydrated[k] = false    // 今天的 :483 是"先置位后执行、失败不回滚"，所以不会重试
+    return ex, nil          // ← 这里没有 hydrate
 }
 ```
 
+所以第 5 条改成**对所有未水合实例生效**：见到未水合实例就重建（而不是只在"曾非空"时）。代价用两道闸门限制，且两道都落在"不要伤害"这一侧：
+
+| 闸门 | 防的是 |
+|---|---|
+| `inUse[k] > 0` 时**不重建** | 拆掉正在跑命令的实例 = 把命令的流截断（§4 的 M2）。宁可先发一个空实例（且已声明），等这次操作结束再重建 |
+| 同一 scope 每 `rebuildCooldown`（默认 1 分钟）最多重建一次 | store 长时间故障时，每个 scope 每分钟付约 1 次重建，而不是**每次工具调用**一次。§8.3 实测的 10 分钟故障窗口 ≈ 每 scope 10 次重建；而 store 在一分钟内恢复时，下一次调用就能拿回完整工作区，不必等空闲回收 |
+
+**这个取舍是有意的**：store 长时间不可用时，scope 会持续以"未水合 + 已声明"的形态服务。宁可给出一个空容器并说明原因，也不要让 agent 因为读不到 store 而完全不可用 —— 后者会把一次存储故障放大成一次服务中断。
+
+### 9.3 机制侧（✅ 全部已实现）
+
+| 位置 | 改动 | 提交 |
+|---|---|---|
+| `e2b_executor.go` | `listWorkspaceWithRetry`（复用水合的 attempts/interval）+ `workspaceUnhydrated` + `WorkspaceUnhydrated()` | `b4ffc7b` |
+| `e2b_executor.go` | 导出 `UnhydratedWorkspace` 接口 —— lifecycle 层与工具层读同一个形状 | `da37174` |
+| `lifecycle.go` | 未水合 → `hydrated[k] = false`（不再静默当作已水合） | `48d8e06` |
+| `lifecycle.go` | `recoverUnhydrated`：未水合 → 销毁重建（受 `inUse` 与 `rebuildCooldown` 两道闸门） | `da37174` |
+| `lifecycle.go` | scope 级状态 + `lazyExecutor.WorkspaceUnhydrated()`：工具层由此得知状态，**且不会因此触发建实例**（状态问题不该成为开机理由） | `da37174` |
+| `registry.go` | ⓑ 声明挂到 6 个工作区工具的返回值上 | `1b0b77e` |
+
 注意保持既有的语义分工：**`List` 失败 = 可检索性故障（致命到"要声明"）**；**单文件 `Get`/`Read`/`tar` 失败 = best-effort**（个别文件坏了不该让整次 hydrate 变成"未水合"）。
+
+**一处仍未闭合的证明**：重建让 hydrate **再跑一次**，但没有任何一步能证明这次 hydrate **真的把 N 个文件放进了容器**（§5 P1「attempted → verified」）。今天能说清的是"listing 成功了"；说不到"容器里因此有了那些文件"。
 
 ### 9.4 用例（红→绿，全部可离线）
 
@@ -241,10 +262,13 @@ if sw, ok := ex.(interface{ WorkspaceUnhydrated() bool }); ok && sw.WorkspaceUnh
 |---|---|---|
 | 1 | `List` 失败一次后成功 → 重试、拿到真实列表、**未**标记未水合 | ✅ `e85e6e8`（先红后绿；红时日志可见 `retrying … attempt=1`） |
 | 3 | `List` 成功返回 0 个对象 → **不**标记、**不**失败（防误伤新会话） | ✅ `1b98cd2` |
-| 2 | `List` 持续失败 → **拿到 executor** + `WorkspaceUnhydrated() == true` + `p.hydrated[k]` 回到 false | ⬜ lifecycle 层：给 `fakeExecutor`（`lifecycle_test.go:20`）加"未水合"标记，让 `fakePool.Get`（`:66`）交出它，用 `lp.Get(...)` 触发一次 `Exec` 后断言 `lp.hydrated[poolKey(...)] == false` |
-| 4 | 曾成功列举非空、随后列不出来 → 走**销毁重建** | ⬜ **实现还没有**（C 第二半），先实现再有例 |
+| 2 | `List` 持续失败 → **拿到 executor** + `WorkspaceUnhydrated() == true` + `p.hydrated[k]` 回到 false | ✅ `da37174`：`TestLifecycle_UnhydratedWorkspaceIsNotRecordedHydrated`（红用变异验证：去掉 `hydrated[k] = false` 即红） |
+| 4 | 曾成功列举非空、随后列不出来 → 走**销毁重建** | ✅ `da37174`：`TestLifecycle_UnhydratedWorkspaceIsRebuilt`（断言 release=1、实例被 Close、create=2、拿到的是**另一个**实例、scope 重新记为已水合） |
+| 5 | store 持续故障 → 重建**受 `inUse` 限制**、且**受冷却限制**（不会一调用一实例） | ✅ `da37174`：`...RebuildWaitsForInFlightWork`、`...RebuildIsRateLimitedButRepeatable`（后者还钉住"store 恢复后必须能再重建一次"，否则 scope 会一直空到空闲回收） |
 
 **替身的一个坑（用例①踩过，值得记下）**：`fakeWorkspace.put` 只按 **agent** 存，而它的 `List` 按 **scope** 过滤 —— 用例里调用 `listWorkspaceWithRetry` 时的 `(project, session)` 必须与存入时一致（用 `("", "")`），否则会得到 0 个对象、误判成"空工作区"。
+
+**替身（用例②④⑤用的）**：`fakeExecutor` 带一个 `workspaceUnhydrated atomic.Bool`（零值 = 已水合，所以 Policy C 之前的用例照旧走普通路径）；`fakePool` 带一个 `unhydrated` 开关，打开后**每个新建实例都报未水合** —— 就是 store 故障时的形态。
 
 ### 9.5 ③ 的注入点：**已定 ⓑ（工具结果前缀）**
 
@@ -263,7 +287,23 @@ if sw, ok := ex.(interface{ WorkspaceUnhydrated() bool }); ok && sw.WorkspaceUnh
 
 3. **只在 `WorkspaceUnhydrated()` 为真时出现**，且**只在触碰工作区的工具上出现** —— 不碰工作区的调用（纯计算、纯网络）不该被这行字污染上下文。
 
-**下次开工需要先读的一处**：工作区类工具的**结果拼装点**（`internal/agent/tools/exec.go` / `file.go` 一侧），以及 sandbox 包暴露 `WorkspaceUnhydrated()` 的接口形态（见 §9.3 的 ①）。读完即可把声明接上，与机制侧同一刀落地。
+#### 9.5.1 ⓑ 已落 `1b0b77e`：把声明接在哪、以什么形状
+
+实现比"在每个工具里加一行"少一层手工：**在 `SetExecutor` 里把 6 个工作区工具的闭包包一层**（`registry.go` 的 `declareUnhydratedWorkspace` / `withWorkspaceNotice`）。这样 `exec` / `read_file` / `write_file` / `edit_file` / `list_dir` / `apply_patch` 的**每一条返回路径**（含错误路径——本次故障正是以 `No such file or directory` 的形状出现的）都被覆盖，规则也只写在一个地方。
+
+```
+[workspace not hydrated: the file store could not list this agent's files (the listing
+ timed out after retries). Files may be missing for this reason only — do not conclude
+ they were deleted.]
+```
+
+两个实现细节值得记住（都有用例钉住）：
+
+* **标记位置**：声明放在 `MetaSandboxPrefix` **之后**，绝不放在它前面。agent loop 用 `strings.TrimPrefix` 剥这个标记，而**只剥第一行** —— 声明若占了第一行，前端会静默失去"跑在沙箱里"的徽标。模型那边仍然先读到声明，因为标记在结果送进 provider 之前已经剥掉。
+* **幂等**：`SetExecutor` 每轮绑定都会跑一次（`loop.go` 的 bindSession），所以包裹会叠加 —— 靠结果前缀的字符串检查去重（`TestWorkspaceNoticeIsNotDuplicatedByRebinding`）。
+* **只在这些工具上**：`web_search` 一类不碰工作区的工具带上这行字，只会让声明变成背景噪声（`TestWorkspaceNoticeStaysOffNonWorkspaceTools`）。
+
+**仍未做的**：ⓒ（事件 + UI 徽标）—— 让人也看得见；它只是补充，模型侧的 ⓑ 已经落地。
 
 ### 9.6 命名修正：`Stale` → `Unhydrated`（✅ 已落 `629ccd1` + `86cc5f3`）
 
@@ -289,4 +329,19 @@ if sw, ok := ex.(interface{ WorkspaceUnhydrated() bool }); ok && sw.WorkspaceUnh
 2. `lifecycle.go`：类型断言 `interface{ WorkspaceUnhydrated() bool }` → `WorkspaceUnhydrated()`；注释同步。
 3. 文档：§9 各处 `WorkspaceUnhydrated()` 改为 `WorkspaceUnhydrated()`（本文件现有措辞「未水合」即可，不必改中文）。
 
-**约束**：与 §9.4 余下三条用例、§9.5 的 ⓑ 声明**同一刀**落地 —— 改名单开一个提交会让"半成品"多一处（类型断言与实现短暂不一致）。
+**当时的约束**：与 §9.4 余下用例、§9.5 的 ⓑ 声明**同一刀**落地 —— 改名单开一个提交会让"半成品"多一处（类型断言与实现短暂不一致）。
+
+**收尾（2026-09-16）**：改名本身先落（`629ccd1` + `86cc5f3`，全仓旧名 0 残留），随后 ⓑ 声明与机制侧重建分别在 `1b0b77e` / `da37174` 落地；`d1b020f` 清掉两处**注释里**残留的旧词（`e2b_executor.go` 的 hydrate 路径注释、以及测试名 `TestE2BHydrateEmptyScopeIsNotMarkedUnhydrated`）。
+
+### 9.7 这一刀之后还剩什么（都不是本轮引入的）
+
+| 项 | 状态 | 说明 |
+|---|---|---|
+| ⓒ 事件 + UI 徽标 | ⬜ | 让人也看得见"这一轮的容器是空的"；补充手段，模型侧 ⓑ 已落 |
+| §5 P1「hydrate 幂等校验」 | ⬜ | **attempted → verified** 仍然没做：能证明 listing 成功，不能证明文件进了容器 |
+| §5 P0「`created`/`hydrated` 日志补 `scopeKey`」 | ⬜ | 一行日志的**效果**，但 `E2BExecutor` 目前没有 scope 字段，实为"给执行器加字段" |
+| §7「流被切断 → 有界重试」 | ⬜ | 与本次故障正交（那是实例不可用，这是容器本来就空），优先级仍低于本刀 |
+| B 案（文件工具通道绕开 hydrate） | ⬜ | **不在本仓**（Quandora session 的持久层） |
+| 削掉残留竞态 | ⬜ | `recoverUnhydrated` 是"先查 `inUse`、再 Release"两步；两次之间进来的并发调用可能拿到即将被销毁的实例。窗口在一次调用内，失败形态是那次 exec 报错（不是静默数据丢失）。要彻底关掉需要引入"重建中"状态并让 `beginUse` 等待——在有实测证据说明这条竞态真的咬到人之前，不值得为它加一个状态机 |
+
+**一句话总结这一刀**：容器可以是空的（store 会故障），但**不能空得没人知道** —— 于是 scope 知道（`unhydrated` + `hydrated=false`）、模型知道（ⓑ 声明）、系统动手（受两道闸门限制的销毁重建），而"空"与"文件不存在"在证据层面被分开了。
