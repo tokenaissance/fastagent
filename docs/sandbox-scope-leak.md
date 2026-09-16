@@ -343,7 +343,7 @@ if ex, ok := p.cachedExecutor(key); ok {
 |---|---|---|
 | ⓒ 事件 + UI 徽标 | ⬜ | 让人也看得见"这一轮的容器是空的"；补充手段，模型侧 ⓑ 已落 |
 | §5 P1「hydrate 幂等校验」 | 🟡 | **打包侧已闭合**（`6e4f6cf` + `aa8127b`）：列到的＝装进 tar 的，有短缺就标记未水合 → 走重建；**容器侧**（装进 tar 的＝盘上有的）仍只由 tar 退出码背书，见 §9.3 的理由 |
-| §5 P0「`created`/`hydrated` 日志补 `scopeKey`」 | ⬜ | 一行日志的**效果**，但 `E2BExecutor` 目前没有 scope 字段，实为"给执行器加字段" |
+| §5 P0「`created`/`hydrated` 日志补 `scopeKey`」 | ✅ | `9e5b924`：绑定那一刻打 `e2b sandbox bound to scope`（`scopeKey` + `sandboxID`），覆盖**建/采纳/恢复**三条路径；`hydrated` 行也补了 scope。原以为"执行器没有 scope 字段"，实际 `agentID/projectID/sessionID` **早已在**（`:100-102`，池建好后赋值）—— 缺的只是没打印出来 |
 | §7「流被切断 → 有界重试」 | ⬜ | 与本次故障正交（那是实例不可用，这是容器本来就空），优先级仍低于本刀 |
 | B 案（文件工具通道绕开 hydrate） | ⬜ | **不在本仓**（Quandora session 的持久层） |
 | 削掉残留竞态 | ⬜ | `recoverUnhydrated` 是"先查 `inUse`、再 Release"两步；两次之间进来的并发调用可能拿到即将被销毁的实例。窗口在一次调用内，失败形态是那次 exec 报错（不是静默数据丢失）。要彻底关掉需要引入"重建中"状态并让 `beginUse` 等待——在有实测证据说明这条竞态真的咬到人之前，不值得为它加一个状态机 |
