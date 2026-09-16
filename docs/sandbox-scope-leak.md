@@ -135,3 +135,55 @@ func (l *lazyExecutor) Exec(ctx, command, timeout) (string, error) {
 ### 7.4 还可以顺带做的（低优先）
 
 给 `e2b sandbox created` / `e2b sandbox hydrated` 两行补 `scopeKey`：本轮靠"轮次活动时刻 vs create 时刻"才把四个实例与四个 scope 对齐，补上字段后下次一眼可见。注意 `e2b sandbox hydrated` 在 `E2BExecutor.Hydrate`（`:730`），而 `E2BExecutor` 目前**没有** scope 字段 —— 所以这是"给执行器加一个字段"的小改动，不是一行日志。
+
+---
+
+## 8. 2026-09-16 补记：现场钉在"空工作区"，新根因候选是 **store 的 List 超时**
+
+### 8.1 现象被钉死（有数字）
+
+报错发生在 **Quandora quant session**（用户点了"quant 启动"）。它在租约表里的那一行：
+
+```
+scope_key  = agt_f8e9acf8088825b4acbf:s:ac978dfb-a4d5-4c72-b7a7-715044991f70
+sandbox_id = igh1bjnj3y8q8m1qgpiy4
+09:30:04  created  igh1bjnj…                            ← 「quant 启动」那一刻
+09:30:04  hydrated skills=6  skillFiles=71  **workspaceFiles=0**
+```
+
+**该 scope 的 hydrate 一个工作区文件都没灌** —— 这就是 `refresh_paper_review.py` / 累积库 / 文档"不在容器里"、脚本报 `No such file or directory` 的直接原因。不是"被换成了别人的快照"，是**空工作区**（只有 6 个技能、71 个技能文件）。
+
+### 8.2 "别人的 kronos 文件"这段结论作废（不再是未归因，而是已归因）
+
+kronos 文件属于**另一个 scope**：`agt_cda27bbfbf4a84e2dfa6:s:hJKMWwtOp3mJOtqN8Uz2mW` → `iru7gjxb7fu6vtwlml3ti`，**1228 个文件**，同一时段每 10 分钟在跑 `firing store-backed cron job id=e943aa72-… name="Kronos 宽横截面续跑"`，其 exec 就是 `cd /workspace && … kronos_crypto_wide_one …`。租约表四条 scope ↔ 四个不同 `sandbox_id`，**一对一**。
+
+所以：**没有任何跨 scope 复制**。观感来自"同一台 gateway 上两个 scope 同时活动"（一个空工作区、一个 1228 文件），而不是文件被搬。
+
+### 8.3 新根因候选：对象存储的 `List` 在超时（**当前首选**）
+
+```
+09:26:00  WARN "workspace list failed for media fallback" agent=agt_cda27… session=hJKMW… error="context deadline exceeded"
+09:35:23  WARN 同上
+```
+
+E2B 的批量 hydrate **正是一次 `List` 之后打 tar**（`workspace_hydrate.go` 只服务 docker 那条逐文件路径）。若那次 `List` 超时，tar 里就是 0 个工作区文件 —— 与 `workspaceFiles=0` 吻合。旁证：同一时段另一条路径（渲染用的 media fallback）在**同一个 store**上超时，说明当时列举整体不可靠，不是 hydrate 独有。
+
+**待判 (i)/(ii)**（下一轮一条命令即可分离）：
+
+| 候选 | 判据 |
+|---|---|
+| **(ii) List 超时**（首选） | 09:25–09:35 窗口内出现 `workspace hydrate: list failed` 或同类 `context deadline exceeded`；且对象存储里**确实有**那些文件 |
+| **(i) 键漂移**（写侧与读侧的 `projectID` 不一致） | 对象存储里那些文件落在**别的分区前缀**下（如 `…:p:<proj>:s:…`），而 hydrate 用的是 `…:s:…` |
+
+### 8.4 工具性事实（下次别再走弯路）
+
+* **`agent_files` 不是工作区索引**：列是 `agent_id, user_id, filename, content, updated_at`（agent 身份文件表），Quandora 那个 agent **0 行**。工作区文件只在**对象存储**里 —— psql 看不到它，只能走 S3 或 API。
+* 对象存储配置（只列键名）：`FASTAGENT_OBJECT_STORE_{TYPE,BUCKET=fastagent-nyc3,ENDPOINT=nyc3.digitaloceanspaces.com,PREFIX=prod,REGION,USESSL}`。
+* 列举跳板的两个坑：**endpoint 必须带 `https://`**（aws-cli 否则报 scheme missing）；**不要 `--recursive` 全列举**（大前缀会超时——那正是我们要查的现象本身），改成按前缀逐层 `ls` 或先 `--summarize` 拿计数。
+
+### 8.5 对修复顺序的影响
+
+* **③（流中断重建+重试）优先级下调**：它治的是"实例不可用"，而本次故障是"容器里本来就没有文件"，③ 帮不上。
+* **新 P0：排 store 的 `List` 超时**（对象存储侧：列举耗时 / 对象数 / 客户端超时配置）。这比容器层更根本。
+* **P1：hydrate 失败要可判**：`List` 失败时 hydrate 必须留下明确的失败痕迹（现在 docker 路径有 warn、E2B 批量路径只有一个 `workspaceFiles=N` 的数字），否则"空工作区"和"这个 scope 真的没有文件"无法区分。
+* **治本不变，且理由更强**：文件工具通道**绕开 hydrate**，所以文档读写不该依赖容器里有文件。
