@@ -440,7 +440,10 @@ Alternatives rejected as heavier than the problem:
 - `internal/sandbox/lifecycle.go` — the idle/duty layer above the pool: the
   in-use refcount that keeps a busy scope out of the sweep, `ScopeSleeper`
   (pause instead of destroy), `ScopeExtender` (move both clocks before a long
-  operation) and `LeaseRenewer` (renew after one)
+  operation), `LeaseRenewer` (renew after one) and `UnusableClassifier` (asked
+  only when a failure indicts the instance rather than the command — the answer
+  is destroy-and-replace, never a pause, see
+  [§7 of the leak record](sandbox-scope-leak.md))
 - `internal/gateway/userspace.go` — pool wiring: per-pod owner id + lease store
 - `docs/sandbox-secret-rotation.md` — key rotation runbook
 
