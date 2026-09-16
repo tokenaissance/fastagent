@@ -492,6 +492,17 @@ func (p *LifecyclePool) getInner(ctx context.Context, sc sandboxScope) (Executor
 		p.mu.Unlock()
 		return nil, err
 	}
+	// Policy C (docs/sandbox-scope-leak.md §9): a store listing that failed
+	// leaves a usable sandbox with an EMPTY /workspace. Hand it out — a store
+	// hiccup must not cost the scope its warm instance — but keep hydrated[k]
+	// false so the next use re-hydrates, and let the tools declare the state to
+	// the turn. Today's shape (set eagerly above, rolled back only when Get
+	// itself fails) is why nothing ever retried.
+	if ws, ok := ex.(interface{ WorkspaceStale() bool }); ok && ws.WorkspaceStale() {
+		p.mu.Lock()
+		p.hydrated[k] = false
+		p.mu.Unlock()
+	}
 	// Skip the per-file fallback when the inner pool already pushed
 	// /workspace as part of its own bulk hydrate (E2B does this — one
 	// tar.gz over exec covers /skills and /workspace in one shot).
