@@ -315,6 +315,25 @@ func TestE2BHydrateListRetriesThenSucceeds(t *testing.T) {
 	}
 }
 
+// The boundary that keeps the staleness signal from doing damage of its own: a
+// listing that SUCCEEDS and returns nothing is a genuinely empty scope (a new
+// session, a fresh agent), not a failure. Treating it as one would break every
+// new conversation.
+func TestE2BHydrateEmptyScopeIsNotStale(t *testing.T) {
+	ex := &E2BExecutor{workspace: newFakeWorkspace(), agentID: "agent-empty"}
+
+	objs, err := ex.listWorkspaceWithRetry(context.Background(), "", "")
+	if err != nil {
+		t.Fatalf("an empty scope is a normal outcome, got %v", err)
+	}
+	if len(objs) != 0 {
+		t.Fatalf("workspace files = %d, want 0", len(objs))
+	}
+	if ex.WorkspaceStale() {
+		t.Fatal("empty scope marked stale: listing nothing successfully is not a failure")
+	}
+}
+
 func TestLifecycle_HydrateOnCreate(t *testing.T) {
 	inner := newFakePool()
 	ws := newFakeWorkspace()
