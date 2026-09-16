@@ -110,7 +110,13 @@ modes each map to a test in the failure-semantics table below.
   pod adopted in between, the evicting pod drops its local reference
   **without** destroying the shared sandbox. Registry errors fail open: the
   sandbox is left alive.
-- Adoption does not replay hydration (creator hydrated the same scope);
+- Adoption does not replay hydration (creator hydrated the same scope). Two
+  qualifications added 2026-09-16: the listing that feeds a hydrate is retried,
+  and a hydrate whose listing never succeeded leaves the scope **unhydrated**
+  rather than silently uploading an EMPTY workspace — the sandbox is still
+  handed out (a store hiccup must not cost the scope its warm instance), but the
+  next use re-tries. See `sandbox-scope-leak.md` §8–§9 for the incident this
+  came from and the four cases that pin it;
   skill/workspace changes apply on next recreate, same as single-pod behavior.
 - **Adoption carries the account API key.** The row stores only
   `sandbox_id` + `envd_token`, and exec/read/write authenticate with the envd
