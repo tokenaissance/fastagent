@@ -61,7 +61,14 @@ func TestTurnFilesMetaKeepsOnlyFilesFromThisTurn(t *testing.T) {
 	for _, f := range files {
 		got = append(got, f["path"].(string))
 	}
-	want := map[string]bool{"report.md": true, "chart.png": true, "stream.bin": true}
+	// Agent-relative, project-scoped: the shape the file dialog and the
+	// download endpoint resolve. Raw List() output ("report.md") is relative to
+	// the scope dir and 404s against GET /agents/{id}/files/{path}.
+	want := map[string]bool{
+		"projects/p1/s1/report.md":  true,
+		"projects/p1/s1/chart.png":  true,
+		"projects/p1/s1/stream.bin": true,
+	}
 	if len(got) != len(want) {
 		t.Fatalf("paths = %v, want the three fresh files only", got)
 	}
@@ -73,12 +80,42 @@ func TestTurnFilesMetaKeepsOnlyFilesFromThisTurn(t *testing.T) {
 
 	// Unknown size is normalised, not surfaced as -1.
 	for _, f := range files {
-		if f["path"] == "stream.bin" && f["size"].(int64) != 0 {
+		if f["path"] == "projects/p1/s1/stream.bin" && f["size"].(int64) != 0 {
 			t.Errorf("unknown size should normalise to 0, got %v", f["size"])
 		}
 	}
 	if ws.calls != 1 {
 		t.Errorf("expected exactly one workspace listing, got %d", ws.calls)
+	}
+}
+
+func TestTurnFilesMetaStampsTheScopeTheStoreWasAskedFor(t *testing.T) {
+	turnStart := time.Now()
+	fresh := workspace.ObjectInfo{Path: "notes.md", Size: 42, ModTime: turnStart.Add(time.Second)}
+
+	cases := []struct {
+		name      string
+		projectID string
+		sessionID string
+		want      string
+	}{
+		{"loose chat", "", "s1", "sessions/s1/notes.md"},
+		{"project chat", "p1", "s1", "projects/p1/s1/notes.md"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a := &Agent{name: "a", agentID: "a", workspaceStore: &fakeWorkspaceStore{
+				objs: []workspace.ObjectInfo{fresh},
+			}}
+			meta := a.turnFilesMeta(context.Background(), tc.projectID, tc.sessionID, turnStart)
+			if meta == nil {
+				t.Fatal("expected metadata, got nil")
+			}
+			files := turnFiles(t, meta)
+			if got := files[0]["path"].(string); got != tc.want {
+				t.Errorf("path = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
