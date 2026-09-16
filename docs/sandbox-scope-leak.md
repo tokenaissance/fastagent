@@ -272,6 +272,8 @@ if ex, ok := p.cachedExecutor(key); ok {
 
 **替身（用例②④⑤用的）**：`fakeExecutor` 带一个 `workspaceUnhydrated atomic.Bool`（零值 = 已水合，所以 Policy C 之前的用例照旧走普通路径）；`fakePool` 带一个 `unhydrated` 开关，打开后**每个新建实例都报未水合** —— 就是 store 故障时的形态。
 
+用例的分类（守什么、各自证到哪、红的手法）见 §9.8 —— 别把它们当成同一类断言混着看。
+
 ### 9.5 ③ 的注入点：**已定 ⓑ（工具结果前缀）**
 
 **决定**：声明**只挂在碰到工作区的工具**（`exec` / `read_file` / `list` 一类）的**返回值前缀**上；ⓒ（事件 + UI 徽标）作为**补充**让人也看得见，但**不作为唯一手段**（模型看不到就等于退回成这次事故）。ⓐ（每轮系统提示）不采用 —— 它会把一条"这次操作的事实"变成每轮都出现的指令，稀释提示词。
@@ -344,6 +346,56 @@ if ex, ok := p.cachedExecutor(key); ok {
 | ⓒ 事件 + UI 徽标 | ⬜ | 让人也看得见"这一轮的容器是空的"；补充手段，模型侧 ⓑ 已落 |
 | §5 P1「hydrate 幂等校验」 | 🟡 | **打包侧已闭合**（`6e4f6cf` + `aa8127b`）：列到的＝装进 tar 的，有短缺就标记未水合 → 走重建；**容器侧**（装进 tar 的＝盘上有的）仍只由 tar 退出码背书，见 §9.3 的理由 |
 | §5 P0「`created`/`hydrated` 日志补 `scopeKey`」 | ✅ | `9e5b924`：绑定那一刻打 `e2b sandbox bound to scope`（`scopeKey` + `sandboxID`），覆盖**建/采纳/恢复**三条路径；`hydrated` 行也补了 scope。原以为"执行器没有 scope 字段"，实际 `agentID/projectID/sessionID` **早已在**（`:100-102`，池建好后赋值）—— 缺的只是没打印出来 |
+
+### 9.8 这一线新增的用例分四类，各自守什么、各自证到哪
+
+新增/相关的用例不是同一类断言，混着看会高估覆盖面。按**它们守的真相**分四类：
+
+**① 分支边界（decision boundary）——「哪种情况走哪条路」**
+
+| 用例 | 断言 | 守的是 |
+|---|---|---|
+| `TestE2BHydrateEmptyScopeIsNotMarkedUnhydrated`（`1b98cd2`） | `List` **成功**返回 0 个 → 无错、`len==0`、**未**标记 | **分叉点在"有没有错误"，不在"数量是不是 0"**；判错会打断每个新会话 |
+| `TestE2BHydrateListRetriesThenSucceeds`（`e85e6e8`） | 首次超时 → 重试 → 拿到真实列表、调用 2 次、**未**标记 | 间歇超时必须被重试救回；重试成功＝已水合 |
+| `TestHydrateEntriesBundlesEverythingReadable`（`aa8127b`） | 全部可读 → `bundled == len(objs)`、**未**标记 | 打包侧同型边界：**列到的 = 装进 tar 的**才算正常 |
+
+最强的一类：纯函数、离线、确定。**红的手法**：删实现那一行（实测：删标记行 / 去重试都会红）。
+
+**② 行为保持（best-effort preserved）——「修 bug 没顺手拿走别的性质」**
+
+| 用例 | 断言 | 守的是 |
+|---|---|---|
+| `TestHydrateEntriesMarksTheScopeUnhydratedOnAShortfall`（`aa8127b`） | 一个 `Get` 失败 → **其余仍打进 tar**（`bundled == len-1`）**且**标记未水合 | 单文件失败不该毁掉整次 hydrate；但这个短缺**不允许看起来像完整** |
+
+这一类专挡"过度修正"——把文件级故障升级成整轮不可用。
+
+**③ 恢复路径（recovery）——「信号被举起之后真的有人接」**
+
+| 用例 | 断言 |
+|---|---|
+| `TestLifecycle_UnhydratedWorkspaceIsNotRecordedHydrated`（`da37174`） | 未水合 → `p.hydrated[k] == false`（下次 `Get` 会重试） |
+| `TestLifecycle_UnhydratedWorkspaceIsRebuilt`（`da37174`） | 未水合 → release=1、旧实例 `Close`、create=2、拿到**另一个**实例、scope 重新记为已水合 |
+| `TestLifecycle_UnhydratedRebuildWaitsForInFlightWork`（`da37174`） | 有在飞操作时不重建（拆正在跑的实例＝截断那条流） |
+| `TestLifecycle_UnhydratedRebuildIsRateLimitedButRepeatable`（`da37174`） | 受冷却限制**但**冷却后仍能再重建（否则 store 恢复后 scope 一直空到空闲回收） |
+
+**红的手法**：变异（`da37174` 注明"去掉 `hydrated[k]=false` 即红"）。
+
+**④ 观测性契约（observability）——「人能看到什么」**
+
+| 用例 | 断言 | 边界（必须说清） |
+|---|---|---|
+| `TestRegisterExecutorLogsTheScopeAndSandboxTogether`（`8e0d5c4`） | 捕获 slog → 绑定行**同时**带 `scopeKey` 与 `sandboxID` | 证明"日志里有这两个字段"，**不**证明运维真能据此定位 |
+| `workspace_notice_e2e_test.go`（`3c35808`） | 声明经 `extractToolMeta` + MetaStrip 后：仍识别为 `sandbox` 元数据、仍在正文首行 | 用**假执行器 + 真拼装路径**，守"这条线不被重构剪断"，不是"线上一定如此" |
+
+**四类合起来，证明到哪、没证到哪**
+
+| 环节 | 有断言吗 | 靠什么 |
+|---|---|---|
+| 我们要的（listing） | ✅ ①③ | 重试 + 真·空边界 |
+| 我们装的（bundle 计数） | ✅ ①② | 列到的 = 装进 tar 的，短缺即标记 |
+| 装进 tar 的 → **盘上真的有** | ❌ **无独立断言** | 只有 `tar -xzf` 退出码背书（容器侧逐路径比对刻意未做，理由见 §9.3） |
+| 未水合 → 恢复 | ✅ ③ | 回滚 + 重建 + 两道闸门 |
+| 人与模型知情 | 🟡 ④ | 模型侧 ⓑ 有 e2e 钉住；**人侧 ⓒ 未做** |
 | §7「流被切断 → 有界重试」 | ⬜ | 与本次故障正交（那是实例不可用，这是容器本来就空），优先级仍低于本刀 |
 | B 案（文件工具通道绕开 hydrate） | ⬜ | **不在本仓**（Quandora session 的持久层） |
 | 削掉残留竞态 | ⬜ | `recoverUnhydrated` 是"先查 `inUse`、再 Release"两步；两次之间进来的并发调用可能拿到即将被销毁的实例。窗口在一次调用内，失败形态是那次 exec 报错（不是静默数据丢失）。要彻底关掉需要引入"重建中"状态并让 `beginUse` 等待——在有实测证据说明这条竞态真的咬到人之前，不值得为它加一个状态机 |
