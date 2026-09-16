@@ -80,3 +80,58 @@ kubectl --context do-nyc2-tokenaissance-nyc2 -n production run cron-check --rm -
 
 * 「`poolKey` 退化导致跨 session 共用容器」——该窗口内无一条退化 scopeKey，DB 也无空 `chat_id`。
 * 「cron 侧需要补 session id」——已有。
+
+---
+
+## 7. 修复设计：把"流被切断"变成一次可解释的重试（③，**已设计、未实现**）
+
+### 7.1 为什么是 ③，而不是 ①②
+
+排查确认（见 §3、§4）：**pause 由我们自己发起且已受保护** —— `evictIdle` 跳过 `inUse[k] > 0`（`lifecycle.go:265`），`beginUse` 在 `ex.Exec` 之前、`endUse` 用 defer 覆盖到后置同步结束（`:523/530`），长操作还有 `extendBudget` 主动延期 TTL（`:355`）。缺的不是仲裁（①②），而是**唤醒/损坏实例上开流失败之后没有任何恢复**：代码对它的处理只有注释里那句 *"the truncation that follows is classified like any other cut stream"* —— **被归类，没有被恢复**。
+
+### 7.2 两个挂点（都沿用仓库既有模式）
+
+**挂点 1：分类留在适配器**（沿用 `ScopeSleeper` / `ScopeExtender` / `workspaceAware` 的接口风格，以及 `SleepScope` 注释里的原则 *"The classification lives here, not in the lifecycle layer"*）
+
+```go
+// e2b_executor.go，紧挨 sandboxGone(:881)
+func sandboxUnusable(err error) bool   // 现有 sandboxGone(502/404) ∪ unavailable ∪ "ended before the stream" ∪ "did not exit cleanly"
+
+func (p *E2BExecutorPool) Unusable(err error) bool { return sandboxUnusable(err) }
+
+// lifecycle.go
+type UnusableClassifier interface{ Unusable(err error) bool }
+func (p *LifecyclePool) unusable(err error) bool { c, ok := p.inner.(UnusableClassifier); return ok && c.Unusable(err) }
+```
+
+判据要**窄**：只认传输层信号，**不认"命令返回非零"** —— 否则用户脚本的真实失败会被重复执行。
+
+**挂点 2：重试放在 in-use 之外**（避免 `Release` 与 defer 的 `endUse` 互相踩）
+
+把 `lazyExecutor.Exec` 现有函数体抽成 `execOnce`（getInner → beginUse → extendBudget → defer endUse → ex.Exec → 后置同步），外层只做一次重试：
+
+```go
+func (l *lazyExecutor) Exec(ctx, command, timeout) (string, error) {
+    out, err := l.execOnce(ctx, command, timeout)
+    if err != nil && l.pool.unusable(err) {
+        // 坏实例要**销毁**，不能走 sleepOrRelease 的 pause 路径 ——
+        // 否则重试会唤醒同一个坏实例。
+        if relErr := l.pool.Release(sc.agentID, sc.projectID, sc.sessionID); relErr == nil {
+            out, err = l.execOnce(ctx, command, timeout)
+        }
+    }
+    return out, err
+}
+```
+
+`Release` → `inner.Release` 是销毁路径；`evictIdle` → `sleepOrRelease` → `SleepScope` 才是 pause 路径。两者**必须区分**，这是本设计里最容易写错的一处。
+
+### 7.3 用例（红→绿；沿用现有替身与用例风格）
+
+1. 假 E2B 客户端：第一次 exec 返回 `unavailable: … ended before the stream completed`，第二次成功；
+2. 断言：①该错误被判为 unusable；②走的是**销毁**而非 pause（对照 `TestE2BExecutorFailedRebuildRestoresIdentityAndDestroysReplacement` 的写法）；③命令**只**重跑一次；④模型只收到第二次的结果；
+3. 反向用例：命令返回非零（`exit code 1`）**不得**触发重试。
+
+### 7.4 还可以顺带做的（低优先）
+
+给 `e2b sandbox created` / `e2b sandbox hydrated` 两行补 `scopeKey`：本轮靠"轮次活动时刻 vs create 时刻"才把四个实例与四个 scope 对齐，补上字段后下次一眼可见。注意 `e2b sandbox hydrated` 在 `E2BExecutor.Hydrate`（`:730`），而 `E2BExecutor` 目前**没有** scope 字段 —— 所以这是"给执行器加一个字段"的小改动，不是一行日志。
