@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/fastclaw-ai/fastclaw/internal/workspace"
@@ -62,6 +63,12 @@ type E2BExecutor struct {
 	client   *http.Client
 	template string        // remembered for recreate() so the new sandbox uses the same template; immutable once handed out by the pool
 	timeout  time.Duration // remembered for recreate()
+	// workspaceStale records that this executor's /workspace could not be
+	// hydrated from the store (the listing failed, not "the scope is empty").
+	// Policy C: the sandbox is still handed out — a store hiccup must not cost
+	// the scope its warm instance — but the caller retries the hydrate on the
+	// next use and the tools declare the state to the turn.
+	workspaceStale atomic.Bool
 	// readyTimeout / readyInterval bound the post-create readiness wait. Zero
 	// means the defaults; tests shrink them so a persistent routing gap does
 	// not cost a minute of wall clock.
@@ -588,6 +595,36 @@ func (e *E2BExecutor) SetHydrationSources(skillDirs []string, ws workspace.Store
 // mid-flight. The fix moves the bulk transfer off the exec channel
 // entirely so the script stays small and constant-sized regardless of
 // bundle size.
+// listWorkspaceWithRetry bounds the cost of a flaky store listing. The prod
+// failure of 2026-09-16 was an intermittent `context deadline exceeded`, which
+// a retry is exactly the right answer for; the attempts and interval mirror the
+// hydrate exec loop's, so a slow store is treated the same in both phases.
+func (e *E2BExecutor) listWorkspaceWithRetry(ctx context.Context, listProject, listSession string) ([]workspace.ObjectInfo, error) {
+	for attempt := 1; ; attempt++ {
+		objs, err := e.workspace.List(ctx, e.agentID, listProject, listSession)
+		if err == nil {
+			return objs, nil
+		}
+		if attempt >= hydrateAttempts {
+			return nil, err
+		}
+		slog.Warn("e2b hydrate: workspace list failed, retrying",
+			"agent", e.agentID, "project", e.projectID, "session", e.sessionID,
+			"attempt", attempt, "error", err)
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(hydrateRetryInterval):
+		}
+	}
+}
+
+// WorkspaceStale reports whether this executor's /workspace could not be
+// hydrated from the store — "the listing failed", never "the scope is empty".
+// Policy C reads it so the scope's hydrated flag stays false and the next use
+// retries (docs/sandbox-scope-leak.md §9).
+func (e *E2BExecutor) WorkspaceStale() bool { return e.workspaceStale.Load() }
+
 func (e *E2BExecutor) Hydrate(ctx context.Context) error {
 	bundle := newTarBundle()
 
@@ -630,9 +667,19 @@ func (e *E2BExecutor) Hydrate(ctx context.Context) error {
 		if e.projectID != "" {
 			listSession = ""
 		}
-		objs, err := e.workspace.List(ctx, e.agentID, listProject, listSession)
+		// The listing is the one step whose failure must not be swallowed: a
+		// hydrate that lists nothing uploads an EMPTY workspace, which is
+		// indistinguishable from "this scope has no files" — and that is how a
+		// run ends up acting on an empty /workspace (see
+		// docs/sandbox-scope-leak.md §8, prod 2026-09-16). Retry it, and if it
+		// still fails say so loudly and mark the executor stale instead of
+		// pretending the workspace is empty.
+		objs, err := e.listWorkspaceWithRetry(ctx, listProject, listSession)
 		if err != nil {
-			slog.Warn("e2b hydrate: workspace list", "agent", e.agentID, "project", e.projectID, "session", e.sessionID, "error", err)
+			slog.Warn("e2b hydrate: workspace list failed after retries — handing out an EMPTY workspace",
+				"agent", e.agentID, "project", e.projectID, "session", e.sessionID,
+				"attempts", hydrateAttempts, "error", err)
+			e.workspaceStale.Store(true)
 		} else {
 			for _, obj := range objs {
 				rc, err := e.workspace.Get(ctx, e.agentID, listProject, listSession, obj.Path)
