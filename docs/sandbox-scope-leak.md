@@ -187,3 +187,65 @@ E2B 的批量 hydrate **正是一次 `List` 之后打 tar**（`workspace_hydrate
 * **新 P0：排 store 的 `List` 超时**（对象存储侧：列举耗时 / 对象数 / 客户端超时配置）。这比容器层更根本。
 * **P1：hydrate 失败要可判**：`List` 失败时 hydrate 必须留下明确的失败痕迹（现在 docker 路径有 warn、E2B 批量路径只有一个 `workspaceFiles=N` 的数字），否则"空工作区"和"这个 scope 真的没有文件"无法区分。
 * **治本不变，且理由更强**：文件工具通道**绕开 hydrate**，所以文档读写不该依赖容器里有文件。
+
+---
+
+## 9. P0 已定方案（**策略 C**）与落地清单 —— 待实现
+
+### 9.1 三种"空"必须分开（判据的地基）
+
+| 情形 | 含义 | 处置 |
+|---|---|---|
+| **真·空** | `List` **成功**、返回 0 个对象 | **照常放行、不标记、不失败**（否则打断所有新会话） |
+| **列不出来** | `List` **报错**（prod 实测 `context deadline exceeded`） | 这才是故障，今天被吞成 `workspaceFiles=0` |
+| **以为空、实际有** | store 里有 N 个文件、容器却空 | **最危险**：模型把基础设施故障当成"文件不存在"的世界事实 |
+
+### 9.2 选定策略：**C（放行 + 标注 + 下次重试）**
+
+`List` 失败 → **有界重试** → 仍失败：
+
+1. **不返回 error**（那是策略 A：`inner.Get` 报错就没有 executor 可交）；
+2. **把 executor 标记为 `workspaceStale`**，并打一条响亮日志（含 agent/project/session + 原因 + 重试次数）；
+3. **`p.hydrated[k]` 回到 false** → 下一次 `Get` 自动重试 hydrate；
+4. **把"工作区未水合"声明进这一轮**（③，注入点待定）；
+5. **只有与已知基线矛盾时**（曾成功列举过非空、如今列不出来）才升级为销毁重建（A 的分支）。
+
+理由：本次故障的伤害不是"容器是空的"，而是**"空得没人知道"**；C 消灭这个伤害，同时不为瞬时抖动付冷启动代价（销毁 = 丢热实例 + 重传 42–95MB 的 tar）。
+
+### 9.3 机制侧的两处改动（①②，可离线验证）
+
+```go
+// ① e2b_executor.go:633 附近 —— 现在只有 slog.Warn 然后继续
+objs, err := e.workspace.List(ctx, e.agentID, listProject, listSession)
+if err != nil {
+    if objs, err = e.listWorkspaceWithRetry(...); err != nil {   // 复用 hydrateAttempts / hydrateRetryInterval
+        slog.Warn("e2b hydrate: workspace list failed after retries — handing out an EMPTY workspace",
+            "agent", e.agentID, "project", e.projectID, "session", e.sessionID, "error", err)
+        e.markWorkspaceStale()                                    // 新增：atomic bool + 访问器
+    }
+}
+
+// ② lifecycle.go getInner（:479-501）—— hydrate 失败必须让 hydrated 回到 false
+if sw, ok := ex.(interface{ WorkspaceStale() bool }); ok && sw.WorkspaceStale() {
+    p.hydrated[k] = false    // 今天的 :483 是"先置位后执行、失败不回滚"，所以不会重试
+}
+```
+
+注意保持既有的语义分工：**`List` 失败 = 可检索性故障（致命到"要声明"）**；**单文件 `Get`/`Read`/`tar` 失败 = best-effort**（个别文件坏了不该让整次 hydrate 变成"未水合"）。
+
+### 9.4 用例（红→绿，全部可离线）
+
+1. `List` 失败一次后成功 → 发生重试、`Hydrate` 成功、`workspaceFiles > 0`、**未**标记 stale；
+2. `List` 持续失败 → **拿到 executor**、`WorkspaceStale() == true`、`p.hydrated[k]` 回到 false（下次重试）、并产生可声明的状态；
+3. `List` 成功返回 0 个对象 → **不**标记 stale、**不**失败（防误伤新会话）；
+4. 曾成功列举非空、随后列不出来 → 走**销毁重建**（A 分支）而非 C。
+
+### 9.5 未决：③ 声明的注入点（需拍板）
+
+| 候选 | 做法 | 我评 |
+|---|---|---|
+| ⓐ 每轮系统提示加一行 | 模型必见，但与现有"附加说明"同类，可能稀释提示词 | 备选 |
+| **ⓑ 工具结果前缀** | 只在碰到工作区的工具（`exec`/`read_file`/`list`）返回值里带一句"本次操作前工作区未水合：store 列举超时（重试 N 次）" | **推荐**：精准、是"事实"不是"指令" |
+| ⓒ 事件 + UI 徽标 | 人可见，**模型不可见** | 建议**辅以** ⓒ，但不可单独使用 |
+
+选 ⓐ/ⓑ 需先读一处 agent loop 的提示/工具结果拼装点；选 ⓒ 可并入同一刀。
