@@ -235,10 +235,16 @@ if sw, ok := ex.(interface{ WorkspaceUnhydrated() bool }); ok && sw.WorkspaceUnh
 
 ### 9.4 用例（红→绿，全部可离线）
 
-1. `List` 失败一次后成功 → 发生重试、`Hydrate` 成功、`workspaceFiles > 0`、**未**标记 stale；
-2. `List` 持续失败 → **拿到 executor**、`WorkspaceUnhydrated() == true`、`p.hydrated[k]` 回到 false（下次重试）、并产生可声明的状态；
-3. `List` 成功返回 0 个对象 → **不**标记 stale、**不**失败（防误伤新会话）；
-4. 曾成功列举非空、随后列不出来 → 走**销毁重建**（A 分支）而非 C。
+**进度（2026-09-16）**
+
+| # | 用例 | 状态 |
+|---|---|---|
+| 1 | `List` 失败一次后成功 → 重试、拿到真实列表、**未**标记未水合 | ✅ `e85e6e8`（先红后绿；红时日志可见 `retrying … attempt=1`） |
+| 3 | `List` 成功返回 0 个对象 → **不**标记、**不**失败（防误伤新会话） | ✅ `1b98cd2` |
+| 2 | `List` 持续失败 → **拿到 executor** + `WorkspaceUnhydrated() == true` + `p.hydrated[k]` 回到 false | ⬜ lifecycle 层：给 `fakeExecutor`（`lifecycle_test.go:20`）加"未水合"标记，让 `fakePool.Get`（`:66`）交出它，用 `lp.Get(...)` 触发一次 `Exec` 后断言 `lp.hydrated[poolKey(...)] == false` |
+| 4 | 曾成功列举非空、随后列不出来 → 走**销毁重建** | ⬜ **实现还没有**（C 第二半），先实现再有例 |
+
+**替身的一个坑（用例①踩过，值得记下）**：`fakeWorkspace.put` 只按 **agent** 存，而它的 `List` 按 **scope** 过滤 —— 用例里调用 `listWorkspaceWithRetry` 时的 `(project, session)` 必须与存入时一致（用 `("", "")`），否则会得到 0 个对象、误判成"空工作区"。
 
 ### 9.5 ③ 的注入点：**已定 ⓑ（工具结果前缀）**
 
@@ -259,7 +265,7 @@ if sw, ok := ex.(interface{ WorkspaceUnhydrated() bool }); ok && sw.WorkspaceUnh
 
 **下次开工需要先读的一处**：工作区类工具的**结果拼装点**（`internal/agent/tools/exec.go` / `file.go` 一侧），以及 sandbox 包暴露 `WorkspaceUnhydrated()` 的接口形态（见 §9.3 的 ①）。读完即可把声明接上，与机制侧同一刀落地。
 
-### 9.6 命名修正：`Stale` → `Unhydrated`（下一刀必做，与 §9.4 余下三条同一批）
+### 9.6 命名修正：`Stale` → `Unhydrated`（✅ 已落 `629ccd1` + `86cc5f3`）
 
 **问题**：`WorkspaceUnhydrated()` 里的 **stale 在技术语境里默认读作"陈旧"** —— 即"里面有旧数据"。而这里的真实语义恰恰相反：
 
