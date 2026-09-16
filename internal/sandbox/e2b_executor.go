@@ -816,6 +816,10 @@ func (e *E2BExecutor) Hydrate(ctx context.Context) error {
 	}
 	slog.Info("e2b sandbox hydrated",
 		"sandboxID", e.identSnapshot().id,
+		// The scope, not the listing scope: project chats hydrate with
+		// session="" (they pull the whole project) while the scope key keeps the
+		// session, and it is the scope an operator correlates against.
+		"scopeKey", poolKey(e.agentID, e.projectID, e.sessionID),
 		"skills", skillCount,
 		"skillFiles", skillFileCount,
 		"workspaceFiles", workspaceCount,
@@ -1949,9 +1953,17 @@ func (p *E2BExecutorPool) cachedExecutor(key string) (*E2BExecutor, bool) {
 }
 
 func (p *E2BExecutorPool) registerExecutor(key string, ex *E2BExecutor) {
+	// Read the id BEFORE taking p.mu: identSnapshot takes the executor's own
+	// lock, and the two locks must not nest (nothing establishes an order
+	// between them). The line itself is logged after unlocking for the same
+	// reason — it is the one place where a scope and a sandbox id are both in
+	// hand, which is exactly the correlation a past incident had to be
+	// reconstructed by hand (docs/sandbox-scope-leak.md §9.7).
+	id := ex.identSnapshot().id
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	p.executors[key] = ex
+	p.mu.Unlock()
+	slog.Info("e2b sandbox bound to scope", "scopeKey", key, "sandboxID", id)
 }
 
 func (p *E2BExecutorPool) recordEpoch(key string, epoch int64) {
