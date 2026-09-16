@@ -400,7 +400,9 @@ func (p *LifecyclePool) keepForNextSweep(sc sandboxScope) {
 // extendBudget moves the sandbox's expiry past the end of an operation whose
 // budget is long enough to matter. Best-effort: the operation still runs if the
 // call fails — it just runs with the extra risk of being paused mid-flight, and
-// the truncation that follows is classified like any other cut stream.
+// the truncation that follows is classified like any other cut stream. Since §7
+// that classification is acted on (the instance is destroyed and the caller is
+// told to resend), so a failed extend is a real cost — just never a silent one.
 func (p *LifecyclePool) extendBudget(ctx context.Context, sc sandboxScope, opBudget time.Duration) {
 	if opBudget < extendThreshold {
 		return
