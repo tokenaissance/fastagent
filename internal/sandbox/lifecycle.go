@@ -498,7 +498,7 @@ func (p *LifecyclePool) getInner(ctx context.Context, sc sandboxScope) (Executor
 	// false so the next use re-hydrates, and let the tools declare the state to
 	// the turn. Today's shape (set eagerly above, rolled back only when Get
 	// itself fails) is why nothing ever retried.
-	if ws, ok := ex.(interface{ WorkspaceStale() bool }); ok && ws.WorkspaceStale() {
+	if ws, ok := ex.(interface{ WorkspaceUnhydrated() bool }); ok && ws.WorkspaceUnhydrated() {
 		p.mu.Lock()
 		p.hydrated[k] = false
 		p.mu.Unlock()

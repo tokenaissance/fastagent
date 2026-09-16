@@ -310,7 +310,7 @@ func TestE2BHydrateListRetriesThenSucceeds(t *testing.T) {
 	}
 	// A hydrate that eventually listed is NOT stale: staleness means "the
 	// workspace may be missing files", and this one is complete.
-	if ex.WorkspaceStale() {
+	if ex.WorkspaceUnhydrated() {
 		t.Fatal("executor marked stale after a successful retry")
 	}
 }
@@ -329,7 +329,7 @@ func TestE2BHydrateEmptyScopeIsNotStale(t *testing.T) {
 	if len(objs) != 0 {
 		t.Fatalf("workspace files = %d, want 0", len(objs))
 	}
-	if ex.WorkspaceStale() {
+	if ex.WorkspaceUnhydrated() {
 		t.Fatal("empty scope marked stale: listing nothing successfully is not a failure")
 	}
 }
