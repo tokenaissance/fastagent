@@ -163,6 +163,22 @@ type ScopeSleeper interface {
 	SleepScope(ctx context.Context, agentID, projectID, sessionID string) (paused bool, err error)
 }
 
+// UnusableClassifier is implemented by inner pools that can tell whether an
+// error indicts the instance rather than the command that ran on it. Same split
+// as UnhydratedWorkspace: the provider's vocabulary lives in the adapter, and
+// the policy layer only asks the question (docs/sandbox-scope-leak.md §7.4).
+type UnusableClassifier interface {
+	Unusable(err error) bool
+}
+
+// unusable asks the inner pool whether this failure means the sandbox is bad.
+// A pool that cannot answer is treated as "no", which keeps every existing
+// backend on its current behaviour.
+func (p *LifecyclePool) unusable(err error) bool {
+	c, ok := p.inner.(UnusableClassifier)
+	return ok && c.Unusable(err)
+}
+
 // ScopeExtender is implemented by pools whose backend can push out a running
 // sandbox's expiry. It exists for one hazard: an operation that starts near the
 // end of the instance's life and outlives it. With autoPause on the expiry
@@ -658,7 +674,38 @@ func (l *lazyExecutor) WorkspaceUnhydrated() bool {
 	return l.pool.unhydrated[poolKey(l.scope.agentID, l.scope.projectID, l.scope.sessionID)]
 }
 
+// Exec runs one command, and when the failure indicts the INSTANCE rather than
+// the command, replaces the instance instead of handing a broken sandbox the
+// model will keep tripping over (docs/sandbox-scope-leak.md §7.4).
+//
+// Deliberately NOT a re-run. A cut stream may have left the command's side
+// effects half-applied, and the tool layer's own stance is to hint rather than
+// fall back automatically (internal/agent/tools/exec.go). So the command's
+// verdict — including a non-zero exit — is returned untouched, and a replaced
+// instance says so in the error text so the model can decide to re-send.
+//
+// The replacement happens outside the in-use window on purpose: execOnce
+// brackets beginUse/endUse, and both the idle sweep and the unhydrated-rebuild
+// path deliberately skip scopes with an operation in flight.
 func (l *lazyExecutor) Exec(ctx context.Context, command string, timeout time.Duration) (string, error) {
+	out, err := l.execOnce(ctx, command, timeout)
+	if err == nil || !l.pool.unusable(err) {
+		return out, err
+	}
+	// Release is the DESTROY path; the pause path is evictIdle → SleepScope, and
+	// pausing here would just park a broken instance for the next wake-up.
+	if relErr := l.pool.Release(l.scope.agentID, l.scope.projectID, l.scope.sessionID); relErr != nil {
+		slog.Warn("sandbox could not be replaced after an unusable instance; leaving it in place",
+			"agent", l.scope.agentID, "session", l.scope.sessionID, "error", relErr)
+		return out, err
+	}
+	return out, fmt.Errorf("%w\n[sandbox replaced: the previous instance could not serve this command "+
+		"(its exec stream was cut, or it was gone), so it was discarded and the next call gets a fresh one. "+
+		"The command did not run to completion — re-run it if it is safe to repeat.]", err)
+}
+
+// execOnce is the operation itself, its in-use marker and its post-exec sync.
+func (l *lazyExecutor) execOnce(ctx context.Context, command string, timeout time.Duration) (string, error) {
 	ex, err := l.pool.getInner(ctx, l.scope)
 	if err != nil {
 		return "", err
