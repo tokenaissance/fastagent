@@ -645,6 +645,10 @@ func (e *E2BExecutor) hydrateWorkspaceEntries(
 	return bundled
 }
 
+// listWorkspaceWithRetry bounds the cost of a flaky store listing. The prod
+// failure of 2026-09-16 was an intermittent `context deadline exceeded`, which
+// a retry is exactly the right answer for; the attempts and interval mirror the
+// hydrate exec loop's, so a slow store is treated the same in both phases.
 func (e *E2BExecutor) listWorkspaceWithRetry(ctx context.Context, listProject, listSession string) ([]workspace.ObjectInfo, error) {
 	for attempt := 1; ; attempt++ {
 		objs, err := e.workspace.List(ctx, e.agentID, listProject, listSession)
@@ -797,7 +801,7 @@ func (e *E2BExecutor) Hydrate(ctx context.Context) error {
 		if err == nil {
 			break
 		}
-		if attempt == hydrateAttempts || !retryableHydrateFailure(err) {
+		if attempt == hydrateAttempts || !sandboxUnusable(err) {
 			break
 		}
 		slog.Warn("retrying hydrate against a freshly created sandbox",
@@ -829,28 +833,11 @@ func (e *E2BExecutor) Hydrate(ctx context.Context) error {
 }
 
 // Hydrate's bounded retry. See shipBundleOnce for why a retry is safe and
-// retryableHydrateFailure for what is allowed to use it.
+// sandboxUnusable for what is allowed to use it.
 const (
 	hydrateAttempts      = 3
 	hydrateRetryInterval = 1500 * time.Millisecond
 )
-
-// retryableHydrateFailure reports whether an envd failure is the kind a
-// freshly created sandbox produces once and then not again: a stream that ended
-// without its exit-status trailer (the container was still coming up), or an
-// explicit 502/404 from the edge. Everything else — a 401 from a stale token, a
-// permission error inside the sandbox — is a verdict, and retrying it just
-// delays the report.
-func retryableHydrateFailure(err error) bool {
-	if err == nil {
-		return false
-	}
-	if sandboxGone(err) {
-		return true
-	}
-	var truncated *execStreamTruncatedError
-	return errors.As(err, &truncated)
-}
 
 // shipBundleOnce uploads the tar (when there is one) and runs the
 // mkdir/chown/extract script. Idempotent by construction, which is what makes
@@ -973,6 +960,37 @@ func sandboxGone(err error) bool {
 	status, ok := statusCodeOf(err)
 	return ok && isSandboxGone(status)
 }
+
+// sandboxUnusable reports whether err indicts the INSTANCE rather than the
+// command that ran on it: the sandbox is gone (502/404 from the edge), or the
+// exec stream ended without its exit-status trailer.
+//
+// Two callers ask this one question for two different reasons. Hydrate retries
+// it, because a sandbox created moments ago can cut one stream while it finishes
+// booting and every step of a hydrate is idempotent. The lifecycle layer
+// replaces the instance over it, because a sandbox that cuts a stream for an
+// ordinary tool call is broken for every subsequent call
+// (docs/sandbox-scope-leak.md §7.4).
+//
+// Deliberately narrow — NOT "the command exited non-zero", and not a 401 or a
+// permission error. Those are verdicts: retrying them delays the report, and
+// destroying a healthy sandbox over one would re-run side effects the command
+// already had.
+func sandboxUnusable(err error) bool {
+	if err == nil {
+		return false
+	}
+	if sandboxGone(err) {
+		return true
+	}
+	var truncated *execStreamTruncatedError
+	return errors.As(err, &truncated)
+}
+
+// Unusable implements the lifecycle-side UnusableClassifier, so the policy layer
+// can act on "this instance is bad" without knowing e2b's error shapes. Only the
+// question crosses the boundary; the vocabulary stays here.
+func (p *E2BExecutorPool) Unusable(err error) bool { return sandboxUnusable(err) }
 
 // connectEnvelope wraps JSON payload in Connect protocol envelope framing.
 // Format: [1 byte flags][4 bytes big-endian length][payload]
