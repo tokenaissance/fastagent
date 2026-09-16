@@ -625,6 +625,17 @@ func (e *E2BExecutor) listWorkspaceWithRetry(ctx context.Context, listProject, l
 // retries (docs/sandbox-scope-leak.md §9).
 func (e *E2BExecutor) WorkspaceUnhydrated() bool { return e.workspaceUnhydrated.Load() }
 
+// UnhydratedWorkspace is the read side of Policy C: a sandbox whose /workspace
+// never got filled from the store because the listing failed, so it may hold no
+// files at all — not "old files". Implemented twice on the way out to the
+// tools: by the executor itself (what this instance's hydrate achieved) and by
+// the lifecycle pool's lazy executor (what the scope's current instance came up
+// with, which the tools read to declare the state into the turn). See
+// docs/sandbox-scope-leak.md §9.2 and §9.5.
+type UnhydratedWorkspace interface {
+	WorkspaceUnhydrated() bool
+}
+
 func (e *E2BExecutor) Hydrate(ctx context.Context) error {
 	bundle := newTarBundle()
 

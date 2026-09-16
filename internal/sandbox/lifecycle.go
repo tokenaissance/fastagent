@@ -3,6 +3,7 @@ package sandbox
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
@@ -41,6 +42,20 @@ type LifecyclePool struct {
 	// lazy-creation re-hydrates from the durable store).
 	lastUsed map[string]time.Time
 	hydrated map[string]bool
+	// unhydrated records the scopes whose CURRENT instance was handed out with
+	// an unfilled /workspace (Policy C: the store listing failed after retries).
+	// The tool layer reads it through lazyExecutor.WorkspaceUnhydrated to put the
+	// fact in front of the model — the whole damage of 2026-09-16 was an empty
+	// workspace nobody mentioned (docs/sandbox-scope-leak.md §8–§9).
+	unhydrated map[string]bool
+	// rebuildAt rate-limits the Policy C repair per scope: an instance whose
+	// /workspace came up empty is destroyed and rebuilt (nothing else re-runs a
+	// hydrate for a live instance), but a store outage must not turn every tool
+	// call into a new sandbox. A clock rather than a one-shot flag because the
+	// only signal that the store came back is a successful hydrate, and we need
+	// to keep asking for one — a one-shot flag would leave the scope empty until
+	// idle eviction happened to recycle the instance.
+	rebuildAt map[string]time.Time
 	// inUse counts operations currently running against a scope. lastUsed is
 	// stamped when an operation STARTS, so an exec longer than idleTTL used to
 	// look idle and had its sandbox destroyed underneath it — a 20-minute build
@@ -70,6 +85,13 @@ type LifecyclePool struct {
 	// TTL on their own need the trailing renew; keeping it conditional keeps the
 	// common path free of an extra round trip.
 	longOpRenew time.Duration
+
+	// rebuildCooldown is the shortest interval between two Policy C rebuilds of
+	// the same scope. Zero disables the rate limit (every unhydrated call
+	// rebuilds) — that is what the unit tests use, and it is the honest setting
+	// for an operator who would rather spend sandboxes than serve an empty
+	// workspace.
+	rebuildCooldown time.Duration
 }
 
 // sandboxScope is the (agentID, projectID, sessionID) tuple a sandbox
@@ -89,16 +111,19 @@ func NewLifecyclePool(inner ExecutorPool, idleTTL, sweep time.Duration) *Lifecyc
 		sweep = 30 * time.Second
 	}
 	return &LifecyclePool{
-		inner:       inner,
-		idleTTL:     idleTTL,
-		sweep:       sweep,
-		lastUsed:    make(map[string]time.Time),
-		hydrated:    make(map[string]bool),
-		inUse:       make(map[string]int),
-		scopes:      make(map[string]sandboxScope),
-		longOpRenew: defaultLongOpRenew,
-		stopCh:      make(chan struct{}),
-		done:        make(chan struct{}),
+		inner:           inner,
+		idleTTL:         idleTTL,
+		sweep:           sweep,
+		lastUsed:        make(map[string]time.Time),
+		hydrated:        make(map[string]bool),
+		unhydrated:      make(map[string]bool),
+		rebuildAt:       make(map[string]time.Time),
+		rebuildCooldown: defaultRebuildCooldown,
+		inUse:           make(map[string]int),
+		scopes:          make(map[string]sandboxScope),
+		longOpRenew:     defaultLongOpRenew,
+		stopCh:          make(chan struct{}),
+		done:            make(chan struct{}),
 	}
 }
 
@@ -107,6 +132,14 @@ func NewLifecyclePool(inner ExecutorPool, idleTTL, sweep time.Duration) *Lifecyc
 // an operation that could outlive the TTL always renews, while the common
 // sub-second tool call never pays for it.
 const defaultLongOpRenew = 2 * time.Minute
+
+// defaultRebuildCooldown is how long a scope is spared a second Policy C
+// rebuild. The failure it bounds is a store listing that is down for minutes
+// (§8.3 measured a ten-minute window of `context deadline exceeded`); at a
+// minute, that outage costs one extra sandbox per scope per minute instead of
+// one per tool call, while a store that recovers inside the minute gets its
+// workspace back without waiting for the idle TTL.
+const defaultRebuildCooldown = time.Minute
 
 // LeaseRenewer is implemented by pools that hold a time-limited shared lease
 // for a scope (E2B does; docker has none). The lifecycle layer calls it after
@@ -438,6 +471,8 @@ func (p *LifecyclePool) Release(agentID, projectID, sessionID string) error {
 	p.mu.Lock()
 	delete(p.lastUsed, k)
 	delete(p.hydrated, k)
+	delete(p.unhydrated, k)
+	delete(p.rebuildAt, k)
 	delete(p.scopes, k)
 	p.mu.Unlock()
 	return p.inner.Release(agentID, projectID, sessionID)
@@ -463,6 +498,8 @@ func (p *LifecyclePool) CloseAll() {
 	p.mu.Lock()
 	p.lastUsed = make(map[string]time.Time)
 	p.hydrated = make(map[string]bool)
+	p.unhydrated = make(map[string]bool)
+	p.rebuildAt = make(map[string]time.Time)
 	p.inUse = make(map[string]int)
 	p.scopes = make(map[string]sandboxScope)
 	p.mu.Unlock()
@@ -493,14 +530,30 @@ func (p *LifecyclePool) getInner(ctx context.Context, sc sandboxScope) (Executor
 		return nil, err
 	}
 	// Policy C (docs/sandbox-scope-leak.md §9): a store listing that failed
-	// leaves a usable sandbox with an EMPTY /workspace. Hand it out — a store
-	// hiccup must not cost the scope its warm instance — but keep hydrated[k]
-	// false so the next use re-hydrates, and let the tools declare the state to
-	// the turn. Today's shape (set eagerly above, rolled back only when Get
-	// itself fails) is why nothing ever retried.
-	if ws, ok := ex.(interface{ WorkspaceUnhydrated() bool }); ok && ws.WorkspaceUnhydrated() {
+	// leaves a usable sandbox with an EMPTY /workspace. The original shape of
+	// this fix only rolled hydrated[k] back, on the theory that the next Get
+	// would retry the hydrate. On E2B it does not: a live cached executor is
+	// returned without re-hydrating (E2BExecutorPool.Get's cachedExecutor
+	// branch), so an empty workspace would have been served until the instance
+	// was evicted for idleness. The only thing that re-runs a hydrate is a
+	// recreated instance, so that is what an unhydrated one gets — rate-limited
+	// by rebuildCooldown, never while the scope is in use.
+	if ws, ok := ex.(UnhydratedWorkspace); ok {
+		if ws.WorkspaceUnhydrated() {
+			recovered, rebuildErr := p.recoverUnhydrated(ctx, sc, k, ex)
+			if rebuildErr != nil {
+				return nil, rebuildErr
+			}
+			ex = recovered
+			ws, _ = ex.(UnhydratedWorkspace)
+		}
 		p.mu.Lock()
-		p.hydrated[k] = false
+		if ws != nil && ws.WorkspaceUnhydrated() {
+			p.unhydrated[k] = true
+			p.hydrated[k] = false
+		} else {
+			delete(p.unhydrated, k)
+		}
 		p.mu.Unlock()
 	}
 	// Skip the per-file fallback when the inner pool already pushed
@@ -515,12 +568,94 @@ func (p *LifecyclePool) getInner(ctx context.Context, sc sandboxScope) (Executor
 	return ex, nil
 }
 
+// recoverUnhydrated is Policy C's repair half (§9.2 step 5, strengthened): the
+// scope's instance is alive but its /workspace was never filled, and no live
+// instance can be re-hydrated in place — so it is destroyed and rebuilt, and
+// the hydrate runs again on the fresh one.
+//
+// Two refusals, both deliberate:
+//
+//   - an operation is already in flight on this scope (inUse > 0). Releasing
+//     the instance underneath a running command truncates that command's
+//     stream, which is the second failure mode in §4 (M2) of the incident doc.
+//     The unhydrated instance is handed out for now; the next getInner after
+//     the in-flight operation finishes does the rebuild.
+//   - a rebuild this scope already had inside rebuildCooldown. A store that is
+//     down for minutes would otherwise mint a sandbox per tool call — twenty
+//     calls in a turn, twenty instances, all empty anyway.
+//
+// When the replacement comes up empty too (the store is still failing), it is
+// handed out regardless: refusing here would turn a read-only store outage into
+// an outage of the whole agent. The caller marks the scope unhydrated and the
+// tools declare it into the turn.
+//
+// The one path that returns an error is "the instance is gone and its
+// replacement could not be built" — there is nothing left to hand out, and the
+// caller has to fail the call rather than run a command against a destroyed
+// sandbox.
+func (p *LifecyclePool) recoverUnhydrated(ctx context.Context, sc sandboxScope, k string, ex Executor) (Executor, error) {
+	p.mu.Lock()
+	last, rebuilt := p.rebuildAt[k]
+	if p.inUse[k] > 0 || (rebuilt && time.Since(last) < p.rebuildCooldown) {
+		p.mu.Unlock()
+		return ex, nil
+	}
+	p.rebuildAt[k] = time.Now()
+	p.mu.Unlock()
+
+	slog.Warn("workspace not hydrated: rebuilding the sandbox to re-run the hydrate",
+		"agent", sc.agentID, "project", sc.projectID, "session", sc.sessionID)
+	// Release is the DESTROY path. The pause path is evictIdle → SleepScope,
+	// and pausing here would just park the empty instance for the next wake-up
+	// to hand out again.
+	if err := p.inner.Release(sc.agentID, sc.projectID, sc.sessionID); err != nil {
+		slog.Warn("workspace rebuild: release failed, keeping the unhydrated instance",
+			"agent", sc.agentID, "project", sc.projectID, "session", sc.sessionID, "error", err)
+		return ex, nil
+	}
+
+	p.mu.Lock()
+	// inner.Release does not touch the lifecycle maps, so drop the dead
+	// instance's entries here and re-arm the hydrate for the replacement.
+	delete(p.lastUsed, k)
+	delete(p.scopes, k)
+	p.hydrated[k] = true
+	p.lastUsed[k] = time.Now()
+	p.scopes[k] = sc
+	p.mu.Unlock()
+
+	replacement, err := p.inner.Get(ctx, sc.agentID, sc.projectID, sc.sessionID)
+	if err != nil {
+		slog.Error("workspace rebuild: recreate failed after the empty instance was destroyed",
+			"agent", sc.agentID, "project", sc.projectID, "session", sc.sessionID, "error", err)
+		p.mu.Lock()
+		p.hydrated[k] = false
+		p.mu.Unlock()
+		return nil, fmt.Errorf("workspace rebuild: %w", err)
+	}
+	return replacement, nil
+}
+
 // lazyExecutor is what Get() hands back. Each tool call routes through
 // pool.getInner which (a) refreshes the idle timer and (b) lazily creates
 // the real sandbox if this is the first call since last eviction.
 type lazyExecutor struct {
 	pool  *LifecyclePool
 	scope sandboxScope
+}
+
+// WorkspaceUnhydrated reports whether the scope's current instance was handed
+// out with an unfilled /workspace — the state the tool layer turns into a
+// declaration on workspace-touching results (docs/sandbox-scope-leak.md §9.5).
+//
+// Answered from the pool's bookkeeping rather than by asking the inner
+// executor: the inner executor is created lazily, and a question about the
+// workspace must never be the thing that spins a sandbox up (or, worse, blocks
+// behind one being created).
+func (l *lazyExecutor) WorkspaceUnhydrated() bool {
+	l.pool.mu.Lock()
+	defer l.pool.mu.Unlock()
+	return l.pool.unhydrated[poolKey(l.scope.agentID, l.scope.projectID, l.scope.sessionID)]
 }
 
 func (l *lazyExecutor) Exec(ctx context.Context, command string, timeout time.Duration) (string, error) {
