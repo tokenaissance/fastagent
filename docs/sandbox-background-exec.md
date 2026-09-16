@@ -183,10 +183,14 @@ error now carries the next step instead of a bare provider string
 |---|---|---|
 | `e2b exec body read: context canceled` | ours — turn budget expired, turn superseded, caller gone | the process it started may still be running: check `ps` and the log it redirected to, adopt that result, and prefer `run_in_background` next time |
 | `did not exit cleanly … server error: deadline_exceeded` | envd's `Connect-Timeout-Ms` | if output was delivered, say so; a process the command started is holding the exec stream — run it with `run_in_background` instead |
+| `… [sandbox replaced: …]` appended to a cut stream | neither clock — the **instance**, not the command | the sandbox was discarded, so the next call gets a fresh one, and the command did **not** run to completion: re-run it only if repeating it is safe (see [§7 of the leak record](sandbox-scope-leak.md)) |
 
-Both are additive: the provider's own text and the partial output are
-unchanged, and a plain truncation (a sandbox still booting, which `Hydrate`
-retries) gets no hint at all.
+All three are additive: the provider's own text and the partial output are
+unchanged. The two clock hints are attached where the error is built (the
+adapter, `e2b_executor.go`); the replacement sentence is attached one layer up,
+by whoever actually discarded the instance (the lifecycle pool), and only when
+the discard succeeded — a failed release leaves the error exactly as the
+provider wrote it, so the sentence never claims a repair that did not happen.
 
 ## Where the code lives
 
