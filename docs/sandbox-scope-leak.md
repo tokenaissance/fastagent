@@ -83,7 +83,7 @@ kubectl --context do-nyc2-tokenaissance-nyc2 -n production run cron-check --rm -
 
 ---
 
-## 7. 修复设计：把"流被切断"变成一次可解释的重试（③，**已设计、未实现**）
+## 7. 修复设计：把"流被切断"变成可解释的恢复（③，**已设计、未实现**；复查见 §7.4，有一处决定待定）
 
 ### 7.1 为什么是 ③，而不是 ①②
 
@@ -128,13 +128,45 @@ func (l *lazyExecutor) Exec(ctx, command, timeout) (string, error) {
 
 ### 7.3 用例（红→绿；沿用现有替身与用例风格）
 
+> 注：下面第 ② 条"命令只重跑一次"是**原设计**。§7.4 的复查建议把它改成"换实例 + 明确错误"（不自动重跑），理由见那一节。
+
 1. 假 E2B 客户端：第一次 exec 返回 `unavailable: … ended before the stream completed`，第二次成功；
 2. 断言：①该错误被判为 unusable；②走的是**销毁**而非 pause（对照 `TestE2BExecutorFailedRebuildRestoresIdentityAndDestroysReplacement` 的写法）；③命令**只**重跑一次；④模型只收到第二次的结果；
 3. 反向用例：命令返回非零（`exit code 1`）**不得**触发重试。
 
-### 7.4 还可以顺带做的（低优先）
+### 7.4 复查（2026-09-17）：能复用什么，以及一处**该改的决定**
 
-给 `e2b sandbox created` / `e2b sandbox hydrated` 两行补 `scopeKey`：本轮靠"轮次活动时刻 vs create 时刻"才把四个实例与四个 scope 对齐，补上字段后下次一眼可见。注意 `e2b sandbox hydrated` 在 `E2BExecutor.Hydrate`（`:730`），而 `E2BExecutor` 目前**没有** scope 字段 —— 所以这是"给执行器加一个字段"的小改动，不是一行日志。
+**现状**：针对"流被切断"**没有任何重试** —— 不只池层没有，工具层还明确表态不要自动回退：
+
+```
+internal/agent/tools/exec.go:631
+// Hint, don't auto-fall-back: an auto-retry to host shell would …
+```
+
+**可复用的（都在 `da37174` 之后才有）**：
+
+* `recoverUnhydrated`（`lifecycle.go:596`）= **销毁重建** + 两道闸门（`inUse` / `rebuildCooldown`），正是 §7.2「坏实例要销毁，不能走 pause」想要的那条路；
+* `UnhydratedWorkspace` 接口的形状（适配器判、策略层消费）可原样套用给"不可用"分类；
+* `execStreamTruncatedError`（`:1090`，产出于 `:1366`）已经是**类型化**的切断错误，且 detail 里已带 `clockHint` 与首帧诊断。
+
+**新增约束（原设计没写）**：`recoverUnhydrated` 在 `inUse[k] > 0` 时**直接跳过**（`:599`），而 exec 期间 `inUse[k]` 恰好 >0（`beginUse` 持有）→ **恢复动作必须落在 in-use 窗口之外**。这正好印证 §7.2 挂点 2 的做法（抽出 `execOnce`、外层再动），另一个可选通路是"标记待重建、由 `endUse` 兜底"。
+
+**该改的决定（需要点头）**：§7.3 写的是"**命令只重跑一次**"。复查后**建议改成"不自动重跑"**：
+
+| 方案 | 行为 | 代价 |
+|---|---|---|
+| 原设计：自动重跑一次 | 切断 → 销毁 → 重跑 → 模型只看到第二次结果 | **流被切断时命令可能已产生部分副作用**，静默重跑会放大它；且与工具层"hint, don't auto-fall-back"的取向相反 |
+| **建议：换实例 + 明确错误** | 切断 → 销毁坏实例（下次拿到健康的）→ 返回**带说明的错误**（"流被切断；实例已替换；如可重复请重发"） | 常见情形（实例被唤醒后开流失败、命令其实没跑）需要模型主动重发一次 —— 但这正是它该做的判断，而不是我们替它猜 |
+
+理由：① 与策略 C 的取向一致（**声明优先于静默修复**）；② 工具层已有"给提示、不自动回退"的先例；③ 重跑非幂等命令的后果不可回收，而多一次重发的成本可回收。**若仍要自动重跑，则必须声明**（"已重跑一次"），并把副作用风险写进契约。
+
+**不管选哪条，判据都要窄**：只认传输层信号（`sandboxGone` 的 502/404 ∪ `unavailable` ∪ `ended before the stream completed` ∪ `did not exit cleanly`），**绝不认"命令返回非零"**。
+
+**最小切片（走"换实例 + 明确错误"）**：分类器（`sandboxUnusable` + `UnusableClassifier`，照 `UnhydratedWorkspace` 的形状）→ 抽 `execOnce` → `Exec` 外层：切断 → `p.inner.Release`（销毁，**不是** pause）→ 返回带替换说明的错误。用例：①切断一次 → 实例被销毁、错误含"已替换"、**未**重跑；②非零退出 → 不销毁、不替换（判据窄）；③切断但 `Release` 失败 → 原错误照常返回（**不**假装已修复）。
+
+### 7.5 顺带做的（低优先，**已于 2026-09-17 完成**）
+
+给 `created` / `hydrated` 补 `scopeKey` —— ✅ `9e5b924`：绑定那一刻打 `e2b sandbox bound to scope`（覆盖建/采纳/恢复），`hydrated` 行也带上 scope。原以为"执行器没有 scope 字段"，实际 `agentID/projectID/sessionID` 早在（`:100-102`），缺的只是没打印。
 
 ---
 
@@ -396,7 +428,7 @@ if ex, ok := p.cachedExecutor(key); ok {
 | 装进 tar 的 → **盘上真的有** | ❌ **无独立断言** | 只有 `tar -xzf` 退出码背书（容器侧逐路径比对刻意未做，理由见 §9.3） |
 | 未水合 → 恢复 | ✅ ③ | 回滚 + 重建 + 两道闸门 |
 | 人与模型知情 | 🟡 ④ | 模型侧 ⓑ 有 e2e 钉住；**人侧 ⓒ 未做** |
-| §7「流被切断 → 有界重试」 | ⬜ | 与本次故障正交（那是实例不可用，这是容器本来就空），优先级仍低于本刀 |
+| §7「流被切断 → 恢复」 | 🟡 | **已复查**（§7.4）：能复用的比原设计多（`recoverUnhydrated` 的销毁重建 + `UnhydratedWorkspace` 的接口形状 + 类型化的 `execStreamTruncatedError`），并发现一条新约束（`recoverUnhydrated` 在 `inUse>0` 时跳过 → 恢复必须在 in-use 窗口外）。**待定一处**：原设计的"自动重跑一次"建议改成"换实例 + 明确错误"（与工具层 `exec.go:631` 的"hint, don't auto-fall-back"取向一致，且不放大非幂等命令的副作用） |
 | B 案（文件工具通道绕开 hydrate） | ⬜ | **不在本仓**（Quandora session 的持久层） |
 | 削掉残留竞态 | ⬜ | `recoverUnhydrated` 是"先查 `inUse`、再 Release"两步；两次之间进来的并发调用可能拿到即将被销毁的实例。窗口在一次调用内，失败形态是那次 exec 报错（不是静默数据丢失）。要彻底关掉需要引入"重建中"状态并让 `beginUse` 等待——在有实测证据说明这条竞态真的咬到人之前，不值得为它加一个状态机 |
 
