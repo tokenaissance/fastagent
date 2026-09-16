@@ -83,52 +83,66 @@ kubectl --context do-nyc2-tokenaissance-nyc2 -n production run cron-check --rm -
 
 ---
 
-## 7. 修复设计：把"流被切断"变成可解释的恢复（③，**已设计、未实现**；复查见 §7.4，有一处决定待定）
+## 7. 修复设计：把"流被切断"变成可解释的恢复（③，**已实现**：`c5448f7` + `e62f924` + `d9a2d51`，落地记录见 §7.6）
 
 ### 7.1 为什么是 ③，而不是 ①②
 
-排查确认（见 §3、§4）：**pause 由我们自己发起且已受保护** —— `evictIdle` 跳过 `inUse[k] > 0`（`lifecycle.go:265`），`beginUse` 在 `ex.Exec` 之前、`endUse` 用 defer 覆盖到后置同步结束（`:523/530`），长操作还有 `extendBudget` 主动延期 TTL（`:355`）。缺的不是仲裁（①②），而是**唤醒/损坏实例上开流失败之后没有任何恢复**：代码对它的处理只有注释里那句 *"the truncation that follows is classified like any other cut stream"* —— **被归类，没有被恢复**。
+排查确认（见 §3、§4）：**pause 由我们自己发起且已受保护** —— `evictIdle` 跳过 `inUse[k] > 0`（`lifecycle.go:314`），`beginUse`（`:206`）在 `ex.Exec` 之前、`endUse`（`:218`）用 defer 覆盖到后置同步结束，长操作还有 `extendBudget`（`:406`）主动延期 TTL。缺的不是仲裁（①②），而是**唤醒/损坏实例上开流失败之后没有任何恢复**：代码对它的处理只有注释里那句 *"the truncation that follows is classified like any other cut stream"*（`extendBudget` 的注释，`:403`）—— **被归类，没有被恢复**（这是**本条线之前**的状态；`c5448f7` + `e62f924` 之后，归类会被执行，见 §7.6）。
 
-### 7.2 两个挂点（都沿用仓库既有模式）
+> 本节的锚一律给出**符号名**，行号只作同一提交内的定位参考（这一线每次改名/搬家都会让纯行号过期；凡是行号，都在当次提交里核对过）。
+
+### 7.2 两个挂点（都沿用仓库既有模式）—— **已落，实际形状见 §7.6**
 
 **挂点 1：分类留在适配器**（沿用 `ScopeSleeper` / `ScopeExtender` / `workspaceAware` 的接口风格，以及 `SleepScope` 注释里的原则 *"The classification lives here, not in the lifecycle layer"*）
 
 ```go
-// e2b_executor.go，紧挨 sandboxGone(:881)
-func sandboxUnusable(err error) bool   // 现有 sandboxGone(502/404) ∪ unavailable ∪ "ended before the stream" ∪ "did not exit cleanly"
+// e2b_executor.go：紧挨 sandboxGone，全仓唯一的谓词
+func sandboxUnusable(err error) bool               // sandboxGone(502/404) ∪ *execStreamTruncatedError
 
-func (p *E2BExecutorPool) Unusable(err error) bool { return sandboxUnusable(err) }
+func (p *E2BExecutorPool) Unusable(err error) bool { return sandboxUnusable(err) } // 只把"问题"递出去
 
 // lifecycle.go
 type UnusableClassifier interface{ Unusable(err error) bool }
-func (p *LifecyclePool) unusable(err error) bool { c, ok := p.inner.(UnusableClassifier); return ok && c.Unusable(err) }
+func (p *LifecyclePool) unusable(err error) bool {
+	c, ok := p.inner.(UnusableClassifier)
+	return ok && c.Unusable(err) // 答不上来的后端 = 不处理，行为不变
+}
 ```
 
-判据要**窄**：只认传输层信号，**不认"命令返回非零"** —— 否则用户脚本的真实失败会被重复执行。
+判据要**窄**：只认传输层信号，**不认"命令返回非零"**（也**不认** 401 / 权限错误）—— 那两样是命令或请求的判决，按实例故障处理会毁掉健康的沙箱，并把命令已经产生的副作用再跑一遍。
 
-**挂点 2：重试放在 in-use 之外**（避免 `Release` 与 defer 的 `endUse` 互相踩）
+**实际到达这个判据的，只有"切断"那一类**：e2b 适配器自己已经在 `sandboxGone` 上重建并重跑一次（`E2BExecutor.Exec` → `recreateIfCurrent`，`49b5ae9`），所以一个 502/404 的普通 exec 轮不到 lifecycle 看见；`sandboxGone` 留在判据里是为了**重建也失败**之后的残余（`sandbox recreate failed: %w` 会把状态码带上来）。那条既有的静默重跑不在本刀的承诺范围内，见 §7.6 第三条边界。
 
-把 `lazyExecutor.Exec` 现有函数体抽成 `execOnce`（getInner → beginUse → extendBudget → defer endUse → ex.Exec → 后置同步），外层只做一次重试：
+一处**必须写下来的修正**：原设计列了四个信号（`sandboxGone` ∪ `unavailable` ∪ "ended before the stream completed" ∪ "did not exit cleanly"），代码里其实只有**两类** —— `unavailable` 从来不是一个独立形状；而 "ended before the stream completed" 与 "did not exit cleanly" 是**同一个** `execStreamTruncatedError`（`:1384` 产出，detail 里两种措辞）。所以谓词**按类型判、不按措辞判**。这张边界由 `TestSandboxUnusableIsAboutTheInstanceNotTheCommand` 的表格钉住。
+
+这个谓词和 Hydrate 的重试判据本来是同一件事的两份拷贝（同一个函数体、同一组信号），现已收敛成一份：Hydrate 重试它（新起的沙箱会切一次流，且 hydrate 每步幂等），lifecycle 用它决定换实例（一个对普通工具调用切流的沙箱，对后面每一次调用都是坏的）。
+
+**挂点 2：恢复动作放在 in-use 之外**（避免 `Release` 与 defer 的 `endUse` 互相踩）
+
+把 `lazyExecutor.Exec` 原有函数体原样抽成 `execOnce`，外层只做"判定 → 销毁 → 加一句说明"：
 
 ```go
+// execOnce：getInner → beginUse → extendBudget → defer endUse → ex.Exec → 后置 syncSnapshot
+
 func (l *lazyExecutor) Exec(ctx, command, timeout) (string, error) {
     out, err := l.execOnce(ctx, command, timeout)
-    if err != nil && l.pool.unusable(err) {
-        // 坏实例要**销毁**，不能走 sleepOrRelease 的 pause 路径 ——
-        // 否则重试会唤醒同一个坏实例。
-        if relErr := l.pool.Release(sc.agentID, sc.projectID, sc.sessionID); relErr == nil {
-            out, err = l.execOnce(ctx, command, timeout)
-        }
+    if err == nil || !l.pool.unusable(err) {
+        return out, err
     }
-    return out, err
+    if relErr := l.pool.Release(...); relErr != nil {
+        return out, err                              // 销毁失败：不假装修复
+    }
+    return out, fmt.Errorf("%w\n[sandbox replaced: …]", err)  // 不重跑
 }
 ```
 
 `Release` → `inner.Release` 是销毁路径；`evictIdle` → `sleepOrRelease` → `SleepScope` 才是 pause 路径。两者**必须区分**，这是本设计里最容易写错的一处。
 
+这里走的是 `LifecyclePool.Release`（而不是像 `recoverUnhydrated` 那样直接调 `inner.Release`）：它会连带清掉 `lastUsed / hydrated / unhydrated / rebuildAt / scopes`，于是下一次 `Get` 既拿到新实例、也会重新跑 hydrate。这条选择的代价见 §7.6 的边界表。
+
 ### 7.3 用例（红→绿；沿用现有替身与用例风格）
 
-> 注：下面第 ② 条"命令只重跑一次"是**原设计**。§7.4 的复查建议把它改成"换实例 + 明确错误"（不自动重跑），理由见那一节。
+> 注：下面第 ② 条"命令只重跑一次"是**原设计**，已在 §7.4 被取代（**换实例 + 明确错误**，不自动重跑）。原文保留，是为了让"为什么改"有对照物；**实际落地**的三条用例见 §7.6。
 
 1. 假 E2B 客户端：第一次 exec 返回 `unavailable: … ended before the stream completed`，第二次成功；
 2. 断言：①该错误被判为 unusable；②走的是**销毁**而非 pause（对照 `TestE2BExecutorFailedRebuildRestoresIdentityAndDestroysReplacement` 的写法）；③命令**只**重跑一次；④模型只收到第二次的结果；
@@ -145,28 +159,56 @@ internal/agent/tools/exec.go:631
 
 **可复用的（都在 `da37174` 之后才有）**：
 
-* `recoverUnhydrated`（`lifecycle.go:596`）= **销毁重建** + 两道闸门（`inUse` / `rebuildCooldown`），正是 §7.2「坏实例要销毁，不能走 pause」想要的那条路；
+* `recoverUnhydrated`（`lifecycle.go:614`）= **销毁重建** + 两道闸门（`inUse` / `rebuildCooldown`），正是 §7.2「坏实例要销毁，不能走 pause」想要的那条路；
 * `UnhydratedWorkspace` 接口的形状（适配器判、策略层消费）可原样套用给"不可用"分类；
-* `execStreamTruncatedError`（`:1090`，产出于 `:1366`）已经是**类型化**的切断错误，且 detail 里已带 `clockHint` 与首帧诊断。
+* `execStreamTruncatedError`（`:1108`，产出于 `:1384`）已经是**类型化**的切断错误，且 detail 里已带 `clockHint` 与首帧诊断。
 
-**新增约束（原设计没写）**：`recoverUnhydrated` 在 `inUse[k] > 0` 时**直接跳过**（`:599`），而 exec 期间 `inUse[k]` 恰好 >0（`beginUse` 持有）→ **恢复动作必须落在 in-use 窗口之外**。这正好印证 §7.2 挂点 2 的做法（抽出 `execOnce`、外层再动），另一个可选通路是"标记待重建、由 `endUse` 兜底"。
+**新增约束（原设计没写）**：`recoverUnhydrated` 在 `inUse[k] > 0` 时**直接跳过**（`:617`），而 exec 期间 `inUse[k]` 恰好 >0（`beginUse` 持有）→ **恢复动作必须落在 in-use 窗口之外**。这正好印证 §7.2 挂点 2 的做法（抽出 `execOnce`、外层再动），另一个可选通路是"标记待重建、由 `endUse` 兜底"。
 
-**该改的决定（需要点头）**：§7.3 写的是"**命令只重跑一次**"。复查后**建议改成"不自动重跑"**：
+**已定的决定（2026-09-17，用户点头）**：§7.3 写的是"**命令只重跑一次**"，改为"**换实例 + 明确错误**"（不自动重跑）：
 
 | 方案 | 行为 | 代价 |
 |---|---|---|
 | 原设计：自动重跑一次 | 切断 → 销毁 → 重跑 → 模型只看到第二次结果 | **流被切断时命令可能已产生部分副作用**，静默重跑会放大它；且与工具层"hint, don't auto-fall-back"的取向相反 |
-| **建议：换实例 + 明确错误** | 切断 → 销毁坏实例（下次拿到健康的）→ 返回**带说明的错误**（"流被切断；实例已替换；如可重复请重发"） | 常见情形（实例被唤醒后开流失败、命令其实没跑）需要模型主动重发一次 —— 但这正是它该做的判断，而不是我们替它猜 |
+| **采纳（已落）：换实例 + 明确错误** | 切断 → 销毁坏实例（下次拿到健康的）→ 返回**带说明的错误**（"流被切断；实例已替换；如可重复请重发"） | 常见情形（实例被唤醒后开流失败、命令其实没跑）需要模型主动重发一次 —— 但这正是它该做的判断，而不是我们替它猜 |
 
 理由：① 与策略 C 的取向一致（**声明优先于静默修复**）；② 工具层已有"给提示、不自动回退"的先例；③ 重跑非幂等命令的后果不可回收，而多一次重发的成本可回收。**若仍要自动重跑，则必须声明**（"已重跑一次"），并把副作用风险写进契约。
 
-**不管选哪条，判据都要窄**：只认传输层信号（`sandboxGone` 的 502/404 ∪ `unavailable` ∪ `ended before the stream completed` ∪ `did not exit cleanly`），**绝不认"命令返回非零"**。
+**判据要窄**：只认传输层信号，**绝不认"命令返回非零"**（也绝不认 401 / 权限错误）。实际判据只有两类 —— `sandboxGone`(502/404) 与类型化的 `execStreamTruncatedError`；原设计里"四个信号"的写法已在 §7.2 更正过。
 
-**最小切片（走"换实例 + 明确错误"）**：分类器（`sandboxUnusable` + `UnusableClassifier`，照 `UnhydratedWorkspace` 的形状）→ 抽 `execOnce` → `Exec` 外层：切断 → `p.inner.Release`（销毁，**不是** pause）→ 返回带替换说明的错误。用例：①切断一次 → 实例被销毁、错误含"已替换"、**未**重跑；②非零退出 → 不销毁、不替换（判据窄）；③切断但 `Release` 失败 → 原错误照常返回（**不**假装已修复）。
+**最小切片 —— 已落**（分类器 `c5448f7`、lifecycle `e62f924`、用例 `d9a2d51`）：分类器（`sandboxUnusable` + `UnusableClassifier`，照 `UnhydratedWorkspace` 的形状）→ 抽 `execOnce` → `Exec` 外层：切断 → `Release`（销毁，**不是** pause）→ 返回带替换说明的错误。用例：①切断一次 → 实例被销毁、错误含"已替换"、**未**重跑；②非零退出 → 不销毁、不替换（判据窄）；③切断但 `Release` 失败 → 原错误照常返回（**不**假装已修复）。逐条对照见 §7.6。
 
 ### 7.5 顺带做的（低优先，**已于 2026-09-17 完成**）
 
 给 `created` / `hydrated` 补 `scopeKey` —— ✅ `9e5b924`：绑定那一刻打 `e2b sandbox bound to scope`（覆盖建/采纳/恢复），`hydrated` 行也带上 scope。原以为"执行器没有 scope 字段"，实际 `agentID/projectID/sessionID` 早在（`:100-102`），缺的只是没打印。
+
+### 7.6 落地记录（2026-09-17）：三个提交、三条用例、三条已知边界
+
+| 提交 | 文件 | 内容 |
+|---|---|---|
+| `c5448f7` | `e2b_executor.go`（+ 2 个测试文件） | 谓词收敛成**一份**：`sandboxUnusable` 放在 `sandboxGone` 旁；Hydrate 的重试与 lifecycle 的替换读同一个定义。顺带修好被打断时错位的文档注释 —— `listWorkspaceWithRetry` 曾经失去自己的注释块。 |
+| `e62f924` | `lifecycle.go` | `UnusableClassifier` + `unusable()`；`Exec` 拆成外层（判定 → `Release` 销毁 → 加一句说明）与 `execOnce`（原函数体，含 in-use 窗口与后置同步）。 |
+| `d9a2d51` | `lifecycle_test.go` | §7.4 的三条用例；替身加了两样：按**实例** armed 的 `execErr`、可失败的 `Release`。 |
+
+（另有一条注释修正 `9599e00`：`extendBudget` 的注释原先用"被归类"来解释"延期失败可以容忍"，而现在归类会被执行 —— 同一句话、不同的代价。）
+
+三条用例各自守的真相（与 §9.8 的分类一致）：
+
+| 用例 | 断言 | 守的是 |
+|---|---|---|
+| `TestLifecycle_CutStreamReplacesTheInstanceWithoutReRunning` | 切断 → `releases==1`、旧实例 `closed==1`、错误里既有 provider 原文又有 `sandbox replaced`、切断后 `creates==1`（替换由**下一次**调用造）、旧实例 `execs==2` | ①销毁而非 pause；②模型看得出"实例被换过"；③**不是重跑** |
+| `TestLifecycle_CommandFailureIsNotAnInstanceFailure` | `exit code 1` → `releases==0`、`closed==0`、线上仍是同一个实例、错误里没有 `sandbox replaced` | 判据窄：命令的判决不许花掉一个沙箱 |
+| `TestLifecycle_FailedReplaceDoesNotClaimARepair` | 切断但 `Release` 失败 → provider 原文返回、**没有** `sandbox replaced`、实例未被 close | 双重故障时不许撒谎 |
+
+灵敏度（都实跑过、再改回）：还原 `lifecycle.go` → 用例①红，红在 *"nothing tells the model the instance was replaced"*（这正是事故的伤害：坏实例被原样递回来）；把判定放宽成"任何错误都是实例故障" → 用例②红（`exit code 1` 也报了替换）；忽略 `Release` 的失败 → 用例③红。`go test ./internal/sandbox/ -race` 绿（21.3s）。判据本身的边界另有表格用例（nil / 裸切断 / 包装过的切断 / 502 / 404 判为实例；`exit code 1` / 401 / 传输错误不判）。
+
+只做了一条路 —— 这里的**故意**和**欠账**要分开写：
+
+| 边界 | 现状 | 为什么先停在这 |
+|---|---|---|
+| 只有 `Exec` 走这条路 | `ReadFile` / `WriteFile` 拿到同类错误时仍然只是把错误交回调用方，下一次调用还会发到同一个坏实例 | §7 的事故形状是 exec 流被切断。给读/写也套一层，得先回答"写了一半的写操作要不要重放"—— 那是另一个决定，不该顺手替它做 |
+| `Release` 失败后账本与实况短暂不一致 | `LifecyclePool.Release` 先清 lifecycle 的 map 再转发给 inner；失败时 map 已清、实例仍在，下一次 `Get` 会把同一个坏实例取回来，再失败一次、再尝试一次销毁。错误文本不撒谎（用例③），但这一轮多花一次 exec | 这是 `Release` 既有的语义（`recoverUnhydrated` 为了绕开它才直接调 `inner.Release`）。两条路要合并，得先统一"失败时谁保留账本"—— 不在这一刀里做 |
+| 适配器对 `sandboxGone` 已经**静默重跑**过一次（本条线更早的提交带进来的，且没有文档写过它） | 502/404 上 `E2BExecutor.Exec` 走 `recreateIfCurrent` → 再 `execOnce`：命令执行两遍，模型只看到第二遍（`49b5ae9`）。所以"不重跑"的承诺只覆盖**切断那一类** | 要一起改，得先回答"重建后要不要重跑"：那里是**就地重建、保留 pool 槽位**，与 lifecycle 的销毁是两条路，合并它们本身是一个决定 |
 
 ---
 
@@ -428,7 +470,7 @@ if ex, ok := p.cachedExecutor(key); ok {
 | 装进 tar 的 → **盘上真的有** | ❌ **无独立断言** | 只有 `tar -xzf` 退出码背书（容器侧逐路径比对刻意未做，理由见 §9.3） |
 | 未水合 → 恢复 | ✅ ③ | 回滚 + 重建 + 两道闸门 |
 | 人与模型知情 | 🟡 ④ | 模型侧 ⓑ 有 e2e 钉住；**人侧 ⓒ 未做** |
-| §7「流被切断 → 恢复」 | 🟡 | **已复查**（§7.4）：能复用的比原设计多（`recoverUnhydrated` 的销毁重建 + `UnhydratedWorkspace` 的接口形状 + 类型化的 `execStreamTruncatedError`），并发现一条新约束（`recoverUnhydrated` 在 `inUse>0` 时跳过 → 恢复必须在 in-use 窗口外）。**待定一处**：原设计的"自动重跑一次"建议改成"换实例 + 明确错误"（与工具层 `exec.go:631` 的"hint, don't auto-fall-back"取向一致，且不放大非幂等命令的副作用） |
+| §7「流被切断 → 恢复」 | ✅ | **已落**（`c5448f7` + `e62f924` + `d9a2d51`）：判定为实例故障（`sandboxGone` 502/404 ∪ 类型化的切断）→ **销毁**换实例 + 返回带说明的错误，**不重跑**（与工具层 `exec.go:631` 的"hint, don't auto-fall-back"一致）。三条用例与两条已知边界见 §7.6；**只覆盖 `Exec`**，`ReadFile`/`WriteFile` 是已知边界 |
 | B 案（文件工具通道绕开 hydrate） | ⬜ | **不在本仓**（Quandora session 的持久层） |
 | 削掉残留竞态 | ⬜ | `recoverUnhydrated` 是"先查 `inUse`、再 Release"两步；两次之间进来的并发调用可能拿到即将被销毁的实例。窗口在一次调用内，失败形态是那次 exec 报错（不是静默数据丢失）。要彻底关掉需要引入"重建中"状态并让 `beginUse` 等待——在有实测证据说明这条竞态真的咬到人之前，不值得为它加一个状态机 |
 
