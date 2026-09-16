@@ -14,6 +14,16 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/workspace"
 )
 
+// The two failures the §7.4 tests have to tell apart: one that indicts the
+// INSTANCE (a stream cut mid-flight — the prod text is "the connection to
+// sandbox … ended before the stream completed") and one that is the command's
+// own verdict. Only the first may cost a sandbox.
+var (
+	errFakeCutStream      = errors.New("fake e2b: the connection to sandbox sb-1 ended before the stream completed")
+	errFakeCommandVerdict = errors.New("exit code 1")
+	errFakeReleaseFailed  = errors.New("fake pool: release failed (502)")
+)
+
 // fakeExecutor counts Exec calls so tests can prove the sandbox was actually
 // invoked (or wasn't). Also records WriteFile targets so hydrate tests can
 // check which paths landed inside the sandbox.
@@ -24,6 +34,11 @@ type fakeExecutor struct {
 
 	mu     sync.Mutex
 	writes map[string]string
+	// execErr, when set, is what this instance's Exec returns. Armed per
+	// INSTANCE on purpose: the test that arms it wants the first instance to
+	// fail and its replacement to be healthy — the shape of §7.4, where the
+	// answer to a bad instance is a new instance, not a re-run of the command.
+	execErr error
 
 	// workspaceUnhydrated is what WorkspaceUnhydrated() reports. The zero value
 	// — a workspace that was filled from the store — is what every test written
@@ -33,6 +48,15 @@ type fakeExecutor struct {
 
 func (f *fakeExecutor) Exec(ctx context.Context, command string, timeout time.Duration) (string, error) {
 	atomic.AddInt32(&f.execs, 1)
+	f.mu.Lock()
+	err := f.execErr
+	f.mu.Unlock()
+	if err != nil {
+		// Real cut streams still deliver whatever the command printed before
+		// the cut, so the fake does too: the fix must not turn a partial result
+		// into a silent one.
+		return "partial output\n", err
+	}
 	return "ok", nil
 }
 func (f *fakeExecutor) ReadFile(ctx context.Context, path string) (string, error) { return "", nil }
@@ -70,6 +94,9 @@ type fakePool struct {
 	// a hypothetical one (`go test -race` finds it).
 	liveMu sync.Mutex
 	live   map[string]*fakeExecutor
+	// releaseErr, when set, makes Release fail — the double failure of §7.4's
+	// third case: the instance is known to be bad and cannot be destroyed.
+	releaseErr error
 }
 
 func newFakePool() *fakePool { return &fakePool{live: map[string]*fakeExecutor{}} }
@@ -93,12 +120,21 @@ func (p *fakePool) Release(agentID, projectID, sessionID string) error {
 	key := poolKey(agentID, projectID, sessionID)
 	p.liveMu.Lock()
 	defer p.liveMu.Unlock()
+	if p.releaseErr != nil {
+		return p.releaseErr
+	}
 	if ex, ok := p.live[key]; ok {
 		delete(p.live, key)
 		return ex.Close()
 	}
 	return nil
 }
+
+// Unusable is the classifier the lifecycle layer asks (§7.4). The fake answers
+// for one sentinel so a test can say "this failure indicts the instance"
+// without speaking e2b's wire vocabulary; the real classifier is pinned against
+// real error shapes in e2b_unusable_test.go.
+func (p *fakePool) Unusable(err error) bool { return errors.Is(err, errFakeCutStream) }
 
 func (p *fakePool) Backend() string { return "fake" }
 
@@ -550,6 +586,156 @@ func TestLifecycle_UnhydratedRebuildWaitsForInFlightWork(t *testing.T) {
 	inner.liveMu.Unlock()
 	if before != after {
 		t.Fatal("the busy scope's instance was replaced while an operation was in flight")
+	}
+}
+
+// §7.4 case ①: an exec stream that dies mid-flight indicts the INSTANCE, and
+// the repair is to destroy it so the next call gets a healthy one.
+//
+// What this deliberately does NOT do is re-run the command. A cut stream can
+// leave the command's side effects half-applied, and the tool layer's own
+// stance is "hint, don't auto-fall-back" (internal/agent/tools/exec.go) — so
+// the provider's verdict goes back untouched, plus one sentence saying the
+// instance was replaced and the command did not finish.
+func TestLifecycle_CutStreamReplacesTheInstanceWithoutReRunning(t *testing.T) {
+	inner := newFakePool()
+	lp := NewLifecyclePool(inner, 0, 0) // eviction disabled
+	lp.Start()
+	defer lp.CloseAll()
+
+	ex, err := lp.Get(context.Background(), "iris", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ex.Exec(context.Background(), "echo warm", time.Second); err != nil {
+		t.Fatal(err)
+	}
+	first := liveExecutor(t, inner, "iris", "", "")
+	first.mu.Lock()
+	first.execErr = errFakeCutStream
+	first.mu.Unlock()
+
+	out, callErr := ex.Exec(context.Background(), "python refresh_paper_review.py", time.Minute)
+	if callErr == nil {
+		t.Fatal("a cut stream must not be reported as success")
+	}
+	if !errors.Is(callErr, errFakeCutStream) {
+		t.Fatalf("the provider's own error must survive into what the model reads, got %v", callErr)
+	}
+	if out == "" {
+		t.Fatal("the output that did arrive before the cut must still be delivered")
+	}
+	if !strings.Contains(callErr.Error(), "sandbox replaced") {
+		t.Fatalf("nothing tells the model the instance was replaced, so it cannot tell this from a plain failure: %v", callErr)
+	}
+
+	// Destroyed, not paused: the pause path (evictIdle → sleepOrRelease →
+	// SleepScope) would park the broken instance for the next wake-up to hand
+	// out again. Getting this wrong is the whole bug (§7.2).
+	if got := atomic.LoadInt32(&inner.releases); got != 1 {
+		t.Fatalf("releases = %d, want 1 (the cut instance must be destroyed)", got)
+	}
+	if got := atomic.LoadInt32(&first.closed); got != 1 {
+		t.Fatalf("the cut instance was not closed (closed = %d)", got)
+	}
+	// Not re-run. A re-run would have to build the replacement inside this very
+	// call, so "no replacement yet" is the observable difference between
+	// replace and retry.
+	if got := atomic.LoadInt32(&inner.creates); got != 1 {
+		t.Fatalf("creates = %d, want 1 — the replacement belongs to the NEXT call, which is what makes this a replace and not a retry", got)
+	}
+	if got := atomic.LoadInt32(&first.execs); got != 2 {
+		t.Fatalf("execs on the cut instance = %d, want 2 (the warm-up plus the one cut command; a retry would add a third)", got)
+	}
+
+	// The next call is what mints the replacement, and it serves normally.
+	if _, err := ex.Exec(context.Background(), "echo after", time.Second); err != nil {
+		t.Fatalf("the replacement must serve the next command: %v", err)
+	}
+	if got := atomic.LoadInt32(&inner.creates); got != 2 {
+		t.Fatalf("creates = %d, want 2 (one replacement, built on the next call)", got)
+	}
+	if next := liveExecutor(t, inner, "iris", "", ""); next == first {
+		t.Fatal("the cut instance was handed out again")
+	}
+}
+
+// §7.4 case ②, the narrowness half: "the command exited non-zero" is the
+// command's verdict. Treating it as an instance failure would destroy a healthy
+// sandbox and re-run side effects the command already had, so it must leave the
+// scope completely alone.
+func TestLifecycle_CommandFailureIsNotAnInstanceFailure(t *testing.T) {
+	inner := newFakePool()
+	lp := NewLifecyclePool(inner, 0, 0)
+	lp.Start()
+	defer lp.CloseAll()
+
+	ex, err := lp.Get(context.Background(), "jules", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ex.Exec(context.Background(), "echo warm", time.Second); err != nil {
+		t.Fatal(err)
+	}
+	first := liveExecutor(t, inner, "jules", "", "")
+	first.mu.Lock()
+	first.execErr = errFakeCommandVerdict
+	first.mu.Unlock()
+
+	if _, callErr := ex.Exec(context.Background(), "pytest tests/", time.Minute); callErr == nil {
+		t.Fatal("a non-zero exit must still fail the call")
+	} else if !errors.Is(callErr, errFakeCommandVerdict) {
+		t.Fatalf("the command's own error must reach the model unchanged, got %v", callErr)
+	} else if strings.Contains(callErr.Error(), "sandbox replaced") {
+		t.Fatalf("a command verdict was reported as an instance replacement: %v", callErr)
+	}
+
+	if got := atomic.LoadInt32(&inner.releases); got != 0 {
+		t.Fatalf("releases = %d, want 0 — a failing command must not cost the scope its sandbox", got)
+	}
+	if got := atomic.LoadInt32(&first.closed); got != 0 {
+		t.Fatalf("the instance was closed over a command's non-zero exit (closed = %d)", got)
+	}
+	if liveExecutor(t, inner, "jules", "", "") != first {
+		t.Fatal("the instance was replaced although only the command had failed")
+	}
+}
+
+// §7.4 case ③: both halves of the repair can fail independently. When the bad
+// instance cannot even be destroyed, the honest outcome is the original error —
+// the one thing that must not happen is an error claiming a replacement that
+// did not take place.
+func TestLifecycle_FailedReplaceDoesNotClaimARepair(t *testing.T) {
+	inner := newFakePool()
+	inner.releaseErr = errFakeReleaseFailed
+	lp := NewLifecyclePool(inner, 0, 0)
+	lp.Start()
+	defer lp.CloseAll()
+
+	ex, err := lp.Get(context.Background(), "kira", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ex.Exec(context.Background(), "echo warm", time.Second); err != nil {
+		t.Fatal(err)
+	}
+	first := liveExecutor(t, inner, "kira", "", "")
+	first.mu.Lock()
+	first.execErr = errFakeCutStream
+	first.mu.Unlock()
+
+	_, callErr := ex.Exec(context.Background(), "python refresh_paper_review.py", time.Minute)
+	if callErr == nil {
+		t.Fatal("a cut stream must not be reported as success")
+	}
+	if !errors.Is(callErr, errFakeCutStream) {
+		t.Fatalf("the provider's own error must survive a failed replace, got %v", callErr)
+	}
+	if strings.Contains(callErr.Error(), "sandbox replaced") {
+		t.Fatalf("the error claims a replacement that did not happen: %v", callErr)
+	}
+	if got := atomic.LoadInt32(&first.closed); got != 0 {
+		t.Fatalf("the instance was closed even though Release failed (closed = %d)", got)
 	}
 }
 
