@@ -320,18 +320,18 @@ func TestE2BHydrateListRetriesThenSucceeds(t *testing.T) {
 	if got := atomic.LoadInt32(&flaky.calls); got != 2 {
 		t.Fatalf("List calls = %d, want 2 (one failure, one success)", got)
 	}
-	// A hydrate that eventually listed is NOT stale: staleness means "the
+	// A hydrate that eventually listed is NOT unhydrated: the mark means "the
 	// workspace may be missing files", and this one is complete.
 	if ex.WorkspaceUnhydrated() {
-		t.Fatal("executor marked stale after a successful retry")
+		t.Fatal("executor marked unhydrated after a successful retry")
 	}
 }
 
-// The boundary that keeps the staleness signal from doing damage of its own: a
+// The boundary that keeps the unhydrated signal from doing damage of its own: a
 // listing that SUCCEEDS and returns nothing is a genuinely empty scope (a new
 // session, a fresh agent), not a failure. Treating it as one would break every
 // new conversation.
-func TestE2BHydrateEmptyScopeIsNotStale(t *testing.T) {
+func TestE2BHydrateEmptyScopeIsNotMarkedUnhydrated(t *testing.T) {
 	ex := &E2BExecutor{workspace: newFakeWorkspace(), agentID: "agent-empty"}
 
 	objs, err := ex.listWorkspaceWithRetry(context.Background(), "", "")
@@ -342,7 +342,7 @@ func TestE2BHydrateEmptyScopeIsNotStale(t *testing.T) {
 		t.Fatalf("workspace files = %d, want 0", len(objs))
 	}
 	if ex.WorkspaceUnhydrated() {
-		t.Fatal("empty scope marked stale: listing nothing successfully is not a failure")
+		t.Fatal("empty scope marked unhydrated: listing nothing successfully is not a failure")
 	}
 }
 

@@ -683,8 +683,9 @@ func (e *E2BExecutor) Hydrate(ctx context.Context) error {
 		// indistinguishable from "this scope has no files" — and that is how a
 		// run ends up acting on an empty /workspace (see
 		// docs/sandbox-scope-leak.md §8, prod 2026-09-16). Retry it, and if it
-		// still fails say so loudly and mark the executor stale instead of
-		// pretending the workspace is empty.
+		// still fails say so loudly and mark the executor UNHYDRATED —
+		// "never filled", not "holding old files" (see §9.6 on the naming) —
+		// instead of pretending the workspace is empty.
 		objs, err := e.listWorkspaceWithRetry(ctx, listProject, listSession)
 		if err != nil {
 			slog.Warn("e2b hydrate: workspace list failed after retries — handing out an EMPTY workspace",
