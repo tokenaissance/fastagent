@@ -63,12 +63,12 @@ type E2BExecutor struct {
 	client   *http.Client
 	template string        // remembered for recreate() so the new sandbox uses the same template; immutable once handed out by the pool
 	timeout  time.Duration // remembered for recreate()
-	// workspaceStale records that this executor's /workspace could not be
+	// workspaceUnhydrated records that this executor's /workspace could not be
 	// hydrated from the store (the listing failed, not "the scope is empty").
 	// Policy C: the sandbox is still handed out — a store hiccup must not cost
 	// the scope its warm instance — but the caller retries the hydrate on the
 	// next use and the tools declare the state to the turn.
-	workspaceStale atomic.Bool
+	workspaceUnhydrated atomic.Bool
 	// readyTimeout / readyInterval bound the post-create readiness wait. Zero
 	// means the defaults; tests shrink them so a persistent routing gap does
 	// not cost a minute of wall clock.
@@ -619,11 +619,11 @@ func (e *E2BExecutor) listWorkspaceWithRetry(ctx context.Context, listProject, l
 	}
 }
 
-// WorkspaceStale reports whether this executor's /workspace could not be
+// WorkspaceUnhydrated reports whether this executor's /workspace could not be
 // hydrated from the store — "the listing failed", never "the scope is empty".
 // Policy C reads it so the scope's hydrated flag stays false and the next use
 // retries (docs/sandbox-scope-leak.md §9).
-func (e *E2BExecutor) WorkspaceStale() bool { return e.workspaceStale.Load() }
+func (e *E2BExecutor) WorkspaceUnhydrated() bool { return e.workspaceUnhydrated.Load() }
 
 func (e *E2BExecutor) Hydrate(ctx context.Context) error {
 	bundle := newTarBundle()
@@ -679,7 +679,7 @@ func (e *E2BExecutor) Hydrate(ctx context.Context) error {
 			slog.Warn("e2b hydrate: workspace list failed after retries — handing out an EMPTY workspace",
 				"agent", e.agentID, "project", e.projectID, "session", e.sessionID,
 				"attempts", hydrateAttempts, "error", err)
-			e.workspaceStale.Store(true)
+			e.workspaceUnhydrated.Store(true)
 		} else {
 			for _, obj := range objs {
 				rc, err := e.workspace.Get(ctx, e.agentID, listProject, listSession, obj.Path)
