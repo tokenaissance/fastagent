@@ -1273,14 +1273,34 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	// Detach the agent's ctx from the request: when the browser tab
 	// disconnects (refresh, close, network blip) we want the agent to
 	// keep running so its already-paid-for LLM call finishes and the
-	// reply lands in session_events. The 15-minute cap is the only thing
+	// reply lands in session_events. agentTurnTimeout is the only thing
 	// that can kill it.
+	//
+	// Where cancel() lives is what that promise hangs on, and the handler is
+	// the wrong place for it. This handler returns the moment the client's
+	// connection drops (clientGone below), so a handler-scope cancel turns
+	// "the browser went away" into "the turn is over". Production, 2026-09-16,
+	// pod fastagent-gateway-568cc96dcb-6pzbl:
+	//
+	//	15:26:29Z turn ctx ended with a tool in flight; cause="context canceled"
+	//	15:27:29Z tool still running after its grace window; cancelling it
+	//	         → e2b exec body read: context canceled (got 68 bytes); pid 1928
+	//
+	// A web turn 26 minutes into a babysitting loop — 19 minutes short of the
+	// 45m ceiling — was cut in the middle of a `sleep 200` by nothing but the
+	// client's connection ending; the sandbox and the job inside it were
+	// healthy. cancel() is deferred on the agent goroutine below instead.
 	agentCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), agentTurnTimeout)
-	// cancel lives on the handler, not the agent goroutine: when a slash
-	// queues a continuation we keep the SSE open past HandleMessage's
-	// return, and inner-scope cancel would tear down agentCtx before the
-	// continuation's events can reach this handler's safety-net check.
-	defer cancel()
+	// The turn's ceiling, read here because agentCtx.Done() stops being a
+	// usable "the turn is over" signal below: cancel belongs to the agent
+	// goroutine, so that channel now also closes the moment HandleMessage
+	// returns — normal for a turn that queued a continuation, and fatal as a
+	// select case, where it would beat the drain below to an event still
+	// sitting in the buffer.
+	turnDeadline, hasTurnDeadline := agentCtx.Deadline()
+	if !hasTurnDeadline {
+		turnDeadline = time.Now().Add(agentTurnTimeout)
+	}
 	agentCtx = agent.ContextWithStream(agentCtx, nil, s.dataStore, hub, uid, agentID, req.SessionID)
 	// admissionStarted closes when the agent holds the session's turn slot;
 	// until then this turn is still queued and may be withdrawn.
@@ -1289,6 +1309,13 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	agentDone := make(chan struct{})
 	go func() {
 		defer close(agentDone)
+		// cancel is deferred HERE, not on the handler — see the incident above.
+		// Owned by the goroutine, the turn is released exactly when its work
+		// ends, which is what makes the detach above real: a client that
+		// vanishes mid-turn leaves the turn running to its reply (persisted to
+		// session_events for the next load to pick up), and the WithTimeout
+		// ceiling still bounds a runaway loop.
+		defer cancel()
 		// events param stays nil — emitEvent now fans out via the
 		// streamCtx attached above (persist + hub). The legacy channel
 		// path is no longer needed for this handler.
@@ -1315,6 +1342,16 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	// thinking but not yet emitting content.
 	keepalive := time.NewTicker(30 * time.Second)
 	defer keepalive.Stop()
+
+	// Safety net for the turnPending path: the continuation's `done` may never
+	// arrive. It watches the turn's *deadline* rather than agentCtx.Done(),
+	// which now also closes when the agent goroutine returns (see above) —
+	// keeping this stream open past HandleMessage's return on the continuation
+	// path is exactly what d471fa2 (2026-05-14) moved cancel() out of the
+	// goroutine for, and the deadline preserves it without re-coupling the turn
+	// to the client.
+	turnClock := time.NewTimer(time.Until(turnDeadline))
+	defer turnClock.Stop()
 
 	clientGone := r.Context().Done()
 	forwardedAny := false
@@ -1379,10 +1416,9 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 				})
 			}
 			return
-		case <-agentCtx.Done():
-			// Safety net for the turnPending path above: bail out at
-			// the agent context's hard timeout even if no `done` event
-			// ever arrives.
+		case <-turnClock.C:
+			// Safety net for the turnPending path above: bail out at the
+			// turn's hard deadline even if no `done` event ever arrives.
 			return
 		case <-keepalive.C:
 			fmt.Fprintf(w, ": ping\n\n")

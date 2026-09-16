@@ -549,6 +549,31 @@ split that landed:
   schema but deliberately absent from the refusal text, so the default answer
   stays `run_in_background` and a bypass is visible in the log
   (`long foreground wait allowed by allow_long_wait override`).
+* **A web turn outlives its client, and where `cancel()` is deferred decides
+  that.** `handleChatStream` detaches the agent ctx from the request on purpose
+  (`context.WithoutCancel(r.Context())`, 45 m ceiling) and returns as soon as the
+  client's connection drops (`clientGone`). Since d471fa2 (2026-05-14) —
+  which needed the SSE to stay open past `HandleMessage` returning on the
+  slash-continuation path — `cancel()` was deferred on the *handler*, so that
+  return ran it: "the browser hung up" silently became "the turn is over", with
+  no budget involved.
+  Production, 2026-09-16T15:26:29Z, pod `fastagent-gateway-568cc96dcb-6pzbl`: a
+  web turn 26 minutes into a babysitting loop logged `turn ctx ended with a tool
+  in flight … cause="context canceled"` — the only event was the client's
+  connection ending, and the same agent's genuine budget expiry that hour logged
+  `cause="context deadline exceeded"` instead. 60 s later
+  `tool still running after its grace window; cancelling it`, and the in-flight
+  `sleep 200` exec died as `e2b exec body read: context canceled (got 68 bytes)
+  … first={"event":{"start":{"pid":1928}}}` while its sandbox and the job stayed
+  healthy.
+  Fix (2026-09-17): `cancel()` is deferred on the agent goroutine again — where
+  `git show d471fa2^` had it — and the SSE's `turnPending` safety net watches the
+  turn's *deadline* (`time.NewTimer` on `agentCtx.Deadline()`) instead of
+  `agentCtx.Done()`, which now closes when `HandleMessage` returns. The
+  continuation path keeps its open stream with no re-coupling of the turn to its
+  client. Pinned by `internal/setup/client_disconnect_turn_test.go`
+  (`TestClientDisconnectDoesNotKillTheTurnE2E`; it fails with "client disconnect
+  cancelled the turn" if the defer moves back to the handler).
 * **The other budget is rounds, not seconds.** `maxToolIterations` (default 20)
   caps how many model rounds one turn may run; hitting it ends the turn with a
   forced synthesis and the chat panel's "Iteration limit reached" badge
