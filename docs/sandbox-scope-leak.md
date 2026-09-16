@@ -205,7 +205,7 @@ E2B 的批量 hydrate **正是一次 `List` 之后打 tar**（`workspace_hydrate
 `List` 失败 → **有界重试** → 仍失败：
 
 1. **不返回 error**（那是策略 A：`inner.Get` 报错就没有 executor 可交）；
-2. **把 executor 标记为 `workspaceStale`**，并打一条响亮日志（含 agent/project/session + 原因 + 重试次数）；
+2. **把 executor 标记为 `workspaceUnhydrated`**，并打一条响亮日志（含 agent/project/session + 原因 + 重试次数）；
 3. **`p.hydrated[k]` 回到 false** → 下一次 `Get` 自动重试 hydrate；
 4. **把"工作区未水合"声明进这一轮**（③，注入点待定）；
 5. **只有与已知基线矛盾时**（曾成功列举过非空、如今列不出来）才升级为销毁重建（A 的分支）。
@@ -221,12 +221,12 @@ if err != nil {
     if objs, err = e.listWorkspaceWithRetry(...); err != nil {   // 复用 hydrateAttempts / hydrateRetryInterval
         slog.Warn("e2b hydrate: workspace list failed after retries — handing out an EMPTY workspace",
             "agent", e.agentID, "project", e.projectID, "session", e.sessionID, "error", err)
-        e.markWorkspaceStale()                                    // 新增：atomic bool + 访问器
+        e.markWorkspaceUnhydrated()                                    // 新增：atomic bool + 访问器
     }
 }
 
 // ② lifecycle.go getInner（:479-501）—— hydrate 失败必须让 hydrated 回到 false
-if sw, ok := ex.(interface{ WorkspaceStale() bool }); ok && sw.WorkspaceStale() {
+if sw, ok := ex.(interface{ WorkspaceUnhydrated() bool }); ok && sw.WorkspaceUnhydrated() {
     p.hydrated[k] = false    // 今天的 :483 是"先置位后执行、失败不回滚"，所以不会重试
 }
 ```
@@ -236,7 +236,7 @@ if sw, ok := ex.(interface{ WorkspaceStale() bool }); ok && sw.WorkspaceStale() 
 ### 9.4 用例（红→绿，全部可离线）
 
 1. `List` 失败一次后成功 → 发生重试、`Hydrate` 成功、`workspaceFiles > 0`、**未**标记 stale；
-2. `List` 持续失败 → **拿到 executor**、`WorkspaceStale() == true`、`p.hydrated[k]` 回到 false（下次重试）、并产生可声明的状态；
+2. `List` 持续失败 → **拿到 executor**、`WorkspaceUnhydrated() == true`、`p.hydrated[k]` 回到 false（下次重试）、并产生可声明的状态；
 3. `List` 成功返回 0 个对象 → **不**标记 stale、**不**失败（防误伤新会话）；
 4. 曾成功列举非空、随后列不出来 → 走**销毁重建**（A 分支）而非 C。
 
@@ -255,13 +255,13 @@ if sw, ok := ex.(interface{ WorkspaceStale() bool }); ok && sw.WorkspaceStale() 
 
 2. **必须与"文件不存在"区分开**：这行字的目的就是拦住"把基础设施故障当成世界事实"（本次事故的伤害本体）。所以它要写明**原因**（列举超时/重试次数），而不是只说"空"。
 
-3. **只在 `WorkspaceStale()` 为真时出现**，且**只在触碰工作区的工具上出现** —— 不碰工作区的调用（纯计算、纯网络）不该被这行字污染上下文。
+3. **只在 `WorkspaceUnhydrated()` 为真时出现**，且**只在触碰工作区的工具上出现** —— 不碰工作区的调用（纯计算、纯网络）不该被这行字污染上下文。
 
-**下次开工需要先读的一处**：工作区类工具的**结果拼装点**（`internal/agent/tools/exec.go` / `file.go` 一侧），以及 sandbox 包暴露 `WorkspaceStale()` 的接口形态（见 §9.3 的 ①）。读完即可把声明接上，与机制侧同一刀落地。
+**下次开工需要先读的一处**：工作区类工具的**结果拼装点**（`internal/agent/tools/exec.go` / `file.go` 一侧），以及 sandbox 包暴露 `WorkspaceUnhydrated()` 的接口形态（见 §9.3 的 ①）。读完即可把声明接上，与机制侧同一刀落地。
 
 ### 9.6 命名修正：`Stale` → `Unhydrated`（下一刀必做，与 §9.4 余下三条同一批）
 
-**问题**：`WorkspaceStale()` 里的 **stale 在技术语境里默认读作"陈旧"** —— 即"里面有旧数据"。而这里的真实语义恰恰相反：
+**问题**：`WorkspaceUnhydrated()` 里的 **stale 在技术语境里默认读作"陈旧"** —— 即"里面有旧数据"。而这里的真实语义恰恰相反：
 
 > **这份 `/workspace` 从未成功从持久层填充（列举失败、重试耗尽）—— 可能一个文件都没有，而不是"有旧副本"。**
 
@@ -279,8 +279,8 @@ if sw, ok := ex.(interface{ WorkspaceStale() bool }); ok && sw.WorkspaceStale() 
 
 **改动清单（3 个文件，纯机械）**
 
-1. `e2b_executor.go`：字段 `workspaceStale atomic.Bool` → `workspaceUnhydrated`；方法 `WorkspaceStale()` → `WorkspaceUnhydrated()`；doc 注释补一句对照 —— *"unhydrated here means the listing failed, never 'the scope is empty': there may be no files at all, not old ones."*
-2. `lifecycle.go`：类型断言 `interface{ WorkspaceStale() bool }` → `WorkspaceUnhydrated()`；注释同步。
-3. 文档：§9 各处 `WorkspaceStale()` 改为 `WorkspaceUnhydrated()`（本文件现有措辞「未水合」即可，不必改中文）。
+1. `e2b_executor.go`：字段 `workspaceUnhydrated atomic.Bool` → `workspaceUnhydrated`；方法 `WorkspaceUnhydrated()` → `WorkspaceUnhydrated()`；doc 注释补一句对照 —— *"unhydrated here means the listing failed, never 'the scope is empty': there may be no files at all, not old ones."*
+2. `lifecycle.go`：类型断言 `interface{ WorkspaceUnhydrated() bool }` → `WorkspaceUnhydrated()`；注释同步。
+3. 文档：§9 各处 `WorkspaceUnhydrated()` 改为 `WorkspaceUnhydrated()`（本文件现有措辞「未水合」即可，不必改中文）。
 
 **约束**：与 §9.4 余下三条用例、§9.5 的 ⓑ 声明**同一刀**落地 —— 改名单开一个提交会让"半成品"多一处（类型断言与实现短暂不一致）。
