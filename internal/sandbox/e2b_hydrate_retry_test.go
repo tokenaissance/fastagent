@@ -15,6 +15,7 @@ package sandbox
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -55,7 +56,7 @@ func TestExecTruncatedStreamCarriesRawBody(t *testing.T) {
 	if !strings.Contains(err.Error(), "frames=") || !strings.Contains(err.Error(), "start") {
 		t.Fatalf("error must include the received frames, got %q", err)
 	}
-	if !retryableHydrateFailure(err) {
+	if !sandboxUnusable(err) {
 		t.Fatal("a truncated stream is the class a fresh sandbox produces once")
 	}
 }
@@ -94,5 +95,34 @@ func TestHydrateDoesNotRetryAVerdict(t *testing.T) {
 	}
 	if got := envd.attempts(); got != 1 {
 		t.Fatalf("exec attempts = %d, want 1: a verdict is not retried", got)
+	}
+}
+
+// sandboxUnusable is now asked by two callers — Hydrate (retry it) and the
+// lifecycle layer (replace the instance over it, §7.4) — so its boundary is the
+// contract between them: widen it and a failing command starts costing a
+// sandbox and re-running side effects, narrow it and a genuinely broken
+// instance is handed back for the next call.
+func TestSandboxUnusableIsAboutTheInstanceNotTheCommand(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"no error at all", nil, false},
+		{"a cut stream (the 2026-09-16 shape)", &execStreamTruncatedError{detail: "did not exit cleanly"}, true},
+		{"wrapped cut stream", fmt.Errorf("exec: %w", &execStreamTruncatedError{detail: "cut"}), true},
+		{"the instance is gone (502)", &sandboxHTTPError{op: "e2b exec", status: http.StatusBadGateway}, true},
+		{"the instance is gone (404)", &sandboxHTTPError{op: "e2b exec", status: http.StatusNotFound}, true},
+		{"the command said no", errors.New("exit code 1"), false},
+		{"a verdict from the provider", &sandboxHTTPError{op: "e2b exec", status: http.StatusUnauthorized}, false},
+		{"a plain transport error", errors.New("dial tcp: i/o timeout"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sandboxUnusable(tc.err); got != tc.want {
+				t.Fatalf("sandboxUnusable(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
 	}
 }

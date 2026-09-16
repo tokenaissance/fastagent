@@ -216,7 +216,7 @@ func TestStreamCutMidFrameStaysATruncatedExec(t *testing.T) {
 	if !errors.As(err, &truncated) {
 		t.Fatalf("error = %T (%v), want *execStreamTruncatedError", err, err)
 	}
-	if !retryableHydrateFailure(err) {
+	if !sandboxUnusable(err) {
 		t.Fatal("a mid-frame cut is the class a fresh sandbox produces once")
 	}
 	// The frame never completed, so there is nothing decoded to show — and the
