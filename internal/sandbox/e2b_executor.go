@@ -1542,7 +1542,7 @@ func uploadHTTPError(sandboxPath string, status int, body string) error {
 	if status != http.StatusInternalServerError || !mentionsPermissionDenied(body) {
 		return raw
 	}
-	return fmt.Errorf("%s: 写入权限不足；/workspace 是合法写入路径。原始错误：%w", sandboxPath, raw)
+	return fmt.Errorf("%s: 写入权限不足；/workspace 是合法写入路径，或换一个新文件名。原始错误：%w", sandboxPath, raw)
 }
 
 // mentionsPermissionDenied reads one verdict out of the body. Matching on text
