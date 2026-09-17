@@ -1519,9 +1519,39 @@ func (e *E2BExecutor) uploadBytesOn(ctx context.Context, id sandboxIdent, sandbo
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(resp.Body)
-		return &sandboxHTTPError{op: "e2b upload", status: resp.StatusCode, body: string(body)}
+		return uploadHTTPError(sandboxPath, resp.StatusCode, string(body))
 	}
 	return nil
+}
+
+// uploadHTTPError gives a write refusal one thing to act on.
+//
+// envd writes every file as `user`, so a path owned by another account (a file
+// some earlier root/sudo command created; /tmp is not covered by Hydrate's
+// chown) is readable but not writable, and the provider's whole answer is
+// "open …: permission denied". Production 2026-09-17 05:36:47Z: apply_patch
+// failed that way and edit_file, two seconds later, returned the identical
+// bytes — write_file / edit_file / apply_patch share this one entry point.
+//
+// Only that verdict is translated, and only into a hint: any other 500 (a full
+// disk, a missing directory) and every other status keep the provider's words.
+// The result still wraps sandboxHTTPError, so the status stays readable and
+// §7.4's classifier stays narrow — a write refusal is not an instance failure.
+func uploadHTTPError(sandboxPath string, status int, body string) error {
+	raw := &sandboxHTTPError{op: "e2b upload", status: status, body: body}
+	if status != http.StatusInternalServerError || !mentionsPermissionDenied(body) {
+		return raw
+	}
+	return fmt.Errorf("%s: 写入权限不足；/workspace 是合法写入路径。原始错误：%w", sandboxPath, raw)
+}
+
+// mentionsPermissionDenied reads one verdict out of the body. Matching on text
+// is acceptable here, and only here, because the decision it drives is a hint
+// rather than a sandbox's fate — the gone/unusable classifiers read the status
+// code instead.
+func mentionsPermissionDenied(body string) bool {
+	lower := strings.ToLower(body)
+	return strings.Contains(lower, "permission denied") || strings.Contains(lower, "eacces")
 }
 
 func (e *E2BExecutor) ListDir(ctx context.Context, path string) (string, error) {
