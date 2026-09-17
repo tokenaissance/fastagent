@@ -1519,46 +1519,9 @@ func (e *E2BExecutor) uploadBytesOn(ctx context.Context, id sandboxIdent, sandbo
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(resp.Body)
-		return uploadHTTPError(sandboxPath, resp.StatusCode, string(body))
+		return &sandboxHTTPError{op: "e2b upload", status: resp.StatusCode, body: string(body)}
 	}
 	return nil
-}
-
-// uploadHTTPError turns one refusal into the thing the writer can act on.
-//
-// envd writes every file as `user`, so a path that is readable but owned by
-// another account — a file some earlier `sudo` command created; /tmp is not
-// covered by Hydrate's chown — fails with a 500 whose entire text is
-// "open …: permission denied". That reached the model as-is on 2026-09-17: the
-// call looked broken, and switching tools (apply_patch → edit_file) produced
-// identical bytes, because both open the same file with the same identity
-// (docs/sandbox-file-writes.md).
-//
-// Only that verdict is translated. Any other 500, and every other status, keeps
-// the provider's own words: a full disk or a missing directory is not an
-// ownership problem, and saying it is would send the model rewriting paths that
-// are fine. The result still wraps the sandboxHTTPError, so the status stays
-// readable and §7.4's classifiers stay narrow — a write refusal is a verdict
-// about the request, never a reason to destroy the instance.
-func uploadHTTPError(sandboxPath string, status int, body string) error {
-	raw := &sandboxHTTPError{op: "e2b upload", status: status, body: body}
-	if status != http.StatusInternalServerError || !mentionsPermissionDenied(body) {
-		return raw
-	}
-	return fmt.Errorf("%s: 这个路径对沙箱用户不可写（属主/权限不匹配）：改写到 /workspace —— "+
-		"envd 一律以 user 身份写盘，而这个文件不属于 user（/tmp 不在 hydrate 的 chown 范围内，"+
-		"多半是某次 sudo/root 命令创建的）。用相对路径（例如 board_core.js）会落进持久工作区，"+
-		"沙箱重建后仍在。原始错误：%w", sandboxPath, raw)
-}
-
-// mentionsPermissionDenied reads one verdict out of the body. Matching on text
-// is acceptable here, and only here, because the decision it drives is a hint
-// rather than a sandbox's fate — the gone/unusable classifiers read the status
-// code instead, which is why they cannot be fooled by a message that merely
-// mentions a code.
-func mentionsPermissionDenied(body string) bool {
-	lower := strings.ToLower(body)
-	return strings.Contains(lower, "permission denied") || strings.Contains(lower, "eacces")
 }
 
 func (e *E2BExecutor) ListDir(ctx context.Context, path string) (string, error) {
