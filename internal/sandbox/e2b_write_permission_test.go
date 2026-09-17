@@ -48,14 +48,17 @@ func TestWriteFilePointsAtWorkspace(t *testing.T) {
 		t.Fatal("an unwritable path must fail the write")
 	}
 	// The hint, and the path it applies to. The provider's text named neither.
-	if !strings.Contains(err.Error(), "/workspace 是合法写入路径") {
+	// Two ways out, both of them writable by `user`: a path under /workspace,
+	// or a fresh name — the second one is what saves a /workspace file that is
+	// itself root-owned, where moving to /workspace changes nothing.
+	if !strings.Contains(err.Error(), "/workspace 是合法写入路径，或换一个新文件名") {
 		t.Fatalf("error must carry the hint, got %q", err)
 	}
 	if !strings.Contains(err.Error(), "/tmp/board_core.js") {
 		t.Fatalf("error must name the path it refused, got %q", err)
 	}
 	// Short: the whole point of this message is that the model reads it.
-	if len(err.Error()) > 260 {
+	if len(err.Error()) > 280 {
 		t.Fatalf("hint grew back into a paragraph (%d bytes): %q", len(err.Error()), err)
 	}
 	// Forensics stay: status + provider message are what an operator greps for
@@ -90,7 +93,7 @@ func TestUploadBytesGetsTheSameHint(t *testing.T) {
 	if err == nil {
 		t.Fatal("an unwritable upload target must fail")
 	}
-	if !strings.Contains(err.Error(), "/workspace 是合法写入路径") {
+	if !strings.Contains(err.Error(), "/workspace 是合法写入路径，或换一个新文件名") {
 		t.Fatalf("upload must carry the same hint, got %q", err)
 	}
 	if !strings.Contains(err.Error(), "/tmp/fc-hydrate.tar.gz") {
