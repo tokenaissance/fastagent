@@ -69,6 +69,14 @@ type E2BExecutor struct {
 	// the scope its warm instance — but the caller retries the hydrate on the
 	// next use and the tools declare the state to the turn.
 	workspaceUnhydrated atomic.Bool
+	// workspaceReplaced records that this scope's /workspace was rebuilt from
+	// the store after the previous instance died (expiry, or a killed
+	// instance). It exists for one reason: the rebuild is otherwise SILENT —
+	// the next exec succeeds normally — while anything that lived only inside
+	// the old sandbox (a script's changes that were never synced) is gone for
+	// good. Consumed once by the lifecycle pool, which turns it into a signal on
+	// the next tool result (docs 09, G1/G2).
+	workspaceReplaced atomic.Bool
 	// readyTimeout / readyInterval bound the post-create readiness wait. Zero
 	// means the defaults; tests shrink them so a persistent routing gap does
 	// not cost a minute of wall clock.
@@ -536,8 +544,17 @@ func (e *E2BExecutor) recreateIfCurrent(ctx context.Context, observed sandboxIde
 		"oldSandboxID", observed.id,
 		"newSandboxID", replacement.id,
 		"elapsedMs", time.Since(started).Milliseconds())
+	// The replacement is live and hydrated; the old instance (and anything that
+	// existed only inside it) is gone. Hand that fact to the caller.
+	e.workspaceReplaced.Store(true)
 	return nil
 }
+
+// TakeWorkspaceReplaced states — once — whether this scope's workspace was
+// rebuilt since the last call, so the caller can tell the agent that its sandbox
+// was swapped and unsynced sandbox-side work is gone. It is the delta source
+// behind the replacement signal, not the signal itself.
+func (e *E2BExecutor) TakeWorkspaceReplaced() bool { return e.workspaceReplaced.Swap(false) }
 
 // abandonRebuild undoes a replacement that was created but never became
 // usable. Without it the executor keeps a sandbox that cannot serve while the
@@ -674,6 +691,12 @@ func (e *E2BExecutor) listWorkspaceWithRetry(ctx context.Context, listProject, l
 // Policy C reads it so the scope's hydrated flag stays false and the next use
 // retries (docs/sandbox-scope-leak.md §9).
 func (e *E2BExecutor) WorkspaceUnhydrated() bool { return e.workspaceUnhydrated.Load() }
+
+// setWorkspaceUnhydrated carries the "never filled from the store" fact onto
+// this executor. The one caller that must set it is adoption: hydration is not
+// replayed for an instance another pod created, so the only place that fact can
+// come from is the lease row it was published with (docs 10 §4, G19).
+func (e *E2BExecutor) setWorkspaceUnhydrated(v bool) { e.workspaceUnhydrated.Store(v) }
 
 // UnhydratedWorkspace is the read side of Policy C: a sandbox whose /workspace
 // never got filled from the store because the listing failed, so it may hold no
@@ -2020,6 +2043,9 @@ func (p *E2BExecutorPool) recordEpoch(key string, epoch int64) {
 	p.leaseEpochs[key] = epoch
 }
 
+// LiveExecutor implements LiveExecutorPool: the scope's cached instance, or
+// false. No lease read, no create, no hydrate — see the interface's comment for
+// why the panel's delete must never pay for a sandbox.
 func (p *E2BExecutorPool) LiveExecutor(agentID, projectID, sessionID string) (Executor, bool) {
 	ex, ok := p.cachedExecutor(poolKey(agentID, projectID, sessionID))
 	if !ok {
@@ -2061,6 +2087,18 @@ func (p *E2BExecutorPool) LiveProjectExecutors(agentID, projectID string) []Exec
 // Best-effort, but never quiet about failing: a missed write means a sibling
 // replica will not be able to declare the state, so it is logged with the scope
 // and instance it would have described.
+func (p *E2BExecutorPool) publishUnhydrated(ctx context.Context, key string, ex *E2BExecutor) {
+	if p.leaseStore == nil || ex == nil || !ex.WorkspaceUnhydrated() {
+		return
+	}
+	id := ex.identSnapshot().id
+	if err := p.leaseStore.SetSandboxLeaseUnhydrated(ctx, key, p.ownerID, id, true); err != nil {
+		slog.Warn("e2b could not record that this sandbox's /workspace was never filled; "+
+			"a replica adopting it would not be able to say so",
+			"scopeKey", key, "sandboxID", id, "error", err)
+	}
+}
+
 // takeExecutor removes and returns the scope's executor together with the
 // epoch this pod last received for it.
 func (p *E2BExecutorPool) takeExecutor(key string) (*E2BExecutor, int64, bool) {
@@ -2144,6 +2182,7 @@ func (p *E2BExecutorPool) Get(ctx context.Context, agentID, projectID, sessionID
 			slog.Warn("e2b lease acquire failed (keeping local sandbox)", "scopeKey", key, "error", lerr)
 		} else if acquired && rec != nil {
 			p.recordEpoch(key, rec.Epoch)
+			p.publishUnhydrated(ctx, key, ex)
 		} else if !acquired && rec != nil {
 			// Another replica won the race for this scope; use its sandbox
 			// when the CAS adoption succeeds, otherwise keep our own.
@@ -2217,6 +2256,11 @@ func (p *E2BExecutorPool) adoptFromLease(
 		}
 	}
 	ex.SetHydrationSources(skillDirsForAgent(p.home, agentID), p.workspace, agentID, projectID, sessionID)
+	// The instance's own record of how it came up. Adoption never replays
+	// hydration, so without this read the fact "nobody could fill /workspace"
+	// would die with the pod that discovered it — silently, and the agent would
+	// read the empty tree as "my files are gone" (docs 10 §4, G19).
+	ex.setWorkspaceUnhydrated(rec.Unhydrated)
 	epoch, err := p.leaseStore.RenewSandboxLease(ctx, key, p.ownerID, rec.SandboxID, p.leaseTTL)
 	if err != nil {
 		slog.Warn("e2b lease renew after adopt failed; adopting without epoch",
@@ -2448,6 +2492,7 @@ func (p *E2BExecutorPool) reconcileLocalLease(
 		}
 		if epoch > 0 {
 			p.recordEpoch(key, epoch)
+			p.publishUnhydrated(ctx, key, ex)
 			if !ex.clearRebuild(pending) {
 				slog.Info("e2b rebuild superseded mid-publish; the newer identity publishes next",
 					"scopeKey", key, "publishedSandboxID", pending.id)

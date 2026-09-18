@@ -21,6 +21,9 @@ type StdioClient struct {
 	scanner *bufio.Scanner
 	mu      sync.Mutex
 	nextID  int
+	// onNotification receives server-initiated notifications. Nil means they are
+	// still read off the wire (they cannot be un-read) but not acted upon.
+	onNotification func(method string)
 }
 
 // NewStdioClient creates a new stdio MCP client.
@@ -31,6 +34,14 @@ func NewStdioClient(command string, args []string, env map[string]string) *Stdio
 		env:     env,
 		nextID:  1,
 	}
+}
+
+// SetNotificationHandler implements NotificationSink. The handler runs on the
+// reader goroutine with the client's lock held (see the interface's contract).
+func (c *StdioClient) SetNotificationHandler(f func(method string)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.onNotification = f
 }
 
 // Connect starts the subprocess and initializes the MCP session.
@@ -107,6 +118,18 @@ func (c *StdioClient) sendRequest(method string, params interface{}) (*jsonRPCRe
 		var resp jsonRPCResponse
 		if err := json.Unmarshal(line, &resp); err != nil {
 			continue // skip non-JSON lines (e.g. stderr leaking)
+		}
+
+		// A server-initiated notification (a method, no id) is not the response
+		// we are waiting for. It used to be `continue`d past silently, which is
+		// where "this server's tool list changed" died on the floor
+		// (docs 10 §3.4, G11). Request ids start at 1, so a notification's id
+		// (0 after unmarshalling) can never be mistaken for one of ours.
+		if resp.Method != "" {
+			if c.onNotification != nil {
+				c.onNotification(resp.Method)
+			}
+			continue
 		}
 
 		if resp.ID == id {

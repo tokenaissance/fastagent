@@ -74,6 +74,13 @@ func (a *StoreAdapter) GetSession(ctx context.Context, agentID, sessionKey strin
 			Thinking:     m.Thinking,
 			RawAssistant: m.RawAssistant,
 			Origin:       m.Origin,
+			// The receipt half: which LLM produced this reply. These two are
+			// written by Session.Append and were already read back by the
+			// archive path (providerMessageFromStored); omitting them here made
+			// the working set lose what the archive kept — the same row read two
+			// ways and disagreeing (docs 10 §4, G9).
+			Provider: m.Provider,
+			Model:    m.Model,
 		}
 		// ToolCalls / ContentParts are stored as interface{} so a
 		// JSON round-trip leaves them as []interface{} / map nests.

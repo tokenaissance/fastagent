@@ -24,12 +24,13 @@ func (d *DBStore) GetSandboxLease(ctx context.Context, scopeKey string) (*sandbo
 	}
 	now := time.Now().Unix()
 	row := d.handle().QueryRowContext(ctx,
-		fmt.Sprintf(`SELECT sandbox_id, envd_token, template, state, paused_at, expires_at, epoch
+		fmt.Sprintf(`SELECT sandbox_id, envd_token, template, state, paused_at, unhydrated, expires_at, epoch
 			FROM sandbox_leases
 			WHERE scope_key = %s AND expires_at > %s`, d.ph(1), d.ph(2)),
 		scopeKey, now)
 	var rec sandbox.SandboxLeaseRecord
-	if err := row.Scan(&rec.SandboxID, &rec.EnvdToken, &rec.Template, &rec.State, &rec.PausedAt, &rec.ExpiresAt, &rec.Epoch); err != nil {
+	if err := row.Scan(&rec.SandboxID, &rec.EnvdToken, &rec.Template, &rec.State, &rec.PausedAt,
+		&rec.Unhydrated, &rec.ExpiresAt, &rec.Epoch); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -67,7 +68,7 @@ func (d *DBStore) AcquireSandboxLease(
 	if _, err := d.handle().ExecContext(ctx,
 		fmt.Sprintf(`UPDATE sandbox_leases
 			SET owner = %s, sandbox_id = %s, envd_token = %s, template = %s,
-			    state = 'running', paused_at = 0,
+			    state = 'running', paused_at = 0, unhydrated = 0,
 			    expires_at = %s, epoch = 1, updated_at = %s
 			WHERE scope_key = %s AND expires_at <= %s`,
 			d.ph(1), d.ph(2), d.ph(3), d.ph(4), d.ph(5), d.ph(6), d.ph(7), d.ph(8)),
@@ -151,7 +152,7 @@ func (d *DBStore) ReplaceSandboxLease(
 	err := d.handle().QueryRowContext(ctx,
 		fmt.Sprintf(`UPDATE sandbox_leases
 			SET sandbox_id = %s, envd_token = %s, template = %s,
-			    state = 'running', paused_at = 0,
+			    state = 'running', paused_at = 0, unhydrated = 0,
 			    expires_at = %s, epoch = epoch + 1, updated_at = %s
 			WHERE scope_key = %s AND owner = %s AND expires_at > %s
 			RETURNING epoch`,
@@ -188,6 +189,34 @@ func (d *DBStore) SetSandboxLeaseState(ctx context.Context, scopeKey, owner, sta
 			WHERE scope_key = %s AND owner = %s AND expires_at > %s`,
 			d.ph(1), d.ph(2), d.ph(3), d.ph(4), d.ph(5), d.ph(6)),
 		state, pausedAt, now, scopeKey, owner, now)
+	return err
+}
+
+// SetSandboxLeaseUnhydrated implements sandbox.SandboxLeaseStore.
+//
+// Same owner CAS as the other annotations, plus the sandbox id: the flag
+// describes one instance, so it must not land on that instance's successor
+// after a rebuild swapped the row's identity. The epoch is deliberately not
+// bumped — this is an observation about the instance, not a change of owner.
+func (d *DBStore) SetSandboxLeaseUnhydrated(
+	ctx context.Context,
+	scopeKey, owner, sandboxID string,
+	unhydrated bool,
+) error {
+	if scopeKey == "" || owner == "" || sandboxID == "" {
+		return nil
+	}
+	flag := int64(0)
+	if unhydrated {
+		flag = 1
+	}
+	now := time.Now().Unix()
+	_, err := d.handle().ExecContext(ctx,
+		fmt.Sprintf(`UPDATE sandbox_leases
+			SET unhydrated = %s, updated_at = %s
+			WHERE scope_key = %s AND owner = %s AND sandbox_id = %s AND expires_at > %s`,
+			d.ph(1), d.ph(2), d.ph(3), d.ph(4), d.ph(5), d.ph(6)),
+		flag, now, scopeKey, owner, sandboxID, now)
 	return err
 }
 
@@ -287,6 +316,16 @@ func (e *EncryptedSandboxLeaseStore) ReleaseSandboxLease(ctx context.Context, sc
 // straight through.
 func (e *EncryptedSandboxLeaseStore) SetSandboxLeaseState(ctx context.Context, scopeKey, owner, state string) error {
 	return e.Inner.SetSandboxLeaseState(ctx, scopeKey, owner, state)
+}
+
+// SetSandboxLeaseUnhydrated carries no credential either: it is a fact about
+// the instance, not about the token, so it passes straight through.
+func (e *EncryptedSandboxLeaseStore) SetSandboxLeaseUnhydrated(
+	ctx context.Context,
+	scopeKey, owner, sandboxID string,
+	unhydrated bool,
+) error {
+	return e.Inner.SetSandboxLeaseUnhydrated(ctx, scopeKey, owner, sandboxID, unhydrated)
 }
 
 // encryptToken returns the AES-GCM ciphertext as base64 so the stored value

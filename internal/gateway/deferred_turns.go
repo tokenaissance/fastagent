@@ -2,8 +2,10 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -34,6 +36,13 @@ type deferredTurns struct {
 	mu     sync.Mutex
 	items  map[string][]*deferredTurn
 	submit func(agentID, chatKey string, msg bus.InboundMessage, accountID string)
+	// notify, when wired, delivers one sentence to the chat a dropped turn
+	// belonged to. Only sources the USER created get it (cron): the harness's own
+	// sources re-fire on their next cycle, so a user-facing line about them would
+	// be noise (C3), while a scheduled task the user asked for and never got an
+	// answer from is exactly the silent failure this whole audit is about
+	// (docs 10 §3.5, G12).
+	notify func(msg bus.InboundMessage, text string)
 	// busy reports whether the session this message targets currently has a
 	// turn in flight. Injected so the drain can skip a still-busy session
 	// instead of blindly re-submitting and re-parking on every tick.
@@ -51,11 +60,13 @@ type deferredTurns struct {
 func newDeferredTurns(
 	submit func(agentID, chatKey string, msg bus.InboundMessage, accountID string),
 	busy func(ctx context.Context, agentID string, msg bus.InboundMessage) bool,
+	notify func(msg bus.InboundMessage, text string),
 ) *deferredTurns {
 	return &deferredTurns{
 		items:      make(map[string][]*deferredTurn),
 		submit:     submit,
 		busy:       busy,
+		notify:     notify,
 		now:        time.Now,
 		maxWait:    5 * time.Minute,
 		retryEvery: time.Second,
@@ -91,7 +102,7 @@ func (d *deferredTurns) drain(ctx context.Context) {
 		item    *deferredTurn
 	}
 	var ready []submitJob
-	var expired int
+	var expired []*deferredTurn
 
 	d.mu.Lock()
 	// Sorted keys keep submission order deterministic across chats (map
@@ -106,7 +117,7 @@ func (d *deferredTurns) drain(ctx context.Context) {
 		kept := queue[:0]
 		for i, item := range queue {
 			if d.now().Sub(item.parkedAt) > d.maxWait {
-				expired++
+				expired = append(expired, item)
 				continue
 			}
 			// FIFO: a later turn for the same chat must not overtake the head.
@@ -127,10 +138,60 @@ func (d *deferredTurns) drain(ctx context.Context) {
 	for _, job := range ready {
 		d.submit(job.item.agentID, job.chatKey, job.item.msg, job.item.accountID)
 	}
-	if expired > 0 {
-		slog.Warn("dropping parked automatic turns: session stayed busy past the wait budget",
-			"count", expired, "budget", d.maxWait)
+	// A drop is a fact about the agent's world and, for a scheduled task, about
+	// the user's expectations. It used to leave only "count=2" in the log, which
+	// cannot even be located afterwards (docs 10 §3.5, G12).
+	for _, item := range expired {
+		waited := d.now().Sub(item.parkedAt).Round(time.Second)
+		slog.Warn("dropping a parked automatic turn: the session stayed busy past the wait budget",
+			"agent", item.agentID, "channel", item.msg.Channel, "chat_id", item.msg.ChatID,
+			"source", item.msg.Source, "budget", d.maxWait, "waited", waited,
+			"text", firstLine(item.msg.Text))
+		if item.msg.Source == bus.SourceCron && d.notify != nil {
+			d.notify(item.msg, droppedCronNote(item.msg.Text, d.maxWait))
+		}
 	}
+}
+
+// firstLine bounds how much of a dropped turn's text reaches the log: enough to
+// identify it, not a copy of the prompt.
+func firstLine(text string) string {
+	if i := strings.IndexByte(text, '\n'); i >= 0 {
+		text = text[:i]
+	}
+	if len(text) > 120 {
+		text = text[:120] + "…"
+	}
+	return text
+}
+
+// droppedCronNote is the sentence a user gets when the scheduled task they set
+// up never ran. The user is the one holding the belief "it will run at 9", so
+// the note goes out through the channel they are already in — without starting
+// a turn (docs 10 §3.5, G12).
+func droppedCronNote(text string, budget time.Duration) string {
+	subject := "A scheduled task"
+	if name := cronJobName(text); name != "" {
+		subject = fmt.Sprintf("The scheduled task %q", name)
+	}
+	return fmt.Sprintf("[scheduled task did not run] %s was due, but this conversation stayed busy for over %s, "+
+		"so its turn was dropped. Set it up again if you still need it.", subject, budget)
+}
+
+// cronJobName reads the name out of the scheduler's trigger text
+// ("[Cron Job: <name>] This is a scheduled task trigger."). Empty when the text
+// does not carry a name, so the sentence never renders a dangling quote.
+func cronJobName(text string) string {
+	const prefix = "[Cron Job: "
+	if !strings.HasPrefix(text, prefix) {
+		return ""
+	}
+	rest := text[len(prefix):]
+	end := strings.IndexByte(rest, ']')
+	if end <= 0 {
+		return ""
+	}
+	return rest[:end]
 }
 
 func (d *deferredTurns) count() int {

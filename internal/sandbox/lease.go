@@ -24,6 +24,21 @@ type SandboxLeaseRecord struct {
 	State string
 	// PausedAt is a unix timestamp (seconds), 0 while running.
 	PausedAt int64
+	// Unhydrated records that the instance named by this row was handed out
+	// with a /workspace that was NEVER filled from the store — the listing
+	// failed, so nobody can say what should have been in there.
+	//
+	// It rides the row because the fact belongs to the INSTANCE, not to the pod
+	// that created it: adoption deliberately does not replay hydration ("the
+	// creating pod hydrated the same scope"), so a fact kept in the creator's
+	// memory is lost exactly when the instance changes hands — and it is lost
+	// SILENTLY, which turns "the store could not be read" into "your files are
+	// gone" for the agent (docs 09 §9.5, docs 10 §4 G19).
+	//
+	// Cleared by construction: a fresh instance or a replacement publishes a new
+	// identity into this row (see AcquireSandboxLease / ReplaceSandboxLease), so
+	// the flag can only ever describe the instance the row names.
+	Unhydrated bool
 	// ExpiresAt is a unix timestamp (seconds). An expired lease is dead:
 	// the next acquirer may replace it.
 	ExpiresAt int64
@@ -90,6 +105,20 @@ type SandboxLeaseStore interface {
 	SetSandboxLeaseState(
 		ctx context.Context,
 		scopeKey, owner, state string,
+	) error
+	// SetSandboxLeaseUnhydrated annotates the row for one instance this pod
+	// owns: "the /workspace of THIS sandbox was never filled from the store".
+	// Same owner CAS as the other writes, plus the sandbox id, because the flag
+	// describes that instance and must not be pinned onto its successor.
+	//
+	// Best-effort: a write that misses is reported, not retried. A reader that
+	// finds it set must declare it to the agent (the declaration is the whole
+	// reason the flag exists); a reader that finds it unset inherits the
+	// long-standing behaviour of saying nothing.
+	SetSandboxLeaseUnhydrated(
+		ctx context.Context,
+		scopeKey, owner, sandboxID string,
+		unhydrated bool,
 	) error
 	// ReleaseSandboxLease deletes the lease only when this pod is still the
 	// owner AND the stored epoch matches the one the caller last received.

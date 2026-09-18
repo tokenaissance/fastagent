@@ -94,17 +94,31 @@ func (hb *Heartbeat) tick(ctx context.Context) {
 	hb.updateMemory()
 }
 
+// loadHeartbeatTasks returns the HEARTBEAT.md that the heartbeat TURN's own
+// prompt will show.
+//
+// It resolves through the same reader the prompt uses
+// (ContextBuilder.loadFileForUser: store row first, then the on-disk copy).
+// Before 2026-09-18 this read <home>/HEARTBEAT.md straight off the pod's disk
+// while the prompt read the store row, so with a relational store wired the
+// agent reviewed one file and the tick executed another — editing the panel's
+// copy changed what the agent SAW without changing what fired, and a pod-local
+// edit did the opposite (docs 10 §4, G14).
+//
+// The owner is the right identity here: the tick's inbound message carries
+// SourceHeartbeat, and chatterUserID resolves that to the agent owner — the same
+// resolution the turn itself will perform.
 func (hb *Heartbeat) loadHeartbeatTasks() string {
+	if cb := hb.agent.ctxBuilder; cb != nil {
+		return strings.TrimSpace(cb.loadFileForUser("HEARTBEAT.md", hb.agent.ownerUserID))
+	}
+	// No context builder (embedded/CLI shapes): the on-disk copy is all there is.
 	path := filepath.Join(hb.agent.home(), "HEARTBEAT.md")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return ""
 	}
-	content := strings.TrimSpace(string(data))
-	if content == "" {
-		return ""
-	}
-	return content
+	return strings.TrimSpace(string(data))
 }
 
 func (hb *Heartbeat) updateMemory() {

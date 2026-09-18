@@ -426,7 +426,7 @@ func TestApplyHunks_EOFFallbackToForwardScan(t *testing.T) {
 func TestRunApplyPatch_Move(t *testing.T) {
 	files := map[string]string{"src.txt": "line\n"}
 	read := func(_ context.Context, p string) (string, error) { return files[p], nil }
-	write := func(_ context.Context, p, c string) error { files[p] = c; return nil }
+	write := func(_ context.Context, p, c, _ string) error { files[p] = c; return nil }
 	del := func(_ context.Context, p string) error { delete(files, p); return nil }
 
 	patch := `*** Begin Patch
@@ -460,7 +460,7 @@ func TestRunApplyPatch_HappyPath(t *testing.T) {
 		}
 		return s, nil
 	}
-	write := func(_ context.Context, p, c string) error {
+	write := func(_ context.Context, p, c, _ string) error {
 		files[p] = c
 		return nil
 	}
@@ -512,7 +512,7 @@ func TestRunApplyPatch_AtomicOnHunkFail(t *testing.T) {
 		return s, nil
 	}
 	writes := 0
-	write := func(_ context.Context, p, c string) error {
+	write := func(_ context.Context, p, c, _ string) error {
 		writes++
 		files[p] = c
 		return nil
@@ -698,7 +698,7 @@ func TestParsePatch_FirstHunkNoAtAt(t *testing.T) {
 // through.
 func TestRunApplyPatch_IdentityRefusals(t *testing.T) {
 	noopRead := func(_ context.Context, _ string) (string, error) { return "", nil }
-	noopWrite := func(_ context.Context, _, _ string) error { return nil }
+	noopWrite := func(_ context.Context, _, _, _ string) error { return nil }
 	noopDel := func(_ context.Context, _ string) error { return nil }
 
 	cases := []struct {

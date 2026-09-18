@@ -53,6 +53,18 @@ type Session struct {
 	// Set per-turn by the agent loop via SetProviderModel.
 	provider string
 	model    string
+	// runReceipt is the agent's world at the start of the turn that is about to
+	// run, as one opaque JSON document (configuration fingerprint + skills /
+	// tools / memory / identity / cron fingerprints today). Append stamps it
+	// onto the assistant message as metadata, which makes the turn receipt the
+	// durable home of "what this conversation last ran under and last saw" — the
+	// baseline the environment signal needs after a rebuild or a restart, so the
+	// signal does not keep one of its own (docs 10 §3.3/§4, G9 + G20).
+	//
+	// Opaque on purpose: this package owns the fact "a turn carries a receipt
+	// with it", not what is inside one. The producer and the reader of the
+	// document are both the agent (docs 10 §4, G20).
+	runReceipt string
 
 	// Steering: turnDepth counts in-flight HandleMessage turns for this
 	// session (a counter, not a bool, so re-entrant/overlapping turns
@@ -125,6 +137,34 @@ func (s *Session) SetProviderModel(prov, mdl string) {
 	s.provider = prov
 	s.model = mdl
 	s.mu.Unlock()
+}
+
+// RunReceiptMetadataKey is the metadata key Append stamps onto assistant
+// messages: the world this turn started in. It lives here, next to the stamp,
+// so the writer and the reader cannot drift apart.
+const RunReceiptMetadataKey = "run_receipt"
+
+// SetRunReceipt binds the turn's world snapshot to this Session so Append stamps
+// it onto the assistant message. Called by the agent loop alongside
+// SetProviderModel, with the document the environment sampler produced.
+func (s *Session) SetRunReceipt(doc string) {
+	s.mu.Lock()
+	s.runReceipt = doc
+	s.mu.Unlock()
+}
+
+// RunReceiptOf reads back the document Append stamped onto a message ("" when
+// this message carries none — a user/tool row, a turn that ran before the stamp
+// existed, or a history that was rewritten by compaction).
+//
+// An empty receipt is the signal's "not sampled", never a default: a fabricated
+// baseline would make every turn announce changes that did not happen.
+func RunReceiptOf(m provider.Message) string {
+	if m.Metadata == nil {
+		return ""
+	}
+	v, _ := m.Metadata[RunReceiptMetadataKey].(string)
+	return v
 }
 
 // Manager manages sessions for one (user, agent). Sessions are keyed
@@ -478,6 +518,19 @@ func (s *Session) Append(msg provider.Message) {
 	if msg.Role == "assistant" && msg.Provider == "" && s.provider != "" {
 		msg.Provider = s.provider
 		msg.Model = s.model
+	}
+	// The same receipt also carries the world this turn started in. It is
+	// metadata rather than a new column because that is exactly what "which LLM
+	// produced this response" already is: a fact about THIS turn, recorded with
+	// it, instead of a separate record someone has to keep in sync (docs 10 §4,
+	// G9 + G20). Metadata is never sent to the model, so this cannot leak into
+	// the prompt — the agent learns about a change from the environment signal,
+	// which is the exit that exists for exactly this.
+	if msg.Role == "assistant" && s.runReceipt != "" {
+		if msg.Metadata == nil {
+			msg.Metadata = map[string]any{}
+		}
+		msg.Metadata[RunReceiptMetadataKey] = s.runReceipt
 	}
 
 	s.Messages = append(s.Messages, msg)

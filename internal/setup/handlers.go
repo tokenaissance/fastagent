@@ -680,10 +680,15 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	// through the namespace sweep, and re-writing them here would
 	// re-build the legacy shape we just split apart.
 	merged.Skills.AgentEntries = nil
+	// Snapshot what storage holds for the GLOBAL skill entries before the body
+	// overlays it: the request may carry the mask the GET path produced, and a
+	// mask is a rendering, not a value (mergeSkillEntries below).
+	storedSkillEntries := cloneSkillEntries(merged.Skills.Entries)
 	if err := json.Unmarshal(buf, merged); err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
+	merged.Skills.Entries = mergeSkillEntries(storedSkillEntries, merged.Skills.Entries)
 	if err := s.saveUserConfigNamespaces(r, merged, touched); err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
@@ -714,6 +719,15 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 			if !s.authorizeScope(w, r, scope.Agent, agentID, scopeWrite) {
 				return
 			}
+			// Same mask rule as the global branch: unmask before persisting.
+			// Failing loudly matters here — writing the body without the merge
+			// is exactly what would replace a stored secret with its mask.
+			stored := map[string]config.SkillEntryCfg{}
+			if err := scope.SettingInto(r.Context(), s.dataStore, "skills.entries", "", agentID, &stored); err != nil {
+				jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+				return
+			}
+			entries = mergeSkillEntries(stored, entries)
 			if err := saveAgentSkillEntries(r.Context(), s.dataStore, agentID, entries); err != nil {
 				jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 				return
@@ -2200,6 +2214,16 @@ func maskSkillEntry(v config.SkillEntryCfg) config.SkillEntryCfg {
 	return out
 }
 
+// mergeSkillEntry keeps an existing secret when the incoming value is still the
+// mask the GET path produced (maskSkillEntry): the dashboard renders a masked
+// key and posts the whole entry back, so unmasking on write is what stops a
+// saved-but-untouched secret from being replaced by "****bad".
+//
+// It is the single home of that rule for skill entries; both write paths go
+// through mergeSkillEntries below (global skills.entries and the per-agent
+// override). Providers and channels carry the equivalent guard inline
+// (handlers_scoped.go's isMaskedSecret checks) — their request shapes differ, so
+// they are left alone until a third variant proves a shared seam.
 func mergeSkillEntry(existing, in config.SkillEntryCfg) config.SkillEntryCfg {
 	out := config.SkillEntryCfg{Enabled: in.Enabled, APIKey: in.APIKey, Env: in.Env}
 	if isMaskedSecret(out.APIKey) {
@@ -2215,20 +2239,54 @@ func mergeSkillEntry(existing, in config.SkillEntryCfg) config.SkillEntryCfg {
 	return out
 }
 
+// mergeSkillEntries applies the mask rule to a whole patch. Callers hand it the
+// value they read from storage and the value the request carries; whatever is
+// still masked keeps what storage had.
+//
+// This is the one place the rule lives for skill entries: the global branch of
+// POST /api/config and the per-agent branch both call it, so a new caller
+// cannot forget it (it used to be nobody's job — see docs 10 §4, G16).
+func mergeSkillEntries(existing, incoming map[string]config.SkillEntryCfg) map[string]config.SkillEntryCfg {
+	if len(incoming) == 0 {
+		return incoming
+	}
+	out := make(map[string]config.SkillEntryCfg, len(incoming))
+	for name, in := range incoming {
+		out[name] = mergeSkillEntry(existing[name], in)
+	}
+	return out
+}
+
+// cloneSkillEntries deep-copies the entries before a request body overlays them.
+// The JSON decoder REUSES the existing map — and each entry's Env map — rather
+// than replacing it, so a snapshot taken by assignment would be mutated in
+// place, and the mask rule would end up comparing the request against itself
+// (that is how the global path silently kept the mask the first time this was
+// wired).
+func cloneSkillEntries(in map[string]config.SkillEntryCfg) map[string]config.SkillEntryCfg {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]config.SkillEntryCfg, len(in))
+	for name, entry := range in {
+		cp := entry
+		if len(entry.Env) > 0 {
+			cp.Env = make(map[string]string, len(entry.Env))
+			for k, v := range entry.Env {
+				cp.Env[k] = v
+			}
+		}
+		out[name] = cp
+	}
+	return out
+}
+
 func newRandID() (string, error) {
 	var buf [10]byte
 	if _, err := rand.Read(buf[:]); err != nil {
 		return "", err
 	}
 	return hex.EncodeToString(buf[:]), nil
-}
-
-func generateRandomToken(length int) string {
-	b := make([]byte, length)
-	if _, err := rand.Read(b); err != nil {
-		return "fastagent-default-token"
-	}
-	return hex.EncodeToString(b)
 }
 
 // debugLog is used from various handlers for diagnostic events; kept as a

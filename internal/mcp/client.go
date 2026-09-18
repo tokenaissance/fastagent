@@ -10,6 +10,21 @@ type Client interface {
 	Close() error
 }
 
+// NotificationSink is implemented by clients that can receive server-initiated
+// notifications — JSON-RPC messages carrying a method and no id.
+//
+// Only the stdio transport can: it owns a long-lived pipe whose reader sees
+// every line the server writes. The HTTP client speaks one POST per request and
+// never opens the SSE stream the Streamable-HTTP spec uses for server→client
+// messages, so on that transport a server has nowhere to push to — the
+// notification is not dropped by us, it has no wire (docs 10 §3.4, G11).
+//
+// The handler is called on the client's reader goroutine with the client's lock
+// held: it must not call back into the same client.
+type NotificationSink interface {
+	SetNotificationHandler(func(method string))
+}
+
 // ToolDef represents a tool definition returned by an MCP server.
 type ToolDef struct {
 	Name        string      `json:"name"`
@@ -27,10 +42,13 @@ type jsonRPCRequest struct {
 }
 
 type jsonRPCResponse struct {
-	JSONRPC string          `json:"jsonrpc"`
-	ID      int             `json:"id"`
-	Result  json.RawMessage `json:"result,omitempty"`
-	Error   *jsonRPCError   `json:"error,omitempty"`
+	JSONRPC string `json:"jsonrpc"`
+	ID      int    `json:"id"`
+	// Method is set on server-initiated messages (notifications and requests):
+	// they carry a method and no id, so ID unmarshals to 0.
+	Method string          `json:"method,omitempty"`
+	Result json.RawMessage `json:"result,omitempty"`
+	Error  *jsonRPCError   `json:"error,omitempty"`
 }
 
 type jsonRPCError struct {

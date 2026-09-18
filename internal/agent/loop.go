@@ -36,18 +36,25 @@ import (
 
 // Agent is the ReAct agent loop.
 type Agent struct {
-	name              string
-	provider          provider.Provider
-	registry          *tools.Registry
-	sessions          *session.Manager
-	memory            *Memory
-	ctxBuilder        *ContextBuilder
-	mcpMgr            *mcp.Manager
-	hooks             *HookRegistry
-	model             string
-	maxTokens         int
-	temperature       float64
-	maxToolIterations int
+	name       string
+	provider   provider.Provider
+	registry   *tools.Registry
+	sessions   *session.Manager
+	memory     *Memory
+	ctxBuilder *ContextBuilder
+	// skillsFingerprint is the name→fingerprint map the last skill refresh
+	// produced, kept so the environment signal can compare this turn's skill set
+	// with the previous turn's without loading skills twice.
+	skillsFingerprint map[string]string
+	// skillsHydrationFailed mirrors the last skill refresh's completeness: true
+	// when the object store could not be read, so the list may be incomplete.
+	skillsHydrationFailed bool
+	mcpMgr                *mcp.Manager
+	hooks                 *HookRegistry
+	model                 string
+	maxTokens             int
+	temperature           float64
+	maxToolIterations     int
 	// maxToolContinues is how many EXTRA iteration segments this agent's turn
 	// may start after burning maxToolIterations rounds (0 = never; see
 	// config.DefaultToolIterationContinues). A segment only continues when the
@@ -456,6 +463,26 @@ func newAgentWithActor(rc config.ResolvedAgent, prov provider.Provider, mb *bus.
 				}
 			}
 		}
+		// A server may announce that its tool list changed. The registry's tool
+		// set is fixed at construction, so the honest response is the same path
+		// `mcp add` uses: invalidate this user's cached UserSpace and let the next
+		// turn rebuild with a fresh tools/list — which also makes the change
+		// perceivable, because the per-turn environment signal diffs tool names
+		// (docs 10 §3.4, G11).
+		mcpOpts = append(mcpOpts, mcp.WithNotificationHandler(func(server, method string) {
+			if method != "notifications/tools/list_changed" {
+				slog.Debug("mcp notification (no action)", "agent", rc.ID, "server", server, "method", method)
+				return
+			}
+			if ag.mcpConfigNotify == nil {
+				slog.Warn("mcp server changed its tool list, but this runtime cannot rebuild the agent; "+
+					"the new tools stay invisible until a reload", "agent", rc.ID, "server", server)
+				return
+			}
+			slog.Info("mcp server changed its tool list; rebuilding this agent on the next turn",
+				"agent", rc.ID, "server", server)
+			ag.mcpConfigNotify(rc.UserID, rc.ID)
+		}))
 		mcpMgr := mcp.NewManager(rc.MCPServers, mcpOpts...)
 		ag.mcpMgr = mcpMgr
 
@@ -2090,6 +2117,12 @@ func (a *Agent) handlePlanMode(ctx context.Context, msg bus.InboundMessage) stri
 	ctx = store.WithChatterUserID(ctx, chatterUID)
 	ctx = store.WithChannel(ctx, msg.Channel)
 	sess := a.sessions.Get(sessionTriple(msg, msg.ProjectID))
+	// Plan mode is a turn like any other: it writes history, so it must also
+	// carry the receipt and state what changed while the agent was away. Until
+	// 2026-09-18 only HandleMessage sampled the environment, so this path (and
+	// the API's streaming path) stated nothing and stamped no baseline — the
+	// signal existed but never reached those turns (docs 10 §4, G20).
+	runReceipt := a.signalEnvironmentChanges(chatterUID, msg.ChatID, sess.GetMessages())
 	// Session.ctx() builds its OWN context from session-held fields
 	// rather than inheriting the caller's ctx — without binding the
 	// chatter onto sess itself, the WithChatterUserID we just stamped
@@ -2099,6 +2132,7 @@ func (a *Agent) handlePlanMode(ctx context.Context, msg bus.InboundMessage) stri
 	{
 		prov, mdl := provider.SplitProviderModel(a.model)
 		sess.SetProviderModel(prov, mdl)
+		sess.SetRunReceipt(runReceipt)
 	}
 	// Steering during plan drafting: plan mode has no ReAct loop to drain
 	// into, so a mid-draft steer is parked in history and answered on
@@ -2365,6 +2399,15 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	slog.Info("turn: refreshing skills",
 		"agent", a.name, "channel", msg.Channel, "chat_id", msg.ChatID, "user", chatterUID)
 	a.refreshSkillsFromStore(chatterUID)
+	// The same moment is where every other "the world changed between turns"
+	// subsystem can be sampled, so the environment signal is built here rather
+	// than by each of them separately (env_changes.go).
+	// The conversation's own history is the durable record of what it last ran
+	// in (session.Append stamps each assistant receipt), which is what lets this
+	// turn state a change that happened while nobody was looking — including one
+	// that rebuilt the agent itself (docs 10 §4, G9 + G20). What comes back is
+	// this turn's receipt, stamped onto the reply below.
+	runReceipt := a.signalEnvironmentChanges(chatterUID, msg.ChatID, sess.GetMessages())
 	// sess was resolved when the turn slot was acquired above; reuse it so
 	// the whole turn writes through one session object.
 	// Bind chatter onto sess. Session.ctx() builds its own
@@ -2376,6 +2419,11 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	{
 		prov, mdl := provider.SplitProviderModel(a.model)
 		sess.SetProviderModel(prov, mdl)
+		// Stamp this turn's receipt as well: "which LLM produced this reply" and
+		// "what world this turn started in" are the same kind of fact about the
+		// same turn, and the receipt is what lets a later turn — any replica,
+		// after any restart — state what changed (docs 10 §4, G9 + G20).
+		sess.SetRunReceipt(runReceipt)
 	}
 	// Bind the registry to this chat's session so workspace.Store reads
 	// + writes get session-scoped paths and (when a sandbox pool is
@@ -3165,6 +3213,10 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 		"agent", a.name, "channel", msg.Channel, "chat_id", msg.ChatID, "user", chatterUID)
 	a.refreshSkillsFromStore(chatterUID)
 	// sess was resolved when the turn slot was acquired above; reuse it.
+	// The API's streaming path is a turn too: same sampling, same receipt, so a
+	// change made while the agent was away is stated here as well (docs 10 §4,
+	// G20).
+	runReceipt := a.signalEnvironmentChanges(chatterUID, msg.ChatID, sess.GetMessages())
 	// Bind chatter onto sess so its ctx() embeds WithChatterUserID
 	// for DBStore session writes — Session.ctx() rebuilds ctx from its
 	// own fields, so the chatter has to live on sess itself.
@@ -3172,6 +3224,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 	{
 		prov, mdl := provider.SplitProviderModel(a.model)
 		sess.SetProviderModel(prov, mdl)
+		sess.SetRunReceipt(runReceipt)
 	}
 	a.bindSession(ctx, msg.Channel, msg.AccountID, msg.ChatID, msg.ProjectID)
 	a.registry.SetCallerIsAdmin(a.isAdminChatter(msg))
@@ -3971,6 +4024,10 @@ func (a *Agent) refreshSkillsFromStore(userID string) {
 	skills := loader.LoadSkills()
 	summary := loader.BuildSkillsSummary(skills)
 	a.ctxBuilder.SetSkillsSummary(summary)
+	// A hydrate failure means this list may be MISSING skills that exist. XX	// the fact into the environment signal so the agent does not treat an
+	// incomplete list as authoritative (it would otherwise tell the user it
+	// lacks a capability it has).
+	a.skillsHydrationFailed = loader.HydrationFailed()
 	tools.RegisterLoadSkill(a.registry, loader.AllSkillDirs())
 	// Per-turn fingerprint of the skill set the system prompt will
 	// ship. Lets us diff IM vs web for the same (agent, chatter) and
@@ -3978,9 +4035,14 @@ func (a *Agent) refreshSkillsFromStore(userID string) {
 	// every channel. count==bundled-only is the "missing agent skills"
 	// signature.
 	names := make([]string, 0, len(skills))
+	// Fingerprints for the environment signal: layer + description states a
+	// skill edited in place without reading SKILL.md again.
+	fingerprints := make(map[string]string, len(skills))
 	for _, s := range skills {
 		names = append(names, s.Name)
+		fingerprints[s.Name] = s.Layer + "|" + s.Description
 	}
+	a.skillsFingerprint = fingerprints
 	slog.Info("skills summary refreshed",
 		"agent", a.name, "agentID", a.agentID, "user", userID,
 		"count", len(skills), "summary_bytes", len(summary), "names", names)

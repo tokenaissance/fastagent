@@ -47,6 +47,10 @@ type ContextBuilder struct {
 	// available; nil (or a nil return) falls back to server-local time,
 	// which preserves the legacy single-tenant behavior.
 	tzResolver func(chatterUID string) *time.Location
+	// environmentSignal is the per-turn "what changed in your world since last
+	// turn" signal (see env_changes.go). Empty on a quiet turn — it renders only
+	// when a subsystem actually replaced or removed something.
+	environmentSignal string
 }
 
 // ctx returns a context tagged with this builder's user, used when reading
@@ -78,6 +82,11 @@ func (cb *ContextBuilder) SetWorkspace(p string) { cb.workspace = p }
 // store at turn start end up visible to the model without rebuilding the
 // whole context builder.
 func (cb *ContextBuilder) SetSkillsSummary(s string) { cb.skillsSummary = s }
+
+// SetEnvironmentSignal records the unified per-turn environment signal. Set by
+// the agent loop at turn start, next to the skill refresh, because that is where
+// all the subsystems that can change between turns are read.
+func (cb *ContextBuilder) SetEnvironmentSignal(s string) { cb.environmentSignal = s }
 
 // SetPromptMode selects the system-prompt assembly profile. Empty / unknown
 // values fall back to agent mode (current default). See config.PromptMode*.
@@ -171,6 +180,13 @@ func (cb *ContextBuilder) BuildSystemPromptAs(chatterUID string, chatterMem *Mem
 		}
 	}
 	result := strings.Join(parts, sectionSep)
+	// The environment-change signal rides at the END of the prompt, after the
+	// stable modules: it is the one part that legitimately changes turn to turn,
+	// and keeping it last keeps the rest of the prompt byte-identical for
+	// caching (07 §3.12, docs 08 §6).
+	if cb.environmentSignal != "" {
+		result += sectionSep + cb.environmentSignal
+	}
 	if config.DebugMode() {
 		fmt.Fprintf(os.Stderr, "\n========== SYSTEM PROMPT [mode=%s] ==========\n%s\n========== END SYSTEM PROMPT ==========\n\n", mode, result)
 	}

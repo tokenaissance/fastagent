@@ -45,6 +45,10 @@ func (fakeLeaseStore) SetSandboxLeaseState(context.Context, string, string, stri
 	return nil
 }
 
+func (fakeLeaseStore) SetSandboxLeaseUnhydrated(context.Context, string, string, string, bool) error {
+	return nil
+}
+
 func TestSandboxLeaseOptsSelection(t *testing.T) {
 	const owner = "host:pid"
 	tests := []struct {
@@ -109,12 +113,12 @@ func TestSandboxLeaseStoreFrom(t *testing.T) {
 
 func TestBuildSystemSandboxPoolWiring(t *testing.T) {
 	disabled := config.SandboxCfg{Enabled: false, Backend: "e2b"}
-	if pool := buildSystemSandboxPool(disabled, nil, fakeLeaseStore{}, "host:pid"); pool != nil {
+	if pool := buildSystemSandboxPool(disabled, nil, fakeLeaseStore{}, nil, "host:pid"); pool != nil {
 		t.Fatalf("disabled sandbox pool = %v, want nil", pool)
 	}
 
 	enabled := config.SandboxCfg{Enabled: true, Backend: "e2b", E2BTemplate: "base"}
-	pool := buildSystemSandboxPool(enabled, nil, fakeLeaseStore{}, "host:pid")
+	pool := buildSystemSandboxPool(enabled, nil, fakeLeaseStore{}, nil, "host:pid")
 	if pool == nil {
 		t.Fatal("enabled sandbox pool = nil, want pool")
 	}

@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,6 +21,7 @@ func TestDeferredTurnsDrainPolicy(t *testing.T) {
 			keys = append(keys, chatKey)
 		},
 		func(_ context.Context, _ string, _ bus.InboundMessage) bool { return busy },
+		nil,
 	)
 
 	d.park("agt_1", "web::chat-a", bus.InboundMessage{Channel: "web", ChatID: "chat-a", Source: bus.SourceCron, Text: "tick-1"}, "")
@@ -71,6 +73,7 @@ func TestDeferredTurnsDropsMessagesPastBudget(t *testing.T) {
 	d := newDeferredTurns(
 		func(string, string, bus.InboundMessage, string) { submitted++ },
 		func(context.Context, string, bus.InboundMessage) bool { return true }, // always busy
+		nil,
 	)
 	d.now = func() time.Time { return now }
 	d.park("agt_1", "web::chat-a", bus.InboundMessage{Channel: "web", ChatID: "chat-a", Source: bus.SourceCron}, "")
@@ -83,5 +86,60 @@ func TestDeferredTurnsDropsMessagesPastBudget(t *testing.T) {
 	}
 	if d.count() != 0 {
 		t.Fatalf("parked = %d; want the expired message dropped", d.count())
+	}
+}
+
+// A dropped scheduled task is the user's silent failure: they asked for
+// something at 9am, the session stayed busy, and the tick disappeared. It is
+// now said out loud in that chat — naming the job — while the harness's own
+// sources (which re-fire on their next cycle) stay out of the user's way
+// (docs 10 §3.5, G12).
+func TestDeferredTurnsAnnouncesADroppedScheduledTask(t *testing.T) {
+	type note struct {
+		msg  bus.InboundMessage
+		text string
+	}
+	var notes []note
+	now := time.Now()
+	d := newDeferredTurns(
+		func(string, string, bus.InboundMessage, string) { t.Fatal("a dropped turn must not be submitted") },
+		func(context.Context, string, bus.InboundMessage) bool { return true }, // always busy
+		func(msg bus.InboundMessage, text string) { notes = append(notes, note{msg, text}) },
+	)
+	d.now = func() time.Time { return now }
+	d.park("agt_1", "web::chat-a", bus.InboundMessage{
+		Channel: "web", ChatID: "chat-a", AgentID: "agt_1", Source: bus.SourceCron,
+		Text: "[Cron Job: morning-brief] This is a scheduled task trigger.",
+	}, "")
+	d.park("agt_1", "web::chat-b", bus.InboundMessage{
+		Channel: "web", ChatID: "chat-b", AgentID: "agt_1", Source: bus.SourceHeartbeat,
+		Text: "[Heartbeat — 2026-09-18 09:00:00 +0800] tasks",
+	}, "")
+
+	d.now = func() time.Time { return now.Add(d.maxWait + time.Second) }
+	d.drain(context.Background())
+
+	if len(notes) != 1 {
+		t.Fatalf("notes = %d; want exactly one (the cron drop, not the heartbeat)", len(notes))
+	}
+	if notes[0].msg.ChatID != "chat-a" {
+		t.Fatalf("the note went to %q; want the chat whose task was dropped", notes[0].msg.ChatID)
+	}
+	for _, want := range []string{"morning-brief", "did not run", "busy"} {
+		if !strings.Contains(notes[0].text, want) {
+			t.Fatalf("the note does not contain %q:\n%s", want, notes[0].text)
+		}
+	}
+}
+
+// A trigger text without the scheduler's marker must still produce a sentence,
+// never a dangling quote (docs 10 §3.5, G12).
+func TestDroppedCronNoteWithoutAJobName(t *testing.T) {
+	got := droppedCronNote("no marker here", 5*time.Minute)
+	if strings.Contains(got, `""`) {
+		t.Fatalf("the note rendered an empty name:\n%s", got)
+	}
+	if !strings.Contains(got, "A scheduled task") {
+		t.Fatalf("the note lost its subject:\n%s", got)
 	}
 }

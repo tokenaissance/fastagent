@@ -672,7 +672,7 @@ func registerApplyPatch(r *Registry) {
 		}
 		return runApplyPatch(ctx, args.Input,
 			func(ctx context.Context, p string) (string, error) { return r.readForPatch(ctx, p) },
-			func(ctx context.Context, p, c string) error { return r.writeForPatch(ctx, p, c) },
+			func(ctx context.Context, p, c, _ string) error { return r.writeForPatch(ctx, p, c) },
 			func(ctx context.Context, p string) error { return r.deleteForPatch(ctx, p) },
 		)
 	})
@@ -684,9 +684,20 @@ func registerSandboxedApplyPatch(r *Registry, ex sandbox.Executor) {
 		if err := json.Unmarshal(raw, &args); err != nil {
 			return "", fmt.Errorf("apply_patch: parse args: %w", err)
 		}
+		// Write-through, per file: runApplyPatch hands this closure one path at
+		// a time, so a mirror refusal lands on exactly the file whose copy
+		// diverged — never on the whole patch. Refusals are collected and
+		// appended to the tool result rather than thrown: the store write
+		// succeeded, and only the agent can say which version it meant.
 		out, err := runApplyPatch(ctx, args.Input,
 			func(ctx context.Context, p string) (string, error) { return r.readForPatchSandbox(ctx, ex, p) },
-			func(ctx context.Context, p, c string) error { return r.writeForPatchSandbox(ctx, ex, p, c) },
+			func(ctx context.Context, p, c, previous string) error {
+				if err := r.writeForPatchSandbox(ctx, ex, p, c); err != nil {
+					return err
+				}
+				r.addSignal(ctx, r.writeThroughSignal(ctx, p, c, previous))
+				return nil
+			},
 			func(ctx context.Context, p string) error { return r.deleteForPatchSandbox(ctx, ex, p) },
 		)
 		if err != nil {
@@ -709,7 +720,7 @@ func runApplyPatch(
 	ctx context.Context,
 	input string,
 	read func(context.Context, string) (string, error),
-	write func(context.Context, string, string) error,
+	write func(context.Context, string, string, string) error,
 	del func(context.Context, string) error,
 ) (string, error) {
 	p, err := parsePatch(input)
@@ -717,7 +728,11 @@ func runApplyPatch(
 		return "", err
 	}
 
-	type plannedWrite struct{ path, content string }
+	// previous is what the file held before this patch, as far as the caller's
+	// read could tell. The sandbox write-through uses it as the expectation for
+	// its "did we just replace a different version?" check (docs 10 §2.1, G6):
+	// the read already happened here, so carrying it costs nothing.
+	type plannedWrite struct{ path, content, previous string }
 	var (
 		writes  []plannedWrite
 		deletes []string
@@ -729,7 +744,7 @@ func runApplyPatch(
 			if op.Path == "" {
 				return "", errors.New("apply_patch: Add File requires a non-empty path")
 			}
-			writes = append(writes, plannedWrite{op.Path, op.AddBody})
+			writes = append(writes, plannedWrite{path: op.Path, content: op.AddBody})
 
 		case opDelete:
 			if op.Path == "" {
@@ -765,12 +780,12 @@ func runApplyPatch(
 				target = op.MoveTo
 				deletes = append(deletes, op.Path)
 			}
-			writes = append(writes, plannedWrite{target, updated})
+			writes = append(writes, plannedWrite{path: target, content: updated, previous: old})
 		}
 	}
 
 	for _, w := range writes {
-		if err := write(ctx, w.path, w.content); err != nil {
+		if err := write(ctx, w.path, w.content, w.previous); err != nil {
 			return "", fmt.Errorf("apply_patch: write %s: %w", w.path, err)
 		}
 	}
