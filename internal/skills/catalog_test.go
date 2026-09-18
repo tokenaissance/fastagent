@@ -35,6 +35,51 @@ func TestBuildCatalogPublishesOnlyMatchingNames(t *testing.T) {
 		if problem.Reason == "" {
 			t.Fatalf("problem for %q has no reason", problem.Path)
 		}
+		// ... and says which one it is, in a form a caller can switch on: the product
+		// shows this to its own users, who may not read English.
+		if problem.Code == "" {
+			t.Fatalf("problem for %q has no code", problem.Path)
+		}
+	}
+}
+
+func TestBuildCatalogLabelsEachRefusalWithItsCode(t *testing.T) {
+	base := DiscoveredSkill{Path: "refunds", DirName: "refunds",
+		Frontmatter: map[string]any{"name": "refunds"}, Files: []CatalogFile{file("SKILL.md", "body")}}
+	renamed := DiscoveredSkill{Path: "pdf-tools", DirName: "pdf-tools",
+		Frontmatter: map[string]any{"name": "pdf-processing"}, Files: []CatalogFile{file("SKILL.md", "body")}}
+	nameless := DiscoveredSkill{Path: "mystery", DirName: "mystery", Frontmatter: map[string]any{}}
+	empty := DiscoveredSkill{Path: "empty", DirName: "empty", Frontmatter: map[string]any{"name": "empty"}}
+
+	catalog := BuildCatalog([]DiscoveredSkill{base, renamed, nameless, empty})
+	codes := map[string]string{}
+	for _, problem := range catalog.Unpublishable {
+		codes[problem.Path] = problem.Code
+	}
+	want := map[string]string{
+		"pdf-tools": CodeNameMismatch,
+		"mystery":   CodeNoName,
+		"empty":     CodeNoFiles,
+	}
+	for path, code := range want {
+		if codes[path] != code {
+			t.Fatalf("code for %q = %q; want %q (all: %+v)", path, codes[path], code, catalog.Unpublishable)
+		}
+	}
+	if _, ok := codes["refunds"]; ok {
+		t.Fatalf("refunds was refused: %+v", catalog.Unpublishable)
+	}
+}
+
+func TestBuildCatalogReportsTheShadowedCopyByCode(t *testing.T) {
+	low := DiscoveredSkill{Layer: "managed", Path: "refunds", DirName: "refunds",
+		Frontmatter: map[string]any{"name": "refunds"}, Files: []CatalogFile{file("SKILL.md", "old")}}
+	high := DiscoveredSkill{Layer: "agent", Path: "refunds", DirName: "refunds",
+		Frontmatter: map[string]any{"name": "refunds"}, Files: []CatalogFile{file("SKILL.md", "new")}}
+
+	catalog := BuildCatalog([]DiscoveredSkill{low, high})
+	if len(catalog.Unpublishable) != 1 || catalog.Unpublishable[0].Code != CodeShadowedByLayer {
+		t.Fatalf("unpublishable = %+v; want one %s", catalog.Unpublishable, CodeShadowedByLayer)
 	}
 }
 
