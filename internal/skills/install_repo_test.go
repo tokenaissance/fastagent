@@ -155,6 +155,7 @@ func TestResult_RepoField_EachInstallPath(t *testing.T) {
 // populates Result.Repo with the result's Source (owner/repo). This is an
 // integration test — it downloads a real tarball from GitHub.
 func TestInstallFromSkillsSh_RepoField(t *testing.T) {
+	requireLiveNet(t)
 	// Simulate what runInstall does: search → PickSkillsShBySource → InstallFromSkillsSh
 	results, err := SearchSkillsSh("clean-architecture")
 	if err != nil {
