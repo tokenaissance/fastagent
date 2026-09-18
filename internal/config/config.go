@@ -213,12 +213,11 @@ type SandboxCfg struct {
 	// ClientID is retained for back-compat with older config rows but
 	// no longer wired to anything. Prefix defaults to "default" when
 	// empty so the minimum config is just (URL, Key).
-	BoxliteURL      string `json:"boxliteUrl,omitempty"`
-	BoxliteClientID string `json:"boxliteClientId,omitempty"`
-	BoxliteKey      string `json:"boxliteKey,omitempty"`
-	BoxlitePrefix   string `json:"boxlitePrefix,omitempty"`
-	Network         string `json:"network,omitempty"`
-	IdleTTLSec      int    `json:"idleTTLSec,omitempty"`
+	BoxliteURL    string `json:"boxliteUrl,omitempty"`
+	BoxliteKey    string `json:"boxliteKey,omitempty"`
+	BoxlitePrefix string `json:"boxlitePrefix,omitempty"`
+	Network       string `json:"network,omitempty"`
+	IdleTTLSec    int    `json:"idleTTLSec,omitempty"`
 }
 
 // GatewayAuth is now a thin shell — the authoritative auth state lives in

@@ -241,7 +241,6 @@ export interface ConfigResponse {
     boxliteSnapshot?: string;
     e2bKey?: string;
     boxliteUrl?: string;
-    boxliteClientId?: string;
     boxliteKey?: string;
     boxlitePrefix?: string;
   };
