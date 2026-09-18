@@ -56,6 +56,11 @@ type Catalog struct {
 // its SKILL.md declares, the parsed frontmatter, and its files' raw bytes.
 type DiscoveredSkill struct {
 	DirName string
+	// Path is the skill's directory relative to its layer, slash-separated: `refunds`,
+	// or `acme/refunds` for a skill nested inside another. It is what the entry's URI
+	// ends in and what the file endpoint is keyed by, so the two cannot disagree about
+	// which skill a request means.
+	Path string
 	// Layer names where the skill was found. It is carried for diagnostics only:
 	// precedence is expressed by the order the caller supplies, never by comparing
 	// these names, which would put the layer ranking in two places.
@@ -104,18 +109,18 @@ func BuildCatalog(discovered []DiscoveredSkill) Catalog {
 		switch {
 		case name == "":
 			catalog.Unpublishable = append(catalog.Unpublishable, CatalogProblem{
-				Path: skill.DirName, Reason: "frontmatter declares no name",
+				Path: skill.Path, Reason: "frontmatter declares no name",
 			})
 			continue
 		case name != skill.DirName:
 			catalog.Unpublishable = append(catalog.Unpublishable, CatalogProblem{
-				Path:   skill.DirName,
+				Path:   skill.Path,
 				Reason: fmt.Sprintf("directory name %q does not match the declared name %q", skill.DirName, name),
 			})
 			continue
 		case len(skill.Files) == 0:
 			catalog.Unpublishable = append(catalog.Unpublishable, CatalogProblem{
-				Path: skill.DirName, Reason: "no files were read",
+				Path: skill.Path, Reason: "no files were read",
 			})
 			continue
 		}
@@ -123,7 +128,10 @@ func BuildCatalog(discovered []DiscoveredSkill) Catalog {
 		files := append([]CatalogFile(nil), skill.Files...)
 		sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
 		catalog.Skills = append(catalog.Skills, CatalogSkill{
-			Path:        name,
+			// The path, not the name: for a flat skill they are the same string, and for
+			// a nested one the path is the only spelling that can be addressed (the
+			// entry's URI and the file endpoint both key on it).
+			Path:        skill.Path,
 			Frontmatter: skill.Frontmatter,
 			Files:       files,
 		})

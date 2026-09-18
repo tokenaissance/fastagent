@@ -8,9 +8,9 @@ import (
 // The runtime merges layers by name, with a later layer winning. The catalog must
 // agree, or the same skill name reaches hosts twice with different digests.
 func TestBuildCatalogResolvesSameNameAcrossLayers(t *testing.T) {
-	low := DiscoveredSkill{Layer: "managed", DirName: "refunds",
+	low := DiscoveredSkill{Layer: "managed", Path: "refunds", DirName: "refunds",
 		Frontmatter: map[string]any{"name": "refunds"}, Files: []CatalogFile{file("SKILL.md", "old")}}
-	high := DiscoveredSkill{Layer: "agent", DirName: "refunds",
+	high := DiscoveredSkill{Layer: "agent", Path: "refunds", DirName: "refunds",
 		Frontmatter: map[string]any{"name": "refunds"}, Files: []CatalogFile{file("SKILL.md", "new")}}
 
 	catalog := BuildCatalog([]DiscoveredSkill{low, high})
@@ -30,8 +30,8 @@ func TestBuildCatalogResolvesSameNameAcrossLayers(t *testing.T) {
 // Order is the only thing that decides precedence, so reversing the input must
 // reverse the outcome: if it did not, something else would be ranking layers.
 func TestBuildCatalogPrecedenceFollowsInputOrder(t *testing.T) {
-	a := DiscoveredSkill{DirName: "refunds", Frontmatter: map[string]any{"name": "refunds"}, Files: []CatalogFile{file("SKILL.md", "first")}}
-	b := DiscoveredSkill{DirName: "refunds", Frontmatter: map[string]any{"name": "refunds"}, Files: []CatalogFile{file("SKILL.md", "second")}}
+	a := DiscoveredSkill{Path: "refunds", DirName: "refunds", Frontmatter: map[string]any{"name": "refunds"}, Files: []CatalogFile{file("SKILL.md", "first")}}
+	b := DiscoveredSkill{Path: "refunds", DirName: "refunds", Frontmatter: map[string]any{"name": "refunds"}, Files: []CatalogFile{file("SKILL.md", "second")}}
 
 	forward := BuildCatalog([]DiscoveredSkill{a, b})
 	backward := BuildCatalog([]DiscoveredSkill{b, a})
