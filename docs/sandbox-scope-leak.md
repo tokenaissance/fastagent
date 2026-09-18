@@ -381,7 +381,7 @@ if ex, ok := p.cachedExecutor(key); ok {
 * **幂等**：`SetExecutor` 每轮绑定都会跑一次（`loop.go` 的 bindSession），所以包裹会叠加 —— 靠结果前缀的字符串检查去重（`TestWorkspaceNoticeIsNotDuplicatedByRebinding`）。
 * **只在这些工具上**：`web_search` 一类不碰工作区的工具带上这行字，只会让声明变成背景噪声（`TestWorkspaceNoticeStaysOffNonWorkspaceTools`）。
 
-**这一句是否真的到了模型眼前，单独有一个端到端用例钉住**（`internal/agent/workspace_notice_e2e_test.go`，`3c35808`）：按生产形状把 registry 绑到 **lifecycle 池的代理**上（而不是裸执行器），经过 `extractToolMeta` 之后断言 —— 标记仍被识别成 `sandbox` 元数据、声明仍在正文第一行。把声明挪到标记**前面**即可复现红灯，也就是说这两条最容易在重构中悄悄断掉的线有了守卫。
+**这一句是否真的到了模型眼前，单独有一个端到端用例钉住**（`internal/agent/workspace_signal_e2e_test.go`，`3c35808`）：按生产形状把 registry 绑到 **lifecycle 池的代理**上（而不是裸执行器），经过 `extractToolMeta` 之后断言 —— 标记仍被识别成 `sandbox` 元数据、声明仍在正文第一行。把声明挪到标记**前面**即可复现红灯，也就是说这两条最容易在重构中悄悄断掉的线有了守卫。
 
 **仍未做的**：ⓒ（事件 + UI 徽标）—— 让人也看得见；它只是补充，模型侧的 ⓑ 已经落地。
 
@@ -459,7 +459,7 @@ if ex, ok := p.cachedExecutor(key); ok {
 | 用例 | 断言 | 边界（必须说清） |
 |---|---|---|
 | `TestRegisterExecutorLogsTheScopeAndSandboxTogether`（`8e0d5c4`） | 捕获 slog → 绑定行**同时**带 `scopeKey` 与 `sandboxID` | 证明"日志里有这两个字段"，**不**证明运维真能据此定位 |
-| `workspace_notice_e2e_test.go`（`3c35808`） | 声明经 `extractToolMeta` + MetaStrip 后：仍识别为 `sandbox` 元数据、仍在正文首行 | 用**假执行器 + 真拼装路径**，守"这条线不被重构剪断"，不是"线上一定如此" |
+| `workspace_signal_e2e_test.go`（`3c35808`） | 声明经 `extractToolMeta` + MetaStrip 后：仍识别为 `sandbox` 元数据、仍在正文首行 | 用**假执行器 + 真拼装路径**，守"这条线不被重构剪断"，不是"线上一定如此" |
 
 **四类合起来，证明到哪、没证到哪**
 
