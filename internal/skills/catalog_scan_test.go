@@ -58,8 +58,8 @@ func TestScanSkillDirsReadsRawBytesAndFrontmatter(t *testing.T) {
 			t.Fatalf("path not slash-separated: %q", file.Path)
 		}
 	}
-	if string(skill.Files[1].Content) != "guide\n" {
-		t.Fatalf("content = %q; want the file's exact bytes", skill.Files[1].Content)
+	if want := file("references/GUIDE.md", "guide\n"); skill.Files[1].Digest != want.Digest || skill.Files[1].Size != want.Size {
+		t.Fatalf("file = %+v; want the digest and size of the bytes on disk", skill.Files[1])
 	}
 	if len(catalog.Unpublishable) != 1 || !strings.Contains(catalog.Unpublishable[0].Reason, "no name") {
 		t.Fatalf("unpublishable = %+v; want the frontmatterless skill with a reason", catalog.Unpublishable)

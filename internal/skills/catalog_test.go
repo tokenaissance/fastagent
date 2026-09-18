@@ -1,13 +1,18 @@
 package skills
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"strings"
 	"testing"
 )
 
+// file builds the metadata form of a file: content in, digest and size out, which
+// is what travels to the cloud.
 func file(path, content string) CatalogFile {
-	return CatalogFile{Path: path, Content: []byte(content)}
+	sum := sha256.Sum256([]byte(content))
+	return CatalogFile{Path: path, Digest: "sha256:" + hex.EncodeToString(sum[:]), Size: len(content)}
 }
 
 func TestBuildCatalogPublishesOnlyMatchingNames(t *testing.T) {

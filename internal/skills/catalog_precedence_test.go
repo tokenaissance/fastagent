@@ -18,8 +18,8 @@ func TestBuildCatalogResolvesSameNameAcrossLayers(t *testing.T) {
 	if len(catalog.Skills) != 1 {
 		t.Fatalf("skills = %+v; want one refunds", catalog.Skills)
 	}
-	if got := string(catalog.Skills[0].Files[0].Content); got != "new" {
-		t.Fatalf("published content = %q; want the higher layer's bytes", got)
+	if got, want := catalog.Skills[0].Files[0], file("SKILL.md", "new"); got.Digest != want.Digest {
+		t.Fatalf("published digest = %q; want the higher layer's version", got.Digest)
 	}
 	if len(catalog.Unpublishable) != 1 ||
 		!strings.Contains(catalog.Unpublishable[0].Reason, "overridden") {
@@ -35,7 +35,8 @@ func TestBuildCatalogPrecedenceFollowsInputOrder(t *testing.T) {
 
 	forward := BuildCatalog([]DiscoveredSkill{a, b})
 	backward := BuildCatalog([]DiscoveredSkill{b, a})
-	if string(forward.Skills[0].Files[0].Content) != "second" || string(backward.Skills[0].Files[0].Content) != "first" {
+	if forward.Skills[0].Files[0].Digest != file("SKILL.md", "second").Digest ||
+		backward.Skills[0].Files[0].Digest != file("SKILL.md", "first").Digest {
 		t.Fatalf("precedence did not follow input order")
 	}
 }
