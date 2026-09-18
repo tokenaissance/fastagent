@@ -28,7 +28,7 @@
 | B5 | 单 skill ≤ 512 文件 / 16 MiB；超限要说明原因（Limits） | entry 构造时预检，超限不进 listing 并进诊断 | 构造超限 fixture，确认被拒且有原因 | ⏳ |
 | B6 | 结果带 `resultType: "complete"`，并给 `ttlMs` / `cacheScope`（Listing / Getting） | 与 D9/SEP-2549 同一处理（`tools/list` 已做） | 应答字段检查 | ✅ 实测（list: `resultType/skills/ttlMs/cacheScope`；get: `resultType/skill/ttlMs/cacheScope`） |
 | B7 | `skills/list` 可为空或部分；`skills/get` 必须能回答它服务的每一个 skill（对方按 URI 取） | `get` 不依赖 listing | 取一个"不在 listing 里"的 skill | ✅ 实测（未知 URI → `-32602`，`get` 不依赖调用方先 list） |
-| B8 | 嵌套 skill 的文件也算外层 skill 的 supporting files（Nested Skills） | walk 到底，不去重 | 构造嵌套 fixture | ⏳ |
+| B8 | 嵌套 skill 的文件也算外层 skill 的 supporting files（Nested Skills） | walk 到底，不去重 | 构造嵌套 fixture | ⏳ **两侧都缺**：pod 只扫一层且 `Path = DirName`（单段），cloud 的 `splitSkillUri` 按第一个斜杠切。要支持嵌套是**双端契约改动**（pod 的 `skill` 参数要能吃路径，cloud 要从 entry 反解而不是猜斜杠），不是随手能补的 |
 
 ## C. 读取与错误
 
@@ -44,7 +44,7 @@
 | :-- | :--- | :--- | :--- |
 | D1 | **诊断必须发声**：被拒发布的 skill（无名、超限、名字冲突）要出现在客户端能读到的应答里 | 出口设计 §6.2 的 O6 | 构造三类坏 fixture，确认有诊断 |
 | D1a | 诊断的承载位置：`ListSkillsResult` 按规范只有 `skills`，所以诊断走 `result._meta["com.tokenaissance/skills/unpublishable"]`（规范：附加信息用 `_meta` + 自己的反域名前缀） | 本轮实测修正（原方案放在顶层成员上） | ✅ 实测：`no-frontmatter` / `orphan-dir` 两条带原因出现在 `_meta` 里，顶层成员仍只有规范定义的那四个 |
-| D2 | **工具兜底层先于扩展**：`list_skills` / `read_skill` 对协商到 2025-xx 的客户端可用 | 决策 D10（实测两个客户端只调 `tools/list`） | Codex/Claude Code 真机调用 |
+| D2 | **工具兜底层先于扩展**：`list_skills` / `read_skill` 对协商到 2025-xx 的客户端可用 | 决策 D10（实测两个客户端只调 `tools/list`） | Codex/Claude Code 真机调用 | ✅ 已实现并实测（`tools/list` 两个工具、`list_skills` 文本 + 拒绝原因、`read_skill` 字节与磁盘逐字节一致、未知工具 `-32602`） |
 | D3 | **只发原始字节**：不做 `{baseDir}` 替换；依赖它的 skill 进诊断 | 出口设计 §4 | 含 `{baseDir}` 的 fixture |
 | D4 | **平台公共 skill 默认包含**，`Gated` 照发（`requires` 随 frontmatter 透传） | 决策 D2 / D3 | listing 里能看到这两类 |
 
@@ -64,3 +64,10 @@
 - `skills/get` 200；`resources/read` 字节与磁盘逐字节相等
 - 负例：未列出文件、未知 skill → `-32602`；上游不是 fastagent API（200 + `text/html`）→ **502**，此前是框架的 HTML 500
 - 三个真实缺陷正是这一步发现的，均已修：skills 读取没有错误边界；cloud 适配器仍按"列表带 base64 字节"解析（pod 早已改成只发 digest，见 `internal/skills/catalog.go`）；pod 的 `unpublishable` 被整段丢弃
+
+同一套栈上补测工具兜底层（真实客户端唯一会走的那条路）：
+
+- `tools/list` 200 → `list_skills` / `read_skill`（都带 `readOnlyHint`）；无 token → 401 + 挑战
+- `tools/call list_skills` → 4 个已发布 skill 的文本清单 + 2 条拒绝原因（D1 在工具面同样发声）
+- `tools/call read_skill` → `SKILL.md` 与磁盘逐字节一致；`path: notes.md` 读到支持文件
+- 未知 skill → `isError: true` 且列出已发布名字；未知工具名 → `-32602`（这是请求错，不是读取失败）
