@@ -52,14 +52,13 @@ type EnvRedis struct {
 }
 
 type EnvSandbox struct {
-	Enabled         bool   // FASTAGENT_SANDBOX_ENABLED
-	Backend         string // FASTAGENT_SANDBOX_BACKEND  — "docker", "e2b", or "boxlite"
-	Image           string // FASTAGENT_SANDBOX_IMAGE
-	E2BKey          string // E2B_API_KEY
-	BoxliteURL      string // FASTAGENT_SANDBOX_BOXLITE_URL — full base URL e.g. https://api.boxlite.ai/v1
-	BoxliteClientID string // FASTAGENT_SANDBOX_BOXLITE_CLIENT_ID — default "default"
-	BoxliteKey      string // BOXLITE_API_KEY — apikey sent as Authorization: Bearer
-	BoxlitePrefix   string // FASTAGENT_SANDBOX_BOXLITE_PREFIX — workspace prefix, default "default"
+	Enabled       bool   // FASTAGENT_SANDBOX_ENABLED
+	Backend       string // FASTAGENT_SANDBOX_BACKEND  — "docker", "e2b", or "boxlite"
+	Image         string // FASTAGENT_SANDBOX_IMAGE
+	E2BKey        string // E2B_API_KEY
+	BoxliteURL    string // FASTAGENT_SANDBOX_BOXLITE_URL — full base URL e.g. https://api.boxlite.ai/v1
+	BoxliteKey    string // BOXLITE_API_KEY — apikey sent as Authorization: Bearer
+	BoxlitePrefix string // FASTAGENT_SANDBOX_BOXLITE_PREFIX — workspace prefix, default "default"
 }
 
 type EnvLog struct {
@@ -135,9 +134,6 @@ func LoadEnv() *EnvConfig {
 	}
 	if v := os.Getenv("FASTAGENT_SANDBOX_BOXLITE_URL"); v != "" {
 		cfg.Sandbox.BoxliteURL = v
-	}
-	if v := os.Getenv("FASTAGENT_SANDBOX_BOXLITE_CLIENT_ID"); v != "" {
-		cfg.Sandbox.BoxliteClientID = v
 	}
 	if v := os.Getenv("BOXLITE_API_KEY"); v != "" {
 		cfg.Sandbox.BoxliteKey = v
@@ -277,9 +273,6 @@ func (e *EnvConfig) ApplyToConfig(cfg *Config) {
 		}
 		if e.Sandbox.BoxliteURL != "" {
 			cfg.Sandbox.BoxliteURL = e.Sandbox.BoxliteURL
-		}
-		if e.Sandbox.BoxliteClientID != "" {
-			cfg.Sandbox.BoxliteClientID = e.Sandbox.BoxliteClientID
 		}
 		if e.Sandbox.BoxliteKey != "" {
 			cfg.Sandbox.BoxliteKey = e.Sandbox.BoxliteKey

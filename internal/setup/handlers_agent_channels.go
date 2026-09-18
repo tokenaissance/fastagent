@@ -166,12 +166,6 @@ func (s *Server) handleListAgentChannels(w http.ResponseWriter, r *http.Request)
 // without an extra arg.
 type accountFilter func(channelType, accountID string) bool
 
-func filterAccounts(allow map[[2]string]bool) accountFilter {
-	return func(channelType, accountID string) bool {
-		return allow[[2]string{channelType, accountID}]
-	}
-}
-
 func flattenChannelRows(rows []store.ConfigRecord, source string, _, _ string, filters ...accountFilter) []channelOut {
 	out := make([]channelOut, 0, len(rows))
 	for _, rec := range rows {
