@@ -204,12 +204,13 @@ mtime** (so timestamp claims must pin a command or go live — see 10-4/10-5), a
 (pid, sid)** (so "project root vs project chat" needs a real `LocalFS` or a live sandbox — see
 `sync_project_scope_test.go` and 10-7).
 
-## 11. Shipping groups (proposal, for review)
+## 11. Shipping groups
 
-> Status: **a proposal**. This step only groups; **nothing has been committed**. All 81 changed files are still in
-> the working tree and production still runs `HEAD` (`16a7532`).
+> §11.1–§11.4 are the **plan** (the boundaries agreed in review); **§11.7 is what actually landed** (seven commits,
+> each with its SHA and its verification). Where the two disagree, §11.7 wins, and §11.7.1 lists every difference
+> and why. §11.5 is the bar each commit had to clear; §11.6 is the documentation move's outcome.
 
-### 11.1 Six commits
+### 11.1 Plan: six commits
 
 > Two were added on 2026-09-18: **T0** (gate the live-network tests, so CI can be trusted first) and **T5** (bring
 > the formalisation docs into the repo — §11.6). Neither depends on T1–T4 in code; put T0 first and T5 last.
@@ -323,3 +324,34 @@ finds **0 dead relative links**; the 13 code comments/scripts that named the old
 
 **So from this commit on the rule is**: a code change commit must carry its matching documentation change (or the
 other way round) — otherwise it is not finished. Verify each commit against the bars in §11.5.
+
+## 11.7 What actually landed (as-shipped, 2026-09-18)
+
+Branch `ship/incident-2026-09-17` (from `fastagent`'s `16a7532`), **seven commits**:
+
+| Commit | SHA | Contents | How this commit itself was verified |
+|--------|-----|----------|-------------------------------------|
+| **T0** | `e278e6b` | gate the live-network tests in both packages (`FASTAGENT_NET_LIVE=1`) | build ✓; `internal/skills` 0.59s and `internal/setup` 7.38s green (was 156s + 1 failure / 122s + intermittent failure) |
+| **T1** | `8fde5da` | the reconcile (size+mtime → byte compare → `BLOCKED`, zero migration), the pod-local baseline removed, the delivery stamp, the scope invariants (#1–#4, #21–#27, #31) | build ✓; `internal/{sandbox,agent/tools,workspace,runtime,setup}` green; the live subset ✓ (sandbox 110.1s) |
+| **T2** | `39da597` | signals and delivery (#5–#20): the generalised write-through, the four-state `CompareResult`, store-only, G19, G3's durable carrier, the unified environment-signal exit, G11/G12/G14/G16 | offline **34/34 packages**; the full live suite ✓ (sandbox 169.5s / tools 50.0s) |
+| **T3** | `175c8d6` | dead code and the retired config it depended on (#29) | build ✓; offline 34/34; the pre-commit eslint hook passed |
+| **T4** | `260ec1e` | the offline scripts + `docs/sandbox-scope-leak.md` (#30) | `--selftest` passes (the three duplicate shapes classify as intended) |
+| **T5** | `a087ec4` | the formalisation set into the repo (26 files) | link check: 0 dead links (§11.6) |
+| **T6** | this commit | write §11.7 (the as-shipped split) into the register so the plan and reality agree | documentation only |
+
+**Final state check (on HEAD after T5)**: `git status` clean; against the BK3 baseline,
+`verify.sh <repo> HEAD` → `verify OK: 112 files match` (the split lost nothing); offline 34/34; the full live suite
+green (sandbox 179.0s, agent/tools 42.9s). Production still runs `16a7532`; nothing is deployed.
+
+### 11.7.1 Differences from §11.3's plan (six, each recorded in the matching commit message)
+
+| File | Planned | Actual | Why (measured) |
+|------|---------|--------|----------------|
+| `internal/sandbox/lifecycle.go` | split by function between T1/T2 | **rides T1 whole** | its reconcile, write-through and **signal port** share one diff region; three partial splits failed to compile (unused `errors`; undefined `strconv` / `movedLine` / `takeReplacedNote`). The signal port therefore lands as **definitions** in T1; the **wiring and rendering** are in T2 (`SetSignalStore` in `gateway/userspace.go`, etc.) |
+| `internal/sandbox/boxlite_executor.go` | all T3 (the `clientID` chain) | **rides T2** | its only caller, `gateway/userspace.go` (`NewBoxliteExecutorPool`, which drops the `clientID` parameter), is in T2; split, it does not compile |
+| `internal/agent/tools/apply_patch_live_scope_e2e_test.go` | T1 | **rides T2** | its `TestE2BLiveOnePathIsOneKey` asserts that the sandbox **mirror** received the write, and the mirror is T2's tool layer (in T1 it is red for real: `the write-through did not reach the sandbox`). G18's three offline tests stay in T1 |
+| `internal/setup/handlers_agents.go` | split (delete handler T1 / boxlite fields T3) | **rides T1 whole** | its T3 part is not in this file at all (it lives in `handlers_admin.go` / `handlers_agent_channels.go`, already in T3) |
+| `internal/agent/tools/registry.go`'s `sandboxSessionID` | T3 (dead code) | **rides T1** | it shares one field hunk with `codingRootScope`, which T1 removes |
+| `internal/gateway/userspace.go`'s boxlite wiring | T3 | **rides T2** | it sits next to the same file's `SetSignalStore` wiring and has to move with `boxlite_executor.go`'s signature |
+
+Apart from those six, §11.2's whole-file assignment and §11.3's function-level assignment match what landed exactly.

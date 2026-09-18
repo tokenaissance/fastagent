@@ -186,11 +186,12 @@ go test ./internal/workspace/ -run 'TestScopeSegments|TestWriteScope|TestAWriter
 见 10-4/10-5）；假 store 的 `scopeForKey` **折叠 (pid, sid)**（所以"项目根 vs 项目 chat"只能靠真 `LocalFS`
 或真机，见 `sync_project_scope_test.go` 与 10-7）。
 
-## 11. 上线分组清单（建议，供评审）
+## 11. 上线分组清单
 
-> 状态：**建议稿** —— 这一步只分组，**没有建任何提交**。81 个改动文件全在工作区，线上仍是 `HEAD`（`16a7532`）。
+> §11.1–§11.4 是**计划**（评审时定的边界）；**§11.7 是实际落地**（七笔提交、每笔的 SHA 与验证），
+> 两者不一致处以 §11.7 为准，差异与原因也列在那里。§11.5 是每笔要过的门槛，§11.6 是文档入库的结果。
 
-### 11.1 六笔提交
+### 11.1 计划：六笔提交
 
 > 2026-09-18 追加两笔：**T0**（给联网测试加闸门，先让 CI 可信）与 **T5**（形式化文档入库，见 §11.6）。
 > 它们与 T1–T4 无代码依赖，顺序上 T0 放最前、T5 放最后即可。
@@ -297,3 +298,34 @@ go test ./internal/workspace/ -run 'TestScopeSegments|TestWriteScope|TestAWriter
 
 **因此从这一笔起，规则是**：改代码的那一笔里必须有对应的文档改动（或反之），否则视为未完成；
 发布前用 §11.5 的门槛逐笔核对。
+
+## 11.7 实际落地（as-shipped，2026-09-18）
+
+分支 `ship/incident-2026-09-17`（从 `fastagent` 的 `16a7532` 起），**七笔**：
+
+| 提交 | SHA | 内容 | 该笔自身的验证 |
+|------|-----|------|---------------|
+| **T0** | `e278e6b` | 给两个包的联网测试加闸门（`FASTAGENT_NET_LIVE=1`） | build ✓；`internal/skills` 0.59s、`internal/setup` 7.38s 全绿（此前 156s+失败 / 122s+偶发失败） |
+| **T1** | `8fde5da` | 对账（size+mtime → 字节比较 → `BLOCKED` 零迁移）、删 pod 本地基线、交付戳、作用域不变式（#1–#4、#21–#27、#31） | build ✓；`internal/{sandbox,agent/tools,workspace,runtime,setup}` 全绿；真机子集 ✓（sandbox 110.1s） |
+| **T2** | `39da597` | 信号与投递（#5–#20）：穿透泛化、`CompareResult` 四态、store-only、G19、G3 载体、统一环境信号出口、G11/G12/G14/G16 | 离线 **34/34 包**；真机全套 ✓（sandbox 169.5s / tools 50.0s） |
+| **T3** | `175c8d6` | 死码与配置清理（#29） | build ✓；离线 34/34；pre-commit 的 eslint 通过 |
+| **T4** | `260ec1e` | 离线脚本 + `docs/sandbox-scope-leak.md`（#30） | `--selftest` 通过（三类副本判定符合预期） |
+| **T5** | `a087ec4` | 形式化文档入库（26 文件） | 链接检查 0 死链（见 §11.6） |
+| **T6** | 本笔 | 把本节（实际切分）写进册子，使清单与落地一致 | 文档改动，无代码影响 |
+
+**最终状态校验（T5 之后的 HEAD 上）**：`git status` 干净；对 BK3 基线 `verify.sh <repo> HEAD` →
+`verify OK: 112 files match`（拆分没丢任何文件）；离线全量 34/34；真机全套 sandbox 179.0s、
+agent/tools 42.9s 全绿。线上仍是 `16a7532`，一行未发。
+
+### 11.7.1 与 §11.3 计划的差异（六处，每处都写在对应 commit message 里）
+
+| 文件 | 计划 | 实际 | 原因（实测） |
+|------|------|------|-------------|
+| `internal/sandbox/lifecycle.go` | T1/T2 按函数拆 | **整份随 T1** | 它的对账、写穿透与**信号端口**挤在同一个 diff 区段；部分切分三次都编不过（`errors` 未使用、`strconv`/`movedLine`/`takeReplacedNote` 未定义）。所以信号端口作为**定义**落在 T1，**接线与渲染**在 T2（`gateway/userspace.go` 的 `SetSignalStore` 等） |
+| `internal/sandbox/boxlite_executor.go` | 全部 T3（`clientID` 链） | **随 T2** | 它唯一的调用方 `gateway/userspace.go`（`NewBoxliteExecutorPool`，去掉 `clientID` 参数）在 T2；拆开编不过 |
+| `internal/agent/tools/apply_patch_live_scope_e2e_test.go` | T1 | **随 T2** | 其中的 `TestE2BLiveOnePathIsOneKey` 断言沙箱**镜像**收到了写，而镜像是 T2 的工具层（T1 里它真的红：`the write-through did not reach the sandbox`）。G18 的三条离线单测仍在 T1 |
+| `internal/setup/handlers_agents.go` | 拆（删除处理 T1 / boxlite 字段 T3） | **整份随 T1** | 它的 T3 部分实际不在这个文件（在 `handlers_admin.go`/`handlers_agent_channels.go`，已在 T3） |
+| `internal/agent/tools/registry.go` 的 `sandboxSessionID` | T3（死码） | **随 T1** | 它与 T1 删掉的 `codingRootScope` 是同一个字段 hunk |
+| `internal/gateway/userspace.go` 的 boxlite 接线 | T3 | **随 T2** | 与同文件的 `SetSignalStore` 接线相邻，且必须与 `boxlite_executor.go` 的签名一起走 |
+
+除这六处，§11.2 的整文件归属与 §11.3 的其余函数级归属与实际完全一致。
