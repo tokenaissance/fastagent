@@ -16,6 +16,7 @@
 | A1 | 必须同时声明 `resources` 能力与 `capabilities.extensions["io.modelcontextprotocol.skills"]`；`directoryRead: true` 才可实现目录读取（Capability Negotiation） | 在 `server/discover` 与 `initialize` 两条握手里都带上（我们已经带上 capabilities.extensions） | 客户端握手应答里能看到该键 | ✅ 实测（握手返回 `resources: {}` + 扩展键） |
 | A2 | 声明了扩展就**必须**实现 `skills/list` 与 `skills/get` | 实现两个方法 | conformance `sep-2640-skills-enumeration` | ✅ 已实现（该套件无此场景，见 E1） |
 | A3 | 声明 `directoryRead: true` 就必须实现 `resources/directory/read`；没声明时按未知方法处理 | **本轮改为不声明**：方法未实现，声明了就等于给客户端一个假承诺；实现目录读取时再把 flag 加回来 | `resources/directory/read` 必须落到未知方法分支 | ✅ 已撤回声明（实测扩展键为 `{}`）+ 单测锁住"声明 ↔ 实现" |
+| A4 | 声明 `resources` 能力就必须响应 `resources/list`（base Resources："Servers that declare the `resources` capability **MUST** respond to `resources/list`"）；扩展又强制我们必须声明该能力 | 由已发布 entry 投影出资源列表（`resourcesFromEntries`），不第二次扫盘 | `resources/list` 的 URI 集合 == pod 的文件集合 | ✅ 实测（27 条，与 pod 文件集合完全相等；无 token → 401；带 `resultType/resources/ttlMs/cacheScope`） |
 
 ## B. 条目构造（`Skill` entry）
 
@@ -71,3 +72,8 @@
 - `tools/call list_skills` → 4 个已发布 skill 的文本清单 + 2 条拒绝原因（D1 在工具面同样发声）
 - `tools/call read_skill` → `SKILL.md` 与磁盘逐字节一致；`path: notes.md` 读到支持文件
 - 未知 skill → `isError: true` 且列出已发布名字；未知工具名 → `-32602`（这是请求错，不是读取失败）
+- `resources/list` → 27 条，URI 集合与 pod 目录**完全相等**（同一份 entry 投影，不第二次扫盘）
+
+一句提醒（避免下次再踩）：`MCP_SPEC` 那组引用里原本有两个 404（`/basic/utilities/caching`、`/basic/extensions`），
+handshake 那条还指到会 308 的页。2026-07-28 的实际布局是 `server/discover`、`server/utilities/caching`、
+`server/resources`、`server/tools`，扩展在 `/docs/extensions/overview`（不在版本路径下）。引用注释只有在**打得开**时才起作用。
