@@ -55,6 +55,30 @@ func GlobalLayer() (LayerSpec, error) {
 	return LayerSpec{Layer: "managed", Dir: dir, Owner: GlobalSkillOwner, Precedence: 30}, nil
 }
 
+// PublishableLayers returns the layers an agent's catalog may publish, lowest
+// precedence first: the platform library, then the agent's own skills.
+//
+// The per-chatter layer is absent on purpose. It belongs to whoever is chatting,
+// not to the agent, and the catalog is served to a token that names an agent and
+// carries no chatter identity - publishing that layer would hand one user's
+// private skills to whoever holds a token for the agent.
+//
+// Order is precedence, and it is the only place that ordering is expressed: the
+// consumers (the runtime loader and the catalog builder) both receive layers in
+// this order and must not re-derive a ranking of their own.
+func PublishableLayers(agentID string) ([]LayerSpec, error) {
+	layers := make([]LayerSpec, 0, 2)
+	if global, err := GlobalLayer(); err == nil && global.Dir != "" {
+		layers = append(layers, global)
+	}
+	if agent, err := AgentLayer(agentID); err != nil {
+		return nil, err
+	} else if agent.Dir != "" {
+		layers = append(layers, agent)
+	}
+	return layers, nil
+}
+
 // AgentLayer returns one agent's own layer.
 func AgentLayer(agentID string) (LayerSpec, error) {
 	dir, err := AgentSkillsDir(agentID)

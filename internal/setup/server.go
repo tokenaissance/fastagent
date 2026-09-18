@@ -395,6 +395,9 @@ func (s *Server) Run(ctx context.Context) error {
 
 	// Skills
 	mux.HandleFunc("GET /api/skills", auth(s.handleListSkills))
+	// The catalog the cloud MCP egress publishes: one agent's skills, ownership-gated.
+	// Cloud calls this over the internal hop (service apikey + asserted end-user).
+	mux.HandleFunc("GET /api/agent-skills/catalog", auth(s.handleAgentSkillCatalog))
 	mux.HandleFunc("GET /api/skills/search", auth(s.handleSearchSkills))
 	mux.HandleFunc("GET /api/skills/{name}/readme", s.handleSkillReadme)
 	mux.HandleFunc("POST /api/skills/install", auth(s.handleInstallSkill))
