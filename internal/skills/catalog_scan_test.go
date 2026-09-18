@@ -3,6 +3,7 @@ package skills
 import (
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -24,6 +25,51 @@ func writeCatalogSkill(t *testing.T, root, dir, manifest string, extra map[strin
 		if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+// A skill inside another skill is a skill of its own: the extension says the enclosing
+// path becomes its organizational prefix, and that the nested files remain ordinary
+// supporting files of the enclosing skill. Both statements are testable here, and the
+// second one is why the outer entry keeps listing the nested SKILL.md.
+func TestScanSkillDirsPublishesNestedSkillsUnderTheirPrefix(t *testing.T) {
+	layer := t.TempDir()
+	writeCatalogSkill(t, layer, "acme", "---\nname: acme\n---\nouter\n", nil)
+	writeCatalogSkill(t, layer, "acme/refunds", "---\nname: refunds\n---\ninner\n",
+		map[string]string{"notes.md": "notes\n"})
+
+	found, err := ScanSkillDirs([]string{layer})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	paths := make([]string, 0, len(found))
+	for _, skill := range found {
+		paths = append(paths, skill.Path)
+	}
+	sort.Strings(paths)
+	if strings.Join(paths, ",") != "acme,acme/refunds" {
+		t.Fatalf("paths = %v; want the enclosing skill and the nested one under its prefix", paths)
+	}
+
+	catalog := BuildCatalog(found)
+	if len(catalog.Skills) != 2 || len(catalog.Unpublishable) != 0 {
+		t.Fatalf("catalog = %+v; want both published", catalog)
+	}
+	if catalog.Skills[0].Path != "acme" || catalog.Skills[1].Path != "acme/refunds" {
+		t.Fatalf("published paths = %q, %q", catalog.Skills[0].Path, catalog.Skills[1].Path)
+	}
+
+	// The enclosing skill still carries the nested manifest as supporting content.
+	outer := catalog.Skills[0]
+	var sawNestedManifest bool
+	for _, f := range outer.Files {
+		if f.Path == "refunds/SKILL.md" {
+			sawNestedManifest = true
+		}
+	}
+	if !sawNestedManifest {
+		t.Fatalf("outer files = %+v; the nested manifest must still be supporting content", outer.Files)
 	}
 }
 

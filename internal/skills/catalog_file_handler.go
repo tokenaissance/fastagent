@@ -82,7 +82,10 @@ func SkillFileHandler(dirs []string) http.Handler {
 func findListedFile(discovered []DiscoveredSkill, skill, relPath string) (CatalogFile, bool) {
 	want := strings.TrimPrefix(filepath.ToSlash(relPath), "/")
 	for _, candidate := range discovered {
-		if candidate.DirName != skill {
+		// Keyed by the skill's path, the same string the catalog publishes: a nested
+		// skill is `acme/refunds`, and matching on its directory name alone would make
+		// two skills with the same leaf name indistinguishable here.
+		if candidate.Path != skill {
 			continue
 		}
 		for _, file := range candidate.Files {
@@ -94,12 +97,20 @@ func findListedFile(discovered []DiscoveredSkill, skill, relPath string) (Catalo
 	return CatalogFile{}, false
 }
 
+// The key is a skill path relative to a layer: `refunds`, or `acme/refunds` for a
+// nested skill. Every segment has to be a plain directory name - a path that climbs
+// out of the layer is refused here rather than cleaned into something servable.
 func resolveSkillDir(dirs []string, skill string) (string, bool) {
-	if skill == "" || strings.ContainsAny(skill, `/\`) || skill == "." || skill == ".." {
+	if skill == "" {
 		return "", false
 	}
+	for _, segment := range strings.Split(filepath.ToSlash(skill), "/") {
+		if segment == "" || segment == "." || segment == ".." {
+			return "", false
+		}
+	}
 	for _, dir := range dirs {
-		candidate := filepath.Join(dir, skill)
+		candidate := filepath.Join(dir, filepath.FromSlash(skill))
 		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
 			return candidate, true
 		}

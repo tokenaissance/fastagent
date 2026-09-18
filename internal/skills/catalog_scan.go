@@ -20,6 +20,12 @@ import (
 // digest over exactly these bytes, so a transformation here would be a guaranteed
 // verification failure at every host.
 //
+// The walk is recursive, and a skill's Path is its directory relative to the layer
+// it was found in. That is what makes a nested skill addressable: the extension says
+// the enclosing skill's path becomes part of the nested one's organizational prefix
+// (`acme/refunds`), and until it is addressed by that path a nested skill is only a
+// file inside its parent - published, but impossible to read as a skill of its own.
+//
 // A layer directory that does not exist is not an error: layers are configuration,
 // and an unconfigured layer is simply empty. That is different from a layer that
 // exists and cannot be read, which is returned as an error to the caller so it can
@@ -29,33 +35,45 @@ func ScanSkillDirs(dirs []string) ([]DiscoveredSkill, error) {
 	var unreadable []string
 
 	for _, dir := range dirs {
-		entries, err := os.ReadDir(dir)
-		if err != nil {
+		if _, err := os.Stat(dir); err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
 				continue
 			}
 			unreadable = append(unreadable, dir)
 			continue
 		}
-		for _, entry := range entries {
+		walkErr := filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
 			if !entry.IsDir() {
-				continue
+				return nil
 			}
-			skillDir := filepath.Join(dir, entry.Name())
-			manifest, err := os.ReadFile(filepath.Join(skillDir, "SKILL.md"))
-			if err != nil {
-				continue // not a skill directory; the loader makes the same call
+			manifest, readErr := os.ReadFile(filepath.Join(path, "SKILL.md"))
+			if readErr != nil {
+				// Not a skill directory. Keep walking: a skill may be nested deeper,
+				// and this directory may be the organizational prefix on the way to it.
+				return nil
 			}
-			files, err := readSkillFiles(skillDir)
-			if err != nil {
-				unreadable = append(unreadable, skillDir)
-				continue
+			rel, relErr := filepath.Rel(dir, path)
+			if relErr != nil {
+				return relErr
+			}
+			files, filesErr := readSkillFiles(path)
+			if filesErr != nil {
+				unreadable = append(unreadable, path)
+				return nil
 			}
 			found = append(found, DiscoveredSkill{
+				Path:        filepath.ToSlash(rel),
 				DirName:     entry.Name(),
 				Frontmatter: parseFrontmatterMap(manifest),
 				Files:       files,
 			})
+			return nil
+		})
+		if walkErr != nil {
+			unreadable = append(unreadable, dir)
 		}
 	}
 
