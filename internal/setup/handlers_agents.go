@@ -20,6 +20,7 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/auth"
 	"github.com/fastclaw-ai/fastclaw/internal/buildinfo"
 	"github.com/fastclaw-ai/fastclaw/internal/config"
+	"github.com/fastclaw-ai/fastclaw/internal/sandbox"
 	"github.com/fastclaw-ai/fastclaw/internal/scope"
 	"github.com/fastclaw-ai/fastclaw/internal/store"
 	"github.com/fastclaw-ai/fastclaw/internal/users"
@@ -1526,23 +1527,64 @@ func (s *Server) handleAgentFileDelete(w http.ResponseWriter, r *http.Request) {
 	if rec := s.requireAgentOwner(w, r, id); rec == nil {
 		return
 	}
-	// Accept optional sessionId/projectId from query params, but the
-	// path already includes them (e.g. "sessions/<sid>/file.txt").
-	// Passing them through is harmless — the store uses path as-is.
-	projectID := r.URL.Query().Get("projectId")
-	sessionID := r.URL.Query().Get("sessionId")
-	if err := s.workspaceStore.Delete(r.Context(), id, projectID, sessionID, rel); err != nil {
+	// The path arrives exactly as the file list handed it out: AGENT-relative and
+	// already carrying its scope prefix ("sessions/<sid>/f", "projects/<pid>/x").
+	// That is the shape the download endpoint consumes, and it has to be the shape
+	// the delete consumes too: applying the scope query params ON TOP of it
+	// prefixes the key twice and deletes nothing — silently, because both stores
+	// report success for a missing target (docs 10 §4 G21).
+	//
+	// Callers that send a scope-relative path (a bare name plus the scope query
+	// params) keep working: the prefix, when present, always wins.
+	storePath := filepath.ToSlash(strings.TrimLeft(rel, "/"))
+	queryProject := r.URL.Query().Get("projectId")
+	querySession := r.URL.Query().Get("sessionId")
+	projectID, sessionID, _, prefixed := sandbox.StorePathScope(storePath, queryProject, querySession)
+	delProject, delSession := queryProject, querySession
+	if prefixed {
+		// The path is agent-relative: it already names its own scope, so the
+		// store call must not name it a second time.
+		delProject, delSession = "", ""
+	}
+	if err := s.workspaceStore.Delete(r.Context(), id, delProject, delSession, storePath); err != nil {
 		jsonResponse(w, http.StatusNotFound, map[string]any{"error": err.Error()})
 		return
 	}
-	jsonResponse(w, http.StatusOK, map[string]any{"ok": true})
+	// …and the same deletion has to reach the scope's LIVE sandbox, or the next
+	// post-exec sync will read the sandbox's copy as a sandbox-born file and write
+	// it back (the "deleted, then it came back" loop). Never creates an instance;
+	// a backend with one copy answers "nothing to do".
+	sandboxErr := s.removeLiveSandboxFile(r.Context(), id, projectID, sessionID, storePath)
+	resp := map[string]any{"ok": true}
+	if sandboxErr != nil {
+		// The library delete stands; a running sandbox still holds a copy, which
+		// can come back on its next sync. Say so instead of reporting a clean
+		// delete we cannot stand behind.
+		slog.Warn("panel file delete: live sandbox copy not removed (it may reappear on the next sync)",
+			"agent", id, "project", projectID, "session", sessionID, "path", storePath, "error", sandboxErr)
+		resp["sandboxRemoved"] = false
+		resp["warning"] = "the file was deleted from the library, but a running sandbox still holds a copy; it may reappear after the next command runs there"
+	} else {
+		resp["sandboxRemoved"] = true
+	}
+	jsonResponse(w, http.StatusOK, resp)
 }
 
-func defaultIfEmpty(v, fallback string) string {
-	if v == "" {
-		return fallback
+// removeLiveSandboxFile asks the gateway (which owns the sandbox pool) to drop
+// the file's copy inside the scope's live sandbox. The gateway is reached the way
+// every other cross-layer call is: an optional interface on the resolver, so a
+// deployment without a sandbox pool simply has nothing to do.
+func (s *Server) removeLiveSandboxFile(ctx context.Context, agentID, projectID, sessionID, storePath string) error {
+	if s.userResolver == nil {
+		return nil
 	}
-	return v
+	remover, ok := s.userResolver.(interface {
+		RemoveWorkspaceFile(ctx context.Context, agentID, projectID, sessionID, storePath string) error
+	})
+	if !ok {
+		return nil
+	}
+	return remover.RemoveWorkspaceFile(ctx, agentID, projectID, sessionID, storePath)
 }
 
 // invalidateUser drops the user's lazy-loaded UserSpace so the next

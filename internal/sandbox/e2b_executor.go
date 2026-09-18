@@ -2020,6 +2020,47 @@ func (p *E2BExecutorPool) recordEpoch(key string, epoch int64) {
 	p.leaseEpochs[key] = epoch
 }
 
+func (p *E2BExecutorPool) LiveExecutor(agentID, projectID, sessionID string) (Executor, bool) {
+	ex, ok := p.cachedExecutor(poolKey(agentID, projectID, sessionID))
+	if !ok {
+		return nil, false
+	}
+	return ex, true
+}
+
+// LiveProjectExecutors implements LiveExecutorPool: every cached instance whose
+// scope belongs to this project — "agent:p:<pid>" and "agent:p:<pid>:s:<sid>"
+// alike, and nothing that merely starts with the same prefix (a project named
+// "p1" must not drag in "p10").
+func (p *E2BExecutorPool) LiveProjectExecutors(agentID, projectID string) []Executor {
+	if agentID == "" || projectID == "" {
+		return nil
+	}
+	prefix := agentID + ":p:" + projectID
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]Executor, 0, 2)
+	for key, ex := range p.executors {
+		if key == prefix || strings.HasPrefix(key, prefix+":") {
+			out = append(out, ex)
+		}
+	}
+	return out
+}
+
+// publishUnhydrated records on the instance's lease row that this sandbox came
+// up with a /workspace nobody could fill.
+//
+// Why it has to be the row and not this pod's memory: adoption does not replay
+// hydration ("the creating pod hydrated the same scope"), so an adopting
+// replica has no way to learn the fact — and the loss is silent, which is the
+// one direction this whole mechanism must not fail in. The row already names
+// the instance, so the flag rides the identity it describes, and a replacement
+// clears it by publishing a new identity (docs 10 §4, G19).
+//
+// Best-effort, but never quiet about failing: a missed write means a sibling
+// replica will not be able to declare the state, so it is logged with the scope
+// and instance it would have described.
 // takeExecutor removes and returns the scope's executor together with the
 // epoch this pod last received for it.
 func (p *E2BExecutorPool) takeExecutor(key string) (*E2BExecutor, int64, bool) {

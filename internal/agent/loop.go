@@ -207,11 +207,11 @@ func (a *Agent) SetSandboxPool(p sandbox.ExecutorPool) {
 func (a *Agent) bindSession(ctx context.Context, channel, accountID, sessionID, projectID string) {
 	a.registry.SetSessionID(sessionID)
 	a.registry.SetProjectID(projectID)
-	// Coding agents (those with a project runtime wired) treat a project
-	// as ONE shared app tree: file tools address the project root so the
-	// agent's edits land where the dev server serves. Only when actually
-	// inside a project; loose chats and non-coding agents are unaffected.
-	a.registry.SetCodingRootScope(a.projectRuntime != nil && projectID != "")
+	// A project is ONE shared app tree: the file tools address the project
+	// root so the agent's edits land where the dev server serves. That rule
+	// lives in workspace.WriteScope, keyed on "is there a project" rather
+	// than on whether a runtime happens to be wired (docs 10 §4 G23). Loose
+	// chats are unaffected: no project, no collapse.
 	// If this scope already has a running app (a runtime record exists),
 	// redirect file tools into its app subfolder so edits keep landing
 	// where the dev server serves — across turns, not just the turn that

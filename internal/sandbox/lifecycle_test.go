@@ -34,6 +34,11 @@ type fakeExecutor struct {
 
 	mu     sync.Mutex
 	writes map[string]string
+	// commands records what Exec was asked to run, in order. The write-through's
+	// stamp is only observable there (a fake filesystem has no mtime), so tests
+	// that pin "the sandbox copy carries the STORE's write time" read this
+	// instead of counting later reads — see TestWriteThroughStampsTheSandboxCopyWithTheStoreTime.
+	commands []string
 	// execErr, when set, is what this instance's Exec returns. Armed per
 	// INSTANCE on purpose: the test that arms it wants the first instance to
 	// fail and its replacement to be healthy — the shape of §7.4, where the
@@ -49,6 +54,7 @@ type fakeExecutor struct {
 func (f *fakeExecutor) Exec(ctx context.Context, command string, timeout time.Duration) (string, error) {
 	atomic.AddInt32(&f.execs, 1)
 	f.mu.Lock()
+	f.commands = append(f.commands, command)
 	err := f.execErr
 	f.mu.Unlock()
 	if err != nil {
@@ -59,6 +65,15 @@ func (f *fakeExecutor) Exec(ctx context.Context, command string, timeout time.Du
 	}
 	return "ok", nil
 }
+
+// execCommands is the recorded Exec stream, copied so callers can read it
+// without holding the mutex.
+func (f *fakeExecutor) execCommands() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.commands...)
+}
+
 func (f *fakeExecutor) ReadFile(ctx context.Context, path string) (string, error) { return "", nil }
 func (f *fakeExecutor) WriteFile(ctx context.Context, p, c string) (string, error) {
 	f.mu.Lock()
@@ -798,9 +813,30 @@ func mapKeys(m map[string]string) []string {
 type snapshottingExecutor struct {
 	fakeExecutor
 	files map[string][]byte
+	// snapshotErr, when set, is what SnapshotWorkspace reports — the shape of a
+	// workspace too large to snapshot.
+	snapshotErr error
+	// replaced, when set, makes TakeWorkspaceReplaced report a rebuild once —
+	// the shape of an expired instance being re-created from the store.
+	replaced bool
+	// readErr, when set, makes ReadFile fail — the shape of a call that cannot
+	// carry a note back to the agent.
+	readErr error
+}
+
+// TakeWorkspaceReplaced implements ReplacedWorkspace.
+func (s *snapshottingExecutor) TakeWorkspaceReplaced() bool {
+	if !s.replaced {
+		return false
+	}
+	s.replaced = false
+	return true
 }
 
 func (s *snapshottingExecutor) SnapshotWorkspace(ctx context.Context) (map[string][]byte, error) {
+	if s.snapshotErr != nil {
+		return nil, s.snapshotErr
+	}
 	out := make(map[string][]byte, len(s.files))
 	for k, v := range s.files {
 		out[k] = v
@@ -808,11 +844,60 @@ func (s *snapshottingExecutor) SnapshotWorkspace(ctx context.Context) (map[strin
 	return out, nil
 }
 
+// IsRemoteWorkspace marks the snapshotting fake as a DETACHED backend, which is
+// what it models: it carries its own copy of /workspace (that is why it can be
+// snapshotted), so host writes have to be mirrored into it and a failed mirror
+// has to be remembered. Docker — the backend where /workspace IS the host
+// directory — deliberately does NOT implement this.
+func (s *snapshottingExecutor) IsRemoteWorkspace() {}
+
+// WriteFile keeps the snapshot and the write record in step. A real sandbox has
+// ONE copy of /workspace, so a mirror write and a snapshot of that path cannot
+// disagree; this fake used to keep them in separate maps, which let a test
+// assert against the wrong one. written(relative) is the read side.
+func (s *snapshottingExecutor) WriteFile(ctx context.Context, p, c string) (string, error) {
+	if _, err := s.fakeExecutor.WriteFile(ctx, p, c); err != nil {
+		return "", err
+	}
+	rel, ok := strings.CutPrefix(p, "/workspace/")
+	if !ok {
+		rel, ok = strings.CutPrefix(p, defaultSandboxRoot+"/")
+	}
+	if ok && rel != "" {
+		s.files[rel] = []byte(c)
+	}
+	return "", nil
+}
+
+// ReadFile reads the sandbox's copy — the same single copy the snapshot reports,
+// which is what a real executor does. Without this the fake answered "" for
+// every path, so anything reasoning about the sandbox's CURRENT content (the
+// write-through precondition, conflict resolution) saw an empty file.
+func (s *snapshottingExecutor) ReadFile(ctx context.Context, p string) (string, error) {
+	if s.readErr != nil {
+		return "", s.readErr
+	}
+	rel, ok := strings.CutPrefix(p, "/workspace/")
+	if !ok {
+		rel, ok = strings.CutPrefix(p, defaultSandboxRoot+"/")
+	}
+	if !ok {
+		rel = p
+	}
+	if data, ok := s.files[rel]; ok {
+		return string(data), nil
+	}
+	return "", errors.New("sandbox: no such file")
+}
+
 // fakePool that returns a snapshottingExecutor on first Get, so the
 // lifecycle pool sees a backend that supports SnapshotWorkspace.
 type snappingPool struct {
 	fakePool
 	current *snapshottingExecutor
+	// getErr, when set, makes Get fail — the shape of a scope whose sandbox is
+	// gone, which is how a write-through loses its mirror.
+	getErr error
 }
 
 func newSnappingPool(files map[string][]byte) *snappingPool {

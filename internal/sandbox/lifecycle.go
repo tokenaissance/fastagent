@@ -3,9 +3,12 @@ package sandbox
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -65,7 +68,19 @@ type LifecyclePool struct {
 	// flush + release paths can talk to the right workspace scope without
 	// re-parsing the key.
 	scopes map[string]sandboxScope
-
+	// signals is where a delta waits when it is produced while nobody is
+	// reading — the idle-eviction sync. It is a PORT, not a field: the durable
+	// implementation lives outside this package, because an in-process queue
+	// loses an undelivered signal the moment a pod restarts or another replica
+	// adopts the scope, and that is exactly the state the fleet shares
+	// (docs 09, G3; removed 2026-09-18).
+	//
+	// What the old queue carried is now split by what each fact actually needs:
+	//   blocked / problem → re-derived by the next sync (a refusal leaves the
+	//                       divergence in place, a persistent failure fails again)
+	//   a sandbox rebuild → threaded through the call that discovered it
+	//   moved (evict)     → this port: durable, delivered once, then deleted
+	signals SignalStore
 	// workspace is the optional blob store that bootstraps /workspace on
 	// sandbox creation. When nil, sandboxes start empty and rely on
 	// write_file tool calls (which already write through workspace.Store)
@@ -262,6 +277,25 @@ func (p *LifecyclePool) SetWorkspace(ws workspace.Store) {
 	}
 }
 
+// SignalStore is where a delta waits when it is produced while nobody is
+// reading — the idle-eviction sync. The pool defines the port; the runtime
+// implements it over a durable scope-level store, so the sandbox package stays
+// ignorant of the relational store (the same shape as workspace.Store).
+//
+// It replaces the in-process map removed on 2026-09-18 (docs 09, G3): a pod
+// restart, or another replica adopting the lease, dropped a note only that
+// process held. AppendSignal must accumulate (two evictions before the next turn
+// are two facts), and TakeSignals must return and clear in one step, because the
+// note is delivered exactly once.
+type SignalStore interface {
+	AppendSignal(ctx context.Context, agentID, projectID, sessionID, text string) error
+	TakeSignals(ctx context.Context, agentID, projectID, sessionID string) (string, error)
+}
+
+// SetSignalStore wires the durable carrier. Nil is allowed: the pool then logs
+// what it would have carried (see parkSignal) instead of pretending.
+func (p *LifecyclePool) SetSignalStore(s SignalStore) { p.signals = s }
+
 // workspaceAware is implemented by inner pools that fold workspace
 // hydration into their own create-time bulk upload (so LifecyclePool
 // shouldn't double-hydrate via the per-file path).
@@ -432,44 +466,339 @@ func (p *LifecyclePool) flushIfSupported(sc sandboxScope) {
 	if err != nil {
 		return
 	}
-	p.syncSnapshot(context.Background(), sc, ex, "evict")
+	// This sync has no tool result to deliver with — it happens between turns.
+	// Only the facts a later sync CANNOT re-derive are carried: paths this sync
+	// just wrote into the store (the write erased the evidence of the
+	// divergence). A refusal and a failed sync are not carried — the next sync
+	// sees the same two copies and says the same thing again, and carrying them
+	// would report the same path twice (docs 09, G3).
+	p.parkSignal(sc, movedLine(p.syncSnapshot(context.Background(), sc, ex, "evict").moved))
+}
+
+// parkSignal hands a delta to the durable carrier. The pool never holds it: the
+// in-process map this replaced lost the note on a pod restart or when another
+// replica adopted the scope (docs 09, G3).
+//
+// Without a carrier the signal is logged rather than kept — a runtime that has
+// nowhere durable to put it must say so, not pretend it will be delivered.
+func (p *LifecyclePool) parkSignal(sc sandboxScope, signal string) {
+	if signal == "" {
+		return
+	}
+	if p.signals == nil {
+		slog.Warn("sandbox sync produced a signal with no durable carrier wired; only the log carries it",
+			"agent", sc.agentID, "session", sc.sessionID, "signal", signal)
+		return
+	}
+	if err := p.signals.AppendSignal(context.Background(), sc.agentID, sc.projectID, sc.sessionID, signal); err != nil {
+		slog.Warn("sandbox sync could not park its signal; the change stays in the log only",
+			"agent", sc.agentID, "session", sc.sessionID, "error", err)
+	}
+}
+
+// takeSignals collects whatever earlier syncs parked for this scope, deleting it
+// as it is handed over: exactly one delivery per fact, across processes and
+// replicas.
+func (p *LifecyclePool) takeSignals(ctx context.Context, sc sandboxScope) string {
+	if p.signals == nil {
+		return ""
+	}
+	out, err := p.signals.TakeSignals(ctx, sc.agentID, sc.projectID, sc.sessionID)
+	if err != nil {
+		slog.Warn("sandbox sync could not read parked signals; the agent will not be told this time",
+			"agent", sc.agentID, "session", sc.sessionID, "error", err)
+		return ""
+	}
+	return out
 }
 
 // syncSnapshot does the actual snapshot+diff+Put work. Pulled out of
 // flushIfSupported so post-exec sync (lazyExecutor.Exec) can reuse it
 // without re-fetching the executor through the inner pool. `cause` is a
 // log tag so we can tell evict-flushes from per-exec syncs in slog.
-func (p *LifecyclePool) syncSnapshot(ctx context.Context, sc sandboxScope, ex Executor, cause string) {
+//
+// ── Why this is a reconcile and not a copy ───────────────────────────────
+//
+// 2026-09-17: deliverables were silently reverted in production. The old rule
+// was "store and snapshot sizes differ ⇒ take the snapshot", which is only
+// sound when the store can contain nothing the sandbox did not write. Host
+// tools (write_file / edit_file / apply_patch) break that: they write the
+// store without touching the sandbox, so the sandbox's stale copy looked
+// "newer" and overwrote the good one — once per exec, on every scope whose
+// sandbox had outlived a host edit. Full analysis:
+// docs/文件系统形式化证明/07-formal-rootcause-and-fix.md §2.
+//
+// The repair is a precondition, not a smarter heuristic:
+//
+//   - A path the store does NOT have is a sandbox artefact → push (unchanged).
+//   - A path the store HAS is pushed while this sandbox still holds the copy it
+//     was handed — the read that decides that is the cheap one: the store
+//     object's size+mtime against the sandbox file's own (statsFor). Then the
+//     sandbox's difference is the sandbox's own work.
+//   - Otherwise the two copies disagree, and the precondition is false: migrate
+//     NOTHING and say so. Overwriting here is what destroyed the deliverables;
+//     skipping keeps the store intact and merely leaves the sandbox stale
+//     (which the next hydrate/reconcile repulls).
+//
+// Two mechanisms keep that decision from being a guess:
+//
+//   - WriteThrough mirrors every host write into the live sandbox, so the two
+//     copies of a path are equal at the moment of the write — same bytes AND,
+//     because the mirror stamps the sandbox file with the store object's mtime,
+//     the same version marker. A sandbox edit that follows is therefore
+//     unambiguously the sandbox's, and the cheap check above passes.
+//   - Nothing is remembered between calls. A mirror that failed leaves the two
+//     copies different, which is exactly the state the check sees on its own; a
+//     path whose store copy cannot be read back for a byte comparison is refused
+//     rather than overwritten. No per-pod table means the same sandbox is judged
+//     the same way by whichever replica handles the turn (07 §3.3).
+//
+// 01 §3.1 explains why the docker backend needs neither: there is one copy.
+// ReplacedWorkspace is the read side of a rebuild: an executor whose /workspace
+// was re-created from the store after its previous instance died states it
+// once. The lifecycle pool turns that into a signal on the next tool result —
+// without it, a rebuild is invisible (the next exec succeeds normally) while
+// anything that existed only inside the old sandbox is gone (docs 09, G1/G2).
+type ReplacedWorkspace interface {
+	TakeWorkspaceReplaced() bool
+}
+
+// statsFor reads the sandbox's own size/mtime for every path in the snapshot.
+// This is the memory-free substitute for a baseline table: the sandbox
+// filesystem already records when each file last changed, and that record
+// travels WITH the sandbox across replicas and restarts — which a pod-local map
+// cannot. The agent can see the same numbers with `ls -l`.
+//
+// Best-effort: on failure the map is empty, and sameVersion falls through to
+// comparing the bytes — slower, never wrong.
+func statsFor(ctx context.Context, ex Executor, files map[string][]byte) map[string]fileStat {
+	out := make(map[string]fileStat, len(files))
+	res, err := ex.Exec(ctx, `find /workspace -type f -printf '%P\t%s\t%T@\n' 2>/dev/null`, 30*time.Second)
+	if err != nil {
+		return out
+	}
+	for _, line := range strings.Split(res, "\n") {
+		parts := strings.Split(line, "\t")
+		if len(parts) != 3 {
+			continue
+		}
+		size, sizeErr := strconv.ParseInt(parts[1], 10, 64)
+		secs, modErr := strconv.ParseFloat(parts[2], 64)
+		if sizeErr != nil || modErr != nil {
+			continue
+		}
+		out[parts[0]] = fileStat{size: size, modUnix: int64(secs)}
+	}
+	return out
+}
+
+// fileStat is one sandbox file's own metadata.
+type fileStat struct {
+	size    int64
+	modUnix int64
+}
+
+// sameVersion reports whether the store object and the sandbox copy are the SAME
+// version without reading either: same byte count, same write time. The mirror
+// stamps the sandbox file with the store's write time, so equality is exact for
+// mirrored content and merely uncertain for anything else — and uncertain falls
+// through to comparing the bytes.
+//
+// A stat we could not read never claims equality.
+func sameVersion(info *workspace.ObjectInfo, st fileStat, data []byte) bool {
+	if st.modUnix == 0 {
+		return false
+	}
+	if info.Size != int64(len(data)) || st.size != int64(len(data)) {
+		return false
+	}
+	diff := info.ModTime.Unix() - st.modUnix
+	if diff < 0 {
+		diff = -diff
+	}
+	return diff <= 1
+}
+
+// equalToStore compares the store's bytes with the sandbox's. Called only when
+// the metadata check could not settle it, so the read is paid once per
+// genuinely-ambiguous path, not per sync.
+func equalToStore(ctx context.Context, ws workspace.Store, sc sandboxScope, path string, data []byte) bool {
+	rc, err := ws.Get(ctx, sc.agentID, sc.projectID, sc.sessionID, path)
+	if err != nil {
+		return false
+	}
+	defer rc.Close()
+	stored, err := io.ReadAll(rc)
+	if err != nil {
+		return false
+	}
+	return bytes.Equal(stored, data)
+}
+
+// delta is what one reconcile observed, in the three shapes that matter to the
+// agent: paths it moved into the store, paths it refused, and paths the store
+// has that the sandbox does not. It is the δ of docs 08 §2 — a fact about how
+// the world changed; signalsFor turns it into the σ the agent reads.
+//
+// storeOnly is that third shape, and it closes the walk's blind spot without any
+// memory: the walk's domain is the sandbox snapshot, so "the store has a path the
+// sandbox does not" was never examined. Listing the store once per sync gives it,
+// and it is the trace a deletion inside the sandbox leaves — but the SAME trace
+// as an upload that arrived after the sandbox started, so the signal states the
+// fact and says plainly that this runtime cannot attribute it (docs 10 §4, G4;
+// saying more would be the class of error G16 was).
+type delta struct {
+	moved     []string
+	blocked   []string
+	storeOnly []string
+	// problem is set when the reconcile itself could not run — the snapshot
+	// failed (workspace over the cap) or the store listing did. The agent has to
+	// know: the sandbox's changes are NOT in the store, and it will otherwise
+	// read the store's older copies and conclude its work vanished (production
+	// hit this 64 times in one session; the operator log said so, the agent's
+	// context did not).
+	problem string
+}
+
+// changed reports whether the delta has anything to say.
+func (r delta) changed() bool {
+	return len(r.moved) > 0 || len(r.blocked) > 0 || len(r.storeOnly) > 0 || r.problem != ""
+}
+
+// syncStoreScope is the store scope a sync's write-backs belong to.
+//
+// A project is one tree: its tools write the project root and hydrate fills the
+// sandbox from it, so the sync has to write back there too — otherwise every
+// project file the sandbox holds gets copied into the chat's own subdir (docs
+// 10 §4 G17 residual A). A loose chat keeps its session segment.
+//
+// The rule itself is workspace.WriteScope's — the same call the file tools make
+// (docs 10 §4 G23); this function only re-attaches the agent.
+func syncStoreScope(sc sandboxScope) sandboxScope {
+	ws := workspace.WriteScope(sc.projectID, sc.sessionID)
+	return sandboxScope{agentID: sc.agentID, projectID: ws.ProjectID, sessionID: ws.SessionID}
+}
+
+// syncSnapshot returns what it moved, refused and lost, so the caller can tell
+// the agent what the sandbox did (zero value when there is nothing to observe
+// and nothing to sync).
+func (p *LifecyclePool) syncSnapshot(ctx context.Context, sc sandboxScope, ex Executor, cause string) delta {
+	var d delta
 	if p.workspace == nil {
-		return
+		return d
 	}
 	snapper, ok := ex.(WorkspaceSnapshotter)
 	if !ok {
-		return
+		return d
 	}
 	files, err := snapper.SnapshotWorkspace(ctx)
 	if err != nil {
 		slog.Warn("sandbox sync: snapshot failed", "agent", sc.agentID, "session", sc.sessionID, "cause", cause, "error", err)
-		return
+		// The sandbox's changes did not reach the store. That is a state change
+		// the agent has to be able to reason about: reading the file back
+		// through a file tool returns the STORE's copy, which is now older than
+		// what the sandbox holds. Saying so turns "my work vanished" into "the
+		// sync is blocked and here is why".
+		d.problem = fmt.Sprintf("the sandbox's changes could NOT be synced to the workspace store (%v). "+
+			"The sandbox still holds them; the store — and anything you read with read_file — may be older. "+
+			"Typical cause: /workspace grew past the snapshot cap (32 MiB), usually from logs or datasets. "+
+			"Move those to /tmp and the next sync goes through.", err)
+		return d
 	}
+	// Memory-free decision procedure.
+	//
+	// There is deliberately no per-pod state here (no baseline table, no digest
+	// index, no stale set). A sandbox lease is adopted ACROSS REPLICAS, so a
+	// judgement that depends on "what this process saw earlier" is not a
+	// judgement: the same sandbox would be treated differently by whichever pod
+	// handled the turn, and a pod restart would silently change the rules. What
+	// the two copies carry themselves is enough —
+	//
+	//   the store object's size + write time   (from Stat; one round trip each)
+	//   the sandbox file's size + mtime        (from one stat pass, statsFor)
+	//
+	// — plus the invariant the write-through maintains: after a host write both
+	// copies hold the same bytes AND the mirror stamps the sandbox file with the
+	// store's write time. So "same size and same mtime" means "same version",
+	// and the cheap skip needs no memory.
+	//
+	// When they look different, comparing the bytes decides: equal ⇒ skip;
+	// different ⇒ refuse to choose, and record the δ. A host write whose mirror
+	// failed lands here with the sandbox holding older bytes and is refused
+	// rather than overwritten (the incident's shape); a sandbox edit lands here
+	// too and is signalled as "not synced" for the agent to settle.
+	stats := statsFor(ctx, ex, files)
+
+	// A (docs 10 §4 G17): a project is ONE file tree, so a sandbox-born file
+	// belongs to the PROJECT ROOT — the key the file tools read, the key hydrate
+	// fills from, and the key the preview's dev server serves. Writing it to the
+	// chat's own subdir instead (which is what this loop used to do, because it
+	// took the scope from the container) duplicated every project file once per
+	// chat and put the agent's script output where no tool would look for it.
+	//
+	// Loose chats have no project to share, so their session segment stays.
+	ws := syncStoreScope(sc)
+
 	written := 0
 	for path, data := range files {
-		// Skip files that the store already has with identical size —
-		// avoids rewriting every file every sync when nothing changed.
-		// Content equality would be stricter but requires a full
-		// round-trip per file; size is usually enough.
-		if info, err := p.workspace.Stat(ctx, sc.agentID, sc.projectID, sc.sessionID, path); err == nil && info.Size == int64(len(data)) {
+		info, statErr := p.workspace.Stat(ctx, ws.agentID, ws.projectID, ws.sessionID, path)
+		switch {
+		case errors.Is(statErr, workspace.ErrNotFound):
+			slog.Info("sandbox sync: new path from sandbox",
+				"agent", sc.agentID, "session", sc.sessionID, "cause", cause,
+				"path", path, "snapshotBytes", len(data))
+		case statErr != nil:
+			slog.Warn("sandbox sync: store stat failed, leaving object untouched",
+				"agent", sc.agentID, "session", sc.sessionID, "cause", cause,
+				"path", path, "error", statErr)
+			continue
+		case sameVersion(info, stats[path], data):
+			continue
+		default:
+			if equalToStore(ctx, p.workspace, ws, path, data) {
+				continue
+			}
+			slog.Warn("sandbox sync: BLOCKED — the two copies of this path hold different bytes",
+				"agent", sc.agentID, "session", sc.sessionID, "cause", cause,
+				"path", path, "storeBytes", info.Size, "snapshotBytes", len(data))
+			d.blocked = append(d.blocked, path)
 			continue
 		}
-		if err := p.workspace.Put(ctx, sc.agentID, sc.projectID, sc.sessionID, path, bytesReader(data), int64(len(data)), ""); err != nil {
+		if err := p.workspace.Put(ctx, ws.agentID, ws.projectID, ws.sessionID, path, bytesReader(data), int64(len(data)), ""); err != nil {
 			slog.Warn("sandbox sync: put failed", "agent", sc.agentID, "session", sc.sessionID, "cause", cause, "path", path, "error", err)
 			continue
 		}
+		d.moved = append(d.moved, path)
 		written++
 	}
 	if written > 0 {
 		slog.Info("sandbox synced to workspace store", "agent", sc.agentID, "session", sc.sessionID, "cause", cause, "files", written)
 	}
+	// The loop above walks the SANDBOX SNAPSHOT, so the mirror image — a path the
+	// STORE has and the sandbox does not — is outside its domain and used to go
+	// unexamined. One List closes that: it is the trace a deletion inside the
+	// sandbox leaves, and also the one an upload leaves, so the signal states the
+	// fact and refuses to attribute it (docs 10 §4, G4).
+	//
+	// Best-effort: a listing failure reports nothing rather than guessing, and the
+	// skills namespace is skipped because those objects live in the read-only
+	// /skills mount, not in /workspace (they would otherwise look "missing" from
+	// every agent-scope sandbox).
+	if objs, listErr := p.workspace.List(ctx, ws.agentID, ws.projectID, ws.sessionID); listErr != nil {
+		slog.Warn("sandbox sync: store listing failed; paths the sandbox lacks are not reported",
+			"agent", sc.agentID, "session", sc.sessionID, "cause", cause, "error", listErr)
+	} else {
+		for _, o := range objs {
+			if strings.HasPrefix(o.Path, "skills/") {
+				continue
+			}
+			if _, inSandbox := files[o.Path]; !inSandbox {
+				d.storeOnly = append(d.storeOnly, o.Path)
+			}
+		}
+		sort.Strings(d.storeOnly)
+	}
+	return d
 }
 
 // Get returns a lazy proxy: tool calls on it will fetch the underlying
@@ -547,6 +876,13 @@ func (p *LifecyclePool) getInner(ctx context.Context, sc sandboxScope) (Executor
 		p.mu.Unlock()
 		return nil, err
 	}
+
+	// A rebuild replaces the whole sandbox: /workspace is re-created from the
+	// store, and whatever lived only inside the old instance (a script's changes
+	// that never got synced) is gone. The rebuild is otherwise silent — the next
+	// exec succeeds — so the fact rides the call that discovered it
+	// (takeReplacedNote), as a return value on the call stack rather than in a
+	// map that a restart would empty (docs 09, G1/G2/G3).
 	// Policy C (docs/sandbox-scope-leak.md §9): a store listing that failed
 	// leaves a usable sandbox with an EMPTY /workspace. The original shape of
 	// this fix only rolled hydrated[k] back, on the theory that the next Get
@@ -582,8 +918,29 @@ func (p *LifecyclePool) getInner(ctx context.Context, sc sandboxScope) (Executor
 		if _, selfHydrates := p.inner.(workspaceAware); !selfHydrates {
 			hydrateWorkspace(ctx, p.workspace, ex, sc.agentID, sc.projectID, sc.sessionID, defaultSandboxRoot)
 		}
+		// The instance's /workspace now holds the store's objects as of this
+		// moment. That is what syncSnapshot compares against, and it needs no
+		// record of its own: the hydrate stamps each file with the store
+		// object's mtime, so the comparison reads the marker off the two copies
+		// themselves (07 §3.11.3).
 	}
 	return ex, nil
+}
+
+// takeReplacedNote reads and clears the one-shot "your sandbox was replaced"
+// flag from an executor, and renders it. It is consumed by the operation that
+// found it, so the note is delivered in that operation's own result — no queue,
+// no process memory, and no risk of being delivered to whichever call happens
+// next in some other replica (docs 09, G1/G2/G3).
+func (p *LifecyclePool) takeReplacedNote(ex Executor) string {
+	rw, ok := ex.(ReplacedWorkspace)
+	if !ok || !rw.TakeWorkspaceReplaced() {
+		return ""
+	}
+	return signalsFor(delta{problem: "the sandbox was REPLACED — the previous instance had expired or died, " +
+		"so /workspace was re-created from the workspace store. Anything that existed only inside the old sandbox " +
+		"(changes a script made that were never synced) is gone; the store's copies are intact. " +
+		"Keep long-running output in /tmp so a replacement cannot strand it."})
 }
 
 // recoverUnhydrated is Policy C's repair half (§9.2 step 5, strengthened): the
@@ -722,6 +1079,8 @@ func (l *lazyExecutor) execOnce(ctx context.Context, command string, timeout tim
 	// sandbox, and a scope that is no longer marked in use could be swept
 	// (paused) in the middle of it.
 	defer l.pool.endUse(ctx, l.scope, started)
+	// The call that discovers a rebuild carries the note about it (docs 09, G3).
+	replaced := l.pool.takeReplacedNote(ex)
 	out, execErr := ex.Exec(ctx, command, timeout)
 	// Post-exec sync only for cloud sandboxes (RemoteWorkspace marker).
 	// Docker's /workspace is bind-mounted to host so files appear
@@ -733,9 +1092,94 @@ func (l *lazyExecutor) execOnce(ctx context.Context, command string, timeout tim
 	// reach the host and the UI shows broken images.
 	// Best-effort — never overrides the exec result.
 	if _, remote := ex.(RemoteWorkspace); remote {
-		l.pool.syncSnapshot(ctx, l.scope, ex, "post-exec")
+		// This signal is the agent's only channel for SANDBOX-side change: its
+		// own tool calls tell it what the store got, but a script that edits a
+		// file inside /workspace is invisible to it (07 §3.11.1). Attach what
+		// moved, and what could not be moved, to the exec result — the shortest
+		// path from "the sandbox did something" to "the agent knows".
+		d := l.pool.syncSnapshot(ctx, l.scope, ex, "post-exec")
+		// Whatever an earlier (evict-time) sync parked comes out here, with this
+		// call's own delta after it: one delivery point, delivered once.
+		out += l.pool.takeSignals(ctx, l.scope) + signalsFor(d)
 	}
-	return out, execErr
+	return replaced + out, execErr
+}
+
+// signalsFor renders one delta as the σ the agent reads (docs 08 §2).
+// Empty when there is nothing to say: this is an exception channel, and a line
+// on every exec would train the model to skim past it.
+//
+// Paths are the sandbox's own (relative to /workspace), which is what the agent
+// sees when it lists the sandbox — and the same spelling read_file accepts.
+func signalsFor(d delta) string {
+	if !d.changed() {
+		return ""
+	}
+	var sb strings.Builder
+	if d.problem != "" {
+		sb.WriteString("\n[workspace] ")
+		sb.WriteString(d.problem)
+	}
+	if len(d.moved) > 0 {
+		if sb.Len() > 0 {
+			sb.WriteString("\n")
+		}
+		sb.WriteString(movedLine(d.moved))
+	}
+	if len(d.blocked) > 0 {
+		if sb.Len() > 0 {
+			sb.WriteString("\n")
+		}
+		sb.WriteString("[workspace] NOT synced (the store's copy differs and neither side may be chosen automatically): ")
+		sb.WriteString(strings.Join(d.blocked, ", "))
+		sb.WriteString(" — both versions are intact.")
+	}
+	if len(d.storeOnly) > 0 {
+		sb.WriteString(StoreOnlyLine(d.storeOnly))
+	}
+	return sb.String()
+}
+
+// StoreOnlyLine states the divergence one walk cannot see by construction: paths
+// the store has and the sandbox does not.
+//
+// It is deliberately one shared sentence, because two producers state this same
+// fact at two different moments — the reconcile (whose walk domain is the
+// sandbox snapshot) and list_dir (which lists the store and asks the sandbox what
+// it holds). Two wordings for one fact is how a rule drifts.
+//
+// The origin is NOT claimed: "deleted inside the sandbox" and "uploaded to the
+// store after this sandbox started" leave the identical trace, and only a durable
+// store-side manifest could tell them apart (docs 10 §4, G4). What matters to the
+// agent is the consequence, which is stated exactly: exec cannot see them.
+func StoreOnlyLine(paths []string) string {
+	if len(paths) == 0 {
+		return ""
+	}
+	const shownMax = 5
+	shown := paths
+	more := ""
+	if len(shown) > shownMax {
+		shown = shown[:shownMax]
+		more = fmt.Sprintf(" (+%d more)", len(paths)-shownMax)
+	}
+	return fmt.Sprintf("\n[workspace] %d path(s) are in the workspace store but NOT in this sandbox, "+
+		"so anything run with exec will not find them: %s%s — either they were added to the store after this "+
+		"sandbox started (an upload), or they were deleted inside it; this runtime cannot tell which. "+
+		"read_file still sees them: if a script needs one, read it and write it again (read_file + write_file copies it in).",
+		len(paths), strings.Join(shown, ", "), more)
+}
+
+// movedLine renders the one delta shape that has to survive the moment it is
+// produced: paths a sync wrote into the store. A refusal leaves the divergence
+// in place and a failed sync fails again, so the next sync re-derives both — but
+// a write erases its own evidence, and it happens during idle eviction, when
+// nobody is reading (docs 09, G3).
+func movedLine(paths []string) string {
+	if len(paths) == 0 {
+		return ""
+	}
+	return "\n[workspace] the sandbox changed " + strings.Join(paths, ", ") + " — synced to the workspace store."
 }
 
 func (l *lazyExecutor) ReadFile(ctx context.Context, path string) (string, error) {
@@ -746,7 +1190,13 @@ func (l *lazyExecutor) ReadFile(ctx context.Context, path string) (string, error
 	started := time.Now()
 	l.pool.beginUse(l.scope)
 	defer l.pool.endUse(ctx, l.scope, started)
-	return ex.ReadFile(ctx, path)
+	out, readErr := ex.ReadFile(ctx, path)
+	if readErr != nil {
+		// Leave the replacement note where it is: this call cannot carry it, and
+		// swallowing it here would lose the fact (docs 09, G3).
+		return out, readErr
+	}
+	return l.pool.takeReplacedNote(ex) + out, nil
 }
 
 func (l *lazyExecutor) WriteFile(ctx context.Context, path, content string) (string, error) {
@@ -772,6 +1222,7 @@ func (l *lazyExecutor) WriteFile(ctx context.Context, path, content string) (str
 		if _, remote := ex.(RemoteWorkspace); remote {
 			l.pool.mirrorSandboxWrite(ctx, l.scope, path, content)
 		}
+		return l.pool.takeReplacedNote(ex) + out, nil
 	}
 	return out, writeErr
 }
@@ -811,7 +1262,11 @@ func (l *lazyExecutor) ListDir(ctx context.Context, path string) (string, error)
 	started := time.Now()
 	l.pool.beginUse(l.scope)
 	defer l.pool.endUse(ctx, l.scope, started)
-	return ex.ListDir(ctx, path)
+	out, listErr := ex.ListDir(ctx, path)
+	if listErr != nil {
+		return out, listErr
+	}
+	return l.pool.takeReplacedNote(ex) + out, nil
 }
 
 // Close on a lazy proxy is a no-op — the underlying executor's lifetime is
@@ -834,3 +1289,290 @@ var (
 	_ Executor     = (*lazyExecutor)(nil)
 	_ ExecutorPool = (*LifecyclePool)(nil)
 )
+
+// WriteThrough mirrors one host-tool write into the live sandbox, so the two
+// copies of a path move together instead of diverging until the next reconcile.
+//
+// Why this exists (docs/文件系统形式化证明/07 §2): the incident needed four
+// conditions, and the third — "the host wrote a path the sandbox also has, and
+// the two now differ" — cannot happen on docker, whose /workspace IS the host
+// directory. Remote backends have two copies, so the divergence window is
+// structural. Mirroring at the moment of the write closes it at the source
+// instead of arbitrating it later: after a successful mirror the sandbox copy
+// holds the host's bytes AND the store object's mtime, so the reconcile's cheap
+// "same version" check is exact and only sandbox-side edits can differ.
+//
+// It does NOT prevent a divergence, and it never refuses to write. An earlier
+// version compared the sandbox's copy against a digest it was handed and blocked
+// the mirror on a mismatch (a compare-and-set). That is the wrong shape here:
+// refusing created a state with no way out (a rewrite was refused again by the
+// same check, and a write inside the sandbox was refused by the reconcile), and
+// the choice it avoided making is not the code's to make anyway.
+//
+// What it does instead:
+//
+//  1. OBSERVE — compare the sandbox's copy against what the CALLER says it was
+//     (write_file passes "", edit_file and apply_patch pass the bytes they
+//     read). No stored table: the expectation comes from the call, which is
+//     what keeps the judgement valid across replicas and pod restarts.
+//  2. WRITE — apply the host's content, as asked.
+//  3. STAMP — set the sandbox file's mtime to the store object's, so the two
+//     copies are recognisable as one version without any memory.
+//  4. SIGNAL — return the delta (WriteThroughOutcome). The tool renders it into
+//     a σ and hands it to the package's single signal exit; the mirror itself
+//     never keeps a copy of what it replaced, because the agent decides what to
+//     do with the fact (07 §3.11.1).
+//
+// Granularity is one path per call, deliberately: the caller knows exactly which
+// file it changed, so a mirror failure stays per-path instead of stranding
+// unrelated exec artefacts.
+//
+// sandboxPath is the ABSOLUTE path inside the sandbox; callers pass the same
+// mapping the hydrate uses, so the mirrored file is the one the sandbox's
+// tooling already reads.
+func (p *LifecyclePool) WriteThrough(ctx context.Context, sc sandboxScope, store StoreScope, storeKey, sandboxPath, content, previous string) (WriteThroughOutcome, error) {
+	var outcome WriteThroughOutcome
+	if p.workspace == nil || sandboxPath == "" || storeKey == "" {
+		return outcome, nil
+	}
+	ex, err := p.getInner(ctx, sc)
+	if err != nil {
+		return outcome, fmt.Errorf("sandbox write-through: no sandbox: %w", err)
+	}
+	if _, ok := ex.(RemoteWorkspace); !ok {
+		outcome.Comparison = CompareNoSecondCopy
+		return outcome, nil // docker: /workspace IS the host directory, nothing to mirror
+	}
+
+	// OBSERVE before overwriting. The expectation comes from the CALLER, not
+	// from a table this process keeps: edit_file, write_file and apply_patch all
+	// know what the store held before their write. That keeps the step
+	// memory-free (the sandbox's own bytes are the record) while still being
+	// able to state a replaced version instead of destroying it silently.
+	//
+	// A read error is deliberately reported as "nothing to say" rather than
+	// "the copy could not be read": a missing file and an unreadable one are
+	// indistinguishable through the Executor port, and a missing file is the
+	// normal case for a new path. Claiming a fact we cannot phrase would trade
+	// C2 for C3 — see docs 10 §2.1.
+	if current, readErr := ex.ReadFile(ctx, sandboxPath); readErr == nil && current != "" {
+		outcome.SandboxBytes = int64(len(current))
+		switch {
+		case previous != "" && current != previous && current != content:
+			outcome.Comparison = CompareReplacedVerified
+		case previous == "" && current != content:
+			outcome.Comparison = CompareReplacedUnchecked
+		default:
+			outcome.Comparison = CompareNothingReplaced
+		}
+	}
+
+	if _, err := ex.WriteFile(ctx, sandboxPath, content); err != nil {
+		return outcome, fmt.Errorf("sandbox write-through: %w", err)
+	}
+	// Stamp the sandbox file with the store's write time. This is the whole
+	// "baseline" now: it lives in the sandbox filesystem (survives restarts,
+	// travels across replicas, visible to the agent with ls -l), and it is what
+	// makes the reconcile's cheap "same version" check exact.
+	if info, statErr := p.workspace.Stat(ctx, sc.agentID, store.ProjectID, store.SessionID, storeKey); statErr == nil && !info.ModTime.IsZero() {
+		if _, touchErr := ex.Exec(ctx, fmt.Sprintf("touch -d @%d %s", info.ModTime.Unix(), shellQuote(sandboxPath)), 15*time.Second); touchErr != nil {
+			slog.Warn("sandbox write-through: could not stamp the sandbox copy with the store's write time",
+				"path", storeKey, "error", touchErr)
+		}
+	}
+	// H (docs 10 §4 G17): one project is one file tree, and the preview's dev
+	// server may be running in a DIFFERENT container of that project — a sibling
+	// chat's, or the project-addressed slot the console starts. Docker closes that
+	// gap with a bind mount; without one, the store is the channel and the write
+	// has to reach every live container of the project.
+	outcome.BroadcastFailures = p.mirrorToProjectPeers(ctx, sc, store, ex, storeKey, sandboxPath, content)
+	return outcome, nil
+}
+
+// mirrorToProjectPeers copies one already-mirrored write into the project's OTHER
+// live containers, and stamps them the same way the primary copy is stamped.
+//
+// Best-effort by construction: the primary copy is already correct, so a peer
+// that cannot be reached costs a stale preview — not a wrong file, and never a
+// failed tool call. The count comes back so the tool layer can say so (C3: a
+// signal only when something went wrong).
+func (p *LifecyclePool) mirrorToProjectPeers(ctx context.Context, sc sandboxScope, store StoreScope, primary Executor, storeKey, sandboxPath, content string) int {
+	if sc.projectID == "" {
+		return 0
+	}
+	inner, ok := p.inner.(LiveExecutorPool)
+	if !ok {
+		return 0
+	}
+	peers := inner.LiveProjectExecutors(sc.agentID, sc.projectID)
+	if len(peers) == 0 {
+		return 0
+	}
+	// The stamp is whatever the primary copy was stamped with; one Stat serves
+	// every peer.
+	var stamp int64
+	if info, statErr := p.workspace.Stat(ctx, sc.agentID, store.ProjectID, store.SessionID, storeKey); statErr == nil && !info.ModTime.IsZero() {
+		stamp = info.ModTime.Unix()
+	}
+	failed := 0
+	for _, peer := range peers {
+		if peer == nil || peer == primary {
+			continue
+		}
+		if _, werr := peer.WriteFile(ctx, sandboxPath, content); werr != nil {
+			failed++
+			slog.Warn("sandbox write-through: another container of this project could not be updated; "+
+				"a dev server running there may show an older version",
+				"agent", sc.agentID, "project", sc.projectID, "path", sandboxPath, "error", werr)
+			continue
+		}
+		if stamp != 0 {
+			if _, terr := peer.Exec(ctx, fmt.Sprintf("touch -d @%d %s", stamp, shellQuote(sandboxPath)), 15*time.Second); terr != nil {
+				slog.Warn("sandbox write-through: could not stamp another container's copy",
+					"path", sandboxPath, "error", terr)
+			}
+		}
+	}
+	return failed
+}
+
+// LifecyclePool also serves as the write-through entry point the tool layer
+// reaches through the executor it was handed. Narrow capability interfaces keep
+// the tools from needing the pool: they ask the executor, and a docker-backed
+// executor answers "nothing to do".
+//
+// WriteThroughExecutor is what internal/agent/tools type-asserts against.
+
+// CompareResult is what the write-through established about the sandbox's copy of
+// one path. Four facts used to be carried by a single bool, and the tool layer
+// read that bool as "over the fingerprint cap" — which is how a 5-byte file came
+// to be announced as "too large to compare" (docs 10 §2.1, G5). Naming the facts
+// is what makes each sentence the exit produces true.
+type CompareResult uint8
+
+const (
+	// CompareNoSecondCopy: there is nothing to compare, because there is no
+	// second copy — the sandbox's /workspace IS the host directory (docker).
+	// Nothing was mirrored and nothing was replaced: stay silent.
+	CompareNoSecondCopy CompareResult = iota
+	// CompareNothingReplaced: the sandbox copy is what the caller expected, or
+	// is already the content being written, or could not be read at all.
+	// Nothing was replaced: stay silent.
+	CompareNothingReplaced
+	// CompareReplacedVerified: the sandbox held a version different from the one
+	// the caller said it should hold, and the write overwrote it.
+	CompareReplacedVerified
+	// CompareReplacedUnchecked: the sandbox held bytes different from what is
+	// being written, but the caller had no expectation to check them against —
+	// something was replaced and we cannot say what it was.
+	CompareReplacedUnchecked
+)
+
+// WriteThroughOutcome is the delta the mirror observed on its way through. It is
+// metadata only: the mirror never keeps a copy of what it replaced, because the
+// agent was already told what the sandbox changed (the exec signal) before it
+// decided to write. Stating the fact keeps the write honest; duplicating the
+// bytes would be a second, redundant safety net for a decision the agent has
+// already made.
+type WriteThroughOutcome struct {
+	// Comparison is what the mirror could establish (see CompareResult). The
+	// zero value — no second copy — is the docker case.
+	Comparison CompareResult
+	// SandboxBytes is the size of the version the mirror found before
+	// overwriting it (0 when it found none, or could not read it).
+	SandboxBytes int64
+	// BroadcastFailures counts the OTHER containers of this project that could
+	// not be updated (docs 10 §4 G17, option H). The container this write went to
+	// is excluded: it is accounted for by Comparison. Non-zero means a preview
+	// running in another container may still show an older version.
+	BroadcastFailures int
+}
+
+// WriteThroughExecutor mirrors one host write into the sandbox that serves the
+// same scope. Implemented by LifecyclePool; the tools call it after a
+// successful store write and never let its result fail the tool call — the
+// store write already happened.
+type WriteThroughExecutor interface {
+	WriteThroughScope(store StoreScope, storeKey, sandboxPath, content, previous string) (WriteThroughOutcome, error)
+}
+
+// WriteThroughScope is the executor-facing form of WriteThrough: the caller
+// carries the scope identity it was constructed with, so the tool layer does
+// not have to know how the pool keys sandboxes.
+func (l *lazyExecutor) WriteThroughScope(store StoreScope, storeKey, sandboxPath, content, previous string) (WriteThroughOutcome, error) {
+	return l.pool.WriteThrough(context.Background(), l.scope, store, storeKey, sandboxPath, content, previous)
+}
+
+// RemoveLiveWorkspaceFile is the panel's delete side, on the same proxy the
+// write-through uses: remove the path inside the scope's CURRENT sandbox.
+//
+// Two deliberate properties:
+//
+//   - It never creates an instance. `liveInstance` asks the inner pool for a
+//     cached executor only; a scope nobody is running means "nothing to remove",
+//     which is correct — the store is the authority and the next hydrate reads
+//     the store, where the file is already gone.
+//   - It reuses the same store→sandbox mapping as hydrate (SandboxPathForStorePath),
+//     so the file it deletes is the file the sandbox actually has. Getting this
+//     wrong is what made the panel delete a silent no-op (10 §4 G21), and the way
+//     it failed (address the wrong key, report success) is the way this whole
+//     family fails.
+func (l *lazyExecutor) RemoveLiveWorkspaceFile(ctx context.Context, storePath string) error {
+	sandboxPath, err := SandboxPathForStorePath(storePath)
+	if err != nil {
+		return err
+	}
+	// Every live container of the project holds its own copy, and every one of
+	// them syncs its /workspace back to the store — so a copy left behind in a
+	// peer is not just stale, it is a file that comes back (the loop G21/d1
+	// exists to close, one container further out). The scope's own instance is
+	// included when it is live.
+	var targets []Executor
+	if ex, ok := l.pool.liveInstance(l.scope); ok && ex != nil {
+		targets = append(targets, ex)
+	}
+	if l.scope.projectID != "" {
+		if inner, ok := l.pool.inner.(LiveExecutorPool); ok {
+			for _, peer := range inner.LiveProjectExecutors(l.scope.agentID, l.scope.projectID) {
+				if peer == nil {
+					continue
+				}
+				dup := false
+				for _, t := range targets {
+					if t == peer {
+						dup = true
+						break
+					}
+				}
+				if !dup {
+					targets = append(targets, peer)
+				}
+			}
+		}
+	}
+	var firstErr error
+	for _, target := range targets {
+		if _, err := target.Exec(ctx, "rm -f -- "+shellQuote(sandboxPath), 30*time.Second); err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("sandbox: remove %s: %w", sandboxPath, err)
+			}
+			slog.Warn("sandbox: could not remove a copy of the deleted file; "+
+				"this container's next sync may write it back",
+				"agent", l.scope.agentID, "project", l.scope.projectID, "session", l.scope.sessionID,
+				"path", storePath, "error", err)
+		}
+	}
+	return firstErr
+}
+
+// liveInstance returns the scope's current instance without creating one. Pools
+// that cannot answer (no cache, or a backend that keeps no instance) say false,
+// and every caller of this must treat false as "there is no second copy to
+// touch".
+func (p *LifecyclePool) liveInstance(sc sandboxScope) (Executor, bool) {
+	inner, ok := p.inner.(LiveExecutorPool)
+	if !ok {
+		return nil, false
+	}
+	return inner.LiveExecutor(sc.agentID, sc.projectID, sc.sessionID)
+}

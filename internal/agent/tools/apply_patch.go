@@ -489,12 +489,20 @@ type applyPatchArgs struct {
 // Backend helpers — host filesystem mode (mirrors registerFile's routing)
 // -----------------------------------------------------------------------------
 
+// The three store touchpoints below resolve their key EXACTLY the way
+// write_file / edit_file / read_file do — r.scopeSessionID() + r.wsPath(path) —
+// because a path is one key, not one per tool. Before 2026-09-18 apply_patch
+// used r.sessionID + the raw path, so in a project session (a collapsed scope + a
+// coding subdir) the same logical "notes.md" produced two store objects: the
+// patch wrote the root key while the write-through mirror derived "app/notes.md"
+// — one file, two keys, and a read_file that disagreed with the patch that just
+// wrote it (docs 01 §8; docs 10 §4 G16 is the same family, one layer up).
 func (r *Registry) readForPatch(ctx context.Context, path string) (string, error) {
 	if r.identityFileBlocked(path) {
 		return "", fmt.Errorf("%s", IdentityFileRefusal)
 	}
 	if r.workspaceStore != nil && r.agentID != "" && r.isWorkspacePath(path) {
-		rc, err := r.workspaceStore.Get(ctx, r.agentID, r.projectID, r.sessionID, path)
+		rc, err := r.workspaceStore.Get(ctx, r.agentID, r.projectID, r.scopeSessionID(), r.wsPath(path))
 		if err != nil {
 			return "", fmt.Errorf("workspace get: %w", err)
 		}
@@ -536,7 +544,7 @@ func (r *Registry) writeForPatch(ctx context.Context, path, content string) erro
 		return fmt.Errorf("%s", OwnerManagedFileWriteRefusal)
 	}
 	if r.workspaceStore != nil && r.agentID != "" && r.isWorkspacePath(path) {
-		return r.workspaceStore.Put(ctx, r.agentID, r.projectID, r.sessionID, path,
+		return r.workspaceStore.Put(ctx, r.agentID, r.projectID, r.scopeSessionID(), r.wsPath(path),
 			strings.NewReader(content), int64(len(content)), "")
 	}
 	if r.systemFileStore != nil && r.agentID != "" && isSingleSegmentSystemFile(path) {
@@ -577,7 +585,7 @@ func (r *Registry) deleteForPatch(ctx context.Context, path string) error {
 		return fmt.Errorf("apply_patch: refusing to delete identity file %q (use Update File with empty content instead)", path)
 	}
 	if r.workspaceStore != nil && r.agentID != "" && r.isWorkspacePath(path) {
-		return r.workspaceStore.Delete(ctx, r.agentID, r.projectID, r.sessionID, path)
+		return r.workspaceStore.Delete(ctx, r.agentID, r.projectID, r.scopeSessionID(), r.wsPath(path))
 	}
 	root := r.rootForPath(path)
 	full, err := resolvePathSandboxed(root, r.effectiveSandboxRoot(root), path)
@@ -605,7 +613,7 @@ func (r *Registry) readForPatchSandbox(ctx context.Context, ex sandbox.Executor,
 		return string(r.readSystemFileWithFallback(ctx, r.systemFileUserID(name), name)), nil
 	}
 	if r.workspaceStore != nil && r.agentID != "" && r.isWorkspacePath(path) {
-		rc, err := r.workspaceStore.Get(ctx, r.agentID, r.projectID, r.sessionID, path)
+		rc, err := r.workspaceStore.Get(ctx, r.agentID, r.projectID, r.scopeSessionID(), r.wsPath(path))
 		if err == nil {
 			defer rc.Close()
 			data, readErr := io.ReadAll(rc)
@@ -630,7 +638,7 @@ func (r *Registry) writeForPatchSandbox(ctx context.Context, ex sandbox.Executor
 		return r.systemFileStore.SaveWorkspaceFile(ctx, r.agentID, r.systemFileUserID(name), name, []byte(content))
 	}
 	if r.workspaceStore != nil && r.agentID != "" && r.isWorkspacePath(path) {
-		return r.workspaceStore.Put(ctx, r.agentID, r.projectID, r.sessionID, path,
+		return r.workspaceStore.Put(ctx, r.agentID, r.projectID, r.scopeSessionID(), r.wsPath(path),
 			strings.NewReader(content), int64(len(content)), "")
 	}
 	_, err := ex.WriteFile(ctx, path, content)
@@ -642,7 +650,7 @@ func (r *Registry) deleteForPatchSandbox(ctx context.Context, ex sandbox.Executo
 		return fmt.Errorf("apply_patch: refusing to delete identity file %q (use Update File with empty content instead)", path)
 	}
 	if r.workspaceStore != nil && r.agentID != "" && r.isWorkspacePath(path) {
-		return r.workspaceStore.Delete(ctx, r.agentID, r.projectID, r.sessionID, path)
+		return r.workspaceStore.Delete(ctx, r.agentID, r.projectID, r.scopeSessionID(), r.wsPath(path))
 	}
 	// Sandbox executor exposes no Delete API; fall back to `rm`. Single-quote
 	// the path and escape embedded single quotes so a pathological filename

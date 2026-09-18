@@ -2,23 +2,25 @@ package tools
 
 import "testing"
 
-// codingRootScope must collapse the session segment so file tools address
-// the project root the dev server serves; off, it preserves per-chat
-// isolation. This is the invariant the coding-agent preview relies on.
-func TestScopeSessionIDCodingRoot(t *testing.T) {
+// A project session must collapse the session segment so file tools address the
+// project root the dev server serves; outside a project the session segment
+// stays, preserving per-chat isolation. The collapse is not decided here — it is
+// workspace.WriteScope's rule (docs 10 §4 G23) — so this test pins the wiring
+// between the registry's fields and that rule.
+func TestScopeSessionIDCollapsesInsideAProject(t *testing.T) {
 	r := NewRegistry(t.TempDir(), t.TempDir())
 	r.SetSessionID("sess-123")
 
 	if got := r.scopeSessionID(); got != "sess-123" {
-		t.Fatalf("default mode: want session segment preserved, got %q", got)
+		t.Fatalf("loose chat: want session segment preserved, got %q", got)
 	}
 
-	r.SetCodingRootScope(true)
+	r.SetProjectID("proj-1")
 	if got := r.scopeSessionID(); got != "" {
-		t.Fatalf("coding-root mode: want empty session segment, got %q", got)
+		t.Fatalf("project session: want empty session segment, got %q", got)
 	}
 
-	r.SetCodingRootScope(false)
+	r.SetProjectID("")
 	if got := r.scopeSessionID(); got != "sess-123" {
 		t.Fatalf("after disabling: want session segment restored, got %q", got)
 	}

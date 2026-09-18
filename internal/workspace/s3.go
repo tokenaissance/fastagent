@@ -62,24 +62,16 @@ func NewS3(cfg S3Config) (*S3, error) {
 }
 
 // key is <prefix>/<agentID>[/projects/<pid>[/<sid>]|/sessions/<sid>]/<path>,
-// always with forward slashes. Layout matches LocalFS.scopeDir — project
-// chats get their own per-session subdir under the project so concurrent
-// chats can't collide and a chat can be moved in/out as a single
-// rename. See LocalFS.scopeDir for the full table.
+// always with forward slashes. The scope segments come from ScopeSegments —
+// the one expression of the layout (docs 10 §4 G23) — so this backend and
+// LocalFS cannot drift apart.
 func (s *S3) key(agentID, projectID, sessionID, p string) string {
 	parts := []string{}
 	if s.prefix != "" {
 		parts = append(parts, s.prefix)
 	}
 	parts = append(parts, agentID)
-	switch {
-	case projectID != "" && sessionID != "":
-		parts = append(parts, "projects", projectID, sessionID)
-	case projectID != "":
-		parts = append(parts, "projects", projectID)
-	case sessionID != "":
-		parts = append(parts, "sessions", sessionID)
-	}
+	parts = append(parts, ScopeSegments(projectID, sessionID)...)
 	parts = append(parts, path.Clean("/" + p)[1:])
 	return strings.Join(parts, "/")
 }
@@ -92,14 +84,7 @@ func (s *S3) scopePrefix(agentID, projectID, sessionID string) string {
 		parts = append(parts, s.prefix)
 	}
 	parts = append(parts, agentID)
-	switch {
-	case projectID != "" && sessionID != "":
-		parts = append(parts, "projects", projectID, sessionID)
-	case projectID != "":
-		parts = append(parts, "projects", projectID)
-	case sessionID != "":
-		parts = append(parts, "sessions", sessionID)
-	}
+	parts = append(parts, ScopeSegments(projectID, sessionID)...)
 	return strings.Join(parts, "/") + "/"
 }
 
