@@ -1,6 +1,8 @@
 package skills
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"sort"
@@ -70,6 +72,57 @@ func TestScanSkillDirsPublishesNestedSkillsUnderTheirPrefix(t *testing.T) {
 	}
 	if !sawNestedManifest {
 		t.Fatalf("outer files = %+v; the nested manifest must still be supporting content", outer.Files)
+	}
+}
+
+// A skill that leans on {baseDir} is published, and the diagnostic says so: the
+// runtime substitutes the token when this agent loads the skill, but the MCP egress
+// cannot (the digest covers the bytes as they are), so a connected client reads the
+// literal text. Refusing the skill instead would break the use that works.
+func TestScanAndCatalogReportTheBaseDirTokenAsAWarning(t *testing.T) {
+	layer := t.TempDir()
+	writeCatalogSkill(t, layer, "runner", "---\nname: runner\n---\n\nRun {baseDir}/scripts/go.sh\n",
+		map[string]string{"scripts/go.sh": "echo hi\n"})
+	writeCatalogSkill(t, layer, "plain", "---\nname: plain\n---\n\nNothing to substitute.\n", nil)
+	// A skill that is refused anyway must not also collect a warning: the refusal is
+	// the actionable fact, and two messages for one skill is noise.
+	writeCatalogSkill(t, layer, "orphan-dir", "---\nname: orphan\n---\n\n{baseDir}\n", nil)
+
+	found, err := ScanSkillDirs([]string{layer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog := BuildCatalog(found)
+
+	if len(catalog.Warnings) != 1 {
+		t.Fatalf("warnings = %+v; want exactly one (the published skill that uses the token)", catalog.Warnings)
+	}
+	warning := catalog.Warnings[0]
+	if warning.Path != "runner" || warning.Code != CodeBaseDirToken {
+		t.Fatalf("warning = %+v", warning)
+	}
+	if len(warning.Files) != 1 || warning.Files[0] != "SKILL.md" {
+		t.Fatalf("warning files = %v; want SKILL.md", warning.Files)
+	}
+
+	// The bytes stay raw, and the digest still describes them: the warning is the
+	// only thing that changes.
+	var runner DiscoveredSkill
+	for _, skill := range found {
+		if skill.Path == "runner" {
+			runner = skill
+		}
+	}
+	if len(runner.Files) != 2 {
+		t.Fatalf("runner files = %+v", runner.Files)
+	}
+	for _, f := range runner.Files {
+		if f.Path == "SKILL.md" {
+			want := sha256.Sum256([]byte("---\nname: runner\n---\n\nRun {baseDir}/scripts/go.sh\n"))
+			if f.Digest != "sha256:"+hex.EncodeToString(want[:]) {
+				t.Fatalf("digest = %q; the scan must hash the raw bytes it hands out", f.Digest)
+			}
+		}
 	}
 }
 

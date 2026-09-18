@@ -5,6 +5,20 @@ import (
 	"sort"
 )
 
+// The stable codes that travel with a problem or a warning.
+//
+// A consumer that shows these to a person needs to say them in that person's
+// language, and matching on the human sentence would break the next time someone
+// improves the wording. The sentence still travels: it is what a caller without a
+// translation table (a log, a script, a CLI) shows as-is.
+const (
+	CodeShadowedByLayer = "shadowed_by_layer"
+	CodeNoName          = "no_name"
+	CodeNameMismatch    = "name_mismatch"
+	CodeNoFiles         = "no_files"
+	CodeBaseDirToken    = "base_dir_token"
+)
+
 // CatalogSkill is one skill as the cloud MCP egress needs it: the path it must be
 // served under, the frontmatter verbatim, and every file's raw bytes.
 //
@@ -44,12 +58,31 @@ type CatalogFile struct {
 type CatalogProblem struct {
 	Path   string `json:"path"`
 	Reason string `json:"reason"`
+	// Code is the same fact as Reason, in a form a caller can switch on. The reason
+	// is written for a human reading the pod's logs; a product that shows it to its
+	// own users has to be able to say it in their language, and matching on prose
+	// would break the moment someone improves the wording.
+	Code string `json:"code"`
+}
+
+// CatalogWarning records a skill that IS published, but whose meaning changes on the
+// way out.
+//
+// Separate from CatalogProblem on purpose: "we refused to publish this" and "we
+// published this and it will not behave the way you wrote it" are two different
+// states, and a single list would make them look like one.
+type CatalogWarning struct {
+	Path   string   `json:"path"`
+	Code   string   `json:"code"`
+	Reason string   `json:"reason"`
+	Files  []string `json:"files,omitempty"`
 }
 
 // Catalog is the whole answer of the internal endpoint the cloud consumes.
 type Catalog struct {
 	Skills        []CatalogSkill   `json:"skills"`
 	Unpublishable []CatalogProblem `json:"unpublishable"`
+	Warnings      []CatalogWarning `json:"warnings"`
 }
 
 // DiscoveredSkill is what a layer scan found: the directory it lives in, the name
@@ -67,6 +100,9 @@ type DiscoveredSkill struct {
 	Layer       string
 	Frontmatter map[string]any
 	Files       []CatalogFile
+	// BaseDirFiles names the skill's files whose text carries the literal
+	// `{baseDir}`. Populated by the scan, which is the only place that has the bytes.
+	BaseDirFiles []string
 }
 
 // BuildCatalog applies the publishability rule — the served path's final segment
@@ -76,7 +112,7 @@ type DiscoveredSkill struct {
 // It sorts by path so two calls over the same disk produce byte-identical answers;
 // a host that sees the order shift may read it as a content change.
 func BuildCatalog(discovered []DiscoveredSkill) Catalog {
-	catalog := Catalog{Skills: []CatalogSkill{}, Unpublishable: []CatalogProblem{}}
+	catalog := Catalog{Skills: []CatalogSkill{}, Unpublishable: []CatalogProblem{}, Warnings: []CatalogWarning{}}
 
 	// Precedence is the caller's order: the caller supplies layers from lowest to
 	// highest, exactly as the runtime merges them (a later layer overrides an
@@ -97,6 +133,7 @@ func BuildCatalog(discovered []DiscoveredSkill) Catalog {
 			catalog.Unpublishable = append(catalog.Unpublishable, CatalogProblem{
 				Path:   name,
 				Reason: "overridden by a higher-precedence layer",
+				Code:   CodeShadowedByLayer,
 			})
 			continue
 		}
@@ -109,20 +146,33 @@ func BuildCatalog(discovered []DiscoveredSkill) Catalog {
 		switch {
 		case name == "":
 			catalog.Unpublishable = append(catalog.Unpublishable, CatalogProblem{
-				Path: skill.Path, Reason: "frontmatter declares no name",
+				Path: skill.Path, Reason: "frontmatter declares no name", Code: CodeNoName,
 			})
 			continue
 		case name != skill.DirName:
 			catalog.Unpublishable = append(catalog.Unpublishable, CatalogProblem{
 				Path:   skill.Path,
 				Reason: fmt.Sprintf("directory name %q does not match the declared name %q", skill.DirName, name),
+				Code:   CodeNameMismatch,
 			})
 			continue
 		case len(skill.Files) == 0:
 			catalog.Unpublishable = append(catalog.Unpublishable, CatalogProblem{
-				Path: skill.Path, Reason: "no files were read",
+				Path: skill.Path, Reason: "no files were read", Code: CodeNoFiles,
 			})
 			continue
+		}
+
+		// Published, but part of its text will not mean what the author wrote: the
+		// runtime substitutes {baseDir} for the agent's own use, and this endpoint
+		// cannot (the digest covers the bytes as they are).
+		if len(skill.BaseDirFiles) > 0 {
+			catalog.Warnings = append(catalog.Warnings, CatalogWarning{
+				Path:   skill.Path,
+				Code:   CodeBaseDirToken,
+				Reason: "{baseDir} is replaced when this agent loads the skill, but not over MCP: a connected client sees the literal text",
+				Files:  append([]string(nil), skill.BaseDirFiles...),
+			})
 		}
 
 		files := append([]CatalogFile(nil), skill.Files...)
