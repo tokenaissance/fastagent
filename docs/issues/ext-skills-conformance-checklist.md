@@ -13,9 +13,9 @@
 
 | # | 要求（规范小节） | 我们要做的 | 验收 | 现状 |
 | :-- | :--- | :--- | :--- | :--- |
-| A1 | 必须同时声明 `resources` 能力与 `capabilities.extensions["io.modelcontextprotocol.skills"]`；`directoryRead: true` 才可实现目录读取（Capability Negotiation） | 在 `server/discover` 与 `initialize` 两条握手里都带上（我们已经带上 capabilities.extensions） | 客户端握手应答里能看到该键 | ✅ 已声明 |
-| A2 | 声明了扩展就**必须**实现 `skills/list` 与 `skills/get` | 实现两个方法 | conformance `sep-2640-skills-enumeration` | ⏳ 待做 |
-| A3 | 声明 `directoryRead: true` 就必须实现 `resources/directory/read`；没声明时按未知方法处理 | 实现或先不声明 | conformance `sep-2640-skills-directory` | ⏳ 待做 |
+| A1 | 必须同时声明 `resources` 能力与 `capabilities.extensions["io.modelcontextprotocol.skills"]`；`directoryRead: true` 才可实现目录读取（Capability Negotiation） | 在 `server/discover` 与 `initialize` 两条握手里都带上（我们已经带上 capabilities.extensions） | 客户端握手应答里能看到该键 | ✅ 实测（握手返回 `resources: {}` + 扩展键） |
+| A2 | 声明了扩展就**必须**实现 `skills/list` 与 `skills/get` | 实现两个方法 | conformance `sep-2640-skills-enumeration` | ✅ 已实现（该套件无此场景，见 E1） |
+| A3 | 声明 `directoryRead: true` 就必须实现 `resources/directory/read`；没声明时按未知方法处理 | **本轮改为不声明**：方法未实现，声明了就等于给客户端一个假承诺；实现目录读取时再把 flag 加回来 | `resources/directory/read` 必须落到未知方法分支 | ✅ 已撤回声明（实测扩展键为 `{}`）+ 单测锁住"声明 ↔ 实现" |
 
 ## B. 条目构造（`Skill` entry）
 
