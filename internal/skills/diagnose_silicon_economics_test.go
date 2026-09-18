@@ -38,6 +38,7 @@ import (
 // "hackernews" in the InstallSkillDialog, and inspect the
 // /api/fastagent/skills/search?source=skillssh&q=hackernews response.
 func TestDiagnose_HackernewsSearchEmpty(t *testing.T) {
+	requireLiveNet(t)
 	// ── Step 1: Raw search against skills.sh ──────────────────────────
 	results, err := SearchSkillsSh("hackernews")
 	if err != nil {
@@ -102,6 +103,7 @@ func TestDiagnose_HackernewsSearchEmpty(t *testing.T) {
 //
 // This is a diagnostic test — it calls live APIs and prints the data flow.
 func TestDiagnose_SiliconEconomics_SearchAndInstall(t *testing.T) {
+	requireLiveNet(t)
 	// ── Step 1: Raw search ────────────────────────────────────────────
 	results, err := SearchSkillsSh("silicon-economics")
 	if err != nil {
@@ -227,6 +229,7 @@ func TestDiagnose_SiliconEconomics_SearchAndInstall(t *testing.T) {
 // pattern that fails for repos like tokenaissance/silicon-economics-skill
 // where the SkillID doesn't exist as a subfolder in the tarball.
 func TestDiagnose_RepoIsSkill_InstallPath(t *testing.T) {
+	requireLiveNet(t)
 	// Simulate: skills.sh returns Source="tokenaissance/silicon-economics-skill",
 	// SkillID="silicon-economics". The install pipeline will:
 	//  1. Parse owner=tokenaissance, repo=silicon-economics-skill
@@ -280,6 +283,7 @@ func TestDiagnose_RepoIsSkill_InstallPath(t *testing.T) {
 // TestDiagnose_SiliconEconomics_SearchRaw runs the raw skills.sh query to see
 // the full API response without enrichment.
 func TestDiagnose_SiliconEconomics_SearchRaw(t *testing.T) {
+	requireLiveNet(t)
 	u := fmt.Sprintf("https://skills.sh/api/search?q=%s", "silicon-economics")
 	resp, err := http.DefaultClient.Get(u)
 	if err != nil {

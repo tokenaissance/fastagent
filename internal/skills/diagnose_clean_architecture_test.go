@@ -9,6 +9,7 @@ import (
 // chain for "clean-architecture" — searching skills.sh, matching by skillId
 // and Source, and showing which entry would be installed.
 func TestDiagnose_CleanArchitecture_InstallResolution(t *testing.T) {
+	requireLiveNet(t)
 	// Step 1: Live skills.sh search for "clean-architecture"
 	results, err := SearchSkillsSh("clean-architecture")
 	if err != nil {

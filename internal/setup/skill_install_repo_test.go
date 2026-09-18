@@ -11,6 +11,7 @@ import (
 // install and verifies the Result includes the Repo field matching the
 // input. This is the end-to-end integration test for the repo field flow.
 func TestRunInstall_GitHub_ReturnsRepoInResult(t *testing.T) {
+	requireLiveNet(t)
 	tmpDir, err := os.MkdirTemp("", "fastagent-install-test-*")
 	if err != nil {
 		t.Fatal(err)
