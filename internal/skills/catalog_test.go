@@ -17,10 +17,10 @@ func file(path, content string) CatalogFile {
 
 func TestBuildCatalogPublishesOnlyMatchingNames(t *testing.T) {
 	catalog := BuildCatalog([]DiscoveredSkill{
-		{DirName: "refunds", Frontmatter: map[string]any{"name": "refunds"}, Files: []CatalogFile{file("SKILL.md", "body")}},
-		{DirName: "pdf-tools", Frontmatter: map[string]any{"name": "pdf-processing"}, Files: []CatalogFile{file("SKILL.md", "body")}},
-		{DirName: "mystery", Frontmatter: map[string]any{}, Files: []CatalogFile{file("SKILL.md", "body")}},
-		{DirName: "empty", Frontmatter: map[string]any{"name": "empty"}},
+		{Path: "refunds", DirName: "refunds", Frontmatter: map[string]any{"name": "refunds"}, Files: []CatalogFile{file("SKILL.md", "body")}},
+		{Path: "pdf-tools", DirName: "pdf-tools", Frontmatter: map[string]any{"name": "pdf-processing"}, Files: []CatalogFile{file("SKILL.md", "body")}},
+		{Path: "mystery", DirName: "mystery", Frontmatter: map[string]any{}, Files: []CatalogFile{file("SKILL.md", "body")}},
+		{Path: "empty", DirName: "empty", Frontmatter: map[string]any{"name": "empty"}},
 	})
 
 	if len(catalog.Skills) != 1 || catalog.Skills[0].Path != "refunds" {
@@ -41,10 +41,10 @@ func TestBuildCatalogPublishesOnlyMatchingNames(t *testing.T) {
 func TestBuildCatalogIsStableAndSortsFiles(t *testing.T) {
 	build := func() Catalog {
 		return BuildCatalog([]DiscoveredSkill{
-			{DirName: "b", Frontmatter: map[string]any{"name": "b"}, Files: []CatalogFile{
+			{Path: "b", DirName: "b", Frontmatter: map[string]any{"name": "b"}, Files: []CatalogFile{
 				file("SKILL.md", "b"), file("references/GUIDE.md", "g"),
 			}},
-			{DirName: "a", Frontmatter: map[string]any{"name": "a"}, Files: []CatalogFile{file("SKILL.md", "a")}},
+			{Path: "a", DirName: "a", Frontmatter: map[string]any{"name": "a"}, Files: []CatalogFile{file("SKILL.md", "a")}},
 		})
 	}
 	first, second := build(), build()
