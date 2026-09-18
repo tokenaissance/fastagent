@@ -233,6 +233,41 @@ func poolKey(agentID, projectID, sessionID string) string {
 // can surface the provider identity without resolving a lazy executor.
 func (p *DockerExecutorPool) Backend() string { return "docker" }
 
+// LiveExecutor implements LiveExecutorPool. Callers only use it to decide
+// whether a second copy exists to touch — and on docker there is no second copy
+// (/workspace IS the host directory the store writes), so this pool answers
+// "yes" only to stay honest about the instance, while DockerExecutor does not
+// implement LiveWorkspaceFileRemover: the store delete is the whole job.
+func (p *DockerExecutorPool) LiveExecutor(agentID, projectID, sessionID string) (Executor, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	ex, ok := p.executors[poolKey(agentID, projectID, sessionID)]
+	if !ok {
+		return nil, false
+	}
+	return ex, true
+}
+
+// LiveProjectExecutors implements LiveExecutorPool. Docker does not need the
+// broadcast (its /workspace IS the host directory, so every container sees a
+// write the moment it lands), but the pool answers honestly: callers that do use
+// it must not be handed a half-truth about which instances exist.
+func (p *DockerExecutorPool) LiveProjectExecutors(agentID, projectID string) []Executor {
+	if agentID == "" || projectID == "" {
+		return nil
+	}
+	prefix := agentID + ":p:" + projectID
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]Executor, 0, 2)
+	for key, ex := range p.executors {
+		if key == prefix || strings.HasPrefix(key, prefix+":") {
+			out = append(out, ex)
+		}
+	}
+	return out
+}
+
 // NewDockerExecutorPool creates a pool of Docker-backed executors.
 func NewDockerExecutorPool(image, workspaceRoot string, policy *Policy) *DockerExecutorPool {
 	if image == "" {

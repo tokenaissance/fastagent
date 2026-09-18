@@ -60,17 +60,13 @@ func (f *LocalFS) LocalScopeDir(agentID, projectID, sessionID string) (string, b
 // at `/workspace/<other-sid>/...`) but cwd into the chat's subdir
 // so relative writes default to the chat's own files — see
 // docker_executor.go's pool.Get.
+//
+// The table itself lives in ScopeSegments — the one expression of the layout
+// (docs 10 §4 G23); this function only joins it onto the root. Writers use
+// WriteScope, which drops the chat segment inside a project.
 func (f *LocalFS) scopeDir(agentID, projectID, sessionID string) string {
-	switch {
-	case projectID != "" && sessionID != "":
-		return filepath.Join(f.root, agentID, "projects", projectID, sessionID)
-	case projectID != "":
-		return filepath.Join(f.root, agentID, "projects", projectID)
-	case sessionID != "":
-		return filepath.Join(f.root, agentID, "sessions", sessionID)
-	default:
-		return filepath.Join(f.root, agentID)
-	}
+	parts := append([]string{f.root, agentID}, ScopeSegments(projectID, sessionID)...)
+	return filepath.Join(parts...)
 }
 
 // resolvePath joins scopeDir with path and rejects attempts to escape via

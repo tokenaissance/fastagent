@@ -266,6 +266,26 @@ func removeVolume(name string) {
 	}
 }
 
+// previewSandboxSession resolves the sandbox scope a PREVIEW container is keyed
+// by, given whoever asked for it.
+//
+// A project has exactly ONE preview: the runtime record is per project
+// (scopeFor), the port is per project, and the user sees one URL. The container
+// therefore has to be project-addressed too — otherwise the same record can
+// describe two different containers, and the dead-end production actually hit is
+// this: the console starts the preview with session="", the agent's turns run in
+// "…:s:<chat>", and the dev server the user is looking at is the one nobody
+// writes into (docs 10 §4 G17, option G).
+//
+// A loose chat keeps its own session: there is no project to share, so the
+// preview belongs to that chat.
+func previewSandboxSession(projectID, sessionID string) string {
+	if projectID != "" {
+		return ""
+	}
+	return sessionID
+}
+
 // scopeFor resolves how a runtime is addressed. A project, when present,
 // is the app's home — shared across all the project's chats and serving
 // projects/<pid>/. Otherwise the chat's own session dir is the home
@@ -665,7 +685,7 @@ func (m *Manager) ChangedFiles(ctx context.Context, userID, agentID, projectID, 
 // works with no host bind mount and no file sync — the property that makes
 // the preview work on cloud backends like E2B.
 func (m *Manager) upViaPool(ctx context.Context, rec *store.ProjectRuntimeRecord, spec TemplateSpec, agentID, projectID, sessionID string) (*store.ProjectRuntimeRecord, error) {
-	ex, err := m.pool.Get(ctx, agentID, projectID, sessionID)
+	ex, err := m.pool.Get(ctx, agentID, projectID, previewSandboxSession(projectID, sessionID))
 	if err != nil {
 		rec.Status = StatusCrashed
 		rec.LastError = "sandbox acquire: " + err.Error()
@@ -747,7 +767,7 @@ func (m *Manager) upViaPool(ctx context.Context, rec *store.ProjectRuntimeRecord
 
 // poolExec runs a one-shot command in the project's pooled executor.
 func (m *Manager) poolExec(ctx context.Context, agentID, projectID, sessionID, command string, timeout time.Duration) (string, error) {
-	ex, err := m.pool.Get(ctx, agentID, projectID, sessionID)
+	ex, err := m.pool.Get(ctx, agentID, projectID, previewSandboxSession(projectID, sessionID))
 	if err != nil {
 		return "", fmt.Errorf("runtime: sandbox acquire: %w", err)
 	}

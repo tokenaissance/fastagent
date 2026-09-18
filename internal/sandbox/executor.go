@@ -3,6 +3,8 @@ package sandbox
 import (
 	"context"
 	"time"
+
+	"github.com/fastclaw-ai/fastclaw/internal/workspace"
 )
 
 // Executor abstracts a sandboxed execution environment for one user.
@@ -47,6 +49,58 @@ type ExecutorPool interface {
 	// holding a pool handle don't have to lazily resolve an executor
 	// just to learn the provider name.
 	Backend() string
+}
+
+// StoreScope names the workspace-store scope a write landed in.
+//
+// It is a parameter rather than something the pool derives, because only the
+// CALLER knows it: in a coding project session the file tools write the project
+// root (session="") while the sandbox that mirrors the write is keyed by chat,
+// and inferring one from the other is what produced three separate defects in a
+// single session — the panel delete that addressed a key nobody used (docs 10 §4
+// G21), the sync that forked every project file per chat (G17/A), and the stamp
+// that silently stopped landing in project sessions (G22). The rule they share:
+// the party that knows the key states it; nobody guesses at the arbitration
+// point.
+// StoreScope is the store scope a write-through belongs to. It is an alias of
+// workspace.Scope on purpose: "which scope does this key live in" is the
+// workspace package's fact (workspace.WriteScope is its one expression — docs
+// 10 §4 G23), and an alias keeps this port from growing a second copy of it.
+type StoreScope = workspace.Scope
+
+// LiveExecutorPool is the optional read-only half of ExecutorPool: hand back the
+// scope's CURRENT instance, or false, WITHOUT creating one.
+//
+// It exists for work that must never turn into a sandbox birth. The panel's file
+// delete is the first such caller: removing a file from a scope nobody is
+// running should cost nothing, and paying for a sandbox in order to delete a
+// file inside it would be absurd (and would surprise the user with a new billable
+// instance). A pool that does not implement this is treated as "no live
+// instance" — the safe answer, because the store is the authority.
+type LiveExecutorPool interface {
+	LiveExecutor(agentID, projectID, sessionID string) (Executor, bool)
+	// LiveProjectExecutors returns every live instance whose scope belongs to
+	// (agentID, projectID) — the set one project write has to reach.
+	//
+	// A project's file tree is ONE tree, but its containers are per chat (that is
+	// deliberate: concurrent chats must not share shell state), and the preview's
+	// dev server may live in any of them — a sibling chat's, or the
+	// project-addressed slot the console starts. Docker closes that gap with a
+	// bind mount; a backend without one closes it with this set (docs 10 §4 G17,
+	// option H: the store is the channel).
+	LiveProjectExecutors(agentID, projectID string) []Executor
+}
+
+// LiveWorkspaceFileRemover is the narrow capability the file panel needs on the
+// executor it is handed: delete one agent-relative store path's copy inside the
+// scope's live sandbox, and do nothing when there is no live sandbox.
+//
+// It is deliberately not part of Executor: a backend whose /workspace IS the
+// store (docker bind mount) must NOT implement it — there is no second copy, and
+// the store delete is the whole job. Callers therefore type-assert, exactly the
+// way they already do for WriteThroughExecutor.
+type LiveWorkspaceFileRemover interface {
+	RemoveLiveWorkspaceFile(ctx context.Context, storePath string) error
 }
 
 // WorkspaceSnapshotter is an optional capability an Executor can implement

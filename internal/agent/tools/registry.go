@@ -608,18 +608,8 @@ func (r *Registry) EffectiveUserID() string {
 // must land there too, not in a per-chat scratch folder). Only flipped on
 // for agents that have a project runtime wired; ordinary agents keep the
 // per-chat isolation, so existing behavior is unchanged.
-func (r *Registry) SetCodingRootScope(v bool) {
-	r.codingRootScope = v
-}
-
-// scopeSessionID is the session segment the file tools pass to the
-// workspace store. It collapses to "" in coding-root-scope mode so writes
-// land at the project root the dev server serves.
 func (r *Registry) scopeSessionID() string {
-	if r.codingRootScope {
-		return ""
-	}
-	return r.sessionID
+	return workspace.WriteScope(r.projectID, r.sessionID).SessionID
 }
 
 // SetCodingSubdir redirects the file tools into a subfolder of the scope
