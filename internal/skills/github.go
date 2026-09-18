@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"strings"
 )
 
@@ -79,6 +80,14 @@ func InstallFromGitHubRepo(repo, skillName, targetDir string) (*Result, error) {
 			lastErr = fmt.Errorf("extracted no files from %s", tarURL)
 			continue
 		}
+		installedName, renamedFrom, err := FinalizeInstallDir(targetDir, installedName, dest)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if renamedFrom != "" {
+			dest = filepath.Join(strings.TrimRight(targetDir, "/"), installedName)
+		}
 		version := readSkillVersionFromDir(dest)
 		if version == "" {
 			version = latestGitHubRelease(client, owner, name)
@@ -91,6 +100,7 @@ func InstallFromGitHubRepo(repo, skillName, targetDir string) (*Result, error) {
 			Source:       "github",
 			Repo:         canonicalSource,
 			Name:         installedName,
+			RenamedFrom:  renamedFrom,
 			Version:      version,
 			InstalledAt:  dest,
 			FilesWritten: n,

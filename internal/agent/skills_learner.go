@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/fastclaw-ai/fastclaw/internal/provider"
+	"github.com/fastclaw-ai/fastclaw/internal/skills"
 )
 
 // SkillsLearner observes complex tasks and extracts reusable skill patterns.
@@ -73,6 +74,24 @@ func (sl *SkillsLearner) MaybeExtract(ctx context.Context, messages []provider.M
 
 	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(skill.Content), 0o644); err != nil {
 		return fmt.Errorf("write skill: %w", err)
+	}
+
+	// The learner authors both names: the directory is the slug it asked the
+	// model for, the identity is the frontmatter `name` the model wrote. Align
+	// them here so a learned skill is publishable over MCP like any other —
+	// and when the model wrote a non-conforming (e.g. human-readable) name,
+	// FinalizeInstallDir leaves the slug in place and we say so instead of
+	// silently shipping two identities.
+	if finalName, from, ferr := skills.FinalizeInstallDir(
+		filepath.Join(sl.workspace, "skills"), skill.Slug, skillDir); ferr != nil {
+		slog.Warn("skill learner: could not align directory with declared name",
+			"slug", skill.Slug, "error", ferr)
+	} else if from != "" {
+		slog.Info("skill learner: directory aligned with declared name",
+			"slug", from, "name", finalName)
+	} else if declared, reason := skills.ReadSkillName(skillDir); declared == "" {
+		slog.Warn("skill learner: learned skill has no publishable name",
+			"slug", skill.Slug, "reason", reason)
 	}
 
 	slog.Info("extracted new skill", "name", skill.Name, "slug", skill.Slug)
