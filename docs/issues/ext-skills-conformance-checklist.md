@@ -29,7 +29,7 @@
 | B5 | 单 skill ≤ 512 文件 / 16 MiB；超限要说明原因（Limits） | entry 构造时预检，超限不进 listing 并进诊断 | 构造超限 fixture，确认被拒且有原因 | ⏳ |
 | B6 | 结果带 `resultType: "complete"`，并给 `ttlMs` / `cacheScope`（Listing / Getting） | 与 D9/SEP-2549 同一处理（`tools/list` 已做） | 应答字段检查 | ✅ 实测（list: `resultType/skills/ttlMs/cacheScope`；get: `resultType/skill/ttlMs/cacheScope`） |
 | B7 | `skills/list` 可为空或部分；`skills/get` 必须能回答它服务的每一个 skill（对方按 URI 取） | `get` 不依赖 listing | 取一个"不在 listing 里"的 skill | ✅ 实测（未知 URI → `-32602`，`get` 不依赖调用方先 list） |
-| B8 | 嵌套 skill 的文件也算外层 skill 的 supporting files（Nested Skills） | walk 到底，不去重 | 构造嵌套 fixture | ⏳ **两侧都缺**：pod 只扫一层且 `Path = DirName`（单段），cloud 的 `splitSkillUri` 按第一个斜杠切。要支持嵌套是**双端契约改动**（pod 的 `skill` 参数要能吃路径，cloud 要从 entry 反解而不是猜斜杠），不是随手能补的 |
+| B8 | 嵌套 skill：文件算外层的 supporting files，同时它自己是独立 entry，URI 带外层前缀（Nested Skills） | pod 递归扫描、`Path = 相对层的路径`；cloud 从 entry 反解 skill 路径与文件路径（不再按斜杠猜） | 构造嵌套 fixture，两侧都读一遍 | ✅ 已实现并实测：`acme/billing` 作为独立 entry 出现在 listing/resources；外层仍把嵌套的 SKILL.md 列为 supporting file；`skill=acme/billing` 可取文件、`skill=billing` 与 `../` 一律 404 |
 
 ## C. 读取与错误
 
@@ -73,6 +73,11 @@
 - `tools/call read_skill` → `SKILL.md` 与磁盘逐字节一致；`path: notes.md` 读到支持文件
 - 未知 skill → `isError: true` 且列出已发布名字；未知工具名 → `-32602`（这是请求错，不是读取失败）
 - `resources/list` → 27 条，URI 集合与 pod 目录**完全相等**（同一份 entry 投影，不第二次扫盘）
+
+嵌套 skill 的双端实测（同一套栈，pod 侧加一个 `acme/billing` fixture）：
+
+- pod：catalog 里 `acme/billing` 是独立 entry（`acme` 本身没有 SKILL.md，所以不发布）；`skill=acme/billing&path=policy.md` → 200；`skill=billing` → 404（叶子名不再是键）
+- cloud：`skills/list` 与 `resources/list` 都带 `acme/billing`；`read_skill billing` 的字节与磁盘逐字节一致；`skills/get skill://acme/billing/SKILL.md` 返回 2 个 resource；叶子名 URI `skill://billing/SKILL.md` → `-32602`（没有任何 listing 发布过它）
 
 一句提醒（避免下次再踩）：`MCP_SPEC` 那组引用里原本有两个 404（`/basic/utilities/caching`、`/basic/extensions`），
 handshake 那条还指到会 308 的页。2026-07-28 的实际布局是 `server/discover`、`server/utilities/caching`、
