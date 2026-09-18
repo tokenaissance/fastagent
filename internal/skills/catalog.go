@@ -21,11 +21,18 @@ type CatalogSkill struct {
 	Files       []CatalogFile  `json:"files"`
 }
 
-// CatalogFile is one file of a skill. Encoding []byte in JSON yields base64, which
-// is what the cloud side decodes before hashing.
+// CatalogFile is one file of a skill: its path, the SHA-256 of its raw bytes, and
+// its size. The bytes themselves do not travel here.
+//
+// That is a Worker constraint, not a taste: the cloud egress runs on Cloudflare
+// Workers, whose per-request CPU and memory are small. Inlining every file of every
+// skill into one response would make "list this agent's skills" cost as much as
+// reading all of them, and a 16 MiB skill is legal. Content is fetched per file, on
+// demand, which is also what lazy retrieval in the extension asks of a host.
 type CatalogFile struct {
-	Path    string `json:"path"`
-	Content []byte `json:"content"`
+	Path   string `json:"path"`
+	Digest string `json:"digest"`
+	Size   int    `json:"size"`
 }
 
 // CatalogProblem records a skill that exists but cannot be published, and why.

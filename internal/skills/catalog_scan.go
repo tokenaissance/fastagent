@@ -1,6 +1,8 @@
 package skills
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io/fs"
 	"os"
@@ -80,7 +82,15 @@ func readSkillFiles(skillDir string) ([]CatalogFile, error) {
 		if relErr != nil {
 			return relErr
 		}
-		files = append(files, CatalogFile{Path: filepath.ToSlash(rel), Content: content})
+		// Hash here, where the bytes are: the digest has to cover exactly what was
+		// read, so computing it anywhere downstream would mean sending the bytes to
+		// be able to compute it.
+		sum := sha256.Sum256(content)
+		files = append(files, CatalogFile{
+			Path:   filepath.ToSlash(rel),
+			Digest: "sha256:" + hex.EncodeToString(sum[:]),
+			Size:   len(content),
+		})
 		return nil
 	})
 	if err != nil {
