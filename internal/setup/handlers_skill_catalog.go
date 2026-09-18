@@ -1,7 +1,6 @@
 package setup
 
 import (
-	"log/slog"
 	"net/http"
 
 	"github.com/fastclaw-ai/fastclaw/internal/skills"
@@ -22,25 +21,9 @@ import (
 //     than a partial catalog, because a partial catalog is indistinguishable from
 //     "those skills do not exist".
 func (s *Server) handleAgentSkillCatalog(w http.ResponseWriter, r *http.Request) {
-	agentID := r.URL.Query().Get("agent")
-	if agentID == "" {
-		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "agent is required"})
+	dirs, ok := s.skillDirsForRequest(w, r)
+	if !ok {
 		return
-	}
-	if s.requireAgentOwner(w, r, agentID) == nil {
-		return
-	}
-
-	layers, err := skills.PublishableLayers(agentID)
-	if err != nil {
-		slog.Warn("skill catalog: cannot resolve layers", "agent", agentID, "error", err)
-		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-		return
-	}
-
-	dirs := make([]string, 0, len(layers))
-	for _, layer := range layers {
-		dirs = append(dirs, layer.Dir)
 	}
 	skills.CatalogHandler(dirs).ServeHTTP(w, r)
 }
