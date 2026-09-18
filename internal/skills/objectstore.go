@@ -302,7 +302,7 @@ func HydrateSkillsDown(ctx context.Context, ws workspace.Store, owner, rootDir s
 			if !e.IsDir() {
 				continue
 			}
-			if remoteSkills[e.Name()] || keep[e.Name()] {
+			if keep[e.Name()] || LocalDirMatchesRemote(rootDir, e.Name(), remoteSkills) {
 				continue
 			}
 			if err := os.RemoveAll(filepath.Join(rootDir, e.Name())); err != nil {

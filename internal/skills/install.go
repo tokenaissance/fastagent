@@ -18,6 +18,10 @@ type Result struct {
 	Source       string `json:"source"`         // "skills.sh" | "clawhub" | "github"
 	Repo         string `json:"repo,omitempty"` // GitHub "owner/repo" the content actually came from
 	Name         string `json:"name"`           // final directory name under targetDir
+	// RenamedFrom is the request name (slug / repo / form field) when the
+	// skill's SKILL.md declared a different name and the directory was
+	// aligned with it. Empty when no rename happened.
+	RenamedFrom  string `json:"renamedFrom,omitempty"`
 	Version      string `json:"version,omitempty"`
 	InstalledAt  string `json:"installedAt"` // filesystem path of the new skill dir
 	FilesWritten int    `json:"filesWritten"`
@@ -123,10 +127,18 @@ func InstallFromClawHub(slug, targetDir string) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
+	name, renamedFrom, err := FinalizeInstallDir(targetDir, slug, dest)
+	if err != nil {
+		return nil, err
+	}
+	if renamedFrom != "" {
+		dest = filepath.Join(targetDir, name)
+	}
 	return &Result{
 		Source:       "clawhub",
 		Repo:         "",
-		Name:         slug,
+		Name:         name,
+		RenamedFrom:  renamedFrom,
 		Version:      version,
 		InstalledAt:  dest,
 		FilesWritten: n,

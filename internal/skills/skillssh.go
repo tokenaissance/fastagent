@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strings"
 )
 
@@ -171,6 +172,14 @@ func InstallFromSkillsSh(r SkillsShResult, targetDir string) (*Result, error) {
 			lastErr = fmt.Errorf("extracted no files from %s (subpath %q)", tarURL, subpath)
 			continue
 		}
+		skillName, renamedFrom, err := FinalizeInstallDir(targetDir, r.SkillID, dest)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if renamedFrom != "" {
+			dest = filepath.Join(strings.TrimRight(targetDir, "/"), skillName)
+		}
 		version := readSkillVersionFromDir(dest)
 		if version == "" {
 			version = latestGitHubRelease(client, owner, repo)
@@ -182,7 +191,8 @@ func InstallFromSkillsSh(r SkillsShResult, targetDir string) (*Result, error) {
 		return &Result{
 			Source:       "skills.sh",
 			Repo:         canonicalSource,
-			Name:         r.SkillID,
+			Name:         skillName,
+			RenamedFrom:  renamedFrom,
 			Version:      version,
 			InstalledAt:  dest,
 			FilesWritten: n,
