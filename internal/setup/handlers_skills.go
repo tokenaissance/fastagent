@@ -15,13 +15,12 @@ import (
 // --- Skills ---
 
 func (s *Server) handleListSkills(w http.ResponseWriter, r *http.Request) {
-	homeDir, err := config.HomeDir()
+	skillsDir, err := skills.GlobalSkillsDir()
 	if err != nil {
 		jsonResponse(w, http.StatusOK, []any{})
 		return
 	}
 
-	skillsDir := filepath.Join(homeDir, "skills")
 	// Hydrate from object store first so pods that didn't handle the
 	// original install still see the skill bundle. Pass the bundled skill
 	// names as the keep-local list so an empty OSS response never causes
@@ -45,12 +44,12 @@ func (s *Server) handleListSkills(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDeleteSkill(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	homeDir, err := config.HomeDir()
+	skillsDir, err := skills.GlobalSkillsDir()
 	if err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
-	skillPath := filepath.Join(homeDir, "skills", name)
+	skillPath := filepath.Join(skillsDir, name)
 	if err := os.RemoveAll(skillPath); err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
@@ -79,12 +78,11 @@ func (s *Server) handleListAgentSkills(w http.ResponseWriter, r *http.Request) {
 	if s.requireAgentOwner(w, r, id) == nil {
 		return
 	}
-	homePath, err := config.AgentHomeDir(id)
+	skillsDir, err := skills.AgentSkillsDir(id)
 	if err != nil {
 		jsonResponse(w, http.StatusOK, []any{})
 		return
 	}
-	skillsDir := filepath.Join(homePath, "skills")
 	// Hydrate this agent's skills from object store on demand so replica
 	// pods that haven't yet cached the bundle still list it in the UI.
 	if s.workspaceStore != nil {

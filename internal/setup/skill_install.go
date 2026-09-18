@@ -14,7 +14,6 @@ import (
 	"strings"
 
 	"github.com/fastclaw-ai/fastclaw/internal/auth"
-	"github.com/fastclaw-ai/fastclaw/internal/config"
 	"github.com/fastclaw-ai/fastclaw/internal/skills"
 )
 
@@ -137,21 +136,19 @@ func resolveInstallTarget(r *http.Request, agentID string) (string, error) {
 	if agentID != "" {
 		// agents.id is globally unique, so the home dir doesn't need a
 		// user namespace — owner check happens upstream of this call.
-		homePath, err := config.AgentHomeDir(agentID)
+		dir, err := skills.AgentSkillsDir(agentID)
 		if err != nil {
 			return "", fmt.Errorf("resolve agent home: %w", err)
 		}
-		dir := filepath.Join(homePath, "skills")
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return "", fmt.Errorf("create agent skills dir: %w", err)
 		}
 		return dir, nil
 	}
-	home, err := config.HomeDir()
+	dir, err := skills.GlobalSkillsDir()
 	if err != nil {
 		return "", err
 	}
-	dir := filepath.Join(home, "skills")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
@@ -393,6 +390,20 @@ func (s *Server) handleUploadSkill(w http.ResponseWriter, r *http.Request) {
 		files = append(files, clean)
 	}
 
+	// Align the on-disk directory with the name the author declared in
+	// SKILL.md before anything mirrors the skill to the object store: the
+	// store key is built from the name, so renaming afterwards would leave the
+	// upload under one key and every other pod hydrating it under another.
+	renamedFrom := ""
+	if finalName, from, ferr := skills.FinalizeInstallDir(targetDir, skillName, skillDir); ferr != nil {
+		jsonResponse(w, http.StatusConflict, map[string]any{"ok": false, "error": ferr.Error()})
+		return
+	} else if from != "" {
+		renamedFrom = from
+		skillName = finalName
+		skillDir = filepath.Join(targetDir, finalName)
+	}
+
 	if s.workspaceStore != nil {
 		owner := agentID
 		if owner == "" {
@@ -415,6 +426,7 @@ func (s *Server) handleUploadSkill(w http.ResponseWriter, r *http.Request) {
 		"ok":          true,
 		"source":      "upload",
 		"name":        skillName,
+		"renamedFrom": renamedFrom,
 		"installedAt": skillDir,
 		"files":       files,
 	})

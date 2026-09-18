@@ -508,11 +508,11 @@ func (sl *SkillsLoader) userSkillsDir() string {
 	if sl.userID == "" {
 		return ""
 	}
-	base := fastagentBaseDir()
-	if base == "" {
+	dir, err := skills.UserSkillsDir(sl.userID)
+	if err != nil {
 		return ""
 	}
-	return filepath.Join(base, "users", sl.userID, "skills")
+	return dir
 }
 
 // userSkillsRootDir is the host parent dir of the per-user skills/
@@ -816,11 +816,11 @@ func fastagentBaseDir() string {
 // fastagentManagedDir returns the FastAgent managed skills directory
 // (~/.fastagent/skills/, host-shared).
 func fastagentManagedDir() string {
-	base := fastagentBaseDir()
-	if base == "" {
+	dir, err := skills.GlobalSkillsDir()
+	if err != nil {
 		return ""
 	}
-	return filepath.Join(base, "skills")
+	return dir
 }
 
 func expandPath(path string) string {
