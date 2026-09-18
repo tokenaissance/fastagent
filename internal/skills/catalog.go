@@ -48,7 +48,11 @@ type Catalog struct {
 // DiscoveredSkill is what a layer scan found: the directory it lives in, the name
 // its SKILL.md declares, the parsed frontmatter, and its files' raw bytes.
 type DiscoveredSkill struct {
-	DirName     string
+	DirName string
+	// Layer names where the skill was found. It is carried for diagnostics only:
+	// precedence is expressed by the order the caller supplies, never by comparing
+	// these names, which would put the layer ranking in two places.
+	Layer       string
 	Frontmatter map[string]any
 	Files       []CatalogFile
 }
@@ -61,6 +65,32 @@ type DiscoveredSkill struct {
 // a host that sees the order shift may read it as a content change.
 func BuildCatalog(discovered []DiscoveredSkill) Catalog {
 	catalog := Catalog{Skills: []CatalogSkill{}, Unpublishable: []CatalogProblem{}}
+
+	// Precedence is the caller's order: the caller supplies layers from lowest to
+	// highest, exactly as the runtime merges them (a later layer overrides an
+	// earlier one by name). Publishing both would put one URI on the wire with two
+	// digest sets, which a host cannot reconcile - so the loser is recorded here
+	// rather than dropped in silence. Comparing layer *names* to decide this is
+	// deliberately avoided: the ranking would then exist in two places.
+	winner := make(map[string]int, len(discovered))
+	for i, skill := range discovered {
+		if name, _ := skill.Frontmatter["name"].(string); name != "" && name == skill.DirName {
+			winner[name] = i
+		}
+	}
+	kept := make([]DiscoveredSkill, 0, len(discovered))
+	for i, skill := range discovered {
+		name, _ := skill.Frontmatter["name"].(string)
+		if name != "" && name == skill.DirName && winner[name] != i {
+			catalog.Unpublishable = append(catalog.Unpublishable, CatalogProblem{
+				Path:   name,
+				Reason: "overridden by a higher-precedence layer",
+			})
+			continue
+		}
+		kept = append(kept, skill)
+	}
+	discovered = kept
 
 	for _, skill := range discovered {
 		name, _ := skill.Frontmatter["name"].(string)
