@@ -68,6 +68,10 @@ type fakeLeaseStore struct {
 	// SetSandboxLeaseState scripting: the running/paused annotation.
 	states   []string
 	stateErr error
+	// unhydratedByID is the per-instance "workspace was never filled" bit the
+	// row carries (docs 10 §4, G19). GetSandboxLease merges it into the record
+	// it hands back, so a test can play "pod A published it, pod B adopts it".
+	unhydratedByID map[string]bool
 	// ops records every method in call order, so tests can assert ordering
 	// between two writes that touch the same row.
 	ops []string
@@ -76,6 +80,11 @@ type fakeLeaseStore struct {
 func (f *fakeLeaseStore) GetSandboxLease(_ context.Context, _ string) (*SandboxLeaseRecord, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.getRec != nil {
+		rec := *f.getRec
+		rec.Unhydrated = rec.Unhydrated || f.unhydratedByID[rec.SandboxID]
+		return &rec, f.getErr
+	}
 	return f.getRec, f.getErr
 }
 
@@ -176,6 +185,26 @@ func (f *fakeLeaseStore) SetSandboxLeaseState(_ context.Context, _, _, state str
 	defer f.mu.Unlock()
 	f.states = append(f.states, state)
 	f.ops = append(f.ops, "state="+state)
+	return f.stateErr
+}
+
+// SetSandboxLeaseUnhydrated records the /workspace-never-filled bit the same
+// way: on the row, keyed by the instance it describes. The fake keeps it in
+// unhydratedByID so a test can drive "pod A published it, pod B adopts it"
+// without a database.
+func (f *fakeLeaseStore) SetSandboxLeaseUnhydrated(
+	_ context.Context,
+	_, owner, sandboxID string,
+	unhydrated bool,
+) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.unhydratedByID == nil {
+		f.unhydratedByID = map[string]bool{}
+	}
+	f.unhydratedByID[sandboxID] = unhydrated
+	f.ops = append(f.ops, "unhydrated="+sandboxID)
+	_ = owner
 	return f.stateErr
 }
 
@@ -672,4 +701,73 @@ func TestE2BPoolAdoptedExecutorCarriesAPIKey(t *testing.T) {
 			t.Fatalf("adopted executor apiKey = %q, want the pool key %q", ex.apiKey, pool.apiKey)
 		}
 	})
+}
+
+// G19 (docs 10 §4): "this instance came up with an unfilled /workspace" is a
+// fact about the INSTANCE, and adoption does not replay hydration — so the only
+// place it can come from is the row. Without this read the fact dies with the
+// pod that discovered it, and it dies silently: the agent then reads the empty
+// tree as "my files are gone".
+func TestE2BPoolAdoptionCarriesTheUnhydratedFact(t *testing.T) {
+	ctx := context.Background()
+	store := &fakeLeaseStore{getRec: &SandboxLeaseRecord{
+		SandboxID: "sb-2", EnvdToken: "tok-2", Template: "tpl", Epoch: 7, Unhydrated: true,
+	}}
+	pool := newLeasePool(t, store, "pod-a")
+	rec := &leaseCloseRecorder{}
+	pool.executors["agt_1:s:chat_1"] = testExecutor(rec, "sb-1", "tok-1")
+
+	got, err := pool.Get(ctx, "agt_1", "", "chat_1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	ex, ok := got.(*E2BExecutor)
+	if !ok {
+		t.Fatalf("unexpected executor type %T", got)
+	}
+	if ex.identSnapshot().id != "sb-2" {
+		t.Fatalf("adopted %q; want sb-2", ex.identSnapshot().id)
+	}
+	if !ex.WorkspaceUnhydrated() {
+		t.Fatal("the adopted executor does not know its /workspace was never filled — " +
+			"the tools would declare nothing and the agent would read the empty tree as deleted files")
+	}
+	// And a row that does not carry the fact must not invent it.
+	clean := newLeasePool(t, &fakeLeaseStore{getRec: &SandboxLeaseRecord{
+		SandboxID: "sb-3", EnvdToken: "tok-3", Template: "tpl", Epoch: 1,
+	}}, "pod-a")
+	other, err := clean.Get(ctx, "agt_2", "", "chat_2")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if other.(*E2BExecutor).WorkspaceUnhydrated() {
+		t.Fatal("a row without the flag produced an unhydrated executor")
+	}
+}
+
+// The other half of the same fact: the pod that DISCOVERS it publishes it onto
+// the instance, so the next replica can declare it.
+func TestE2BPoolPublishesTheUnhydratedFactOnCreate(t *testing.T) {
+	ctx := context.Background()
+	store := &fakeLeaseStore{acquired: true, acquireRec: &SandboxLeaseRecord{SandboxID: "sb-new", Epoch: 1}}
+	pool := newLeasePool(t, store, "pod-a")
+	rec := &leaseCloseRecorder{}
+	pool.newSandboxExecutor = func(_ context.Context, _, _ string, _ time.Duration) (*E2BExecutor, error) {
+		return testExecutor(rec, "sb-new", "tok-new"), nil
+	}
+	// The store listing failed: hydrate returns without filling /workspace and
+	// marks the instance — exactly what E2BExecutor.Hydrate does.
+	pool.hydrateSandbox = func(_ context.Context, ex *E2BExecutor) error {
+		ex.setWorkspaceUnhydrated(true)
+		return nil
+	}
+	pool.verifySandbox = func(context.Context, *E2BExecutor) error { return nil }
+	pool.warmupSandbox = func(context.Context, *E2BExecutor) {}
+
+	if _, err := pool.Get(ctx, "agt_1", "", "chat_1"); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !store.unhydratedByID["sb-new"] {
+		t.Fatalf("the instance that came up unfilled was not published as such; recorded=%v", store.unhydratedByID)
+	}
 }

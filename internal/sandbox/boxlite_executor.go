@@ -25,10 +25,9 @@ import (
 //
 // Auth is a static API key sent as `Authorization: Bearer <apikey>`.
 // Earlier revisions did an OAuth2 client_credentials exchange against
-// /oauth/tokens — that endpoint was removed upstream; the key the
-// operator pastes is now the bearer token directly. BoxliteClientID is
-// retained on the config struct for back-compat (existing admin rows
-// keep working) but it isn't sent anywhere anymore.
+// /oauth/tokens — that endpoint was removed upstream, and the client_id it
+// needed is gone with it: the key the operator pastes is the bearer token.
+// (The plumbing was removed on 2026-09-18; see docs 10 §9.)
 //
 // Lifecycle:
 //   POST   /{prefix}/boxes          create box (configured)
@@ -50,23 +49,18 @@ const (
 	// with a 403 HTML wall. When BoxLite ships a publicly reachable
 	// prod endpoint, update this default — until then, operators on
 	// prod tenants must explicitly set their URL in the admin UI.
-	defaultBoxliteURL      = "https://api.dev.boxlite.ai/api/v1"
-	defaultBoxliteClientID = "default"
-	defaultBoxlitePrefix   = "default"
-	defaultBoxliteImage    = "thinkany/fastclaw-sandbox:latest"
+	defaultBoxliteURL    = "https://api.dev.boxlite.ai/api/v1"
+	defaultBoxlitePrefix = "default"
+	defaultBoxliteImage  = "thinkany/fastclaw-sandbox:latest"
 )
 
 // BoxliteExecutor implements Executor against a remote Boxlite REST API.
 type BoxliteExecutor struct {
 	baseURL string // already trimmed of trailing slash
 	prefix  string
-	// clientID is the legacy OAuth2 client_id, retained on the struct so
-	// older config rows that set it don't break the constructor. Unused
-	// after the apikey-as-bearer switch.
-	clientID string
-	apiKey   string
-	image    string
-	timeout  time.Duration
+	apiKey  string
+	image   string
+	timeout time.Duration
 
 	client *http.Client
 
@@ -82,15 +76,12 @@ type BoxliteExecutor struct {
 	sessionID string
 }
 
-func newBoxliteExecutor(ctx context.Context, baseURL, prefix, clientID, apiKey, image string, timeout time.Duration) (*BoxliteExecutor, error) {
+func newBoxliteExecutor(ctx context.Context, baseURL, prefix, apiKey, image string, timeout time.Duration) (*BoxliteExecutor, error) {
 	if baseURL == "" {
 		baseURL = defaultBoxliteURL
 	}
 	if prefix == "" {
 		prefix = defaultBoxlitePrefix
-	}
-	if clientID == "" {
-		clientID = defaultBoxliteClientID
 	}
 	if image == "" {
 		image = defaultBoxliteImage
@@ -107,13 +98,12 @@ func newBoxliteExecutor(ctx context.Context, baseURL, prefix, clientID, apiKey, 
 	// request level via context.WithTimeout — same pattern E2BExecutor
 	// settled on after the 60s-streaming-cut bug.
 	e := &BoxliteExecutor{
-		baseURL:  strings.TrimRight(baseURL, "/"),
-		prefix:   prefix,
-		clientID: clientID,
-		apiKey:   apiKey,
-		image:    image,
-		timeout:  timeout,
-		client:   &http.Client{},
+		baseURL: strings.TrimRight(baseURL, "/"),
+		prefix:  prefix,
+		apiKey:  apiKey,
+		image:   image,
+		timeout: timeout,
+		client:  &http.Client{},
 	}
 
 	if err := e.createBox(ctx); err != nil {
@@ -833,7 +823,6 @@ type BoxliteExecutorPool struct {
 	executors map[string]*BoxliteExecutor
 	baseURL   string
 	prefix    string
-	clientID  string
 	apiKey    string
 	image     string
 	home      string
@@ -846,17 +835,14 @@ type BoxliteExecutorPool struct {
 func (p *BoxliteExecutorPool) Backend() string { return "boxlite" }
 
 // NewBoxliteExecutorPool constructs a Boxlite-backed pool. Defaults match
-// the public Boxlite Cloud — operators can override URL/prefix/clientID
-// for self-hosted runners or staging environments.
-func NewBoxliteExecutorPool(baseURL, prefix, clientID, apiKey, image, home string, timeout time.Duration) *BoxliteExecutorPool {
+// the public Boxlite Cloud — operators can override URL/prefix for
+// self-hosted runners or staging environments.
+func NewBoxliteExecutorPool(baseURL, prefix, apiKey, image, home string, timeout time.Duration) *BoxliteExecutorPool {
 	if baseURL == "" {
 		baseURL = defaultBoxliteURL
 	}
 	if prefix == "" {
 		prefix = defaultBoxlitePrefix
-	}
-	if clientID == "" {
-		clientID = defaultBoxliteClientID
 	}
 	if image == "" {
 		image = defaultBoxliteImage
@@ -865,7 +851,6 @@ func NewBoxliteExecutorPool(baseURL, prefix, clientID, apiKey, image, home strin
 		executors: make(map[string]*BoxliteExecutor),
 		baseURL:   baseURL,
 		prefix:    prefix,
-		clientID:  clientID,
 		apiKey:    apiKey,
 		image:     image,
 		home:      home,
@@ -888,7 +873,7 @@ func (p *BoxliteExecutorPool) Get(ctx context.Context, agentID, projectID, sessi
 	if ex, ok := p.executors[key]; ok {
 		return ex, nil
 	}
-	ex, err := newBoxliteExecutor(ctx, p.baseURL, p.prefix, p.clientID, p.apiKey, p.image, p.timeout)
+	ex, err := newBoxliteExecutor(ctx, p.baseURL, p.prefix, p.apiKey, p.image, p.timeout)
 	if err != nil {
 		return nil, err
 	}

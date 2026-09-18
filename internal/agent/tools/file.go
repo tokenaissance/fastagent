@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/fastclaw-ai/fastclaw/internal/sandbox"
 	"github.com/fastclaw-ai/fastclaw/internal/skills"
@@ -864,6 +865,161 @@ func makeListDir(r *Registry) ToolFunc {
 	}
 }
 
+// previousStoreVersion reads the object a store write is about to lose, so the
+// mirror can tell "the sandbox still held the version it was handed" from "the
+// sandbox held its own edit" (docs 10 §2.1, G6). Only edit_file used to pass an
+// expectation, because it had to read the file anyway; this gives write_file the
+// same precision for one extra GET.
+//
+// Best-effort by construction: on any error, or for anything over the cap below,
+// it returns "" — the write proceeds with no expectation, and the mirror then
+// states only what it can ("a different version was replaced", not "which one").
+func (r *Registry) previousStoreVersion(ctx context.Context, key string) string {
+	if r.workspaceStore == nil || r.agentID == "" || key == "" {
+		return ""
+	}
+	rc, err := r.workspaceStore.Get(ctx, r.agentID, r.projectID, r.scopeSessionID(), key)
+	if err != nil {
+		return ""
+	}
+	defer rc.Close()
+	data, err := io.ReadAll(io.LimitReader(rc, expectationReadMax+1))
+	if err != nil || len(data) > expectationReadMax {
+		return ""
+	}
+	return string(data)
+}
+
+// expectationReadMax bounds the extra read previousStoreVersion performs: past
+// this size the precision is not worth another full object read.
+const expectationReadMax = 2 << 20
+
+// sandboxFileSet returns the paths the live sandbox holds, in the same logical
+// space the file tools use (paths relative to /workspace). Returns nil when there
+// is no second copy to compare with — docker's /workspace IS the host directory —
+// or when the sandbox could not be asked, because a signal we cannot ground is
+// worse than no signal.
+func (r *Registry) sandboxFileSet(ctx context.Context, ex sandbox.Executor) map[string]bool {
+	if ex == nil {
+		return nil
+	}
+	if _, remote := ex.(sandbox.RemoteWorkspace); !remote {
+		return nil
+	}
+	out, err := ex.Exec(ctx, `find /workspace -type f -printf '%P\n' 2>/dev/null`, 20*time.Second)
+	if err != nil {
+		return nil
+	}
+	set := map[string]bool{}
+	for _, line := range strings.Split(out, "\n") {
+		if p := strings.TrimSpace(line); p != "" {
+			set[p] = true
+		}
+	}
+	return set
+}
+
+// storeOnlySignal collects the paths a store listing has and the live sandbox
+// does not, and renders them with the ONE shared sentence for that fact
+// (sandbox.StoreOnlyLine) — the reconcile states the same fact from the other
+// side, and two wordings for one fact is how a rule drifts (docs 10 §4: G7a
+// for this moment, G4 for the reconcile's).
+//
+// Empty when the two sides agree: this is an exception channel.
+func storeOnlySignal(inSandbox map[string]bool, listed []string) string {
+	if inSandbox == nil {
+		return ""
+	}
+	var missing []string
+	for _, p := range listed {
+		if !inSandbox[p] {
+			missing = append(missing, p)
+		}
+	}
+	return sandbox.StoreOnlyLine(missing)
+}
+
+// writeThroughSignal mirrors one workspace write into the sandbox that serves
+// the same scope, and returns the σ the agent must read when the sandbox was
+// left holding something else. Empty string is the normal case (C3: an
+// exception channel only).
+//
+// It generalises what used to be mirrorCodingWriteToSandbox. That function
+// existed for live preview (a remote backend shares no host mount, so the dev
+// server never saw the edit and HMR looked dead) and only ran when a coding
+// subdir was configured. The same mirror is what keeps the workspace coherent:
+// with it, a path's sandbox copy equals the host's version at the moment of the
+// write, so a later sandbox edit of that path is unambiguously the sandbox's own
+// work and the reconcile may take it. Background and proof:
+// docs/文件系统形式化证明/07-formal-rootcause-and-fix.md §2, §3.3.
+//
+// Best-effort by design: the user-visible write already landed in the store, so
+// a failed mirror must not fail the tool — but it must not stay silent either.
+// "Your write is safe in the store; anything reading it INSIDE the sandbox may
+// still see an older version" is exactly the fact the 2026-09-17 incident was
+// missing from the agent's context (07 §2).
+//
+// The destination is ABSOLUTE — /workspace/<wsPath> — because envd resolves a
+// bare path against $HOME, and because that is where the hydrate puts the file
+// for this scope (01 §3.5).
+//
+// Each branch states what happened to the OTHER copy; nothing here decides for
+// the agent, and nothing keeps a copy of what it replaced — the sandbox changes
+// the agent was told about in earlier exec results are what that version was.
+func (r *Registry) writeThroughSignal(ctx context.Context, path, content, previous string) string {
+	if r.executor == nil {
+		return ""
+	}
+	wt, ok := r.executor.(sandbox.WriteThroughExecutor)
+	if !ok {
+		return "" // backend without a separate copy (docker) — the host IS /workspace
+	}
+	storeKey := r.wsPath(path)
+	dest := "/workspace/" + strings.TrimPrefix(filepath.ToSlash(storeKey), "/")
+	// The store scope travels with the call: this tool knows which key it just
+	// wrote (scopeSessionID() collapses in coding-root mode, so the project root
+	// and the chat's container can disagree), and the pool must not infer it —
+	// that inference is what made the stamp silently miss in project sessions
+	// (docs 10 §4 G22).
+	outcome, err := wt.WriteThroughScope(
+		sandbox.StoreScope{ProjectID: r.projectID, SessionID: r.scopeSessionID()},
+		storeKey, dest, content, previous)
+	switch {
+	case err != nil:
+		// The sandbox could not be updated. No second version exists to choose
+		// between (the sandbox is unreachable, or its copy is gone), so this is
+		// a statement of what could not be checked — not a decision to make.
+		return fmt.Sprintf("\n\n[workspace] the sandbox copy of %s could not be updated (%v). "+
+			"Your write is safe in the workspace store; anything reading the file INSIDE the sandbox may still see an older version.", path, err)
+	case outcome.Comparison == sandbox.CompareReplacedVerified:
+		// The sandbox held a different version and the write replaced it. Say
+		// so with the size, and with no content: the agent was already told
+		// what the sandbox changed (the exec signal lists it), so the write is
+		// an informed decision — the signal just keeps the fact on the record.
+		return fmt.Sprintf("\n\n[workspace] your write to %s replaced a different version in the sandbox (%d bytes). "+
+			"No copy was kept: the sandbox changes you were told about in earlier exec results are what that version was, "+
+			"so re-run the producing command if you need it.", path, outcome.SandboxBytes)
+	case outcome.Comparison == sandbox.CompareReplacedUnchecked:
+		// Something was replaced and we cannot say what it was: there was no
+		// expectation to check the sandbox's bytes against. State exactly that —
+		// the previous wording claimed "over 2 MiB" for every such write, which
+		// was false for all but the largest files (docs 10 §2.1, G5).
+		return fmt.Sprintf("\n\n[workspace] the sandbox held a different version of %s (%d bytes) and your write replaced it. "+
+			"There was no earlier copy to compare it against, so what that version was cannot be reconstructed here.", path, outcome.SandboxBytes)
+	}
+	// CompareNoSecondCopy (docker: one copy, nothing to mirror) and
+	// CompareNothingReplaced both mean "nothing was destroyed": silence, per C3.
+	// The one thing that can still be worth saying is a PARTIAL mirror: this
+	// container got the file, another container of the same project did not —
+	// which a dev server running there turns into "my edits don't show up".
+	if outcome.BroadcastFailures > 0 {
+		return fmt.Sprintf("\n\n[workspace] your write to %s landed in this sandbox, but %d other sandbox(es) of this project "+
+			"could not be updated — a preview running there may keep showing an older version. "+
+			"Writing the file again retries them.", path, outcome.BroadcastFailures)
+	}
+	return ""
+}
+
 // registerSandboxedFile re-registers file tools so they delegate to a
 // sandbox.Executor for paths that don't belong to a store.
 //
@@ -876,29 +1032,6 @@ func makeListDir(r *Registry) ToolFunc {
 // the path (absolute paths, `skills/...`, ad-hoc scripts, etc.). The
 // sandbox badge is emitted only for the executor-fallback path — store
 // hits intentionally don't badge, since they didn't run in the sandbox.
-// mirrorCodingWriteToSandbox pushes a coding-agent workspace write into the
-// live preview sandbox. Coding writes route to workspace.Store (host), which
-// docker bind-mounts into the dev-server container — but a remote backend
-// (E2B) shares no host mount, so without this the dev server never sees the
-// edit and HMR looks dead. Guarded on RemoteWorkspace, so it's a no-op for
-// docker (whose executor isn't remote). Best-effort: the user-visible write
-// already hit the store, so a mirror failure only degrades live-reload — we
-// log and move on. Destination is ABSOLUTE /workspace/<path> because the
-// dev server serves the sandbox /workspace root and envd resolves a bare
-// path against $HOME, not /workspace.
-func (r *Registry) mirrorCodingWriteToSandbox(ctx context.Context, path, content string) {
-	if r.codingSubdir == "" || r.executor == nil {
-		return
-	}
-	if _, ok := r.executor.(sandbox.RemoteWorkspace); !ok {
-		return
-	}
-	dest := "/workspace/" + strings.TrimPrefix(filepath.ToSlash(filepath.Clean(path)), "/")
-	if _, err := r.executor.WriteFile(ctx, dest, content); err != nil {
-		slog.Warn("coding preview mirror to sandbox failed", "path", dest, "err", err)
-	}
-}
-
 func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 	r.Register("read_file", "Read the contents of a file", map[string]interface{}{
 		"type": "object",
@@ -1032,6 +1165,11 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 			}
 			return fmt.Sprintf("Written %d bytes to %s", len(args.Content), name), nil
 		case RouteWorkspaceStore:
+			// Read what the store is about to lose *before* the write, so the
+			// mirror can tell a stale sandbox copy from the sandbox's own edit
+			// (docs 10 §2.1, G6). Best-effort: "" means "no expectation", and the
+			// mirror then only states what it could establish.
+			previous := r.previousStoreVersion(ctx, r.wsPath(args.Path))
 			if err := r.workspaceStore.Put(ctx, r.agentID, r.projectID, r.scopeSessionID(), r.wsPath(args.Path),
 				strings.NewReader(args.Content), int64(len(args.Content)), ""); err != nil {
 				if friendly := asIsDirToolError("write_file", args.Path, err); friendly != nil {
@@ -1039,7 +1177,7 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 				}
 				return "", fmt.Errorf("workspace put: %w", err)
 			}
-			r.mirrorCodingWriteToSandbox(ctx, args.Path, args.Content)
+			r.addSignal(ctx, r.writeThroughSignal(ctx, args.Path, args.Content, previous))
 			return fmt.Sprintf("Written %d bytes to %s", len(args.Content), args.Path), nil
 		case RouteSkillStore:
 			// Skill scaffolding (skill-creator's `skills/<name>/...`) lands
@@ -1094,6 +1232,14 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 				}
 				var sb strings.Builder
 				seenDirs := map[string]bool{}
+				// The listing below comes from the STORE. `exec` reads the
+				// SANDBOX. When the two disagree the agent is the only one who
+				// can reconcile them, so the disagreement is stated where it is
+				// cheapest to see: next to the listing that would mislead.
+				// (docs 10 §3.2, G7 — a running sandbox is not updated by an
+				// upload, so "read_file sees it, exec does not" is normal today.)
+				inSandbox := r.sandboxFileSet(ctx, ex)
+				var listed []string
 				for _, o := range objs {
 					p := filepath.ToSlash(o.Path)
 					if prefix != "" && !strings.HasPrefix(p, prefix+"/") && p != prefix {
@@ -1113,6 +1259,10 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 						continue
 					}
 					fmt.Fprintf(&sb, "f %s (%d bytes)\n", rel, o.Size)
+					listed = append(listed, p)
+				}
+				if note := storeOnlySignal(inSandbox, listed); note != "" {
+					r.addSignal(ctx, note)
 				}
 				return sb.String(), nil
 			}
@@ -1228,7 +1378,7 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 						}
 						return "", fmt.Errorf("workspace put: %w", err)
 					}
-					r.mirrorCodingWriteToSandbox(ctx, args.Path, updated)
+					r.addSignal(ctx, r.writeThroughSignal(ctx, args.Path, updated, string(data)))
 					return fmt.Sprintf("Edited %s (%d replacement(s))", args.Path, count), nil
 				}
 			}

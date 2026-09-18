@@ -323,7 +323,7 @@ func TestShellManager_StartAfterCloseRefuses(t *testing.T) {
 
 // TestBashOutputTool_DrainsTailOnExit guards the read-then-status
 // race: bytes that land between the first readNew and the snapshot's
-// done=true observation must NOT be lost when bash_output reports
+// done=true delta must NOT be lost when bash_output reports
 // "[status] exited". We provoke the race by polling repeatedly while
 // a short command is finishing — without the post-snapshot drain the
 // last lines are eventually skipped.

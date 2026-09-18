@@ -155,6 +155,7 @@ func buildSystemSandboxPool(
 	cfg config.SandboxCfg,
 	ws workspace.Store,
 	leases sandbox.SandboxLeaseStore,
+	kv store.Store,
 	ownerID string,
 ) sandbox.ExecutorPool {
 	if !cfg.Enabled {
@@ -198,7 +199,6 @@ func buildSystemSandboxPool(
 		inner = sandbox.NewBoxliteExecutorPool(
 			cfg.BoxliteURL,
 			cfg.BoxlitePrefix,
-			cfg.BoxliteClientID,
 			secret,
 			snapshot,
 			home,
@@ -223,6 +223,12 @@ func buildSystemSandboxPool(
 	lp := sandbox.NewLifecyclePool(inner, idle, 30*time.Second)
 	if ws != nil {
 		lp.SetWorkspace(ws)
+	}
+	// Deltas produced between turns (the idle-eviction sync) have no tool result
+	// to ride, so they wait in a durable scope-keyed row instead of in this
+	// process's memory (docs 09, G3).
+	if kv != nil {
+		lp.SetSignalStore(sandboxSignalStore{st: kv})
 	}
 	lp.Start()
 	slog.Info("system sandbox lifecycle pool enabled",

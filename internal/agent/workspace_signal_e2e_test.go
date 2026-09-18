@@ -73,7 +73,7 @@ func (p *stubPool) Release(agentID, projectID, sessionID string) error {
 func (p *stubPool) CloseAll()       { p.mu.Lock(); p.live = nil; p.mu.Unlock() }
 func (p *stubPool) Backend() string { return "stub" }
 
-func TestWorkspaceNoticeSurvivesTheLifecycleProxyAndTheMetaStrip(t *testing.T) {
+func TestWorkspaceSignalSurvivesTheLifecycleProxyAndTheMetaStrip(t *testing.T) {
 	ctx := context.Background()
 	inner := &stubPool{}
 	inner.unhydrated.Store(true)
@@ -83,7 +83,7 @@ func TestWorkspaceNoticeSurvivesTheLifecycleProxyAndTheMetaStrip(t *testing.T) {
 
 	// This is the production shape: bindSession hands the registry the pool's
 	// proxy, not an executor.
-	ex, err := lp.Get(ctx, "agent-notice", "", "")
+	ex, err := lp.Get(ctx, "agent-signal", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +109,7 @@ func TestWorkspaceNoticeSurvivesTheLifecycleProxyAndTheMetaStrip(t *testing.T) {
 
 // The mirror image, through the same wire: a healthy scope must arrive with no
 // declaration at all, or the sentence becomes wallpaper.
-func TestWorkspaceNoticeIsAbsentThroughTheLifecycleProxy(t *testing.T) {
+func TestWorkspaceSignalIsAbsentThroughTheLifecycleProxy(t *testing.T) {
 	ctx := context.Background()
 	inner := &stubPool{}
 	lp := sandbox.NewLifecyclePool(inner, 0, 0)

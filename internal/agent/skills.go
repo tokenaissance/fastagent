@@ -122,6 +122,14 @@ type SkillsLoader struct {
 	// completely invisible on replicas that didn't handle the upload.
 	workspaceStore workspace.Store
 	agentID        string
+	// hydrateFailed records that at least one object-store hydrate failed during
+	// the last LoadSkills. The scan still returns whatever is on disk, so the
+	// resulting list is INCOMPLETE — and an incomplete list presented as
+	// complete makes the agent deny capabilities it actually has ("I don't have
+	// that skill") with no way for it to tell. Callers surface this through the
+	// environment-change note (docs 08: a state the agent reasons about must be
+	// observable, including "this list could not be fully loaded").
+	hydrateFailed bool
 	// userID is the chatter. When set, LoadSkills also scans the
 	// per-user skills dir (~/.fastagent/users/<uid>/skills/) so skills
 	// the user creates while chatting any agent are reusable on every
@@ -165,9 +173,15 @@ func (sl *SkillsLoader) WithUserID(userID string) *SkillsLoader {
 	return sl
 }
 
+// HydrationFailed reports whether the most recent LoadSkills could not fully
+// hydrate from the object store, i.e. whether the returned list may be missing
+// skills that exist for this agent or chatter. Reset on every LoadSkills call.
+func (sl *SkillsLoader) HydrationFailed() bool { return sl.hydrateFailed }
+
 // LoadSkills discovers skills from all layers and returns them merged.
 // Precedence: agent workspace > user installed > managed > extra dirs.
 func (sl *SkillsLoader) LoadSkills() []Skill {
+	sl.hydrateFailed = false
 	// Mirror object-store skills to the local filesystem so a skill
 	// uploaded to OSS (or installed on another replica) is visible here
 	// this turn — not on next pod restart. Cheap idempotent hydrate; the
@@ -179,12 +193,14 @@ func (sl *SkillsLoader) LoadSkills() []Skill {
 			keep := BundledSkillNames()
 			if err := skills.HydrateSkillsDown(ctx, sl.workspaceStore, skills.GlobalSkillOwner, managedDir, keep...); err != nil {
 				slog.Warn("global skill hydrate failed", "error", err)
+				sl.hydrateFailed = true
 			}
 		}
 		if sl.agentID != "" && sl.agentDir != "" {
 			agentSkills := filepath.Join(sl.agentDir, "skills")
 			if err := skills.HydrateSkillsDown(ctx, sl.workspaceStore, sl.agentID, agentSkills); err != nil {
 				slog.Warn("agent skill hydrate failed", "error", err)
+				sl.hydrateFailed = true
 			}
 		}
 		// Per-user skill bucket: shared across every agent the chatter
@@ -195,6 +211,7 @@ func (sl *SkillsLoader) LoadSkills() []Skill {
 			owner := skills.UserSkillOwner(sl.userID)
 			if err := skills.HydrateSkillsDown(ctx, sl.workspaceStore, owner, userDir); err != nil {
 				slog.Warn("user skill hydrate failed", "user", sl.userID, "error", err)
+				sl.hydrateFailed = true
 			}
 			// Anything the agent installed mid-chat into the bind-mounted
 			// per-user dir (e.g. via `npx skills add -g -y`) is local-only

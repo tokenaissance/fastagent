@@ -118,7 +118,7 @@ func (g *Gateway) ReloadSandbox() error {
 		return nil
 	}
 	cfg := readSystemSandboxCfg(g.store)
-	next := buildSystemSandboxPool(cfg, g.workspace, sandboxLeaseStoreFrom(g.store), sandboxPoolOwnerID())
+	next := buildSystemSandboxPool(cfg, g.workspace, sandboxLeaseStoreFrom(g.store), g.store, sandboxPoolOwnerID())
 
 	g.mu.Lock()
 	prev := g.sandboxPool

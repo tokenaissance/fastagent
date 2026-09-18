@@ -18,7 +18,13 @@ const (
 	// PruneTurnAge is the number of recent turns to keep intact; older messages get pruned.
 	PruneTurnAge = 20
 	// truncatedPlaceholder replaces pruned tool results.
-	truncatedPlaceholder = "[Result truncated - see memory logs]"
+	// Pruned tool output must say WHAT happened and WHY, not just point at a
+	// log the agent cannot read: the agent sees this text in place of a result
+	// it once had, and "truncated" alone leaves it guessing whether the tool
+	// failed. See docs/文件系统形式化证明/08 (harness state must be
+	// observable to the agent).
+	truncatedPlaceholder = "[Result dropped by context compaction — the harness pruned older tool output to stay inside the context window. " +
+		"The command did run; re-run it (or read the underlying file) if you need the content again.]"
 )
 
 // EstimateTokens provides a rough token estimate: chars/4.
@@ -201,8 +207,14 @@ func compressOlderMessages(ctx context.Context, messages []provider.Message, pro
 	// Build new message list: summary + recent messages
 	compressed := make([]provider.Message, 0, PruneTurnAge+1)
 	compressed = append(compressed, provider.Message{
-		Role:    "user",
-		Content: fmt.Sprintf("[Conversation Summary]\n%s", resp.Content),
+		Role: "user",
+		// State the fact, not just the result: the agent must be able to tell
+		// "the earlier turns were compacted into this summary" from "these are
+		// the actual earlier turns", or it will treat lossy text as verbatim
+		// history (docs 08, C2). The full transcript is on disk; details here are
+		// worth re-checking against the files themselves.
+		Content: fmt.Sprintf("[Conversation Summary — earlier turns were compacted into this summary to fit the context window. "+
+			"It is lossy: re-read files or re-run commands before relying on a specific number, path or quotation from it.]\n%s", resp.Content),
 	})
 	compressed = append(compressed, messages[cutoff:]...)
 

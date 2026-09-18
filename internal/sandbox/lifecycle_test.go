@@ -908,6 +908,9 @@ func newSnappingPool(files map[string][]byte) *snappingPool {
 }
 
 func (p *snappingPool) Get(ctx context.Context, agentID, projectID, sessionID string) (Executor, error) {
+	if p.getErr != nil {
+		return nil, p.getErr
+	}
 	key := poolKey(agentID, projectID, sessionID)
 	p.fakePool.liveMu.Lock()
 	defer p.fakePool.liveMu.Unlock()

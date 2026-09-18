@@ -1496,6 +1496,12 @@ func (d *DBStore) migrateSandboxLeasesAddState(ctx context.Context) error {
 	columns := []struct{ name, ddl string }{
 		{"state", `ALTER TABLE sandbox_leases ADD COLUMN state TEXT NOT NULL DEFAULT 'running'`},
 		{"paused_at", `ALTER TABLE sandbox_leases ADD COLUMN paused_at BIGINT NOT NULL DEFAULT 0`},
+		// The "this instance's /workspace was never filled" bit. It has to be a
+		// column rather than pod memory because the instance outlives the pod
+		// that created it (adoption does not replay hydration), and the fact's
+		// absence is not neutral: the agent reads an empty workspace as "my files
+		// are gone" (docs 10 §4, G19).
+		{"unhydrated", `ALTER TABLE sandbox_leases ADD COLUMN unhydrated BIGINT NOT NULL DEFAULT 0`},
 	}
 	for _, col := range columns {
 		has, err := d.tableHasColumn(ctx, "sandbox_leases", col.name)
@@ -1678,6 +1684,7 @@ func migrationSQLForDialect(dialect string) []string {
 			template TEXT NOT NULL DEFAULT '',
 			state TEXT NOT NULL DEFAULT 'running',
 			paused_at BIGINT NOT NULL DEFAULT 0,
+			unhydrated BIGINT NOT NULL DEFAULT 0,
 			expires_at BIGINT NOT NULL,
 			epoch BIGINT NOT NULL DEFAULT 0,
 			updated_at BIGINT NOT NULL

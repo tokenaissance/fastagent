@@ -5,8 +5,10 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 
@@ -200,13 +202,6 @@ type Registry struct {
 	// the whole value of "project": notes/files persist across the
 	// project's chats. Set per-turn alongside sessionID.
 	projectID string
-	// codingRootScope, when true, drops the session segment from
-	// workspace store scoping so file tools address the project ROOT
-	// (projects/<pid>/) — the dir a project runtime's dev server serves.
-	// Set per-turn by the agent loop (bindSession) only for agents that
-	// have a project runtime wired; off by default, so per-chat isolation
-	// is unchanged for everyone else. See SetCodingRootScope.
-	codingRootScope bool
 	// codingSubdir, when set, redirects file-tool paths into this
 	// subfolder of the scope workspace (the folder a project runtime
 	// scaffolds its app into). See SetCodingSubdir / wsPath.
@@ -600,14 +595,13 @@ func (r *Registry) EffectiveUserID() string {
 	return r.userID
 }
 
-// SetCodingRootScope, when true, makes the file tools address the
-// PROJECT ROOT (workspaces/<agent>/projects/<pid>/) instead of the
-// per-chat subdir — i.e. it drops the session segment from workspace
-// store scoping. That's what makes a coding project behave as ONE shared
-// app tree (the dev server serves the project root, so the agent's edits
-// must land there too, not in a per-chat scratch folder). Only flipped on
-// for agents that have a project runtime wired; ordinary agents keep the
-// per-chat isolation, so existing behavior is unchanged.
+// scopeSessionID is the session segment the file tools pass to the workspace
+// store. It is not decided here: workspace.WriteScope is the one expression of
+// "a project is one tree", so inside a project the segment is empty and every
+// write lands at the project root the dev server serves. There used to be a
+// separate flag for this, flipped by the agent loop only when a project runtime
+// was wired — which made the file tools and the sandbox agree by wiring rather
+// than by rule (docs 10 §4 G23).
 func (r *Registry) scopeSessionID() string {
 	return workspace.WriteScope(r.projectID, r.sessionID).SessionID
 }
@@ -797,6 +791,22 @@ func (r *Registry) RegisterSerialFrom(name, description string, parameters inter
 		return fn(ctx, args)
 	}
 	r.RegisterFrom(name, description, parameters, wrapped, source)
+}
+
+// ToolNames returns the sorted names of every registered tool.
+//
+// Exists for the environment-change note (internal/agent/env_changes.go): a tool
+// appearing or disappearing between turns changes what the agent can do, and
+// that belongs in the same "what changed in your world" report as skills and
+// memory. Sorted so the caller can diff two snapshots without being fooled by
+// map iteration order.
+func (r *Registry) ToolNames() []string {
+	out := make([]string, 0, len(r.tools))
+	for name := range r.tools {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // HasBuiltin returns true if a built-in tool with the given name exists.
@@ -1000,7 +1010,7 @@ func (r *Registry) registerBuiltins() {
 // bearing on, and putting the line there would dilute it into wallpaper.
 var workspaceTools = []string{"exec", "read_file", "write_file", "edit_file", "list_dir", "apply_patch"}
 
-// workspaceUnhydratedNotice is the declaration itself. Three properties, each
+// workspaceUnhydratedSignal is the declaration itself. Three properties, each
 // load-bearing (§9.5):
 //
 //  1. It states a fact about the environment, not an instruction — the model
@@ -1011,7 +1021,7 @@ var workspaceTools = []string{"exec", "read_file", "write_file", "edit_file", "l
 //  3. It says the files may be missing for this reason ONLY, so the model
 //     neither concludes they were deleted nor treats unrelated absences as
 //     explained by it.
-const workspaceUnhydratedNotice = "[workspace not hydrated: the file store could not list this agent's files (the listing timed out after retries). Files may be missing for this reason only — do not conclude they were deleted.]"
+const workspaceUnhydratedSignal = "[workspace not hydrated: the file store could not list this agent's files (the listing timed out after retries). Files may be missing for this reason only — do not conclude they were deleted.]"
 
 // declareUnhydratedWorkspace wraps the workspace-touching tools so their
 // results carry the declaration when the sandbox in use reports an unfilled
@@ -1027,35 +1037,54 @@ func (r *Registry) declareUnhydratedWorkspace() {
 		}
 		inner := t.fn
 		t.fn = func(ctx context.Context, args json.RawMessage) (string, error) {
+			ctx, col := withSignalCollector(ctx)
 			out, err := inner(ctx, args)
-			return r.withWorkspaceNotice(out), err
+			return r.workspaceSignalExit(out, col.signals), err
 		}
 		r.tools[name] = t
 	}
 }
 
-// withWorkspaceNotice prefixes the declaration onto a result from a
-// workspace-touching tool, when — and only when — the executor reports that
-// this scope's /workspace never got filled from the store.
+// workspaceSignalExit is the tools package's SINGLE signal exit: every
+// delta a workspace tool wants the agent to perceive passes through here.
 //
-// The marker goes BEHIND MetaSandboxPrefix, never in front of it: the agent
-// loop strips that prefix with strings.TrimPrefix and only while it is the
-// first line, so a notice placed on line 1 would silently cost the frontend its
+// Two kinds arrive, in a fixed order so a result reads the same way every time:
+//
+//  1. the scope's state    — /workspace never got filled from the store
+//     (Policy C), which colours everything below it;
+//  2. this call's facts    — what the write-through did to the sandbox copy,
+//     collected by the tool via addSignal.
+//
+// Tools never append their own text: they state facts, this decides placement.
+// That is what makes "how do signals reach the agent in this package?" a
+// one-place question (docs 08 §9).
+//
+// The state marker goes BEHIND MetaSandboxPrefix, never in front of it: the
+// agent loop strips that prefix with strings.TrimPrefix and only while it is the
+// first line, so a signal placed on line 1 would silently cost the frontend its
 // "ran in a sandbox" badge. The model still reads the declaration first, because
 // the marker is gone before the result reaches the provider.
-func (r *Registry) withWorkspaceNotice(out string) string {
-	unhydrated, ok := r.executor.(sandbox.UnhydratedWorkspace)
-	if !ok || !unhydrated.WorkspaceUnhydrated() {
-		return out
+func (r *Registry) workspaceSignalExit(out string, callSignals []string) string {
+	if unhydrated, ok := r.executor.(sandbox.UnhydratedWorkspace); ok && unhydrated.WorkspaceUnhydrated() {
+		out = r.attachUnhydratedSignal(out)
 	}
+	for _, n := range callSignals {
+		out += n
+	}
+	return out
+}
+
+// attachUnhydratedSignal prefixes the Policy C declaration, if it is not
+// already there.
+func (r *Registry) attachUnhydratedSignal(out string) string {
 	rest, hasMeta := strings.CutPrefix(out, MetaSandboxPrefix)
-	if strings.HasPrefix(rest, workspaceUnhydratedNotice) {
+	if strings.HasPrefix(rest, workspaceUnhydratedSignal) {
 		return out // already declared — SetExecutor runs on every bind
 	}
 	if hasMeta {
-		return MetaSandboxPrefix + workspaceUnhydratedNotice + "\n" + rest
+		return MetaSandboxPrefix + workspaceUnhydratedSignal + "\n" + rest
 	}
-	return workspaceUnhydratedNotice + "\n" + out
+	return workspaceUnhydratedSignal + "\n" + out
 }
 
 // StartTurn resets per-turn tool-call state. Called by the agent loop
@@ -1097,4 +1126,35 @@ func (r *Registry) PriorFailure(toolName string, rawArgs string) string {
 		return ""
 	}
 	return r.turnFails[turnFailKey{tool: toolName, hash: sha256.Sum256([]byte(rawArgs))}]
+}
+
+// signalCollector is how a tool call hands its deltas to the package's single
+// signal exit (workspaceSignalExit). A tool never renders or appends a
+// signal itself: it states a fact, and the exit decides where it goes — which is
+// what keeps "how signals reach the agent" answerable in ONE place per package.
+//
+// Carried on the context rather than on the Registry because tool calls run
+// concurrently and the collector belongs to one call, not to the agent.
+type signalCollector struct{ signals []string }
+
+type signalCtxKey struct{}
+
+func withSignalCollector(ctx context.Context) (context.Context, *signalCollector) {
+	col := &signalCollector{}
+	return context.WithValue(ctx, signalCtxKey{}, col), col
+}
+
+// addSignal records one delta's signal for the current tool call. Outside a
+// workspace tool call (no collector in the context) the text is logged instead
+// of dropped — observability should never be silent, even when a caller did not
+// go through the exit.
+func (r *Registry) addSignal(ctx context.Context, signal string) {
+	if signal == "" {
+		return
+	}
+	if col, ok := ctx.Value(signalCtxKey{}).(*signalCollector); ok && col != nil {
+		col.signals = append(col.signals, signal)
+		return
+	}
+	slog.Warn("workspace signal outside the tool-call exit", "signal", signal)
 }

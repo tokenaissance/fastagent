@@ -493,7 +493,7 @@ func New(env *config.EnvConfig) (*Gateway, error) {
 	// builder produced nil for those spaces and the agent's exec tool
 	// refused to run with "sandbox required but no executor available".
 	systemSandboxPool := buildSystemSandboxPool(
-		readSystemSandboxCfg(st), ws, sandboxLeaseStoreFrom(st), sandboxPoolOwnerID())
+		readSystemSandboxCfg(st), ws, sandboxLeaseStoreFrom(st), st, sandboxPoolOwnerID())
 
 	// Accounts service is used by the inbound routing loop to lazy-mint
 	// per-(channel, IM-sender) app_user rows so each chatter on an IM
@@ -664,6 +664,27 @@ func New(env *config.EnvConfig) (*Gateway, error) {
 			tq.SubmitWithTimeout(agentID, chatKey, msg, accountID, g.taskTimeoutFor(msg))
 		},
 		g.sessionBusy,
+		// A scheduled task the user set up is dropped only when the session is
+		// busy past the budget — the user is the one waiting on it, so the note
+		// goes out through the channel they are already in. Bounded: a wedged
+		// outbound route must not stall the drain loop (docs 10 §3.5, G12).
+		func(msg bus.InboundMessage, text string) {
+			out := bus.OutboundMessage{
+				Channel:   msg.Channel,
+				AccountID: msg.AccountID,
+				AgentID:   msg.AgentID,
+				ChatID:    msg.ChatID,
+				Text:      text,
+			}
+			t := time.NewTimer(250 * time.Millisecond)
+			defer t.Stop()
+			select {
+			case mb.Outbound <- out:
+			case <-t.C:
+				slog.Warn("could not deliver the dropped-scheduled-task note",
+					"agent", msg.AgentID, "channel", msg.Channel, "chat_id", msg.ChatID)
+			}
+		},
 	)
 
 	// Register all enabled channel rows from the DB.
