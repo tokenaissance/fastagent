@@ -102,7 +102,18 @@ func SyncSkillUp(ctx context.Context, ws workspace.Store, owner, skillName, root
 		// Skills live in the agent-shared scope (project + session both
 		// empty) so every chat of an agent sees the same set; per-scope
 		// subtrees are reserved for chat artifacts.
-		if putErr := ws.Put(ctx, owner, "", "", key, f, info.Size(), ""); putErr != nil {
+		// A skill publish is an intentional re-publish, so it reads the
+		// version it is replacing and conditions on it (family B, L7): a
+		// concurrent publisher loses the race instead of interleaving halves
+		// of two different skill trees.
+		expected := workspace.VersionAbsent
+		if cur, statErr := ws.Stat(ctx, owner, "", "", key); statErr == nil && cur != nil {
+			expected = cur.Version
+		}
+		if putErr := ws.PutIfVersion(ctx, owner, "", "", key, f, info.Size(), "", expected); putErr != nil {
+			if errors.Is(putErr, workspace.ErrVersionConflict) {
+				return fmt.Errorf("publish %s: another publisher changed it; re-run the publish", key)
+			}
 			return fmt.Errorf("put %s: %w", key, putErr)
 		}
 		uploaded++

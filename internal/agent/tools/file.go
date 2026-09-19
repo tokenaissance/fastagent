@@ -3,7 +3,9 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/fastclaw-ai/fastclaw/internal/workspace"
 	"io"
 	"log/slog"
 	"os"
@@ -587,12 +589,8 @@ func makeWriteFile(r *Registry) ToolFunc {
 		// filesystem because the memory store already covers their
 		// durability via a separate path.
 		if r.workspaceStore != nil && r.agentID != "" && r.isWorkspacePath(args.Path) {
-			if err := r.workspaceStore.Put(ctx, r.agentID, r.projectID, r.scopeSessionID(), r.wsPath(args.Path),
-				strings.NewReader(args.Content), int64(len(args.Content)), ""); err != nil {
-				if friendly := asIsDirToolError("write_file", args.Path, err); friendly != nil {
-					return "", friendly
-				}
-				return "", fmt.Errorf("workspace put: %w", err)
+			if err := r.putGuarded(ctx, "write_file", args.Path, []byte(args.Content)); err != nil {
+				return "", err
 			}
 			return fmt.Sprintf("Written %d bytes to %s", len(args.Content), args.Path), nil
 		}
@@ -701,12 +699,8 @@ func makeEditFile(r *Registry) ToolFunc {
 			if err != nil {
 				return "", err
 			}
-			if err := r.workspaceStore.Put(ctx, r.agentID, r.projectID, r.scopeSessionID(), r.wsPath(args.Path),
-				strings.NewReader(updated), int64(len(updated)), ""); err != nil {
-				if friendly := asIsDirToolError("edit_file", args.Path, err); friendly != nil {
-					return "", friendly
-				}
-				return "", fmt.Errorf("workspace put: %w", err)
+			if err := r.putGuarded(ctx, "edit_file", args.Path, []byte(updated)); err != nil {
+				return "", err
 			}
 			return fmt.Sprintf("Edited %s (%d replacement(s))", args.Path, count), nil
 		}
@@ -893,6 +887,32 @@ func (r *Registry) previousStoreVersion(ctx context.Context, key string) string 
 // expectationReadMax bounds the extra read previousStoreVersion performs: past
 // this size the precision is not worth another full object read.
 const expectationReadMax = 2 << 20
+
+// putGuarded is the family-B write: the store evaluates "is this still the
+// version I saw" inside the same request as the write (docs 12 §3.1, L7), so a
+// writer that was superseded by a panel upload, another session on the same
+// project key, or a sibling replica is told instead of silently clobbering.
+//
+// The expectation is read immediately before the write. Two paths could carry
+// a cheaper one — edit_file and apply_patch already read the object — and that
+// optimisation is deliberately left out of this first cut: one extra HEAD is
+// cheaper than threading a version through three call sites.
+func (r *Registry) putGuarded(ctx context.Context, tool, path string, data []byte) error {
+	key := r.wsPath(path)
+	expected := workspace.VersionAbsent
+	if info, err := r.workspaceStore.Stat(ctx, r.agentID, r.projectID, r.scopeSessionID(), key); err == nil && info != nil {
+		expected = info.Version
+	}
+	err := r.workspaceStore.PutIfVersion(ctx, r.agentID, r.projectID, r.scopeSessionID(), key,
+		strings.NewReader(string(data)), int64(len(data)), "", expected)
+	if errors.Is(err, workspace.ErrVersionConflict) {
+		return fmt.Errorf("another writer changed %s while this turn was working; nothing was overwritten — read it again and re-apply your change", path)
+	}
+	if friendly := asIsDirToolError(tool, path, err); friendly != nil {
+		return friendly
+	}
+	return nil
+}
 
 // sandboxFileSet returns the paths the live sandbox holds, in the same logical
 // space the file tools use (paths relative to /workspace). Returns nil when there
@@ -1371,12 +1391,8 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 					if err != nil {
 						return "", err
 					}
-					if err := r.workspaceStore.Put(ctx, r.agentID, r.projectID, r.scopeSessionID(), r.wsPath(args.Path),
-						strings.NewReader(updated), int64(len(updated)), ""); err != nil {
-						if friendly := asIsDirToolError("edit_file", args.Path, err); friendly != nil {
-							return "", friendly
-						}
-						return "", fmt.Errorf("workspace put: %w", err)
+					if err := r.putGuarded(ctx, "edit_file", args.Path, []byte(updated)); err != nil {
+						return "", err
 					}
 					r.addSignal(ctx, r.writeThroughSignal(ctx, args.Path, updated, string(data)))
 					return fmt.Sprintf("Edited %s (%d replacement(s))", args.Path, count), nil

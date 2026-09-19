@@ -3,6 +3,7 @@ package setup
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -170,4 +171,76 @@ func TestFileUpload_NoSessionKey_LandsAtAgentRoot(t *testing.T) {
 	if _, err := s.workspaceStore.Get(ctx, aid, "", "", "data.csv"); err != nil {
 		t.Errorf("file not found at agent root: %v", err)
 	}
+}
+
+// The panel's upload is create-only by default and answers a name collision
+// with 409 + the CURRENT version; re-sending with that version is the explicit
+// replace (family B, L7 — docs 12 §3.1; the industry shape is Dropbox's
+// mode=update + rev / GitHub's sha).
+//
+// Falsification: drop the expectedVersion handling and the third upload below
+// keeps failing with 409 instead of replacing.
+func TestFileUpload_NameCollisionOffersTheCurrentVersionThenReplaces(t *testing.T) {
+	s, uid, aid := setupFileUploadTest(t)
+	sessionKey := "collide-1"
+	url := fmt.Sprintf("/?sessionId=%s", sessionKey)
+
+	upload := func(body, expected string) *httptest.ResponseRecorder {
+		req := multipartRequest(t, url, "report.pdf", body)
+		if expected != "" {
+			req = withFormField(req, "expectedVersion", expected)
+		}
+		req.SetPathValue("id", aid)
+		req = stampAuthAndUserID(req, uid)
+		w := httptest.NewRecorder()
+		s.handleAgentFileUpload(w, req)
+		return w
+	}
+
+	if w := upload("v1", ""); w.Code != http.StatusOK {
+		t.Fatalf("first upload status = %d, want 200; body = %s", w.Code, w.Body.String())
+	}
+
+	// Second upload, same name, no expectation: refused, with the current
+	// version attached so the panel can offer "replace".
+	w := upload("v2", "")
+	if w.Code != http.StatusConflict {
+		t.Fatalf("collision status = %d, want 409; body = %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Current map[string]any `json:"current"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode 409 body: %v", err)
+	}
+	version, _ := resp.Current["version"].(string)
+	if version == "" {
+		t.Fatalf("409 body carries no current version: %s", w.Body.String())
+	}
+
+	// Third upload carrying that version: the explicit replace.
+	if w := upload("v2", version); w.Code != http.StatusOK {
+		t.Fatalf("replace status = %d, want 200; body = %s", w.Code, w.Body.String())
+	}
+	rc, err := s.workspaceStore.Get(context.Background(), aid, "", sessionKey, "report.pdf")
+	if err != nil {
+		t.Fatalf("read after replace: %v", err)
+	}
+	defer rc.Close()
+	got, _ := io.ReadAll(rc)
+	if string(got) != "v2" {
+		t.Fatalf("content = %q, want v2", got)
+	}
+}
+
+// withFormField adds a plain (non-file) field to a multipart request that
+// multipartRequest already built.
+func withFormField(req *http.Request, key, value string) *http.Request {
+	if req.MultipartForm == nil {
+		_ = req.ParseMultipartForm(1 << 20)
+	}
+	if req.MultipartForm != nil {
+		req.MultipartForm.Value[key] = []string{value}
+	}
+	return req
 }

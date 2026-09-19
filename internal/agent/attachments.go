@@ -3,7 +3,9 @@ package agent
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
+	"github.com/fastclaw-ai/fastclaw/internal/workspace"
 	"io"
 	"log/slog"
 	"net/http"
@@ -115,8 +117,17 @@ func (a *Agent) WriteSessionAttachments(ctx context.Context, sessionID, projectI
 
 		// 2. Durable store (covers E2B / multi-pod via hydrate-on-create)
 		if a.workspaceStore != nil {
-			if pErr := a.workspaceStore.Put(ctx, a.agentID, projectID, sessionID, name, strings.NewReader(string(data)), int64(len(data)), contentTypeFromExt(ext)); pErr != nil {
-				slog.Warn("attachment store put failed", "agent", a.name, "session", sessionID, "path", name, "error", pErr)
+			// Create-only (family B, L7): an attachment name that already
+			// exists must not be silently replaced — whoever uploaded the first
+			// one still believes it is there. Refuse and say so.
+			if pErr := a.workspaceStore.PutIfVersion(ctx, a.agentID, projectID, sessionID, name,
+				strings.NewReader(string(data)), int64(len(data)), contentTypeFromExt(ext), workspace.VersionAbsent); pErr != nil {
+				if errors.Is(pErr, workspace.ErrVersionConflict) {
+					slog.Warn("attachment name already taken; refusing to replace it",
+						"agent", a.name, "session", sessionID, "path", name)
+				} else {
+					slog.Warn("attachment store put failed", "agent", a.name, "session", sessionID, "path", name, "error", pErr)
+				}
 			}
 		}
 

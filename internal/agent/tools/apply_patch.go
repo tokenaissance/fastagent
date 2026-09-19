@@ -544,8 +544,9 @@ func (r *Registry) writeForPatch(ctx context.Context, path, content string) erro
 		return fmt.Errorf("%s", OwnerManagedFileWriteRefusal)
 	}
 	if r.workspaceStore != nil && r.agentID != "" && r.isWorkspacePath(path) {
-		return r.workspaceStore.Put(ctx, r.agentID, r.projectID, r.scopeSessionID(), r.wsPath(path),
-			strings.NewReader(content), int64(len(content)), "")
+		// Same family-B guard as write_file / edit_file (L7): the version check
+		// rides the write, so a peer's version cannot be silently replaced.
+		return r.putGuarded(ctx, "apply_patch", path, []byte(content))
 	}
 	if r.systemFileStore != nil && r.agentID != "" && isSingleSegmentSystemFile(path) {
 		name := filepath.Clean(path)
@@ -585,6 +586,9 @@ func (r *Registry) deleteForPatch(ctx context.Context, path string) error {
 		return fmt.Errorf("apply_patch: refusing to delete identity file %q (use Update File with empty content instead)", path)
 	}
 	if r.workspaceStore != nil && r.agentID != "" && r.isWorkspacePath(path) {
+		// HOST path: /workspace here *is* the store, so there is no second copy
+		// to chase. (The sandbox path is below, and it is the one that needed
+		// the mirror delete.)
 		return r.workspaceStore.Delete(ctx, r.agentID, r.projectID, r.scopeSessionID(), r.wsPath(path))
 	}
 	root := r.rootForPath(path)
@@ -650,7 +654,33 @@ func (r *Registry) deleteForPatchSandbox(ctx context.Context, ex sandbox.Executo
 		return fmt.Errorf("apply_patch: refusing to delete identity file %q (use Update File with empty content instead)", path)
 	}
 	if r.workspaceStore != nil && r.agentID != "" && r.isWorkspacePath(path) {
-		return r.workspaceStore.Delete(ctx, r.agentID, r.projectID, r.scopeSessionID(), r.wsPath(path))
+		if err := r.workspaceStore.Delete(ctx, r.agentID, r.projectID, r.scopeSessionID(), r.wsPath(path)); err != nil {
+			return err
+		}
+		// The store half is done; the sandbox holds a *second* copy, and without
+		// this the next sync reads "the store has no such path, the sandbox does
+		// ⇒ that file is a sandbox product" and pushes the OLD version back — the
+		// deletion is undone, silently, and the caller was told it worked.
+		//
+		// Same narrow capability the file panel uses (d1: fix it at the source,
+		// so no sync-side scope inference is involved) and the same posture on
+		// failure: the call succeeds and the result says what did not happen
+		// (`sandboxRemoved:false` there, an `addSignal` here). A backend whose
+		// /workspace IS the store (docker) does not implement it, the assertion
+		// fails, and nothing is owed.
+		//
+		// Assert on `ex`, the executor bound for this call — the same object the
+		// rest of this function uses (ex.WriteFile, ex.Exec). The first version of
+		// this line read `r.executor` and the tests caught it: a hidden dependency
+		// on registry state stops being true the moment a caller binds a
+		// different executor for one scope.
+		if rem, ok := ex.(sandbox.LiveWorkspaceFileRemover); ok {
+			if err := rem.RemoveLiveWorkspaceFile(ctx, r.wsPath(path)); err != nil {
+				r.addSignal(ctx, "deleted "+r.wsPath(path)+" from the store, but the copy inside the live sandbox could not be removed ("+err.Error()+
+					") — the next workspace sync may write the old version back. Re-running the delete, or a fresh exec listing, will show whether it did.")
+			}
+		}
+		return nil
 	}
 	// Sandbox executor exposes no Delete API; fall back to `rm`. Single-quote
 	// the path and escape embedded single quotes so a pathological filename

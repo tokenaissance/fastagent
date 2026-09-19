@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/fastclaw-ai/fastclaw/internal/agent/tools"
 	"github.com/fastclaw-ai/fastclaw/internal/auth"
@@ -1488,6 +1489,20 @@ func (s *Server) handleAgentFileUpload(w http.ResponseWriter, r *http.Request) {
 		// this path is identical to the DB-backed path once the row exists.
 		sessionID = sessionKey
 	}
+	// Optional "expectedVersion" form field: the version the panel listed for
+	// this name. With it the upload means *replace the version I saw* — the
+	// industry's explicit replace path (Dropbox's mode=update + rev, GitHub's
+	// sha); without it the upload is create-only. A replace carries exactly one
+	// file, since one version cannot describe several names.
+	expectedRaw := r.MultipartForm.Value["expectedVersion"]
+	replaceExpected := ""
+	if len(expectedRaw) > 0 {
+		replaceExpected = expectedRaw[0]
+	}
+	if replaceExpected != "" && len(headers) != 1 {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "expectedVersion applies to a single file"})
+		return
+	}
 	saved := make([]map[string]any, 0, len(headers))
 	for _, h := range headers {
 		fh, err := h.Open()
@@ -1501,11 +1516,36 @@ func (s *Server) handleAgentFileUpload(w http.ResponseWriter, r *http.Request) {
 			jsonResponse(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 			return
 		}
-		if err := s.workspaceStore.Put(r.Context(), id, projectID, sessionID, h.Filename, strings.NewReader(string(data)), int64(len(data)), ""); err != nil {
+		// Create-only (family B, obligation L7 — docs 12 §3.1): an upload must
+		// not silently replace a file that already has that name, whoever wrote
+		// it (a turn, another upload, a panel delete). On conflict the response
+		// carries the CURRENT version so the panel can offer the industry's
+		// three answers — keep both (auto-rename), replace (re-send with this
+		// version), or cancel — instead of just failing.
+		expected := workspace.VersionAbsent
+		if replaceExpected != "" {
+			expected = workspace.Version(replaceExpected)
+		}
+		err = s.workspaceStore.PutIfVersion(r.Context(), id, projectID, sessionID, h.Filename,
+			strings.NewReader(string(data)), int64(len(data)), "", expected)
+		if errors.Is(err, workspace.ErrVersionConflict) {
+			current := map[string]any{"name": h.Filename}
+			if info, statErr := s.workspaceStore.Stat(r.Context(), id, projectID, sessionID, h.Filename); statErr == nil && info != nil {
+				current["version"] = string(info.Version)
+				current["size"] = info.Size
+				current["modified_at"] = info.ModTime.UTC().Format(time.RFC3339)
+			}
+			jsonResponse(w, http.StatusConflict, map[string]any{
+				"error":   "a file with this name already exists",
+				"current": current,
+			})
+			return
+		}
+		if err != nil {
 			jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 			return
 		}
-		saved = append(saved, map[string]any{"name": h.Filename, "size": len(data)})
+		saved = append(saved, map[string]any{"name": h.Filename, "size": len(data), "version": ""})
 	}
 	jsonResponse(w, http.StatusOK, map[string]any{"ok": true, "files": saved})
 }
