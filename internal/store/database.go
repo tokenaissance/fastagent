@@ -2024,6 +2024,41 @@ func migrationSQLForDialect(dialect string) []string {
 		// leaseholder renews periodically; on crash the lease expires
 		// and another instance takes over. See channels.Manager and
 		// channels.runWithLease.
+		`CREATE TABLE IF NOT EXISTS session_turns (
+			user_id     TEXT NOT NULL,
+			agent_id    TEXT NOT NULL,
+			session_key TEXT NOT NULL,
+			holder_id   TEXT NOT NULL,
+			epoch       BIGINT NOT NULL DEFAULT 0,
+			-- TIMESTAMP, not BIGINT: the read/write path (Acquire/Renew/
+			-- GetSessionLease) carries time.Time, exactly like channel_leases.
+			-- Mixing the two affinities is what the cancel test caught.
+			acquired_at TIMESTAMP NOT NULL,
+			expires_at  TIMESTAMP NOT NULL,
+			-- cancel_requested is the user's stop request for the CURRENT
+			-- possession: 0 = none, else the unix time it was asked. It lives on
+			-- the lease row so the request reaches the holder wherever it runs
+			-- (docs/session-turn-integrity.md A4, cancel design X1–X6): the
+			-- holder reads it at its iteration boundary, next to the fence
+			-- check. A new acquisition starts at 0 by construction.
+			cancel_requested BIGINT NOT NULL DEFAULT 0,
+			PRIMARY KEY (user_id, agent_id, session_key)
+		)`,
+		// session_turns is the cross-replica turn lease (docs/session-turn-integrity.md
+		// A1, docs/文件系统形式化证明/12-lease-formal-design.md L1–L6): one row per
+		// session, claiming "at most one turn is writing this history". It is a
+		// second lease KIND in this store, deliberately not folded into
+		// sandbox_leases: the keys differ (this one carries user_id), the row
+		// carries only the exclusion (no instance identity), transferability is
+		// not wanted (a dead pod's turn is dead), and the failure posture is
+		// fail-closed (two writers are unrecoverable).
+		//
+		// epoch is the fencing token. It increments on EVERY successful
+		// acquisition — including the claim of an expired row — and never
+		// resets: the (holder_id, epoch) pair must be unique per acquisition
+		// over the whole life of the row, or a delayed write from a previous
+		// possession could match a newer one (the failure G25 measured in the
+		// sandbox lease).
 		`CREATE TABLE IF NOT EXISTS channel_leases (
 			channel TEXT NOT NULL,
 			account_id TEXT NOT NULL,
@@ -2920,6 +2955,70 @@ func (d *DBStore) SaveSession(ctx context.Context, userID, agentID, sessionKey s
 	return err
 }
 
+// SaveSessionFenced is SaveSession with the turn's write fence attached: the
+// statement carries `EXISTS (SELECT 1 FROM session_turns … holder, epoch, not
+// expired)` in its CONFLICT branch, so a writer whose lease moved on updates
+// zero rows and gets ErrSessionFenceLost instead of overwriting the turn that
+// owns the history now (obligation L4a — the resource checks the token, in the
+// same atomic step as the effect).
+//
+// A nil fence is the plain path; it is spelled as a separate method so the
+// precondition is visible at the call site rather than hidden in a value.
+// The INSERT branch (a brand-new session row) is deliberately not fenced:
+// there is no row to clobber, and the turn that creates a session is by
+// definition its first writer.
+func (d *DBStore) SaveSessionFenced(ctx context.Context, userID, agentID, sessionKey string, session *SessionRecord, fence *SessionFence) error {
+	if fence == nil {
+		return d.SaveSession(ctx, userID, agentID, sessionKey, session)
+	}
+	if userID == "" {
+		return errors.New("store: SaveSession requires user_id")
+	}
+	msgsData, _ := json.Marshal(session.Messages)
+	now := time.Now().UTC()
+	count := len(session.Messages)
+	chatterID := ChatterUserIDFromContext(ctx)
+	if d.dialect == "postgres" {
+		res, err := d.handle().ExecContext(ctx,
+			`INSERT INTO sessions (user_id, agent_id, session_key, channel, account_id, chat_id, project_id, messages, message_count, updated_at, chatter_user_id)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+				ON CONFLICT (user_id, agent_id, session_key) DO UPDATE
+				SET messages=$8, message_count=$9, updated_at=$10,
+				    chatter_user_id = CASE WHEN $11 <> '' THEN $11 ELSE sessions.chatter_user_id END
+				WHERE EXISTS (SELECT 1 FROM session_turns
+					WHERE user_id=$1 AND agent_id=$2 AND session_key=$3
+					  AND holder_id=$12 AND epoch=$13 AND expires_at > $14)`,
+			userID, agentID, sessionKey, session.Channel, session.AccountID, session.ChatID, session.ProjectID,
+			string(msgsData), count, now, chatterID, fence.HolderID, fence.Epoch, time.Now())
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return ErrSessionFenceLost
+		}
+		return nil
+	}
+	res, err := d.handle().ExecContext(ctx,
+		`INSERT INTO sessions (user_id, agent_id, session_key, channel, account_id, chat_id, project_id, messages, message_count, updated_at, chatter_user_id)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT (user_id, agent_id, session_key) DO UPDATE SET
+			  messages=excluded.messages, message_count=excluded.message_count, updated_at=excluded.updated_at,
+			  chatter_user_id = CASE WHEN excluded.chatter_user_id <> '' THEN excluded.chatter_user_id ELSE sessions.chatter_user_id END
+			WHERE EXISTS (SELECT 1 FROM session_turns
+				WHERE user_id=? AND agent_id=? AND session_key=?
+				  AND holder_id=? AND epoch=? AND expires_at > ?)`,
+		userID, agentID, sessionKey, session.Channel, session.AccountID, session.ChatID, session.ProjectID,
+		string(msgsData), count, now, chatterID,
+		userID, agentID, sessionKey, fence.HolderID, fence.Epoch, time.Now())
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrSessionFenceLost
+	}
+	return nil
+}
+
 func (d *DBStore) ListSessions(ctx context.Context, userID, agentID string) ([]SessionMeta, error) {
 	// Include sessions owned by the caller AND sessions owned by any
 	// app_user whose owner_user_id is the caller. This surfaces IM
@@ -3306,6 +3405,80 @@ func (d *DBStore) AppendSessionMessage(ctx context.Context, userID, agentID, ses
 		msg.Provider, msg.Model,
 		userID, agentID, sessionKey)
 	return err
+}
+
+// AppendSessionMessageFenced is AppendSessionMessage with the turn's write
+// fence attached. The archive's seq allocation is an aggregate SELECT, which
+// always yields one row, so the predicate goes in HAVING: a superseded writer
+// archives nothing rather than writing into a turn it no longer owns (L4a),
+// and gets ErrSessionFenceLost.
+func (d *DBStore) AppendSessionMessageFenced(ctx context.Context, userID, agentID, sessionKey string, msg SessionMessage, fence *SessionFence) error {
+	if fence == nil {
+		return d.AppendSessionMessage(ctx, userID, agentID, sessionKey, msg)
+	}
+	if userID == "" {
+		return errors.New("store: AppendSessionMessage requires user_id")
+	}
+	msg.Content = sanitizeNUL(msg.Content)
+	msg.Thinking = sanitizeNUL(msg.Thinking)
+	msg.Name = sanitizeNUL(msg.Name)
+	msg.ToolCallID = sanitizeNUL(msg.ToolCallID)
+	msg.Origin = sanitizeNUL(msg.Origin)
+	msg.Provider = sanitizeNUL(msg.Provider)
+	msg.Model = sanitizeNUL(msg.Model)
+	contentParts, _ := json.Marshal(msg.ContentParts)
+	toolCalls, _ := json.Marshal(msg.ToolCalls)
+	metadata, _ := json.Marshal(msg.Metadata)
+	rawAssistant := sanitizeNUL(string(msg.RawAssistant))
+	ts := msg.Timestamp
+	if ts.IsZero() {
+		ts = time.Now().UTC()
+	}
+	chatterID := ChatterUserIDFromContext(ctx)
+	if d.dialect == "postgres" {
+		res, err := d.handle().ExecContext(ctx,
+			`INSERT INTO session_messages
+				(user_id, agent_id, session_key, seq, role, content, content_parts, tool_calls, tool_call_id, name, metadata, thinking, raw_assistant, origin, created_at, chatter_user_id, provider, model)
+			SELECT $1, $2, $3, COALESCE(MAX(seq), -1) + 1, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17
+				FROM session_messages
+				WHERE user_id = $1 AND agent_id = $2 AND session_key = $3
+				HAVING EXISTS (SELECT 1 FROM session_turns
+					WHERE user_id = $1 AND agent_id = $2 AND session_key = $3
+					  AND holder_id = $18 AND epoch = $19 AND expires_at > $20)`,
+			userID, agentID, sessionKey,
+			msg.Role, msg.Content, string(contentParts), string(toolCalls),
+			msg.ToolCallID, msg.Name, string(metadata), msg.Thinking, rawAssistant, msg.Origin, ts, chatterID,
+			msg.Provider, msg.Model, fence.HolderID, fence.Epoch, time.Now())
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return ErrSessionFenceLost
+		}
+		return nil
+	}
+	res, err := d.handle().ExecContext(ctx,
+		`INSERT INTO session_messages
+			(user_id, agent_id, session_key, seq, role, content, content_parts, tool_calls, tool_call_id, name, metadata, thinking, raw_assistant, origin, created_at, chatter_user_id, provider, model)
+		SELECT ?, ?, ?, COALESCE(MAX(seq), -1) + 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+			FROM session_messages
+			WHERE user_id = ? AND agent_id = ? AND session_key = ?
+			HAVING EXISTS (SELECT 1 FROM session_turns
+				WHERE user_id = ? AND agent_id = ? AND session_key = ?
+				  AND holder_id = ? AND epoch = ? AND expires_at > ?)`,
+		userID, agentID, sessionKey,
+		msg.Role, msg.Content, string(contentParts), string(toolCalls),
+		msg.ToolCallID, msg.Name, string(metadata), msg.Thinking, rawAssistant, msg.Origin, ts, chatterID,
+		msg.Provider, msg.Model,
+		userID, agentID, sessionKey,
+		userID, agentID, sessionKey, fence.HolderID, fence.Epoch, time.Now())
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrSessionFenceLost
+	}
+	return nil
 }
 
 // AppendSessionEvent persists one streaming-event delta and returns the
@@ -4957,6 +5130,193 @@ func (d *DBStore) GetNextDueTime(ctx context.Context) (time.Time, error) {
 		return time.Time{}, nil
 	}
 	return parseTimeString(s.String), nil
+}
+
+// --- Session turn leases ---
+//
+// One row per (user_id, agent_id, session_key): "at most one turn is writing
+// this history". The consumer is the turn (internal/agent), not IM — the key
+// therefore carries user_id, unlike channel_leases, and the row carries only
+// the exclusion (no instance identity, no transferable ownership: a dead pod's
+// turn is dead). See docs/session-turn-integrity.md A1 and
+// docs/文件系统形式化证明/12-lease-formal-design.md (L1–L6).
+
+// SessionLeaseRecord is one live turn lease. It exists so a *reader* (the
+// queued event, the subscription payload) can name the holder and its ETA
+// without deciding anything: the decision is Acquire's.
+type SessionLeaseRecord struct {
+	HolderID   string
+	Epoch      int64
+	AcquiredAt time.Time
+	ExpiresAt  time.Time
+	// CancelRequested is the unix time the user asked this possession to stop,
+	// 0 when nobody did. The holder polls it at its iteration boundary.
+	CancelRequested int64
+}
+
+// GetSessionLease returns the live lease for a session, or nil when none
+// exists / the row already expired.
+func (d *DBStore) GetSessionLease(ctx context.Context, userID, agentID, sessionKey string) (*SessionLeaseRecord, error) {
+	if userID == "" || agentID == "" || sessionKey == "" {
+		return nil, nil
+	}
+	now := time.Now()
+	var rec SessionLeaseRecord
+	err := d.handle().QueryRowContext(ctx,
+		fmt.Sprintf(`SELECT holder_id, epoch, acquired_at, expires_at, cancel_requested
+			FROM session_turns
+			WHERE user_id = %s AND agent_id = %s AND session_key = %s AND expires_at > %s`,
+			d.ph(1), d.ph(2), d.ph(3), d.ph(4)),
+		userID, agentID, sessionKey, now).Scan(&rec.HolderID, &rec.Epoch, &rec.AcquiredAt, &rec.ExpiresAt, &rec.CancelRequested)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &rec, nil
+}
+
+// AcquireSessionLease attempts to take the session's turn lease for ttl,
+// returning the fencing epoch this acquisition may present on writes.
+//
+// The shape is AcquireChannelLease's CAS with one clause that matters: the
+// successful path computes `epoch = session_turns.epoch + 1`, never a constant.
+// The (holder_id, epoch) pair has to be unique per acquisition over the whole
+// life of the row — a reset made a delayed release from an earlier possession
+// match a newer one in the sandbox lease (G25, measured 2026-09-19), and the
+// turn lease is where that would cost a transcript.
+func (d *DBStore) AcquireSessionLease(ctx context.Context, userID, agentID, sessionKey, holderID string, ttl time.Duration) (int64, bool, error) {
+	if userID == "" || agentID == "" || sessionKey == "" || holderID == "" {
+		return 0, false, errors.New("store: AcquireSessionLease requires user_id/agent_id/session_key/holder_id")
+	}
+	now := time.Now()
+	expires := now.Add(ttl)
+	var epoch int64
+	var err error
+	if d.dialect == "postgres" {
+		err = d.handle().QueryRowContext(ctx,
+			`INSERT INTO session_turns (user_id, agent_id, session_key, holder_id, epoch, acquired_at, expires_at)
+				VALUES ($1, $2, $3, $4, 1, $5, $6)
+				ON CONFLICT (user_id, agent_id, session_key) DO UPDATE
+				SET holder_id = EXCLUDED.holder_id,
+				    epoch = session_turns.epoch + 1,
+				    acquired_at = EXCLUDED.acquired_at,
+				    expires_at = EXCLUDED.expires_at
+				WHERE session_turns.expires_at < $5 OR session_turns.holder_id = $4
+				RETURNING epoch`,
+			userID, agentID, sessionKey, holderID, now, expires).Scan(&epoch)
+	} else {
+		err = d.handle().QueryRowContext(ctx,
+			`INSERT INTO session_turns (user_id, agent_id, session_key, holder_id, epoch, acquired_at, expires_at)
+				VALUES (?, ?, ?, ?, 1, ?, ?)
+				ON CONFLICT (user_id, agent_id, session_key) DO UPDATE
+				SET holder_id = excluded.holder_id,
+				    epoch = session_turns.epoch + 1,
+				    acquired_at = excluded.acquired_at,
+				    expires_at = excluded.expires_at
+				WHERE session_turns.expires_at < ? OR session_turns.holder_id = ?
+				RETURNING epoch`,
+			userID, agentID, sessionKey, holderID, now, expires, now, holderID).Scan(&epoch)
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		// A live holder that is not us: the caller queues (or refuses) — never
+		// steals. Not an error.
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	return epoch, true, nil
+}
+
+// RenewSessionLease extends a lease this holder still owns and bumps the epoch.
+// ok=false (not an error) means the lease moved on: the caller MUST stop
+// writing and say so. The CAS is on (holder_id, epoch, not expired), so a
+// holder that was superseded cannot renew itself back into ownership.
+func (d *DBStore) RenewSessionLease(ctx context.Context, userID, agentID, sessionKey, holderID string, epoch int64, ttl time.Duration) (int64, bool, error) {
+	if userID == "" || agentID == "" || sessionKey == "" || holderID == "" {
+		return 0, false, errors.New("store: RenewSessionLease requires user_id/agent_id/session_key/holder_id")
+	}
+	now := time.Now()
+	expires := now.Add(ttl)
+	var newEpoch int64
+	var err error
+	if d.dialect == "postgres" {
+		err = d.handle().QueryRowContext(ctx,
+			`UPDATE session_turns SET expires_at = $1, epoch = epoch + 1
+				WHERE user_id = $2 AND agent_id = $3 AND session_key = $4
+				  AND holder_id = $5 AND epoch = $6 AND expires_at > $7
+				RETURNING epoch`,
+			expires, userID, agentID, sessionKey, holderID, epoch, now).Scan(&newEpoch)
+	} else {
+		err = d.handle().QueryRowContext(ctx,
+			`UPDATE session_turns SET expires_at = ?, epoch = epoch + 1
+				WHERE user_id = ? AND agent_id = ? AND session_key = ?
+				  AND holder_id = ? AND epoch = ? AND expires_at > ?
+				RETURNING epoch`,
+			expires, userID, agentID, sessionKey, holderID, epoch, now).Scan(&newEpoch)
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	return newEpoch, true, nil
+}
+
+// ReleaseSessionLease drops the lease voluntarily so a queued peer can start
+// without waiting for the TTL. Bounded by (holder_id, epoch) so a delayed
+// release from a superseded possession cannot free the current holder's row.
+func (d *DBStore) ReleaseSessionLease(ctx context.Context, userID, agentID, sessionKey, holderID string, epoch int64) error {
+	if userID == "" || agentID == "" || sessionKey == "" || holderID == "" {
+		return errors.New("store: ReleaseSessionLease requires user_id/agent_id/session_key/holder_id")
+	}
+	if d.dialect == "postgres" {
+		_, err := d.handle().ExecContext(ctx,
+			`DELETE FROM session_turns
+				WHERE user_id = $1 AND agent_id = $2 AND session_key = $3
+				  AND holder_id = $4 AND epoch = $5`,
+			userID, agentID, sessionKey, holderID, epoch)
+		return err
+	}
+	_, err := d.handle().ExecContext(ctx,
+		`DELETE FROM session_turns
+			WHERE user_id = ? AND agent_id = ? AND session_key = ?
+			  AND holder_id = ? AND epoch = ?`,
+		userID, agentID, sessionKey, holderID, epoch)
+	return err
+}
+
+// RequestSessionCancel stamps a stop request on the session's LIVE lease row
+// and reports whether a live holder was there to receive it.
+//
+// It is a conditional write in the sense of L7: the predicate (`expires_at >
+// now`) and the effect share one statement, so a request aimed at a possession
+// that already lapsed writes nothing at all — it cannot leak into the next
+// turn's lease, which starts with cancel_requested = 0. Idempotent: asking
+// twice is the same request, and re-stamping the time is harmless.
+//
+// The holder does not need to be on this replica: the request travels through
+// the row, and the holder reads it at its next iteration boundary next to the
+// fence check (docs/session-turn-integrity.md A4). That is why this is a store
+// write and not an in-process cancel func.
+func (d *DBStore) RequestSessionCancel(ctx context.Context, userID, agentID, sessionKey string) (bool, error) {
+	if userID == "" || agentID == "" || sessionKey == "" {
+		return false, errors.New("store: RequestSessionCancel requires user_id/agent_id/session_key")
+	}
+	now := time.Now()
+	query := fmt.Sprintf(`UPDATE session_turns SET cancel_requested = %s
+		WHERE user_id = %s AND agent_id = %s AND session_key = %s AND expires_at > %s`,
+		d.ph(1), d.ph(2), d.ph(3), d.ph(4), d.ph(5))
+	res, err := d.handle().ExecContext(ctx, query,
+		now.UnixNano(), userID, agentID, sessionKey, now)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
 }
 
 // --- Channel leases ---
