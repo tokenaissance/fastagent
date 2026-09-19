@@ -59,13 +59,23 @@ type chatCancelRequest struct {
 	TurnID    string `json:"turnId"`
 }
 
-// handleChatCancel withdraws a queue-waiting turn.
+// handleChatCancel stops a turn the user no longer wants.
 //
-//   - 200 {"canceled": true}  — the turn was still queued and is now withdrawn
-//   - 409 {"reason": "already_started"} — the turn began; use the normal stop
-//     affordance (which only detaches this client's stream — the server keeps
-//     running turns alive on purpose)
-//   - 404 {"reason": "not_queued"} — nothing registered for that turn
+// Two shapes, one endpoint (design X1–X7, docs/session-turn-integrity.md A4):
+//
+//   - still queued  → withdraw it here by canceling its request context; the
+//     turn never starts and nothing reaches the session. 200 {"canceled": true}
+//   - already running → stamp a cancel request on the session's LIVE lease row.
+//     The holder may be another replica; it reads the request at its next
+//     iteration boundary (next to the fence check) and stops with a σ. 200
+//     {"canceled": true, "wasRunning": true, "isRunning": false}
+//   - nothing at all → 200 {"canceled": false, "wasRunning": false}. Deleting
+//     the old 409 "already_started" is the point: that answer told the caller
+//     to "use the normal stop", which only detached the client's stream while
+//     the server kept working — a stop button that did not stop anything.
+//
+// Idempotent by construction: withdrawing twice is one withdrawal, and stamping
+// the cancel twice is one request on the same possession.
 func (s *Server) handleChatCancel(w http.ResponseWriter, r *http.Request) {
 	var req chatCancelRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -85,19 +95,19 @@ func (s *Server) handleChatCancel(w http.ResponseWriter, r *http.Request) {
 
 	key := chatTurnKey(uid, ag.Name(), req.SessionID, req.TurnID)
 	s.pendingTurnsMu.Lock()
-	turn, ok := s.pendingTurns[key]
-	started := ok && turn.started
+	pending, found := s.pendingTurns[key]
 	s.pendingTurnsMu.Unlock()
 
-	switch {
-	case !ok:
-		jsonResponse(w, http.StatusNotFound, map[string]any{"reason": "not_queued"})
-	case started:
-		jsonResponse(w, http.StatusConflict, map[string]any{"reason": "already_started"})
-	default:
-		// Canceling the request context makes the agent's AcquireTurn return
-		// false, so the turn never starts and nothing reaches the session.
-		turn.cancel()
-		jsonResponse(w, http.StatusOK, map[string]any{"canceled": true})
+	// The use case lives in turn_cancel.go: this handler only resolves the
+	// caller and maps the outcome onto HTTP.
+	canceled, wasRunning, err := cancelTurn(r.Context(), s.dataStore, pending, found, uid, ag.Name(), req.SessionID)
+	if err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
 	}
+	jsonResponse(w, http.StatusOK, map[string]any{
+		"canceled":   canceled,
+		"wasRunning": wasRunning,
+		"isRunning":  false,
+	})
 }

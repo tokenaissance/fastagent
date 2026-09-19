@@ -215,8 +215,20 @@ func TestStartedChatTurnCannotBeWithdrawnE2E(t *testing.T) {
 		strings.NewReader(`{"agentId":"agt_e2e","sessionId":"chat-started","turnId":"turn-xyz"}`))
 	cancelReq = cancelReq.WithContext(auth.WithIdentity(cancelReq.Context(), auth.Identity{UserID: "u_1", Role: "user", AuthMethod: "session"}))
 	s.handleChatCancel(cancelRec, cancelReq)
-	if cancelRec.Code != http.StatusConflict {
-		t.Fatalf("cancel status = %d body=%s; want 409 already_started", cancelRec.Code, cancelRec.Body.String())
+	// The old contract answered 409 "already_started" and told the caller to
+	// "use the normal stop" — which only detached the client's stream while the
+	// server kept working. Now a started turn is cancelled through the session's
+	// lease row (design X1–X7): with no lease wired (this harness), that is an
+	// honest no-op — 200, canceled=false — never an error the UI must translate.
+	if cancelRec.Code != http.StatusOK {
+		t.Fatalf("cancel status = %d body=%s; want 200", cancelRec.Code, cancelRec.Body.String())
+	}
+	var cancelBody map[string]any
+	if err := json.Unmarshal(cancelRec.Body.Bytes(), &cancelBody); err != nil {
+		t.Fatalf("decode cancel body: %v", err)
+	}
+	if cancelBody["canceled"] != false || cancelBody["wasRunning"] != false {
+		t.Fatalf("cancel body = %v; want an honest no-op when nothing holds the session", cancelBody)
 	}
 
 	select {

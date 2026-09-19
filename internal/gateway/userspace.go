@@ -1098,6 +1098,9 @@ func loadUserSpace(ctx context.Context, userID string, mb *bus.MessageBus, st st
 		agent.WithSessionStore(session.NewStoreAdapter(st, userID)),
 		agent.WithMemoryStore(agent.NewMemoryStoreAdapter(st)),
 		agent.WithDataStore(st),
+		// The cross-replica turn lease (docs/session-turn-integrity.md A1): admission
+		// for every turn, so two replicas cannot run one session's history.
+		agent.WithSessionLease(storeSessionLease{st: st}),
 		agent.WithMCPConfigNotify(notifyAgent),
 	}
 	if ws != nil {

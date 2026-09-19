@@ -100,8 +100,10 @@ func TestTurnBudgetExpiryLetsInFlightToolRecordItsResult(t *testing.T) {
 		if m.Role == "tool" {
 			toolContent = m.Content
 		}
-		if m.Content == provider.StoppedToolResult {
-			t.Fatalf("a synthetic pad was written despite the grace window: %+v", msgs)
+		for _, pad := range provider.SyntheticToolPads {
+			if m.Content == pad {
+				t.Fatalf("a synthetic pad was written despite the grace window: %+v", msgs)
+			}
 		}
 	}
 	if toolContent != "real tool result" {

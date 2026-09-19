@@ -271,6 +271,52 @@ func TestSandboxLeaseRenewEpochMonotonic(t *testing.T) {
 	}
 }
 
+// TestSandboxLeaseEpochNeverResetsAcrossTakeover pins G25 (2026-09-19): the
+// fencing token must be unique per acquisition over the WHOLE life of the row,
+// not per possession. Before the fix, Acquire stamped `epoch = 1` on every
+// claim, so a delayed release from an earlier possession by the same owner
+// matched a newer possession's row and deleted it (reproduced with a probe:
+// gen2 epoch=1, then ReleaseSandboxLease(scope,"pod-a",1) → released=true).
+//
+// Falsification: put `epoch = 1` back into the claim branch of
+// AcquireSandboxLease and this test goes red twice — first on the monotonicity
+// assertion, then on the live row disappearing.
+func TestSandboxLeaseEpochNeverResetsAcrossTakeover(t *testing.T) {
+	ctx := context.Background()
+	db := newTestSandboxLeaseDB(t)
+	var st sandbox.SandboxLeaseStore = db
+
+	const scope = "agt_epoch:s:sess_epoch"
+	gen1, ok, err := st.AcquireSandboxLease(ctx, scope, "pod-a", "sb-1", "tok-1", "tpl", time.Second)
+	if err != nil || !ok {
+		t.Fatalf("gen1 acquire: ok=%v err=%v", ok, err)
+	}
+
+	// Let the lease lapse, then claim it again with the SAME owner — the shape
+	// that used to hand out `epoch = 1` a second time.
+	time.Sleep(1100 * time.Millisecond)
+	gen2, ok, err := st.AcquireSandboxLease(ctx, scope, "pod-a", "sb-2", "tok-2", "tpl", time.Minute)
+	if err != nil || !ok {
+		t.Fatalf("gen2 acquire: ok=%v err=%v", ok, err)
+	}
+	if gen2.Epoch <= gen1.Epoch {
+		t.Fatalf("epoch reset across a takeover: gen1=%d gen2=%d (want strictly increasing)", gen1.Epoch, gen2.Epoch)
+	}
+
+	// Generation 1's token must not be able to release generation 2's live row.
+	stale, err := st.ReleaseSandboxLease(ctx, scope, "pod-a", gen1.Epoch)
+	if err != nil {
+		t.Fatalf("stale release: %v", err)
+	}
+	if stale {
+		t.Fatal("a stale epoch released the live row — the fence is not a fence (G25)")
+	}
+	live, err := st.GetSandboxLease(ctx, scope)
+	if err != nil || live == nil {
+		t.Fatalf("live row gone after a stale release: rec=%v err=%v", live, err)
+	}
+}
+
 func newTestSandboxLeaseDB(t *testing.T) *DBStore {
 	t.Helper()
 	db, err := NewDBStore("sqlite", "file:"+filepath.Join(t.TempDir(), "leases.db")+"?cache=shared")

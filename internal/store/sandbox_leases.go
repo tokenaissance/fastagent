@@ -65,11 +65,19 @@ func (d *DBStore) AcquireSandboxLease(
 
 	// 1. If the row exists but is expired, claim it first so a concurrent
 	//    acquirer racing us sees an unexpired row and adopts instead.
+	//
+	//    epoch = epoch + 1, never 1: the fencing token must be unique per
+	//    acquisition over the WHOLE life of the row, not per possession. With
+	//    a reset, the same owner re-acquiring after an expiry gets epoch 1
+	//    again while a delayed release from the previous possession still
+	//    carries epoch 1 — and that stale release deletes the live row
+	//    (measured 2026-09-19, G25; docs/文件系统形式化证明/12-lease-formal-design.md
+	//    §5, obligation L4(c)).
 	if _, err := d.handle().ExecContext(ctx,
 		fmt.Sprintf(`UPDATE sandbox_leases
 			SET owner = %s, sandbox_id = %s, envd_token = %s, template = %s,
 			    state = 'running', paused_at = 0, unhydrated = 0,
-			    expires_at = %s, epoch = 1, updated_at = %s
+			    expires_at = %s, epoch = epoch + 1, updated_at = %s
 			WHERE scope_key = %s AND expires_at <= %s`,
 			d.ph(1), d.ph(2), d.ph(3), d.ph(4), d.ph(5), d.ph(6), d.ph(7), d.ph(8)),
 		owner, sandboxID, envdToken, template, expires, now, scopeKey, now); err != nil {

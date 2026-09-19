@@ -7,8 +7,15 @@ import "github.com/fastclaw-ai/fastclaw/internal/provider"
 //
 //   - every tool call has exactly one reply, emitted immediately after the
 //     call that declared it;
-//   - a call with no reply anywhere gets a synthetic "interrupted" reply
-//     (provider.StoppedToolResult) in that same position;
+//   - a call with no reply anywhere gets a synthetic reply in that same
+//     position, and the sentence is chosen from the facts the projection
+//     actually has (provider.NoReply*): "no reply recorded yet; whether the
+//     owning turn is still running is not known to this projection" is the
+//     only sentence available until the cross-replica turn lease supplies the
+//     holder fact (docs/session-turn-integrity.md, A2.1). It must never claim
+//     the turn was interrupted without evidence: the 09-18 model read that
+//     claim for two sub-tasks that were still running on a peer and re-issued
+//     them;
 //   - replies whose call id is unknown, second and later replies for one call
 //     id, and calls re-declared after they were already answered are dropped.
 //
@@ -19,6 +26,17 @@ import "github.com/fastclaw-ai/fastclaw/internal/provider"
 // byte, which matters because a changing projection would invalidate prompt
 // caches on every turn.
 func normalizeForPrompt(msgs []provider.Message) []provider.Message {
+	// The no-fact projection: what a caller without a lease fact may say. Kept
+	// as the default so tests and fact-less callers stay honest by construction.
+	return normalizeForPromptWith(msgs, provider.NoReplyUnknownResult)
+}
+
+// normalizeForPromptWith is the same repair with the sentence chosen by the
+// caller from the facts it actually has (docs/session-turn-integrity.md A2.1):
+// "interrupted" only when no other turn can be running, the alive-holder
+// wording when the lease names one that is not us, and the no-fact wording when
+// the lease cannot be read.
+func normalizeForPromptWith(msgs []provider.Message, openCallAnswer string) []provider.Message {
 	if len(msgs) == 0 {
 		return nil
 	}
@@ -78,7 +96,7 @@ func normalizeForPrompt(msgs []provider.Message) []provider.Message {
 				Role:       "tool",
 				ToolCallID: tc.ID,
 				Name:       tc.Function.Name,
-				Content:    provider.StoppedToolResult,
+				Content:    openCallAnswer,
 			})
 		}
 	}
