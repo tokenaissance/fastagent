@@ -99,6 +99,7 @@ var agentModules = []moduleEntry{
 
 	// ── Operational block (middle) ──
 	{"confidentiality", modConfidentiality},
+	{"response_format", modResponseFormat},
 	{"sandbox", modSandbox},
 	{"task_delegation", modTaskDelegation},
 	{"skills", modSkills},
@@ -121,6 +122,7 @@ var chatbotModules = []moduleEntry{
 
 	// ── Operational block (middle) ──
 	{"confidentiality", modConfidentiality},
+	{"response_format", modResponseFormat},
 	{"sandbox", modSandbox},
 	{"skills", modSkills},
 	{"group_chat", modGroupChat},
@@ -605,6 +607,22 @@ func modThinking(p *promptCtx) string {
 // from wasting rounds on 404s, redundant fetches, etc.
 func modToolDiscipline(p *promptCtx) string {
 	return toolDisciplineContent
+}
+
+// modResponseFormat carries the rules about how a reply is *rendered* to the
+// user, as opposed to what it says.
+//
+// It is a separate always-on module, and it lives here rather than next to the
+// file-delivery rules in modSandbox, because those are sandbox concerns: a
+// deployment without a sandbox would otherwise never see this rule at all.
+// That mistake was made and caught on 2026-09-19 — adding it to the sandbox
+// module pushed that module over its own size budget
+// (TestSandboxPromptStaysUnderItsBudget), which is the test doing its job on a
+// change it was not written for.
+func modResponseFormat(p *promptCtx) string {
+	return `## Writing the reply
+- **Formulas** go in double dollars, inline ones included — ` + "`$$c = f(x)$$`" + `. A single ` + "`$`" + ` is NOT a math delimiter: it is ambiguous with prices and credits, so the chat renderer deliberately leaves it as plain text and ` + "`$x$`" + ` would reach the user as literal characters. Put a ` + "`$$`" + ` fence on its own line when the formula should be displayed as a block.
+`
 }
 
 // modWorkspaceUpdate emits self-update and scheduling instructions.
