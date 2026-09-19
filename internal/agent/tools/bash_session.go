@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -27,6 +28,24 @@ import (
 // oldest bytes are dropped FIFO. 4 MiB comfortably holds 30 minutes of
 // dev-server logs while bounding total memory at 4 MiB × live sessions.
 const bufferCap = 4 * 1024 * 1024
+
+const (
+	// shellExitedTailBytes is what an exited shell keeps. The 4 MiB cap exists to
+	// hold a *running* job's output for polling; once the job has exited, the
+	// only thing the tool still has to deliver is the tail that explains how it
+	// ended, and the reader is told the rest is gone. Without this, every
+	// background job an agent has ever run keeps its own 4 MiB resident for as
+	// long as the agent lives — a container whose size is set by history rather
+	// than by work in flight (docs 10 §10, G27).
+	shellExitedTailBytes = 64 * 1024
+	// shellRetainedExited bounds how many *exited* shells stay addressable by
+	// bash_output. Running shells are never dropped.
+	shellRetainedExited = 32
+	// shellExitedTailNote is what a reader is told when the tail it is about to
+	// receive is not the whole story. It has to name the real reason: "exceeded
+	// the 4 MiB session cap" would be a false statement after an exit trim.
+	shellExitedTailNote = "is no longer buffered (the shell exited; only its last 64 KiB is kept)"
+)
 
 // outputBuffer is a thread-safe FIFO byte buffer with a hard cap.
 // It tracks the total number of bytes ever written ("absolute offsets")
@@ -39,6 +58,9 @@ type outputBuffer struct {
 	head     int // absolute offset of data[0]; equals total bytes dropped
 	total    int // absolute offset just past data[end]; equals total bytes ever written
 	maxBytes int
+	// dropNote is the reason handed to a reader whose cursor fell behind. Empty
+	// means the only reason so far is maxBytes.
+	dropNote string
 }
 
 func newOutputBuffer(maxBytes int) *outputBuffer {
@@ -85,6 +107,37 @@ func (b *outputBuffer) readSince(since int) (out []byte, dropped bool, newSince 
 	return out, dropped, b.total
 }
 
+// trimTo drops the oldest bytes so at most maxBytes remain, and records why in
+// the words a reader will see. Absolute offsets are preserved (head advances by
+// exactly the number of bytes dropped), so a cursor that was behind learns the
+// truth from readSince's `dropped` flag instead of silently mis-splicing output.
+//
+// The remaining bytes are copied rather than sliced: slicing would keep the
+// whole 4 MiB backing array alive, which is the opposite of the point.
+func (b *outputBuffer) trimTo(maxBytes int, note string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if maxBytes < 0 {
+		maxBytes = 0
+	}
+	if len(b.data) > maxBytes {
+		drop := len(b.data) - maxBytes
+		tail := make([]byte, maxBytes)
+		copy(tail, b.data[drop:])
+		b.data = tail
+		b.head += drop
+	}
+	b.dropNote = note
+}
+
+// dropNoteText reports the true reason bytes are missing, or "" when nothing has
+// been dropped for a reason other than the cap.
+func (b *outputBuffer) dropNoteText() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.dropNote
+}
+
 // bashSession is a single backgrounded shell command and the state
 // needed to observe and terminate it.
 type bashSession struct {
@@ -108,6 +161,12 @@ type bashSession struct {
 	done     atomic.Bool
 	exitCode int
 	exitErr  error
+
+	// finishedAt is when this shell was retired. Written under the shell
+	// manager's mutex (retireExited) and read under it, so it needs no lock of
+	// its own. It orders retirement when the retained-exited cap has to choose
+	// which entries to forget.
+	finishedAt time.Time
 }
 
 // status reports a session's runtime state.
@@ -137,6 +196,17 @@ func (s *bashSession) readNew() (out []byte, dropped bool) {
 	out, dropped, next := s.out.readSince(s.readCursor)
 	s.readCursor = next
 	return out, dropped
+}
+
+// dropNoteText is the true reason bytes are missing, in the words the tool
+// prints. A retired shell has been trimmed to its exit tail, and saying "it
+// exceeded the 4 MiB cap" about that would be a false statement about a real
+// loss (docs 08 §2, O1).
+func (s *bashSession) dropNoteText() string {
+	if note := s.out.dropNoteText(); note != "" {
+		return note
+	}
+	return "exceeded the 4 MiB session cap and was dropped"
 }
 
 // kill signals SIGKILL via the cancel function tied to the session's
@@ -257,13 +327,51 @@ func (m *shellManager) Start(command string, env []string) (*bashSession, error)
 			s.exitCode = -1
 		}
 		s.done.Store(true)
-		// Note: we deliberately do NOT remove the session from the map
-		// here. bash_output remains useful after exit so the agent can
-		// fetch the final output and exit status. Registry.Close handles
-		// cleanup, or a future TTL eviction can be layered on top.
+		// Retire, don't delete: bash_output stays useful after exit so the agent
+		// can fetch the final output and exit status. What changes here is that
+		// the entry stops being *unbounded in size and number* — the buffer is
+		// trimmed to the tail that explains the exit, and the retained-exited
+		// population is capped (G27). The trim happens BEFORE done is published,
+		// so a reader that sees "exited" cannot be handed a tail without also
+		// being told it is a tail.
+		//
+		// Registry.Close is not the retirement path: it has no production caller
+		// (the agent's Registry lives as long as the UserSpace does), which is
+		// exactly why the bound has to live here, on the transition, instead of
+		// on a teardown that never runs.
+		m.retireExited(id, s)
 	}()
 
 	return s, nil
+}
+
+// retireExited records that a shell has finished: it trims the shell's output to
+// the tail worth keeping and forgets the oldest exited shells beyond
+// shellRetainedExited. Running shells are never touched.
+func (m *shellManager) retireExited(id string, s *bashSession) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if cur, ok := m.shells[id]; !ok || cur != s {
+		return // already forgotten, or replaced by a newer shell under the same id
+	}
+	// Trim first: this is what turns "every job this agent ever ran holds 4 MiB"
+	// into "every job holds at most the tail".
+	s.out.trimTo(shellExitedTailBytes, shellExitedTailNote)
+	s.finishedAt = time.Now()
+
+	var exited []*bashSession
+	for _, other := range m.shells {
+		if other.done.Load() {
+			exited = append(exited, other)
+		}
+	}
+	if len(exited) <= shellRetainedExited {
+		return
+	}
+	sort.Slice(exited, func(a, b int) bool { return exited[a].finishedAt.Before(exited[b].finishedAt) })
+	for _, old := range exited[:len(exited)-shellRetainedExited] {
+		delete(m.shells, old.id)
+	}
 }
 
 // Get fetches a session by bash_id, or nil if not found.

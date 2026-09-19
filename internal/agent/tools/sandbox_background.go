@@ -32,6 +32,7 @@ import (
 	"fmt"
 	mrand "math/rand/v2"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -56,6 +57,12 @@ const (
 	// cap keeps its unread tail for the next call — the cursor only advances by
 	// the bytes actually returned.
 	sandboxJobOutputCap = 64 * 1024
+	// sandboxRetainedFinished bounds how many *finished* jobs stay addressable by
+	// bash_output. A running job is never forgotten, and the entry is small (a
+	// path, a read cursor, a runner) — but without a bound the table grows by one
+	// entry for every job this agent has ever started, which is the "sized by
+	// history" shape the residency audit looks for (docs 10 §10, G27).
+	sandboxRetainedFinished = 64
 )
 
 // sandboxRunner is the single capability a sandbox job needs: run one shell
@@ -73,10 +80,17 @@ type sandboxJob struct {
 	exitPath string
 	command  string
 	runner   sandboxRunner
+	// table is the job table this job belongs to, so a poll that observes the
+	// job has finished can retire it (nil for jobs built by hand in tests).
+	table *sandboxJobs
 
 	mu     sync.Mutex
 	cursor int  // bytes of the log already handed to the model
 	killed bool // kill_shell ran; the job may still be writing its exit code
+	// finished is set once a poll has seen the job exited (or its sandbox gone),
+	// and finishedAt orders retirement. Both are guarded by mu.
+	finished   bool
+	finishedAt time.Time
 }
 
 // sandboxJobs is the per-Registry table of live sandbox jobs. It is the
@@ -155,6 +169,7 @@ func (s *sandboxJobs) start(ctx context.Context, runner sandboxRunner, command s
 		exitPath: sandboxJobExitPath(id),
 		command:  command,
 		runner:   runner,
+		table:    s,
 	}
 	s.mu.Lock()
 	if s.closed {
@@ -177,6 +192,50 @@ func (s *sandboxJobs) close() {
 	s.mu.Lock()
 	s.closed = true
 	s.mu.Unlock()
+}
+
+// retireFinished records that a poll has seen this job finish, then forgets the
+// oldest finished jobs beyond sandboxRetainedFinished. Running jobs are never
+// touched: their entry is the only handle bash_output has on a live process.
+//
+// A forgotten id answers exactly like an id that never existed — the tool's
+// message names that ("ids are valid only within the same agent process") — so
+// the honest statement of the contract is "the most recent
+// sandboxRetainedFinished finished jobs stay addressable", and that is what this
+// constant means.
+func (s *sandboxJobs) retireFinished(j *sandboxJob) {
+	if s == nil || j == nil {
+		return
+	}
+	j.mu.Lock()
+	if !j.finished {
+		j.finished = true
+		j.finishedAt = time.Now()
+	}
+	j.mu.Unlock()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	type done struct {
+		id string
+		at time.Time
+	}
+	var finished []done
+	for id, other := range s.live {
+		other.mu.Lock()
+		fin, at := other.finished, other.finishedAt
+		other.mu.Unlock()
+		if fin {
+			finished = append(finished, done{id: id, at: at})
+		}
+	}
+	if len(finished) <= sandboxRetainedFinished {
+		return
+	}
+	sort.Slice(finished, func(a, b int) bool { return finished[a].at.Before(finished[b].at) })
+	for _, old := range finished[:len(finished)-sandboxRetainedFinished] {
+		delete(s.live, old.id)
+	}
 }
 
 func sandboxJobLogPath(id string) string  { return sandboxJobDir + "/" + id + ".log" }
@@ -333,6 +392,12 @@ func (j *sandboxJob) output(ctx context.Context, filter *regexp.Regexp) (string,
 		status, code, size, body, err := parseBackgroundProbe(out)
 		if err != nil {
 			return "", err
+		}
+		// A poll is the only moment the runtime learns a sandbox job is over
+		// (there is no process handle to wait on), so retirement hangs off the
+		// observation instead of off a ticker.
+		if status == "exited" || status == "missing" {
+			j.table.retireFinished(j)
 		}
 
 		if size < cursor && attempt == 0 && status != "missing" {
