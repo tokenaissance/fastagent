@@ -108,19 +108,46 @@ func (a *StoreAdapter) GetSession(ctx context.Context, agentID, sessionKey strin
 	return msgs, nil
 }
 
-func (a *StoreAdapter) SaveSession(ctx context.Context, agentID, sessionKey, channel, accountID, chatID, projectID string, messages []provider.Message) error {
+// storeFence translates the port's fence (this package's type) into the store's
+// own. The adapter is the only layer allowed to know both vocabularies, which
+// is what keeps SessionStore from naming an outer package's type.
+func storeFence(f *TurnFence) *store.SessionFence {
+	if f == nil {
+		return nil
+	}
+	return &store.SessionFence{HolderID: f.Holder, Epoch: f.Epoch}
+}
+
+func (a *StoreAdapter) SaveSession(ctx context.Context, agentID, sessionKey string, messages []provider.Message, scope WriteScope) error {
 	rec := &store.SessionRecord{
-		Channel:   channel,
-		AccountID: accountID,
-		ChatID:    chatID,
-		ProjectID: projectID,
+		Channel:   scope.Channel,
+		AccountID: scope.AccountID,
+		ChatID:    scope.ChatID,
+		ProjectID: scope.ProjectID,
 		Messages:  make([]store.SessionMessage, len(messages)),
 		UpdatedAt: time.Now(),
 	}
 	for i, m := range messages {
 		rec.Messages[i] = sessionMessageFromProvider(m)
 	}
-	return a.st.SaveSession(ctx, a.userID, agentID, sessionKey, rec)
+	// The store reads the chatter off the context internally; the port carries it
+	// explicitly, and translating one into the other is this adapter's job — the
+	// inner layer never imports the store package (that was the whole point).
+	if scope.ChatterUserID != "" {
+		ctx = store.WithChatterUserID(ctx, scope.ChatterUserID)
+	}
+	return writeRefusal(a.st.SaveSessionFenced(ctx, a.userID, agentID, sessionKey, rec, storeFence(scope.Fence)))
+}
+
+// writeRefusal translates the store's refusal into this package's vocabulary.
+// The adapter is the only place that knows both names — which is the point:
+// the refusal is *named* by the use case, *produced* by the store, and the
+// translation lives at the boundary (docs 10 §10.9).
+func writeRefusal(err error) error {
+	if err != nil && errors.Is(err, store.ErrSessionFenceLost) {
+		return ErrSessionFenceLost
+	}
+	return err
 }
 
 // ResolveActiveSessionKey forwards to the store. The session.Manager
@@ -172,8 +199,11 @@ func (a *StoreAdapter) LookupSessionProject(ctx context.Context, agentID, sessio
 // AppendMessage persists one turn into session_messages — the append-only
 // archive parallel to the sessions blob. Called from Session.Append on
 // every Append, in addition to SaveSession.
-func (a *StoreAdapter) AppendMessage(ctx context.Context, agentID, sessionKey string, m provider.Message) error {
-	return a.st.AppendSessionMessage(ctx, a.userID, agentID, sessionKey, sessionMessageFromProvider(m))
+func (a *StoreAdapter) AppendMessage(ctx context.Context, agentID, sessionKey string, m provider.Message, scope WriteScope) error {
+	if scope.ChatterUserID != "" {
+		ctx = store.WithChatterUserID(ctx, scope.ChatterUserID)
+	}
+	return writeRefusal(a.st.AppendSessionMessageFenced(ctx, a.userID, agentID, sessionKey, sessionMessageFromProvider(m), storeFence(scope.Fence)))
 }
 
 // ListMessages reads the full archive for one session, in turn order.

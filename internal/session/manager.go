@@ -5,34 +5,34 @@ import (
 	"context"
 	cryptorand "crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 	"github.com/fastclaw-ai/fastclaw/internal/provider"
-	"github.com/fastclaw-ai/fastclaw/internal/store"
 )
 
 // Session holds the message history for one conversation thread within
 // a (channel, accountID, chatID) triple. session_key is the per-session
 // opaque id; the triple identifies "where" the conversation lives.
 type Session struct {
-	mu               sync.Mutex
-	Messages         []provider.Message
-	LastConsolidated int // index of last consolidated message
-	filePath         string
-	snapshot         []provider.Message // undo snapshot
-	store            SessionStore
-	userID           string
-	agentID          string
-	sessionKey       string
-	channel          string
-	accountID        string
-	chatID           string
+	mu         sync.Mutex
+	Messages   []provider.Message
+	filePath   string
+	snapshot   []provider.Message // undo snapshot
+	store      SessionStore
+	userID     string
+	agentID    string
+	sessionKey string
+	channel    string
+	accountID  string
+	chatID     string
 	// projectID, when non-empty, is stamped on every SaveSession write
 	// for this session. Set on the FIRST turn of a brand-new chat that
 	// arrived with a project hint (URL `?project=<pid>`); for existing
@@ -89,6 +89,157 @@ type Session struct {
 	// hJKMWwtOp3mJOtqN8Uz2mW in production (2026-09-13).
 	turnActive  bool
 	turnWaiters []chan struct{}
+
+	// lastTouched is when this session was last handed out by Manager.Get. The
+	// cache uses it to drop entries nothing is working on.
+	lastTouched time.Time
+
+	// turnFence is the (holder, epoch) pair this session's writes must present
+	// while a turn holds the cross-replica lease (docs/session-turn-integrity.md
+	// A1.4). Set at admission, refreshed by every renew, cleared when the turn
+	// ends or loses the lease. Nil means "unfenced": no lease is wired
+	// (single-instance installs, tests, doctor, migrations) and the writes land
+	// exactly as they did before. Like chatterUserID, it is read inside
+	// Session.Append's critical section and stamped by ctx().
+	turnFence *TurnFence
+	// fenceLost records the first refused fenced write: the turn was
+	// superseded while it was running. The loop reads it at its iteration
+	// boundary, stops, and tells the user (A1.4).
+	fenceLost error
+}
+
+// TurnFence is one possession of a session's turn lease: the holder's identity
+// and the fencing epoch it must present on writes. The store checks the pair in
+// the same statement as the write, so a superseded turn cannot append.
+type TurnFence struct {
+	Holder string
+	Epoch  int64
+}
+
+// ErrSessionFenceLost is this package's own refusal: the turn lost the lease
+// between admission and this write, so the write did not land.
+//
+// It exists as a value of *this* package on purpose. Before it, the inner layer
+// compared the store's `ErrSessionFenceLost` — an error type owned by the outer
+// package — which is the Dependency Rule applied to an error value: whoever
+// refuses (the store) is not necessarily whoever names the refusal (the use
+// case). The adapter translates one into the other, exactly as it translates
+// TurnFence into the store's fence type.
+var ErrSessionFenceLost = errors.New("session: the turn no longer holds the lease; the write was refused")
+
+// FenceLost reports the refusal recorded by a fenced write, or nil. A turn
+// that sees it must stop: another turn owns this history now.
+func (s *Session) FenceLost() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.fenceLost
+}
+
+// Fence reports the possession this session's writes must present, or nil
+// when the session is unfenced. Exposed for the turn loop's supersession check
+// and for tests; the store never reads it — it receives the fence per write.
+func (s *Session) Fence() *TurnFence {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.turnFence
+}
+
+// SetTurnFence binds the current lease possession to this session's writes.
+func (s *Session) SetTurnFence(holder string, epoch int64) {
+	s.mu.Lock()
+	s.turnFence = &TurnFence{Holder: holder, Epoch: epoch}
+	s.mu.Unlock()
+}
+
+// ClearTurnFence unfences the session's writes: called when the turn ends, and
+// the moment a renew proves the lease moved to a peer (L4a — the fence has to
+// be gone before any later append can land).
+func (s *Session) ClearTurnFence() {
+	s.mu.Lock()
+	s.turnFence = nil
+	s.mu.Unlock()
+}
+
+// evictIdleLocked drops cached sessions the process no longer needs. It is safe
+// by construction: the store is authoritative, so the next Get rebuilds a dropped
+// session and no caller can observe the difference. Sessions with work in flight
+// (a held turn slot or a turn body running) are never dropped — their in-memory
+// state (steer buffer, turn fence, waiter queue) is not rebuildable.
+//
+// It only does the work below once the cache is over budget, so the common path
+// costs a length check.
+//
+// The budget is a **session count** (agentSessionCacheMaxSessions). The residual is
+// stated rather than implied: sessions are not equal in size, so this bounds the
+// number of live entries, not the bytes they hold (docs 10 §10.3). What makes it
+// the right unit anyway is that every entry costs the same *bookkeeping* and the
+// heavy part — the history — is not resident for its own sake: `Get` re-reads it
+// from the authoritative store on every call, so evicting an entry costs a
+// rebuild that was going to happen anyway.
+func (m *Manager) evictIdleLocked(now time.Time) {
+	if len(m.sessions) <= agentSessionCacheMaxSessions {
+		return
+	}
+	// An idle TTL alone cannot bound a busy process: when every session was
+	// touched recently nothing is "idle" and the map grows without limit (this
+	// exact hole was caught by the test). So the budget is enforced by LRU —
+	// drop the least-recently-touched entries that have no work in flight until
+	// the cache is back within it.
+	type candidate struct {
+		key     string
+		touched time.Time
+	}
+	cands := make([]candidate, 0, len(m.sessions))
+	for key, sess := range m.sessions {
+		if key == m.lastKey {
+			continue // the caller is holding this one right now
+		}
+		sess.mu.Lock()
+		busy := sess.turnActive || sess.turnDepth > 0
+		touched := sess.lastTouched
+		sess.mu.Unlock()
+		if busy {
+			continue // in-flight state (steer buffer, fence, waiters) is not rebuildable
+		}
+		cands = append(cands, candidate{key: key, touched: touched})
+	}
+	// Genuinely idle entries go first (sessionCacheMinIdle), then oldest-first.
+	// The idle test is an ordering *preference*, never a shield: if everything is
+	// fresh we still evict the oldest, because the store rebuilds it and the
+	// alternative is unbounded growth.
+	sort.Slice(cands, func(a, b int) bool {
+		aIdle := now.Sub(cands[a].touched) >= sessionCacheMinIdle
+		bIdle := now.Sub(cands[b].touched) >= sessionCacheMinIdle
+		if aIdle != bIdle {
+			return aIdle
+		}
+		return cands[a].touched.Before(cands[b].touched)
+	})
+	for _, c := range cands {
+		if len(m.sessions) <= agentSessionCacheMaxSessions {
+			return
+		}
+		delete(m.sessions, c.key)
+	}
+}
+
+// cacheMessagesLocked counts the history lines the cache is holding. It is
+// instrumentation for the footprint line — not a budget (the budget is the
+// session count) — but it is read under each session's lock so the number it
+// prints is not sampled by a racy walk.
+//
+// It counts the undo snapshot too: while it exists it is a second full copy of
+// the working set and is NOT rebuildable from the store (Undo restores from
+// process memory only), which is why "rebuildable" has to be judged per field,
+// not per struct (docs 10 §10.5).
+func (m *Manager) cacheMessagesLocked() int {
+	total := 0
+	for _, sess := range m.sessions {
+		sess.mu.Lock()
+		total += len(sess.Messages) + len(sess.snapshot)
+		sess.mu.Unlock()
+	}
+	return total
 }
 
 // SessionKey returns the opaque session_key this Session is bound to.
@@ -106,23 +257,68 @@ func (s *Session) SessionKey() string { return s.sessionKey }
 // session_events.chatter_user_id) can record the actual conversation
 // participant. user_id stays = UserSpace owner; chatter is the
 // additional dimension. Both tags are independent — empty chatter
-// just leaves the column ''.
+// just leaves the column ”.
 func (s *Session) ctx() context.Context {
 	ctx := context.Background()
 	if s.userID != "" {
 		ctx = config.WithUserID(ctx, s.userID)
 	}
-	if s.chatterUserID != "" {
-		ctx = store.WithChatterUserID(ctx, s.chatterUserID)
-	}
 	return ctx
+}
+
+// WriteScope is the set of facts about the possession that is writing: which
+// conversation, the row's project stamp, the per-turn chatter, and the lease
+// possession that authorises the write.
+//
+// It exists because those facts used to take *two* routes — `fence` and the
+// conversation triple as arguments, the chatter as a context value whose key was
+// owned by the store package. One concept, two mechanisms, and the second one
+// cost the Dependency Rule: this file needed `internal/store` for a single
+// tagging helper. Now the scope is passed by value, the inner layer owns its
+// vocabulary, and the adapter translates into whatever the store wants
+// internally (same shape as `storeFence`).
+//
+// What deliberately did NOT move here: `provider`, `model` and `runReceipt`.
+// Those belong to the *message*, not to the write — their home is the message
+// metadata precisely so they survive compaction and a pod rebuild (G9/G20).
+type WriteScope struct {
+	Channel       string
+	AccountID     string
+	ChatID        string
+	ProjectID     string
+	ChatterUserID string
+	Fence         *TurnFence
+}
+
+// writeScope assembles the scope from the session's current turn facts. Callers
+// must hold s.mu (the fields it reads are guarded by it).
+func (s *Session) writeScope() WriteScope {
+	return newWriteScope(s.channel, s.accountID, s.chatID, s.projectID, s.chatterUserID, s.turnFence)
+}
+
+// newWriteScope is the ONLY constructor of a WriteScope. It exists because the
+// invariant "one fact, one route" is not a property of the fields but of there
+// being exactly one place that fills them — and the first version of this change
+// broke its own rule: a second, hand-written literal appeared for the
+// row-creation path (the one that stores a brand-new session before it has any
+// history). A caller with nothing to say about a field passes "" or nil here
+// rather than assembling the struct itself.
+func newWriteScope(channel, accountID, chatID, projectID, chatterUserID string, fence *TurnFence) WriteScope {
+	return WriteScope{
+		Channel:       channel,
+		AccountID:     accountID,
+		ChatID:        chatID,
+		ProjectID:     projectID,
+		ChatterUserID: chatterUserID,
+		Fence:         fence,
+	}
 }
 
 // SetChatter binds the per-turn conversation participant to this
 // Session so the next Append / SaveSession write stamps the
 // chatter_user_id column. Called by the agent loop at the top of each
 // turn from the resolved chatterUID. Passing "" clears it (the next
-// write goes back to '' which readers fall back to user_id for).
+// write goes back to ” which readers fall back to user_id for).
 func (s *Session) SetChatter(uid string) {
 	s.mu.Lock()
 	s.chatterUserID = uid
@@ -186,8 +382,17 @@ func RunReceiptOf(m provider.Message) string {
 //     of how many times the working set has been pruned/summarized.
 type SessionStore interface {
 	GetSession(ctx context.Context, agentID, sessionKey string) ([]provider.Message, error)
-	SaveSession(ctx context.Context, agentID, sessionKey, channel, accountID, chatID, projectID string, messages []provider.Message) error
-	AppendMessage(ctx context.Context, agentID, sessionKey string, msg provider.Message) error
+	// SaveSession / AppendMessage carry the turn's write fence when one
+	// applies: the (holder, epoch) pair the store must still find live in the
+	// same statement that lands the write (docs/session-turn-integrity.md
+	// A1.4, obligation L4a). A nil fence means "no lease governs this write" —
+	// single-instance installs, the doctor, migrations, tests.
+	//
+	// The type is this package's, not the store's: the port names its own
+	// vocabulary and the adapter translates it, so the inner interface never
+	// depends on an outer package's types.
+	SaveSession(ctx context.Context, agentID, sessionKey string, messages []provider.Message, scope WriteScope) error
+	AppendMessage(ctx context.Context, agentID, sessionKey string, msg provider.Message, scope WriteScope) error
 	ListMessages(ctx context.Context, agentID, sessionKey string) ([]provider.Message, error)
 	ListWebSessions(ctx context.Context, agentID string) ([]WebSession, error)
 	DeleteSession(ctx context.Context, agentID, sessionKey string) error
@@ -210,13 +415,63 @@ type SessionStore interface {
 	LookupSessionProject(ctx context.Context, agentID, sessionKey string) (string, error)
 }
 
+// The session cache is a CACHE, not a store: the store (or, in file-backed
+// mode, the file) is authoritative and every Get rebuilds from it. So its size
+// must be bounded by work in flight, not by how much history this process has
+// served — otherwise a long-lived pod's memory grows with every session and
+// every turn (the serverless invariant S1).
+const (
+	sessionCacheMaxIdle = 30 * time.Minute
+	// sessionCacheMinIdle marks entries too fresh to prefer dropping; it never
+	// prevents reaching the bound (see evictIdleLocked).
+	sessionCacheMinIdle = 2 * time.Minute
+	// agentSessionCacheMaxSessions is one AGENT's cache budget, counted in
+	// **sessions**: that agent's Manager may hold this many, and the LRU drops the
+	// rest. "Per agent" is in the name because it is a real scope — a Manager is
+	// built per agent (`internal/agent/manager.go:246`), so a pod holding K loaded
+	// agents may hold K × this many entries. That is the intended shape (each
+	// agent's own conversations are the ones worth keeping warm); a pod-wide quota
+	// would be a different mechanism, see docs 10 §10.7.
+	//
+	// This is the single knob — there is no byte or line budget alongside it.
+	//
+	// What it buys and what it does not, stated rather than implied:
+	//   - it bounds the *bookkeeping* (identity, in-flight state, lastTouched)
+	//     by concurrency rather than by how much history the pod has served, so
+	//     a long-lived process stops accumulating entries forever (S1);
+	//   - it does **not** bound bytes, because one session's size is not fixed.
+	//     Measured on this repo (docs 10 §10.3): the same cache costs 2.3 MiB
+	//     with small chats and 77.1 MiB with tool-output-heavy ones. Production's
+	//     own shape on 2026-09-19 was 108 sessions / 8366 lines / 31 MiB of text,
+	//     and its largest single session held 1.85 MiB.
+	//
+	// 10, set 2026-09-19. The number is small on purpose: what the cache saves is
+	// only allocation work, because `Get` re-reads the working set from the store
+	// on every call anyway — so keeping ten conversations warm per agent costs a
+	// bounded amount of memory and buys the same thing as keeping a hundred. The
+	// eviction path is now the normal path (production has more than ten sessions
+	// per agent), and docs 10 §10.6 records the field-by-field proof that dropping
+	// an entry is unobservable.
+	agentSessionCacheMaxSessions = 10
+)
+
 type Manager struct {
 	mu       sync.Mutex
 	sessions map[string]*Session
-	dataDir  string
-	store    SessionStore
-	userID   string
-	agentID  string
+	// cacheGets counts Get() calls. The session cache is a CACHE (the store is
+	// authoritative — Get reloads from it every time), so its footprint must be
+	// bounded by concurrency, not by how much history this pod has served
+	// (serverless invariant S1). This counter exists so that claim is measured
+	// rather than assumed: a periodic line in the log says how many sessions and
+	// messages the process is holding.
+	cacheGets int64
+	// lastKey is the session the most recent Get asked for; the sweeper never
+	// drops it (the caller is holding it right now).
+	lastKey string
+	dataDir string
+	store   SessionStore
+	userID  string
+	agentID string
 }
 
 func NewManager(dataDir string) *Manager {
@@ -318,7 +573,10 @@ func (m *Manager) resolveOrMintKey(channel, accountID, chatID string) string {
 // Postgres: the first refresh after a cross-pod write returns whichever
 // pod-local snapshot happened to be warm. We deliberately overwrite
 // Messages on the cached Session rather than re-creating the struct so
-// transient fields (snapshot, LastConsolidated) survive.
+// the transient field (snapshot) survives. `LastConsolidated` used to be listed
+// here; it was dead state — nothing read it, nothing persisted it, and its two
+// accessors had zero references repo-wide (docs 10 §10.6, G29) — so it is gone
+// rather than being kept alive by a comment.
 //
 // File-backed mode stays cache-first since there's only one process.
 func (m *Manager) Get(channel, accountID, chatID, projectID string) *Session {
@@ -412,7 +670,9 @@ func (m *Manager) OpenNewSession(channel, accountID, chatID string) string {
 		// previous (still-newer-than-not-existing) row. IM `/new` is
 		// always a loose chat (project_id=""); project chats are
 		// minted lazily by the chat handler on first message.
-		_ = m.store.SaveSession(m.ctx(), m.agentID, key, channel, accountID, chatID, "", nil)
+		// A row with no history yet: the scope carries only where it lives, and
+		// it is built by the one constructor like every other scope.
+		_ = m.store.SaveSession(m.ctx(), m.agentID, key, nil, newWriteScope(channel, accountID, chatID, "", "", nil))
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -483,7 +743,17 @@ func (m *Manager) getByKey(key, channel, accountID, chatID, projectID string) *S
 		s.load()
 	}
 
+	m.lastKey = key
+	s.lastTouched = time.Now()
 	m.sessions[key] = s
+	m.evictIdleLocked(time.Now())
+	// Occasional footprint line (every 100 cache-touching calls). Cheap, and the
+	// only way to tell "bounded by concurrency" from "growing with history".
+	m.cacheGets++
+	if m.cacheGets%100 == 0 {
+		fmt.Fprintf(os.Stderr, "session cache footprint: sessions=%d messages=%d sessionBudget=%d gets=%d\n",
+			len(m.sessions), m.cacheMessagesLocked(), agentSessionCacheMaxSessions, m.cacheGets)
+	}
 	return s
 }
 
@@ -536,8 +806,18 @@ func (s *Session) Append(msg provider.Message) {
 	s.Messages = append(s.Messages, msg)
 
 	if s.store != nil {
-		s.store.SaveSession(s.ctx(), s.agentID, s.sessionKey, s.channel, s.accountID, s.chatID, s.projectID, s.Messages)
-		if err := s.store.AppendMessage(s.ctx(), s.agentID, s.sessionKey, msg); err != nil {
+		// Every fact about who is writing travels in one value: the fence (the
+		// write's precondition, L4a) and the chatter (per-turn identity) take the
+		// same route, because they are the same kind of fact.
+		scope := s.writeScope()
+		s.store.SaveSession(s.ctx(), s.agentID, s.sessionKey, s.Messages, scope)
+		if err := s.store.AppendMessage(s.ctx(), s.agentID, s.sessionKey, msg, scope); err != nil {
+			// A refused write means the lease moved to another turn: remember
+			// it so the loop stops and says so (A1.4) instead of appending
+			// into a history it no longer owns.
+			if errors.Is(err, ErrSessionFenceLost) {
+				s.fenceLost = err
+			}
 			fmt.Fprintf(os.Stderr, "session archive append error: %v\n", err)
 		}
 	} else {
@@ -551,14 +831,17 @@ func (s *Session) Append(msg provider.Message) {
 // before the archive table existed).
 func (s *Session) ArchivedMessages() []provider.Message {
 	s.mu.Lock()
-	store := s.store
+	// Named `st`, not `store`: the previous name shadowed the `store` package,
+	// which made a package-level dependency look like a method call here (and
+	// fooled a grep, and me, into reporting one that did not exist).
+	st := s.store
 	agentID := s.agentID
 	sessionKey := s.sessionKey
 	s.mu.Unlock()
-	if store == nil {
+	if st == nil {
 		return s.GetMessages()
 	}
-	msgs, err := store.ListMessages(s.ctx(), agentID, sessionKey)
+	msgs, err := st.ListMessages(s.ctx(), agentID, sessionKey)
 	if err != nil || len(msgs) == 0 {
 		return s.GetMessages()
 	}
@@ -719,20 +1002,6 @@ func (s *Session) DrainSteer() []provider.Message {
 	return drained
 }
 
-// UnconsolidatedCount returns the number of messages since last consolidation.
-func (s *Session) UnconsolidatedCount() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return len(s.Messages) - s.LastConsolidated
-}
-
-// MarkConsolidated updates the consolidation pointer.
-func (s *Session) MarkConsolidated(index int) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.LastConsolidated = index
-}
-
 // ReplaceMessages replaces all session messages with the given list.
 // This is used after context compaction to trim the session.
 func (s *Session) ReplaceMessages(msgs []provider.Message) {
@@ -741,10 +1010,9 @@ func (s *Session) ReplaceMessages(msgs []provider.Message) {
 
 	s.Messages = make([]provider.Message, len(msgs))
 	copy(s.Messages, msgs)
-	s.LastConsolidated = 0
 
 	if s.store != nil {
-		s.store.SaveSession(s.ctx(), s.agentID, s.sessionKey, s.channel, s.accountID, s.chatID, s.projectID, s.Messages)
+		s.store.SaveSession(s.ctx(), s.agentID, s.sessionKey, s.Messages, s.writeScope())
 	} else {
 		s.rewriteFile()
 	}
@@ -755,7 +1023,6 @@ func (s *Session) Clear() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.Messages = nil
-	s.LastConsolidated = 0
 	if s.store != nil {
 		s.store.DeleteSession(s.ctx(), s.agentID, s.sessionKey)
 	} else {
@@ -1014,10 +1281,13 @@ func (m *Manager) RenameSessionByID(sessionId, title string) error {
 
 // MoveSessionByID reassigns a session to a different project (or
 // detaches when projectID is ""). Resolves either a session_key or a
-// legacy web chat_id. Drops the in-memory cache entry so the next
-// Get re-loads the row with the freshly-stamped project_id — without
-// this drop, an open chat would keep saving with the old project_id
-// even after the sidebar shows it under a new project.
+// legacy web chat_id.
+//
+// It re-stamps the cached entry *in place* if one exists, and the store
+// write is the authority either way: an evicted-and-rebuilt entry takes
+// project_id from the caller's hint, and `SaveSession`'s ON CONFLICT clause
+// deliberately does not touch project_id on an existing row — so a rebuilt
+// entry can neither resurrect the old project nor blank the new one.
 //
 // File-backed mode is a no-op (no project concept) — callers that
 // only run dev mode shouldn't reach this path.
@@ -1105,7 +1375,6 @@ func (s *Session) Undo() bool {
 	s.Messages = make([]provider.Message, len(s.snapshot))
 	copy(s.Messages, s.snapshot)
 	s.snapshot = nil
-	s.LastConsolidated = 0
 	s.rewriteFile()
 	return true
 }

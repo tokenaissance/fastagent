@@ -97,6 +97,12 @@ type Store interface {
 	// Used to resolve the correct user_id for cross-user session reads.
 	LookupSessionOwner(ctx context.Context, agentID, sessionKey string) (string, error)
 	SaveSession(ctx context.Context, userID, agentID, sessionKey string, session *SessionRecord) error
+	// SaveSessionFenced is the same write with the turn's lease fence attached:
+	// the statement refuses (ErrSessionFenceLost) when (holder, epoch) is no
+	// longer live, so a superseded turn cannot overwrite the history another
+	// turn now owns (docs/session-turn-integrity.md A1.4, obligation L4a).
+	// nil means unfenced and is identical to SaveSession.
+	SaveSessionFenced(ctx context.Context, userID, agentID, sessionKey string, session *SessionRecord, fence *SessionFence) error
 	ListSessions(ctx context.Context, userID, agentID string) ([]SessionMeta, error)
 	// ListSessionOwnerPairs returns every distinct (user_id, agent_id)
 	// pair present in the sessions table. Used by the admin Chats page
@@ -189,6 +195,10 @@ type Store interface {
 	// for one session in ascending seq order — that's the full history,
 	// untouched by compaction. DeleteSession cascades to clean these up.
 	AppendSessionMessage(ctx context.Context, userID, agentID, sessionKey string, msg SessionMessage) error
+	// AppendSessionMessageFenced is AppendSessionMessage under the same fence:
+	// a superseded turn archives nothing instead of writing into a history it
+	// no longer owns.
+	AppendSessionMessageFenced(ctx context.Context, userID, agentID, sessionKey string, msg SessionMessage, fence *SessionFence) error
 	ListSessionMessages(ctx context.Context, userID, agentID, sessionKey string) ([]SessionMessage, error)
 	// CountChatterUserMessages returns how many role='user' rows this
 	// chatter has accumulated under the agent — across all sessions,
@@ -356,6 +366,33 @@ type Store interface {
 	AcquireChannelLease(ctx context.Context, channel, accountID, holderID string, ttl time.Duration) (bool, error)
 	RenewChannelLease(ctx context.Context, channel, accountID, holderID string, ttl time.Duration) (bool, error)
 	ReleaseChannelLease(ctx context.Context, channel, accountID, holderID string) error
+
+	// --- Session turn leases (one writer per session, across replicas) ---
+	//
+	// The turn's admission gate (docs/session-turn-integrity.md A1). Keyed by
+	// the session's own identity, (user_id, agent_id, session_key), because
+	// that is the resource being written — the chat triple is not.
+	//
+	// AcquireSessionLease returns the fencing epoch when this holder now owns
+	// the session, and ok=false (not an error) when a live holder already
+	// does: the caller queues. RenewSessionLease returns ok=false when the
+	// lease moved on, and then the caller MUST stop writing. Both the epoch
+	// and the holder are part of every session write's precondition (the
+	// fence), so a superseded turn cannot keep appending.
+	AcquireSessionLease(ctx context.Context, userID, agentID, sessionKey, holderID string, ttl time.Duration) (epoch int64, ok bool, err error)
+	RenewSessionLease(ctx context.Context, userID, agentID, sessionKey, holderID string, epoch int64, ttl time.Duration) (newEpoch int64, ok bool, err error)
+	ReleaseSessionLease(ctx context.Context, userID, agentID, sessionKey, holderID string, epoch int64) error
+	// RequestSessionCancel stamps the user's stop request onto the session's
+	// LIVE lease row and reports whether a live possession was there to receive
+	// it. It rides the row so the holder — which may be another replica — reads
+	// it at its next iteration boundary (docs/session-turn-integrity.md A4,
+	// design X1–X7). Conditional by construction (L7): a request aimed at a
+	// lapsed possession writes nothing and cannot leak into the next turn.
+	RequestSessionCancel(ctx context.Context, userID, agentID, sessionKey string) (bool, error)
+	// GetSessionLease reads the live lease, or nil when there is none. Used to
+	// name the holder and its ETA in the queued/subscription payloads
+	// (docs/session-turn-integrity.md A4.1) — never as a decision input.
+	GetSessionLease(ctx context.Context, userID, agentID, sessionKey string) (*SessionLeaseRecord, error)
 
 	// --- Goals (per agent × session) ---
 	//
