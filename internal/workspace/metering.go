@@ -65,6 +65,10 @@ func (m *Metered) Get(ctx context.Context, agentID, projectID, sessionID, path s
 	return m.inner.Get(ctx, agentID, projectID, sessionID, path)
 }
 
+func (m *Metered) PutIfVersion(ctx context.Context, agentID, projectID, sessionID, path string, r io.Reader, size int64, contentType string, expected Version) error {
+	return m.inner.PutIfVersion(ctx, agentID, projectID, sessionID, path, r, size, contentType, expected)
+}
+
 func (m *Metered) Stat(ctx context.Context, agentID, projectID, sessionID, path string) (*ObjectInfo, error) {
 	return m.inner.Stat(ctx, agentID, projectID, sessionID, path)
 }

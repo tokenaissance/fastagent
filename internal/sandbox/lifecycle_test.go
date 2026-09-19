@@ -979,3 +979,10 @@ func TestLifecycle_CloseAll(t *testing.T) {
 	// Safe to call twice.
 	lp.CloseAll()
 }
+
+// PutIfVersion makes this test double satisfy workspace.Store after the port
+// gained the conditional write (B2). The doubles model "no versioning": they
+// delegate, which is exactly what a backend declaring no Version does.
+func (f *fakeWorkspace) PutIfVersion(ctx context.Context, agentID, projectID, sessionID, path string, r io.Reader, size int64, contentType string, expected workspace.Version) error {
+	return f.Put(ctx, agentID, projectID, sessionID, path, r, size, contentType)
+}

@@ -48,6 +48,21 @@ import (
 type Store interface {
 	Put(ctx context.Context, agentID, projectID, sessionID, path string, r io.Reader, size int64, contentType string) error
 
+	// PutIfVersion writes only when the object still carries `expected` — the
+	// precondition is evaluated BY THE RESOURCE, in the same request as the
+	// effect (obligation L4(a)/L7, docs/文件系统形式化证明/12-lease-formal-design.md
+	// §3/§3.1): a stale expectation comes back as ErrVersionConflict instead of
+	// silently overwriting whoever wrote in between.
+	//
+	// VersionAbsent means "this key must not exist yet" (a create-only write).
+	//
+	// Strength is per backend and MUST be declared, not assumed:
+	//   S3      — exact (an If-Match / If-None-Match conditional PUT)
+	//   LocalFS — best-effort (read-then-write; there is no kernel CAS). LocalFS
+	//             deployments are single-host by construction; multi-replica
+	//             installs must use S3 or a database-backed store.
+	PutIfVersion(ctx context.Context, agentID, projectID, sessionID, path string, r io.Reader, size int64, contentType string, expected Version) error
+
 	Get(ctx context.Context, agentID, projectID, sessionID, path string) (io.ReadCloser, error)
 
 	Stat(ctx context.Context, agentID, projectID, sessionID, path string) (*ObjectInfo, error)
@@ -78,7 +93,24 @@ type ObjectInfo struct {
 	Size        int64     // bytes, -1 when unknown
 	ContentType string    // e.g. "image/png"
 	ModTime     time.Time // UTC
+	// Version identifies this object's content to its backend: S3's ETag,
+	// LocalFS's size:mtime. It is OPAQUE to callers — an inner-layer token, not
+	// an SDK type — and it is what PutIfVersion compares against. Empty means
+	// "this backend cannot tell" (then PutIfVersion is a plain Put for that
+	// backend and the caller must not claim prevention).
+	Version Version
 }
+
+// Version is an opaque per-backend content identity (see ObjectInfo.Version).
+type Version string
+
+// VersionAbsent is the precondition "the key must not exist yet".
+var VersionAbsent Version = ""
+
+// ErrVersionConflict reports that a conditional write found a different version
+// than the caller expected: somebody else wrote first. The caller must refuse
+// and say so; it must never retry blindly (that would overwrite the winner).
+var ErrVersionConflict = errors.New("workspace: version conflict")
 
 // Common errors. Implementations should wrap these with fmt.Errorf("%w: ...")
 // when adding context, so callers can still errors.Is() match.

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"net/http"
 	"net/url"
 	"path"
 	"path/filepath"
@@ -101,6 +102,42 @@ func (s *S3) Put(ctx context.Context, agentID, projectID, sessionID, p string, r
 	return err
 }
 
+// PutIfVersion is S3's conditional PUT: the expectation rides the request as
+// If-Match (or If-None-Match: * for "must not exist"), so the check and the
+// write share one round trip — the window the port's doc promises to close.
+func (s *S3) PutIfVersion(ctx context.Context, agentID, projectID, sessionID, p string, r io.Reader, size int64, contentType string, expected Version) error {
+	if contentType == "" {
+		contentType = mime.TypeByExtension(filepath.Ext(p))
+		if contentType == "" {
+			contentType = "application/octet-stream"
+		}
+	}
+	opts := minio.PutObjectOptions{ContentType: contentType}
+	if expected == VersionAbsent {
+		// Create-only. S3 spells it If-None-Match: *.
+		opts.SetMatchETagExcept("*")
+	} else {
+		opts.SetMatchETag(string(expected))
+	}
+	if _, err := s.client.PutObject(ctx, s.bucket, s.key(agentID, projectID, sessionID, p), r, size, opts); err != nil {
+		if isPreconditionFailed(err) {
+			return ErrVersionConflict
+		}
+		return mapS3Err(err)
+	}
+	return nil
+}
+
+// isPreconditionFailed recognises the 412 both AWS S3 and MinIO return for a
+// failed If-Match / If-None-Match.
+func isPreconditionFailed(err error) bool {
+	var resp minio.ErrorResponse
+	if errors.As(err, &resp) {
+		return resp.StatusCode == http.StatusPreconditionFailed
+	}
+	return strings.Contains(err.Error(), "PreconditionFailed")
+}
+
 func (s *S3) Get(ctx context.Context, agentID, projectID, sessionID, p string) (io.ReadCloser, error) {
 	obj, err := s.client.GetObject(ctx, s.bucket, s.key(agentID, projectID, sessionID, p), minio.GetObjectOptions{})
 	if err != nil {
@@ -125,6 +162,10 @@ func (s *S3) Stat(ctx context.Context, agentID, projectID, sessionID, p string) 
 		Size:        info.Size,
 		ContentType: info.ContentType,
 		ModTime:     info.LastModified.UTC(),
+		// The ETag is the object's content identity on S3 (and on every
+		// S3-compatible service here). The cleanup script already trusts it as
+		// a content hash; PutIfVersion promotes it to a write precondition.
+		Version: Version(info.ETag),
 	}, nil
 }
 

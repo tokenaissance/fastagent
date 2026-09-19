@@ -104,6 +104,42 @@ func (f *LocalFS) Put(ctx context.Context, agentID, projectID, sessionID, path s
 	return out.Close()
 }
 
+// localVersion is this backend's content identity: size plus nanosecond mtime.
+// LocalFS mtime has nanosecond resolution, so two distinct writes to one path
+// are distinguishable in practice — unlike S3's second-resolution LastModified,
+// which is why the S3 backend uses the ETag instead.
+func localVersion(info os.FileInfo) Version {
+	return Version(fmt.Sprintf("%d:%d", info.Size(), info.ModTime().UnixNano()))
+}
+
+// PutIfVersion is LocalFS's best-effort conditional write: stat, compare, write.
+// There is no kernel compare-and-swap here, so the window between the stat and
+// the rename is not closed — the port's doc says exactly that, and multi-replica
+// installs are required to use a backend that can close it.
+func (f *LocalFS) PutIfVersion(ctx context.Context, agentID, projectID, sessionID, path string, r io.Reader, size int64, contentType string, expected Version) error {
+	full, err := f.resolvePath(agentID, projectID, sessionID, path)
+	if err != nil {
+		return err
+	}
+	info, statErr := os.Stat(full)
+	switch {
+	case errors.Is(statErr, os.ErrNotExist):
+		if expected != VersionAbsent {
+			return ErrVersionConflict
+		}
+	case statErr != nil:
+		return statErr
+	default:
+		if expected == VersionAbsent {
+			return ErrVersionConflict // create-only, but the object exists
+		}
+		if got := localVersion(info); got != expected {
+			return ErrVersionConflict
+		}
+	}
+	return f.Put(ctx, agentID, projectID, sessionID, path, r, size, contentType)
+}
+
 func (f *LocalFS) Get(ctx context.Context, agentID, projectID, sessionID, path string) (io.ReadCloser, error) {
 	full, err := f.resolvePath(agentID, projectID, sessionID, path)
 	if err != nil {
@@ -133,6 +169,7 @@ func (f *LocalFS) Stat(ctx context.Context, agentID, projectID, sessionID, path 
 		Size:        info.Size(),
 		ContentType: mime.TypeByExtension(filepath.Ext(path)),
 		ModTime:     info.ModTime().UTC(),
+		Version:     localVersion(info),
 	}, nil
 }
 
