@@ -107,7 +107,10 @@ func registerBashOutput(r *Registry) {
 
 		var sb strings.Builder
 		if dropped {
-			sb.WriteString("[truncated] earlier output exceeded the 4 MiB session cap and was dropped\n")
+			// The reason travels from the buffer: a retired shell has been
+			// trimmed to its exit tail, and naming the 4 MiB cap there would be
+			// a false explanation of a real loss.
+			sb.WriteString("[truncated] earlier output " + s.dropNoteText() + "\n")
 		}
 		if body != "" {
 			sb.WriteString(body)
