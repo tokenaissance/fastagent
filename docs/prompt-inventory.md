@@ -1,5 +1,8 @@
 # Prompt inventory — every model-facing text in one place
 
+> **状态**：清单已生成（`prompt-inventory/` 六份由 `scripts/extract-prompt-inventory.py` 抽取；改提示词必须重跑脚本）
+> · **日期**：2026-09-14 · **形式**：—（提示词资产）
+
 Prompt text in this repo lives in **six** places, none of which knew about the
 others. This file is the index; the verbatim text sits in
 [`prompt-inventory/`](prompt-inventory/) and is extracted from the source by
