@@ -78,15 +78,18 @@ release, expiry — so each clause can be checked operation by operation:
 
 | Clause | Enforced by | Accepted window | Known open violators |
 |---|---|---|---|
-| U | the row is the only naming authority: single-winner `Acquire`, the loser closes its own copy, adoption is a CAS, destroy is fenced on `owner`+`epoch` **and** reads the control-plane answer (a rejected DELETE is an error, 404 is "already gone"); per-scope locks make `Get`/`Release` single-writer for a scope, and within one executor `rebuildMu` funnels parallel rebuilds into a single replacement | two pods may briefly share one instance during a takeover; a lapsed lease is reclaimable at TTL while its instance lives on until the provider timeout | none known |
+| U | the row is the only naming authority: single-winner `Acquire`, the loser closes its own copy, adoption is a CAS, destroy is fenced on `owner`+`epoch` **and** reads the control-plane answer (a rejected DELETE is an error, 404 is "already gone"); per-scope locks make `Get`/`Release` single-writer for a scope, and within one executor `rebuildMu` funnels parallel rebuilds into a single replacement | two pods may briefly share one instance during a takeover; a lapsed lease is reclaimable at TTL while its instance lives on until the provider timeout | ~~G25~~ **fixed 2026-09-19**: `Acquire` used to restamp `epoch = 1` per possession, so a delayed release from an earlier cycle **by the same owner** matched a newer possession's row and deleted it (measured). The claim branch is now `epoch = epoch + 1`, so the token is unique per acquisition over the whole life of the row; `TestSandboxLeaseEpochNeverResetsAcrossTakeover` pins it (falsified by restoring `epoch = 1`). Obligation L4(c) in [docs/文件系统形式化证明/12-lease-formal-design.md](文件系统形式化证明/12-lease-formal-design.md) §3/§5 |
 | A | per-use reconcile; rebuild only on a **status-code** 502/404 from envd (any other failure surfaces instead of costing an instance); fail-open keeps the local sandbox serving; a rebuild that cannot hydrate or verify destroys its replacement and restores the previous identity, so the executor never keeps a sandbox that cannot serve | a publish lands on the next `Get`, so the row may lag the executor by one call | none known |
 | I | the identity (`id` + token + pending-publish bit) is one value behind one mutex, swapped whole; `ReplaceSandboxLease` moves the row under an `owner` CAS; the expiry re-acquire stamps the current id | the pending bit is in-memory only: a crash before the next `Get` loses it and the row ages out via TTL | none known |
 
 Two properties keep the clauses honest rather than aspirational:
 
-- **`epoch` is monotonic within a lease cycle only** — a fresh `Acquire` resets
-  it to 1. It fences destroys inside a cycle; a delayed destroy from an earlier
-  cycle by the same owner is not covered.
+- **`epoch` is monotonic over the row's whole life** (fixed 2026-09-19, G25): a
+  takeover now does `epoch = epoch + 1`, never a reset to 1. Before the fix it
+  fenced destroys only inside one possession, and a delayed destroy from an
+  earlier possession *by the same owner* was not covered — it could delete the
+  newer possession's live row. `TestSandboxLeaseEpochNeverResetsAcrossTakeover`
+  pins the fixed behaviour.
 - **The lease TTL (15 min) is shorter than the e2b instance lifetime (30 min)**,
   so "lease expired" means *unowned*, not *gone*. Both accepted windows above
   follow from that gap.
@@ -232,12 +235,23 @@ compare-and-set, not a read-then-write:
   evicting pod carries the epoch it last received, so a delayed/duplicated
   eviction from an older snapshot can never delete a lease that was renewed
   or adopted in the meantime.
-- `Acquire` claims a fresh/expired row and stamps `epoch = 1`.
+- `Acquire` claims a fresh/expired row and **increments** `epoch`
+  (`epoch + 1` since the G25 fix; the first insert of a row is `1`).
 
 Why epoch on top of owner: owner changes cover most takeovers, but not
 same-owner request reordering (an old release racing a newer renew from the
 same pod) or a delete formulated before another pod's adoption completed.
-The version column makes any stale destroy request fail closed.
+
+The version column makes a stale destroy fail closed **within one lease cycle**.
+It does not make *any* stale destroy fail closed, and the two statements above
+should be read together with the fix: **until 2026-09-19** `Acquire` stamped
+`epoch = 1` on a takeover, so a delayed release carrying a small epoch from an
+earlier possession *by the same owner* could match the newer row — measured (a
+same-owner re-acquire after expiry, then `ReleaseSandboxLease(scope, "pod-a", 1)`
+returned `released=true` and deleted the live row). That was **G25**; the claim
+branch now does `epoch = epoch + 1`, and the test above pins it. The general
+obligation (a fencing token must be unique per acquisition) is **L4(c)** in
+[docs/文件系统形式化证明/12-lease-formal-design.md](文件系统形式化证明/12-lease-formal-design.md) §3/§5.
 
 ### Staged hardening plan
 
