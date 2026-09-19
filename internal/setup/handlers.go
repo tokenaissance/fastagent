@@ -1530,6 +1530,20 @@ func (s *Server) handleChatSubscribe(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, ": ok\n\n")
 	flusher.Flush()
 
+	// Tell the reader who holds the session right now (docs/session-turn-integrity.md
+	// A4.1): a view that only knows its own socket must not infer "the turn is
+	// gone" from a closed connection — the fact lives on the server, so it is
+	// stated here and again with every replay. Emitted only when a live holder
+	// exists; silence means "nobody holds it" for the client's *unknown* branch,
+	// never a claim that a call died.
+	if s.dataStore != nil {
+		if rec, err := s.dataStore.GetSessionLease(r.Context(), uid, agentID, sessionID); err == nil && rec != nil {
+			payload, _ := json.Marshal(newTurnActivePayload(rec)) // C1: one fact, one wire shape
+			fmt.Fprintf(w, "event: turn_active\ndata: %s\n\n", payload)
+			flusher.Flush()
+		}
+	}
+
 	// Resume point: prefer Last-Event-ID (browser-managed reconnect),
 	// fall back to ?since=N for callers that pass it explicitly. -1
 	// means "stream live only, no replay".
@@ -1793,6 +1807,14 @@ func (s *Server) handleChatHistory(w http.ResponseWriter, r *http.Request) {
 		if uid != "" {
 			if seq, err := s.dataStore.LatestSessionEventSeq(r.Context(), uid, ag.Name(), sessionID); err == nil {
 				resp["latestEventSeq"] = seq
+			}
+			// turnActive is the same fact /api/chat/subscribe announces
+			// (docs/session-turn-integrity.md A4.1): a page load must be able to
+			// tell "a turn is running elsewhere" from "this view is stale"
+			// without inferring either from its own socket. Absent means "no
+			// live holder", which the client renders as its *unknown* branch.
+			if rec, err := s.dataStore.GetSessionLease(r.Context(), uid, ag.Name(), sessionID); err == nil && rec != nil {
+				resp["turnActive"] = newTurnActivePayload(rec) // C1: one fact, one wire shape
 			}
 		}
 	}

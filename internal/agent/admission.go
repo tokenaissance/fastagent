@@ -60,6 +60,18 @@ func turnModeForSource(source string) TurnMode {
 func (a *Agent) RunTurn(ctx context.Context, msg bus.InboundMessage) (string, error) {
 	if a.sessions != nil && turnModeForSource(msg.Source) == TurnStartIfIdle {
 		sess := a.sessions.Get(sessionTriple(msg, msg.ProjectID))
+		// The verdict must come from the cross-replica fact, not from this
+		// pod's memory: an automatic turn (cron / goal / heartbeat / sub-agent)
+		// that finds the session busy on ANOTHER replica must defer, not queue
+		// — queueing is what holds a task-queue worker and its turn budget
+		// hostage (docs/session-turn-integrity.md P2; the 09-19 review found
+		// this path reading only the in-process gate).
+		if live, _ := a.lease().Live(context.Background(), a.turnLeaseKey(sess)); live != nil {
+			slog.Info("turn admission: automatic turn deferred (a peer holds the session)",
+				"agent", a.name, "channel", msg.Channel, "chat_id", msg.ChatID,
+				"source", msg.Source, "holder", live.Holder, "waiters", sess.TurnWaiters())
+			return "", ErrTurnNotAdmitted
+		}
 		if sess.TurnActive() {
 			slog.Info("turn admission: automatic turn deferred",
 				"agent", a.name, "channel", msg.Channel, "chat_id", msg.ChatID,

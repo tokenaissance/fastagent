@@ -36,12 +36,20 @@ import (
 
 // Agent is the ReAct agent loop.
 type Agent struct {
-	name       string
-	provider   provider.Provider
-	registry   *tools.Registry
-	sessions   *session.Manager
-	memory     *Memory
-	ctxBuilder *ContextBuilder
+	name     string
+	provider provider.Provider
+	registry *tools.Registry
+	sessions *session.Manager
+	// sessionLease is the cross-replica admission gate. Nil means "not wired":
+	// lease() then returns NopSessionLease and behaviour is unchanged.
+	sessionLease SessionLease
+	// turnLeaseTTLOverride pins the lease's lifetime for tests (0 = derive it
+	// from the caller's deadline, else the platform default + grace).
+	turnLeaseTTLOverride time.Duration
+	// turnLeaseRetryOverride pins the queued re-try interval for tests.
+	turnLeaseRetryOverride time.Duration
+	memory                 *Memory
+	ctxBuilder             *ContextBuilder
 	// skillsFingerprint is the name→fingerprint map the last skill refresh
 	// produced, kept so the environment signal can compare this turn's skill set
 	// with the previous turn's without loading skills twice.
@@ -2326,6 +2334,22 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	// inside the turn that owned the session.
 	sess := a.sessions.Get(sessionTriple(msg, msg.ProjectID))
 	waitStart := time.Now()
+	// Cross-replica gate first (docs/session-turn-integrity.md A1): the lease is
+	// the one that can be lost to a peer, and the one a queued caller must wait
+	// on. It reports every wait as a `queued` event carrying the holder and its
+	// ETA, so the dashboard can say who is ahead.
+	lease, leased := a.beginTurnLease(ctx, sess, func(evt ChatEvent) { emitEvent(ctx, evt) })
+	if !leased {
+		slog.Info("turn admission: lease not acquired",
+			"agent", a.name, "channel", msg.Channel, "chat_id", msg.ChatID,
+			"queued_ms", time.Since(waitStart).Milliseconds())
+		return ""
+	}
+	// Release the lease last: freeing it first lets a local waiter (already
+	// parked on the in-process slot) take over without another retry.
+	defer lease.Stop()
+	// Local FIFO gate second. In practice it is free: a locally running turn
+	// must itself have held the lease, and we hold it now.
 	if sess.TurnActive() {
 		// Tell the dashboard why nothing is happening yet: its turn is queued
 		// behind the turn that currently owns the session (a cron/goal tick or
@@ -2526,7 +2550,8 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	// call/reply pairs (docs/session-turn-integrity.md, clause P). Without
 	// this, a duplicated or orphaned reply from any past turn is replayed
 	// verbatim and can 400 every later request on the session.
-	messages = append(messages, a.withMessageTimestampsForChatter(normalizeForPrompt(sessionMsgs), chatterUID)...)
+	messages = append(messages, a.withMessageTimestampsForChatter(
+		normalizeForPromptWith(sessionMsgs, a.openCallAnswer(ctx, sess)), chatterUID)...)
 
 	toolDefs := a.registry.DefinitionsForMode(builtinAllowForMode(a.promptMode))
 
@@ -2564,6 +2589,23 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	segmentsUsed := 1
 	segProgress := false
 	for i := 0; i < rounds; i++ {
+		// Superseded mid-turn? The lease moved to a peer (and every later write
+		// would be refused by the fence anyway): stop spending model and tool
+		// budget on a history this turn no longer owns. The notice was already
+		// emitted by the renewal loop, at the moment of the loss.
+		if lease.Lost() || sess.FenceLost() != nil {
+			slog.Warn("turn: superseded, stopping", "agent", a.name, "chat_id", msg.ChatID, "iteration", i+1)
+			break
+		}
+		// The user's own stop request (design X1–X6): the request rode the lease
+		// row from wherever it was made, and this boundary is the delivery
+		// point. Say it — a turn that vanishes without a word is the failure
+		// mode the state-observability principle exists to prevent.
+		if lease.Cancelled(ctx) {
+			slog.Info("turn: cancelled by request", "agent", a.name, "chat_id", msg.ChatID, "iteration", i+1)
+			emitEvent(ctx, ChatEvent{Type: lostNoticeEvent, Data: map[string]any{"message": turnCancelledNotice}})
+			break
+		}
 		slog.Info("agent loop iteration",
 			"agent", a.name,
 			"iteration", i+1,
@@ -3182,6 +3224,16 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 	// rationale and docs/session-turn-integrity.md for the incident.
 	sess := a.sessions.Get(sessionTriple(msg, msg.ProjectID))
 	waitStart := time.Now()
+	// Same two gates as HandleMessage, same order (see there for why the lease
+	// goes first and is released last).
+	lease, leased := a.beginTurnLease(ctx, sess, func(evt ChatEvent) { emitEvent(ctx, evt) })
+	if !leased {
+		slog.Info("turn admission: lease not acquired",
+			"agent", a.name, "channel", msg.Channel, "chat_id", msg.ChatID,
+			"queued_ms", time.Since(waitStart).Milliseconds())
+		return a.stringStream("")
+	}
+	defer lease.Stop()
 	if sess.TurnActive() {
 		emitEvent(ctx, ChatEvent{Type: "queued", Data: map[string]any{
 			"position": sess.TurnWaiters() + 1,
@@ -3279,7 +3331,8 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 	// call/reply pairs (docs/session-turn-integrity.md, clause P). Without
 	// this, a duplicated or orphaned reply from any past turn is replayed
 	// verbatim and can 400 every later request on the session.
-	messages = append(messages, a.withMessageTimestampsForChatter(normalizeForPrompt(sessionMsgs), chatterUID)...)
+	messages = append(messages, a.withMessageTimestampsForChatter(
+		normalizeForPromptWith(sessionMsgs, a.openCallAnswer(ctx, sess)), chatterUID)...)
 
 	toolDefs := a.registry.DefinitionsForMode(builtinAllowForMode(a.promptMode))
 
@@ -3298,6 +3351,21 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 	segmentsUsed := 1
 	segProgress := false
 	for i := 0; i < rounds; i++ {
+		// Same supersession check as the non-streaming loop: stop writing into
+		// a history another turn now owns.
+		if lease.Lost() || sess.FenceLost() != nil {
+			slog.Warn("turn: superseded, stopping", "agent", a.name, "chat_id", msg.ChatID, "iteration", i+1)
+			break
+		}
+		// The user's own stop request (design X1–X6): the request rode the lease
+		// row from wherever it was made, and this boundary is the delivery
+		// point. Say it — a turn that vanishes without a word is the failure
+		// mode the state-observability principle exists to prevent.
+		if lease.Cancelled(ctx) {
+			slog.Info("turn: cancelled by request", "agent", a.name, "chat_id", msg.ChatID, "iteration", i+1)
+			emitEvent(ctx, ChatEvent{Type: lostNoticeEvent, Data: map[string]any{"message": turnCancelledNotice}})
+			break
+		}
 		hcBefore := &HookContext{AgentName: a.name, Point: BeforeModelCall, Messages: messages, Channel: msg.Channel, AccountID: msg.AccountID, ChatID: msg.ChatID, UserID: a.ownerUserID}
 		a.hooks.Run(ctx, hcBefore)
 

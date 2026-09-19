@@ -45,18 +45,39 @@ const (
 	OriginGoalContext = "goal_context"
 )
 
-// StoppedToolResult is the literal the prompt projection
-// (internal/agent/normalize.go) uses to answer a tool call that stored
-// history left open — a turn that exited with a tool_use in flight (client
-// Stop, task-queue timeout, the loop detector breaking out) keeps that call
-// unanswered on purpose (docs/session-turn-integrity.md, Q4).
+// The sentences the prompt projection (internal/agent/normalize.go) may use to
+// answer a tool call that stored history left open. Which one is true depends
+// on a fact only the server can have, so the whole vocabulary lives in one
+// place and the projection picks from it instead of inventing a claim
+// (docs/session-turn-integrity.md, A2.1):
 //
-// Nothing writes it into a session: the projection is the only producer, so
-// the stored record keeps the truth (the call was never answered) and no
-// synthetic reply can collide with a late real result. Tests and the doctor
-// fixtures still name the literal to build pre-Q4 and incident-shaped
-// histories, which is why it lives in provider rather than agent.
-const StoppedToolResult = "(stopped — execution was interrupted before the tool returned)"
+//   - the owning turn is provably gone (a lease was held and then released or
+//     expired with no reply recorded) → StoppedToolResult
+//   - the owning turn is alive on another replica (the lease says so)
+//     → NoReplyTurnAliveResult
+//   - no fact is available (no lease wired, history written before the lease
+//     existed, a single replica) → NoReplyUnknownResult
+//
+// Nothing writes any of them into a session: the projection is the only
+// producer, so the stored record keeps the truth (the call was never answered)
+// and no synthetic reply can collide with a late real result. Tests and the
+// doctor fixtures name the literals to build pre-Q4 and incident-shaped
+// histories, which is why they live in provider rather than agent.
+//
+// Before the cross-replica turn lease existed every open call was the third
+// case, and the projection asserted the first — the 09-18 incident: the model
+// read "interrupted" for two sub-tasks that were still running on a peer and
+// re-issued them.
+const (
+	StoppedToolResult      = "(stopped — execution was interrupted before the tool returned)"
+	NoReplyTurnAliveResult = "(no reply recorded yet — the owning turn is still running; do not re-issue this call; wait, or read what has already landed)"
+	NoReplyUnknownResult   = "(no reply recorded yet; whether the owning turn is still running is not known to this projection)"
+)
+
+// SyntheticToolPads lists every sentence above. A stored history must contain
+// none of them — the projection is their only producer — and tests that assert
+// "no pad was persisted" should check the whole list rather than one literal.
+var SyntheticToolPads = []string{StoppedToolResult, NoReplyTurnAliveResult, NoReplyUnknownResult}
 
 // Message represents a chat message.
 // When storing in session, keep ALL fields exactly as returned by the LLM

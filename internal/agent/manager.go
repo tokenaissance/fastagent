@@ -81,6 +81,7 @@ type managerOpts struct {
 	userID          string
 	globalSkillsCfg config.SkillsCfg
 	mcpConfigNotify func(userID, agentID string)
+	sessionLease    SessionLease
 }
 
 func WithSessionStore(st session.SessionStore) ManagerOption {
@@ -138,6 +139,14 @@ func WithQuotaStore(qs usage.QuotaStore) ManagerOption {
 // REPLICATE_API_TOKEN regardless of what's saved in the DB.
 func WithGlobalSkillsCfg(cfg config.SkillsCfg) ManagerOption {
 	return func(o *managerOpts) { o.globalSkillsCfg = cfg }
+}
+
+// WithSessionLease installs the cross-replica turn lease on every agent the
+// Manager builds. Omit it and each agent gets NopSessionLease: single-instance
+// installs keep today's behaviour instead of failing closed on a component
+// they never had (mirrors WithWorkspaceStore / WithDataStore).
+func WithSessionLease(l SessionLease) ManagerOption {
+	return func(o *managerOpts) { o.sessionLease = l }
 }
 
 // WithMCPConfigNotify wires the gateway's per-agent reload notify into
@@ -274,6 +283,9 @@ func (m *Manager) buildAgent(rc config.ResolvedAgent, prov provider.Provider, mb
 		// NewAgent pass loaded only the filesystem, missing anything that
 		// lives only in OSS.
 		ag.ReloadWorkspaceFiles()
+	}
+	if m.opts.sessionLease != nil {
+		ag.sessionLease = m.opts.sessionLease
 	}
 	if m.opts.dataStore != nil {
 		// Cron tools need the relational store to persist scheduled

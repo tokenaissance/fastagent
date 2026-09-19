@@ -2,6 +2,7 @@ package agent
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/fastclaw-ai/fastclaw/internal/provider"
@@ -33,8 +34,32 @@ func nReply(id, content string) provider.Message {
 //
 // Duplicates are therefore a legacy shape: only histories written before
 // Q4 can carry a synthetic reply in storage next to a real one.
+
+// TestProjectionDoesNotClaimInterruptedWithoutEvidence pins A2.2: with no
+// lease wired the projection has no evidence that the owning turn died, so the
+// word "interrupted" must not appear — the old wording asserted it for every
+// open call, and on 09-18 the model read that claim for two sub-tasks that were
+// still running on a peer and re-issued them.
+//
+// Falsification: put provider.StoppedToolResult back into normalizeForPrompt
+// and this test goes red on both assertions.
+func TestProjectionDoesNotClaimInterruptedWithoutEvidence(t *testing.T) {
+	projected := normalizeForPrompt([]provider.Message{nCall("A")})
+	if len(projected) != 2 {
+		t.Fatalf("projection length = %d, want 2 (the call plus its synthetic reply)", len(projected))
+	}
+	got := projected[1].Content
+	if strings.Contains(strings.ToLower(got), "interrupt") {
+		t.Fatalf("the projection asserts an interruption without evidence: %q", got)
+	}
+	if got != provider.NoReplyUnknownResult {
+		t.Fatalf("projection sentence = %q; want the no-fact sentence %q", got, provider.NoReplyUnknownResult)
+	}
+}
+
 func TestNormalizeForPromptShapes(t *testing.T) {
 	stopped := provider.StoppedToolResult
+	noReply := provider.NoReplyUnknownResult
 
 	cases := []struct {
 		name string
@@ -67,7 +92,7 @@ func TestNormalizeForPromptShapes(t *testing.T) {
 		{
 			name: "unanswered call gets a synthetic reply next to it",
 			in:   []provider.Message{nCall("A"), nUser("next")},
-			want: []provider.Message{nCall("A"), {Role: "tool", ToolCallID: "A", Name: "tool_A", Content: stopped}, nUser("next")},
+			want: []provider.Message{nCall("A"), {Role: "tool", ToolCallID: "A", Name: "tool_A", Content: noReply}, nUser("next")},
 		},
 		{
 			name: "late reply is pulled next to its call",

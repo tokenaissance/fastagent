@@ -79,8 +79,10 @@ func TestInterruptedTurnLeavesNoSyntheticReplyInHistory(t *testing.T) {
 
 	// 1. No synthetic reply was written into history.
 	for i, m := range msgs {
-		if m.Content == provider.StoppedToolResult {
-			t.Fatalf("history carries a persisted synthetic reply at %d: %+v", i, m)
+		for _, pad := range provider.SyntheticToolPads {
+			if m.Content == pad {
+				t.Fatalf("history carries a persisted synthetic reply at %d: %+v", i, m)
+			}
 		}
 	}
 
