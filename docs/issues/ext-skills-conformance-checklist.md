@@ -1,7 +1,7 @@
 # 对照清单：ext-skills 规范 ↔ 我们的出口实现
 
 **状态**：清单（实现未开始） · **日期**：2026-09-18
-**规范来源**：`~/Project/tokenaissance/ext-skills`（`specification/stable/skills.mdx`，扩展 ID
+**规范来源**：[tokenaissance/ext-skills › specification/stable/skills.mdx](https://github.com/tokenaissance/ext-skills/blob/main/specification/stable/skills.mdx)（本地检出常见于 `~/Project/tokenaissance/ext-skills`；扩展 ID
 `io.modelcontextprotocol/skills`，对应 SEP-2640，基线协议 `2026-07-28`）
 **用途**：cloud MCP 出口实现"兼容协议"时的验收条目。每行都能在规范里找到出处，
 最后一列写清我们自己的验收方式，避免开工时再翻规范。

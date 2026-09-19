@@ -1,5 +1,8 @@
 # FastAgent Upstream App Integration API
 
+> **状态**：接口契约（as-built；上游 App 集成面）· **日期**：2026-06-27（最后更新 2026-08-25）
+> · **形式**：—（接口；本文件当前无任何引用，见 [README §2](./README.md)）
+
 This is the integration contract for upstream applications that want to use
 FastAgent as their Agent runtime.
 

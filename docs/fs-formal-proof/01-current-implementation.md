@@ -77,6 +77,27 @@ The key asymmetry:
 - e2b / boxlite's `SnapshotWorkspace` returns **another copy**, and that copy is frozen at the moment of
   the last hydrate (or the last write inside the sandbox).
 
+### 2.x What each backend promises for one write (strength table, 2026-09-19)
+
+> The port gained a conditional write, `PutIfVersion(expected Version)` (family B, obligation L7). **Strength
+> differs per backend and must be declared** — callers may rely only on the declared part.
+
+| Backend | What `Version` is | Strength of `PutIfVersion` | Consequence for callers |
+|---|---|---|---|
+| **S3 / Spaces (multi-replica production)** | the object's ETag | **Exact**: `If-Match` (or `If-None-Match: *` for create-only) shares the request with the write; 412 ⇒ `ErrVersionConflict` | may be used to **refuse** an overwrite |
+| **LocalFS (single host / dev)** | `size:mtime_ns` | **Best-effort**: stat → compare → write, with no kernel CAS | can only "detect and refuse an already-stale expectation"; multi-replica installs must use S3/PG |
+| **Metered** | pass-through | same as its inner store | — |
+
+Writer postures (who uses which precondition):
+
+| Writer | Precondition | Status |
+|---|---|---|
+| `write_file` / `edit_file` / `apply_patch` | `Stat` right before the write ⇒ `PutIfVersion` | ✅ landed (B7–B9) |
+| attachments | `VersionAbsent` (must not exist) | ✅ landed (B10) — `internal/agent/attachments.go:123` passes `workspace.VersionAbsent` to `PutIfVersion`; on S3 that is `If-None-Match: *`, on LocalFS a stat-compare (best effort, §2 above) |
+| skills publish | read the current version, then conditional write | ✅ landed (B10) — `internal/skills/objectstore.go:113` reads the version, then `PutIfVersion`, and maps `ErrVersionConflict` |
+| panel upload/delete | the version the panel last listed | ✅ landed (B11) — the upload reads the optional `expectedVersion` form field and answers 409 with `current{version,size,modified_at}` (`internal/setup/handlers_agents.go:1492-1531`); a **delete** has no content to overwrite, so its second half is the d1 mirror removal instead (§: `sandbox.LiveWorkspaceFileRemover` — panel 2026-09-18, tool path 2026-09-20, [10 §4](./10-harness-state-audit.md) G7b) |
+| sandbox↔store (write-through / write-back) | **no conditional write**: the witness exists only in-band, in the copy's mtime stamp (L7 §3.1) | stays family A |
+
 ## 3. Writers and write paths
 
 ### 3.1 Host file tools → the store

@@ -519,7 +519,7 @@ agent 侧 `mcp` 工具是 **host 级发起器**（§5.6）：模型产 URL、宿
   └ 401 → 恰好一次 refresh 重放（绝不循环）→ 仍失败则提示 mcp check / 重新 login
 ```
 
-> 四条路径共享同一 Use Case（start/complete），只是触发面（SPA / CLI / agent 工具）与 CallbackReceiver/BrowserOpener 适配器不同 —— 这就是端口解耦的价值。完整时序见 tokenaissance-cloud `docs/fastagent/guides/auth/mcp-oauth-authorization-flow.md` §2.1/§2.2。cloud chat 会把路径 4 的授权 URL 渲染成授权按钮卡（popup + 轮询状态，不展示长链接），交互细节见该文档 §4/§7（2026-09-05）。
+> 四条路径共享同一 Use Case（start/complete），只是触发面（SPA / CLI / agent 工具）与 CallbackReceiver/BrowserOpener 适配器不同 —— 这就是端口解耦的价值。完整时序见 tokenaissance-cloud [docs/fastagent/guides/auth/mcp-oauth-authorization-flow.md](https://github.com/tokenaissance/tokenaissance-cloud/blob/develop/docs/fastagent/guides/auth/mcp-oauth-authorization-flow.md) §2.1/§2.2。cloud chat 会把路径 4 的授权 URL 渲染成授权按钮卡（popup + 轮询状态，不展示长链接），交互细节见该文档 §4/§7（2026-09-05）。
 
 ---
 
@@ -1996,13 +1996,13 @@ add/remove 行写成功（或 dashboard `ReplaceMCPServers` 事务完成）→ `
 
 ### 13.7 实现落点与测试（witness）
 
-- store：[agent_mcp_servers.go](/Users/reina/Project/tokenaissance/fastagent/internal/store/agent_mcp_servers.go)（List/Add/Delete/Replace，PK 前置条件）；DDL [database.go:1447](/Users/reina/Project/tokenaissance/fastagent/internal/store/database.go:1447)；DeleteAgent/DeleteUser 级联。
-- agent 工具：[mcp_config_tool.go](/Users/reina/Project/tokenaissance/fastagent/internal/agent/mcp_config_tool.go)（per-key 写 + `requireAgentOwner`；旧 JSON helper 已删；add/remove 输出追加 `<mcp-undo>` 逆参数 marker，remove 携带完整被删 entry）。
-- undo 机器回放：[mcp_undo.go](/Users/reina/Project/tokenaissance/fastagent/internal/agent/mcp_undo.go)（**限定当前会话**：`ListSessionEventsSince(user, agent, session)` 倒序读 tool_result marker，LIFO 自动重放；消费集存 `configs_kv` kind=`mcp_undo`、name=`undo:<sessionKey>`）。
-- fail-loud：[events.go](/Users/reina/Project/tokenaissance/fastagent/internal/agent/events.go) `emitEventChecked`——mcp add/remove 的 tool_result 持久化失败或无 chat journal 时，结果附加 `[undo journal warning]`；`markUndoCursor` 写失败在 undo 结果中显式报错（已应用但未记账）。
-- 读路径：gateway layer-3 loader（[gateway.go:801](/Users/reina/Project/tokenaissance/fastagent/internal/gateway/gateway.go:801)）从表 overlay；GET config 与 oauth servers 枚举从表读。架构备注：`config.AgentFileConfigLoader` 全局间接层当前**单写点**（仅 gateway 启动接线）+ **单读点**（`MergedAgentConfig`）；若未来出现第二个 agent 构建入口，应改为显式入参注入，不再新增全局写点。
-- 前端：编辑器保存前 refetch + [mergeMCPServersForSave](/Users/reina/Project/tokenaissance/fastagent/web/src/lib/mcp-servers.ts)（保留并发新增、不复活用户删除）。
-- dev 存量数据：一次性幂等脚本 [backfill_agent_mcp_servers.sql](/Users/reina/Project/tokenaissance/fastagent/scripts/backfill_agent_mcp_servers.sql)（已在 dev PG 执行：`agt_e586…/quandora` 1 行）。
+- store：[agent_mcp_servers.go](../internal/store/agent_mcp_servers.go)（List/Add/Delete/Replace，PK 前置条件）；DDL [database.go:1447](../internal/store/database.go)；DeleteAgent/DeleteUser 级联。
+- agent 工具：[mcp_config_tool.go](../internal/agent/mcp_config_tool.go)（per-key 写 + `requireAgentOwner`；旧 JSON helper 已删；add/remove 输出追加 `<mcp-undo>` 逆参数 marker，remove 携带完整被删 entry）。
+- undo 机器回放：[mcp_undo.go](../internal/agent/mcp_undo.go)（**限定当前会话**：`ListSessionEventsSince(user, agent, session)` 倒序读 tool_result marker，LIFO 自动重放；消费集存 `configs_kv` kind=`mcp_undo`、name=`undo:<sessionKey>`）。
+- fail-loud：[events.go](../internal/agent/events.go) `emitEventChecked`——mcp add/remove 的 tool_result 持久化失败或无 chat journal 时，结果附加 `[undo journal warning]`；`markUndoCursor` 写失败在 undo 结果中显式报错（已应用但未记账）。
+- 读路径：gateway layer-3 loader（[gateway.go:801](../internal/gateway/gateway.go)）从表 overlay；GET config 与 oauth servers 枚举从表读。架构备注：`config.AgentFileConfigLoader` 全局间接层当前**单写点**（仅 gateway 启动接线）+ **单读点**（`MergedAgentConfig`）；若未来出现第二个 agent 构建入口，应改为显式入参注入，不再新增全局写点。
+- 前端：编辑器保存前 refetch + [mergeMCPServersForSave](../web/src/lib/mcp-servers.ts)（保留并发新增、不复活用户删除）。
+- dev 存量数据：一次性幂等脚本 [backfill_agent_mcp_servers.sql](../scripts/backfill_agent_mcp_servers.sql)（已在 dev PG 执行：`agt_e586…/quandora` 1 行）。
 - 测试：store CRUD/前置条件/Replace、级联删除、dialect 回归、agent e2e（真 SQLite）、owner gate/schema/零 server 注册、**nil 依赖安全（全 action × nil bootstrap/agent 不 panic）**、gateway loader overlay（含空 JSON + 表行回归）、undo e2e（LIFO 顺序、remove 逆参数重放、消费游标、**会话隔离**、**游标写失败注入**）、fail-loud sink e2e（可注入失败 EventSink + warning 决策矩阵）、**tool 文案 copy 契约 golden**（`testdata/mcp-copy/`，`FASTAGENT_UPDATE_GOLDEN=1` 显式更新）、前端 merge（bun 4 用例）。
 
 ### 13.8 未来动作的可逆性门槛

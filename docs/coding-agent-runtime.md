@@ -1,5 +1,8 @@
 # Coding-Agent Project Runtime
 
+> **状态**：as-built 契约（project runtime 已实现；文中 HTTP API 是对外契约）
+> · **日期**：2026-06-13（最后更新 2026-06-14） · **形式**：F1（作用域同一性）+ F3（预览可达）
+
 This document is the integration contract for the **coding-agent runtime**:
 the layer that lets fastclaw scaffold a project from a template, run its
 dev server in a long-lived sandbox, and hand back a live preview URL. The

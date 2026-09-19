@@ -2,9 +2,12 @@
 
 > 状态：登记册（2026-09-18）· 回答一个问题：**基于文件形式化（F1/F2/F3）与状态可观测性原则，
 > 我们改了哪些点，每个点的 UT 与真机 e2e 在哪。**
-> **部署状态**：本册每一行的"上线"列都是 ❌ —— 它们全部只在**工作区**（未提交、未部署）；
-> 线上运行的是 `HEAD`（2026-09-17），**上面一条都还没有**。理由与对照表见
-> [10 的"部署状态"横幅](./10-harness-state-audit.md)。
+> **部署状态（2026-09-19 更正）**：本册 #1–#31（T1–T6）**已提交**在分支 `fastagent`（HEAD `8984c99`，
+> `a0080a5` 是锚点），**dev 已部署** `8984c99`；**production 仍是 `a24c0a8`（落后 34 个提交），
+> 所以对 production 而言"上线"列依然全是 ❌**。原文"只在工作区（未提交）"写于 09-18，已过期；
+> 两个远端：`fastagent`（私有，已含 `8984c99`）与 `origin` = `tokenaissance/fastclaw`
+> （**公开镜像，落后 34 个提交，按决定暂不推送**）。
+> 对照表与理由见 [10 的"部署状态"横幅](./10-harness-state-audit.md)。
 > 与其它文档的分工：**10 §4** 管"缺口的状态"，**05** 管"方案与决策记录"，**本文** 管"改动点 ↔ 证据"。
 
 ## 0. 怎么读
@@ -315,7 +318,8 @@ go test ./internal/workspace/ -run 'TestScopeSegments|TestWriteScope|TestAWriter
 
 **最终状态校验（T5 之后的 HEAD 上）**：`git status` 干净；对 BK3 基线 `verify.sh <repo> HEAD` →
 `verify OK: 112 files match`（拆分没丢任何文件）；离线全量 34/34；真机全套 sandbox 179.0s、
-agent/tools 42.9s 全绿。线上仍是 `16a7532`，一行未发。
+agent/tools 42.9s 全绿。**当时的**线上是 `16a7532`。（2026-09-19 实测：dev 已部署 `8984c99`——
+这七笔都在里面；production 仍是 `a24c0a8`。）
 
 ### 11.7.1 与 §11.3 计划的差异（六处，每处都写在对应 commit message 里）
 
@@ -329,3 +333,21 @@ agent/tools 42.9s 全绿。线上仍是 `16a7532`，一行未发。
 | `internal/gateway/userspace.go` 的 boxlite 接线 | T3 | **随 T2** | 与同文件的 `SetSignalStore` 接线相邻，且必须与 `boxlite_executor.go` 的签名一起走 |
 
 除这六处，§11.2 的整文件归属与 §11.3 的其余函数级归属与实际完全一致。
+
+## 12. 跨副本轮次完整性（2026-09-19 采纳的设计，**已于 2026-09-19/20 实现**）
+
+> 本节与上面所有节的区别：**它们是设计，不是改动**。经用户决定"先把设计做完，再一次性实现"
+> （[../session-turn-integrity.md](../session-turn-integrity.md) 的 Adopted 节）。
+> 所以每一行的"上线"列都是 ❌，且**连代码都还没有**；登记在这里是为了让"设计 → witness"
+> 的缺口可见，而不是预支完成度。形式化依据见 [12](./12-lease-formal-design.md)。
+
+| # | 改动点 | 形式（义务） | 代码锚点 | 计划 UT（含反证） | 真机 e2e | 上线 |
+|---|--------|-------------|---------|------------------|---------|------|
+| 32 | **A1** 跨副本轮次租约：store 新增 `session_turns`（键 = `sessions` 主键），`Acquire/Renew/Release/Get` CAS + 单调令牌；准入失败 ⇒ 既有 `queued` 事件 | F1（L1/L3/L5）+ F2（L6） | **已落地（工作区）**：`internal/store/database.go`（DDL + 四方法）、`internal/store/session_lease_test.go`（2 条）、`internal/agent/sessionlease.go`（端口 + `Turn` + `NopSessionLease`）、`internal/gateway/sessionlease.go`（适配器，持有者由适配器生成）。**已全部落地（工作区）**：两个准入入口（`loop.go` 的 `HandleMessage`/`HandleMessageStream`：先租约、后本地 FIFO 槽、最后释放租约）、`admission.go` 的 IfIdle 改读 `Live`、续租/释放/丢失信号（`internal/agent/turnlease.go`）、装配（`manager.go` 的 `WithSessionLease` + `gateway/userspace.go` 注入 `storeSessionLease`） | UT 已绿：store 侧 3 条（8 并发唯一赢家、过期移交、陈旧令牌不能续租/释放）+ agent 侧 3 条（等待并上报持有者与 ETA、自动回合延迟不入队、被接管即停并提示）。**两条反证已实跑**：把租约从准入拿掉 ⇒ `no queued event`；把 `Live` 从 IfIdle 拿掉 ⇒ `RunTurn error = <nil>` | 待真机（两个 gateway 副本、同一会话、两次 `chat/stream` ⇒ 第二个排队） | ❌ |
+| 33 | **A1 围栏**：`AppendSessionMessage` / `SaveSession` 在**有围栏时**带 `EXISTS(session_turns …)` 谓词；令牌对不上 ⇒ 拒绝写入（`ErrSessionFenceLost`） | F1（L4a：围栏在**资源侧**、与写入同一原子步骤） | **已落地（工作区）**：`internal/store/sessionfence.go`（`SessionFence` + ctx 盖章 + `ErrSessionFenceLost`）、`database.go` 两条写语句（两个方言；`SaveSession` 加在 `ON CONFLICT … DO UPDATE … WHERE`，`AppendSessionMessage` 加在 `HAVING`）、`internal/session/manager.go`（`TurnFence` + `Set/ClearTurnFence`，由 `ctx()` 盖章）。**按 review 决定的形态**：`session.SessionStore` 的两个写方法加 `*session.TurnFence` 参数（端口只命名自己那层的类型），适配器翻译成 `store.SessionFence`；store 侧保留原方法不动、新增 `SaveSessionFenced`/`AppendSessionMessageFenced`（与 A3 计划中的 `PutIfVersion` 同形——带前置条件的形式单独成一个方法）。未用 ctx 隐式传递 | 已绿：`TestSessionFenceRefusesASupersededWriter`（活令牌两侧都落、接管后陈旧令牌两侧都返回 `ErrSessionFenceLost`、新持有者照常写入、无 fence 路径不变）；**反证：把 `EXISTS` 去掉 ⇒ 陈旧写者的断言不再失败** | 同 #32 场景下，被接管的回合不得再落一行 | ❌ |
+| 34 | **A2** 投影不再断言"被打断"：三形态文案（持有者已死 / 持有者还活着 / 无事实），术语常量与"没有证据不许说 interrupted"的测试 | F2（O1 说真话） | **第 1 步已落地（工作区）**：`internal/provider/provider.go`（三句词表 + `SyntheticToolPads`）、`internal/agent/normalize.go`（当前一律用"无事实"句）。**两步都已落地（工作区）**：`internal/agent/turnlease.go` 的 `openCallAnswer`（租约读不到 ⇒ 无事实；对端持有 ⇒ 仍在运行；无其他持有者 ⇒ interrupted 可证），两个投影点改调 `normalizeForPromptWith`。| 已绿：`TestProjectionDoesNotClaimInterruptedWithoutEvidence`、`TestOpenCallAnswerFollowsTheLeaseFacts`（3 个子例）、3 条既有测试改为查整表；**两条反证已实跑**：把 `StoppedToolResult` 放回无条件路径 ⇒ 对端持有/读不到两个子例都红 | 无（纯投影，见 §7 的判据） | ❌ |
+| 35 | **A3** 工具写 store 的覆盖保护 —— **已决定走 B 族（版本条件写）**，改动清单 B1–B11 见 [../session-turn-integrity.md](../session-turn-integrity.md) A3.1：`ObjectInfo.Version`（不透明令牌）、`PutIfVersion` + `ErrVersionConflict`、S3 用 ETag（`SetMatchETag`，minio-go v7.3.0 已核）、LocalFS 用 `size:mtime_ns` 并**声明为尽力而为**、每后端强度表、7 个写者接入 | F1（G24：`tool→store` 那条路的前置条件）+ F4 的首个声明片段（**B1–B5 已落地**：版本令牌 + LocalFS 尽力而为的条件写 + S3 的 ETag 条件 PUT + `Metered` 透传；UT `TestLocalFSPutIfVersionRefusesAStaleExpectation`，反证已实跑。**B6–B11a 已落地**（强度表 `01 §2.x`；三个文件工具、附件、技能发布、面板上传；面板冲突返回 409 + 当前版本）；**B11-b 服务端半已落地**（上传接受可选 `expectedVersion` ⇒ 按版本替换；缺失 ⇒ 仅创建；UT + 反证已跑）；**cloud 面板三答案与自动改名待做**） | `internal/workspace/{workspace,s3,localfs,metering}.go`、`internal/agent/tools/{file,apply_patch}.go`、`agent/attachments.go`、`skills/objectstore.go`、`setup/handlers_agents.go` | 每个写者一条 UT：对端在读写之间写入 ⇒ 拒绝 + σ；**反证：去掉条件谓词 ⇒ 对端版本被静默覆盖** | 面板上传 vs 回合并发（B11） | ❌ 待批准后落地 |
+| 36 | **A4** 客户端不再从自己的 socket 推断服务端状态：三元（interrupted / unknown / running）+ `turnActive{holder, epoch, expiresAt}` + `queued{holder, ETA}` + `subagent_progress.id` | F3（取用侧不得回答只有产生侧能回答的问题） | **服务端已落地（工作区）**：`internal/setup/handlers.go` 的 `handleChatSubscribe`（`event: turn_active`）与 `handleChatHistory`（`turnActive` 字段）、`internal/agent/turnlease.go` 的 `queued{holder, expires_at}`。**未落地**：cloud 侧五态渲染（`message-list.tsx`/`chat-composer.tsx`/`use-stream-pipeline.ts`/`chat.json`）与 `subagent_progress.id` | 待补：三段事件序列 ⇒ 三种标签；**反证：还原措辞 ⇒ 陈旧视图重新渲染成 Interrupted** | 中途断开 SSE、再发一条 ⇒ UI 显示"仍在运行/已排队" | ❌ |
+| 37 | **G25 修法**：沙箱租约的抢占分支 `epoch = epoch + 1`（令牌永不回到 1） | F1（L4c：令牌逐次唯一） | **✅ 已落地（工作区）**：`internal/store/sandbox_leases.go:69-80` | 已绿：`TestSandboxLeaseEpochNeverResetsAcrossTakeover`（严格递增 + 老令牌释放被拒 + 活行仍在）；**反证已实跑**：改回 `epoch = 1` ⇒ `gen1=1 gen2=1` 失败 | 无需真机（纯 store 语义） | ❌ |
+
+> 表中 `tokenaissance-cloud:` 前缀的路径相对 cloud 仓库（[tokenaissance/tokenaissance-cloud](https://github.com/tokenaissance/tokenaissance-cloud)，分支 `develop`）。

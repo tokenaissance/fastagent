@@ -12,6 +12,15 @@
 > ## ⚠️ Deployment status (recorded 2026-09-18; read this before the rest)
 >
 > **Every "fixed (2026-09-18)" below means fixed in the WORKING TREE: uncommitted and undeployed.**
+>
+> **Correction (measured 2026-09-19)**: T1–T6 **are committed** (branch `fastagent`, HEAD `8984c99`;
+> `a0080a5` is an ancestor of HEAD; the **private repository `tokenaissance/fastagent` already carries that
+> commit**); **dev runs** `8984c99`, and **production is 34 commits behind**
+> (`a24c0a8`, image `…:20260917035926-fastagent-a24c0a8`). This repo has two remotes: `fastagent`
+> (private, the current one) and `origin` = `tokenaissance/fastclaw` (the **public mirror, 34 commits
+> behind, deliberately not pushed for now**). So "uncommitted" below is stale;
+> "**not in production**" still holds. Where the tables below say `HEAD`, read it as `16a7532` of
+> 2026-09-17 — this line supersedes it.
 > `HEAD` is `16a7532` (2026-09-17); the working tree is +2163/−359 across 76 files. The difference is not
 > a detail — it is **whole mechanisms that do not exist on the deployed side**:
 >
@@ -458,7 +467,7 @@ warning instead of stalling the drain loop — a remedy for observability must n
 | ~~G5~~ | O1 | ~~the σ from `write_file` / `apply_patch` is always false (over 2 MiB), and docker emits it too~~ | the agent itself | **P0 fixed (2026-09-18)**: four `CompareResult` states; docker is silent; re-checked with the same probe (§2.1) | — |
 | ~~G6~~ | O1 | ~~`apply_patch` / `write_file` can never report "replaced a different version"~~ | the agent itself | **P1 fixed (2026-09-18)**: `previousStoreVersion` + `plannedWrite.previous`; `write_file` reports it now | — |
 | ~~**G7a**~~ | O1 | ~~the divergence is invisible~~ | the user | **P1 fixed (2026-09-18)**: `list_dir` now names the "store has it, the sandbox does not" paths (with the reason and a way out); docker is not asked, and an unanswerable probe stays silent | — |
-| ~~**G7b**~~ | — (write-path symmetry: a Cordis precondition, not a delivery duty) | uploads/deletes do not reach the live sandbox | the user | **upload half decided (2026-09-18): no write-through = option a.** The product semantics is **"the panel is the file library"**; "the next `exec` immediately lists it" is **not** a requirement, and both the cost and the workaround are already stated by the existing signal (`list_dir` and the post-exec sync name the paths the store has and the sandbox does not, and give the `read_file` + `write_file` recipe). Clarification: on LocalFS + docker it is *naturally* visible immediately (one tree); we will **not** change the architecture to hide it — the accurate statement is "immediate visibility is not promised and not prevented; the backend decides" | the **delete half is still unfixed and must be**: awaiting the choice between d1 (write-through delete) and d5 (deletion tombstone), see [05 §8](./05-remediation-plan.md) |
+| ~~**G7b**~~ | — (write-path symmetry: a Cordis precondition, not a delivery duty) | uploads/deletes do not reach the live sandbox | the user | **upload half decided (2026-09-18): no write-through = option a.** The product semantics is **"the panel is the file library"**; "the next `exec` immediately lists it" is **not** a requirement, and both the cost and the workaround are already stated by the existing signal (`list_dir` and the post-exec sync name the paths the store has and the sandbox does not, and give the `read_file` + `write_file` recipe). Clarification: on LocalFS + docker it is *naturally* visible immediately (one tree); we will **not** change the architecture to hide it — the accurate statement is "immediate visibility is not promised and not prevented; the backend decides" | **delete half: fixed twice.** The **panel** on 2026-09-18 (G21's d1) and the **tool path** on 2026-09-20: `apply_patch`'s Delete stopped at the store, so the sandbox copy survived and the next sync pushed the **old version** back — silently, with the caller told it worked. It now calls the same `sandbox.LiveWorkspaceFileRemover` (live instances only, never creating one); a failed mirror attaches a signal instead of claiming a clean delete, the same posture as the panel's `sandboxRemoved:false`. Chose **d1 over d5** for the reason in [05 §8](./05-remediation-plan.md): fix at the source, so no sync-side scope inference is involved. UT: `TestApplyPatchDeleteReachesTheLiveSandboxCopy`, `TestApplyPatchDeleteSurvivesAFailedMirrorWithoutLying`, `TestApplyPatchDeleteIsANoOpWhenTheBackendHasNoSecondCopy`; falsification run for real (disable the mirror call ⇒ the first two go red). **Live proof: done (2026-09-20, real E2B).** `TestE2BLiveApplyPatchDeleteSticks` runs the whole chain on a real sandbox — hydrate → tool delete → the sandbox copy is gone → **one exec later the sync runs and the store still has no key** (no resurrection). **Falsification run on the real machine too**: disable the mirror call and it fails at *"the sandbox copy survived the tool delete: yes"* in 29 s. Command: `FASTAGENT_E2B_LIVE=1 E2B_API_KEY=… go test ./internal/agent/tools/ -run TestE2BLiveApplyPatchDeleteSticks -v`. [This row used to say "the delete half is still unfixed", contradicting G21 above and §6 below: it was the *tool* half that was open, not the panel's.] |
 | ~~**G21**~~ (found 2026-09-18; same family as G7b) | — (the path/scope conventions disagree; F1's "one path, one key") | ~~the panel delete was a silent no-op: the list returns agent-relative paths that already carry the scope prefix, the panel DELETEs that path as-is with `?sessionId=`, and the handler applied the scope **again** ⇒ the key grows a second prefix ⇒ nothing is there; both backends report success for a missing target ⇒ API 200, the UI believes it deleted, and the row reappears on refresh~~ | the user | **fixed (2026-09-18)**: ① **Fix 0** — delete now uses the same convention as download (a path that carries its prefix is read as agent-relative, `Delete(agent,"","",path)`; the older bare-path + query shape keeps working, with `sandbox.StorePathScope` as the single decision point); ② **d1** — the same delete also drops the **live sandbox's** copy (`Gateway.RemoveWorkspaceFile` → `sandbox.LiveWorkspaceFileRemover`, reaching the instance through `LiveExecutorPool` — **live instances only, never creating one**), because otherwise the next sync writes it straight back (both halves pinned on real E2B). A failed sandbox removal answers `sandboxRemoved:false` + a warning instead of pretending the delete was clean | — |
 | ~~G8~~ | O1 | ~~identity/system files edited from outside, unsignalled~~ | user / other session / other pod | **P1 fixed (2026-09-18)**: the turn-level sample now carries fingerprints of the seven identity files; the file is named, never quoted | see the landing note in §3.3 (`identitySampleFiles`) |
 | ~~**G9**~~ | O4 | ~~agent config edited from outside, unsignalled; the baseline died with the instance, and a config change takes effect precisely by replacing that instance~~ | the user | **fixed (2026-09-18)**: `model` + `prompt_mode` are sampled, and the "before" is no longer invented — it is **read from the conversation's own turn receipt**. Zero new storage, zero new write path, and inherently safe across instances and replicas. A rebuilt agent's **first turn** can now state `my configuration changed: <old> → <new>`; no readable receipt means silence. The receipt later grew into the whole snapshot (see G20) | — (G20 generalised the same mechanism to the other five families) |
@@ -483,6 +492,163 @@ warning instead of stalling the drain loop — a remedy for observability must n
 > **measurement**, not a falsification. What does pin the stamp: the unit test
 > `TestWriteThroughStampsTheSandboxCopyWithTheStoreTime` (it pins the instant in the command) and the live
 > `TestE2BLiveHydrateKeepsStoreStamp` ([11 §10](./11-change-register.md), rows 10-4 / 10-5 / 10-8).
+
+> **G24 (found 2026-09-19, in the cross-replica turn incident)** — duty `—` (**F1 preconditions**: the
+> tool-writes-the-store direction): a tool's `workspace.Store.Put` has **no precondition at all**
+> (last-writer-wins). T1 turned the `sandbox→store` write-back into a reconciler with preconditions
+> (`BLOCKED`: refuse and report on differing bytes), but the **`tool→store` direction was never
+> checked**. When a session has two writers (concurrent turns on two replicas) the same path is simply
+> overwritten: on 2026-09-18 the same deliverable was written twice (pod B 16:44:07 **15 348 bytes** →
+> pod A 16:50:16 **11 492 bytes**) and **the first version was lost** — silently; nobody was told.
+>
+> **Fix**: the primary fix is **not in this layer** — the cross-replica turn lease removes the second
+> writer altogether ([docs/session-turn-integrity.md](../session-turn-integrity.md) A1).
+> This layer gets two belts: ① **detect and report** (a `Stat` before and after the write comparing
+> `size+mtime`; no interface change — turns a silent loss into a σ); ② **conditional write**
+> (`ObjectInfo` gains `Version`; `PutIfVersion` + `ErrVersionConflict`; 3 implementations + **11**
+> `.Put(` call sites) where a conflict is refused and reported — the **same policy as T1's `BLOCKED`**. **Decided 2026-09-19: take ② (family B); change list B1–B11**
+> (`Move` already has this posture: it refuses to overwrite a non-empty destination,
+> `ErrMoveDestinationExists`).
+>
+> **Note (upstream)**: this gap's upstream is that "**what one write means under concurrency**" was never
+> stated (on the same port `LocalFS` does an in-place `O_TRUNC` write while `S3.Move` calls itself "Not
+> atomic"). It is the formal fourth-system candidate; the analysis and the reopening conditions are in
+> [00 §7](./00-formal-systems.md)'s note and §7.1 "The original design". **Current decision: not
+> adopted** — A1 (removing the second writer) plus A3 (detect / conditional write) is enough.
+
+> **G25 (found 2026-09-19, while checking every existing lease against the cross-replica turn
+> lease's requirements)** — duty `—` (**F1's mechanism layer**: the lease itself as the witness of a
+> precondition): the sandbox lease's fencing token **resets to 1 every generation** — both of
+> `AcquireSandboxLease`'s statements hard-code `epoch = 1`
+> (`internal/store/sandbox_leases.go:72` / `:81`); only renew/replace increment (`:118-124` /
+> `:151-160`). So `epoch` says "how many renewals this possession received", not "which generation of
+> this row this is".
+>
+> **Measured counterexample** (a probe, deleted after the run): the same `owner` (`host:pid`, which
+> repeats) re-acquires the same scope after the previous generation expired, and generation 2's `epoch`
+> is back to `1`; a delayed release carrying generation 1's token —
+> `ReleaseSandboxLease(scope,"pod-a",1)` — returns **`released=true`** and **the new generation's live
+> row is deleted** (`GetSandboxLease` then returns `nil`). It also explains why one document contradicts
+> itself: `docs/sandbox-pool-leases.md:87-89` admits "monotonic within a lease cycle only", while
+> `:237-240` claims "any stale destroy request fails closed" — the latter is false.
+>
+> **Family and fix**: not an F2/F3 gap but **L4(c)** of [12 §3](./12-lease-formal-design.md) (a fencing
+> token must be **unique per acquisition**: either the holder identity embeds a one-shot nonce, or the
+> token is strictly monotonic over the row's whole life). The fix is one clause: the claim branch becomes
+> `epoch = epoch + 1` (the insert branch keeps `1` — a first row has no predecessor); the falsification
+> test is "the token strictly increases across two takeovers", which goes red the moment that clause is
+> reverted. `session_turns` does not inherit the weakness: its holder is `<pod>/<uuid>` (unique per
+> acquisition) and its token never resets — see [12 §6](./12-lease-formal-design.md).
+>
+> **Fixed (2026-09-19, working tree)**: the claim branch is `epoch = epoch + 1`
+> (`internal/store/sandbox_leases.go:69-80`) and the insert branch keeps `1`;
+> `TestSandboxLeaseEpochNeverResetsAcrossTakeover` pins "strictly increasing across two takeovers +
+> a stale release refused + the live row still there", with the falsification run for real. The prose
+> followed: [../sandbox-pool-leases.md](../sandbox-pool-leases.md)'s U clause and "Hardening" section
+> now say fixed rather than uncovered.
+
+> **G26 (found 2026-09-19, answering "we are supposed to be a serverless fastagent — does any design
+> violate that?")** — duty `—` (**E bucket: retention**; the harness's own residency, not a σ): in the
+> build **production is actually running** (`a24c0a8`, image tag
+> `20260917035926-fastagent-a24c0a8`, pods started 2026-09-17T04:02Z) `session.Manager.sessions` is an
+> **unbounded** in-process map — `m.sessions[key] = s` at `internal/session/manager.go:389` and `:446`
+> with **no eviction anywhere** (`git show a24c0a8:internal/session/manager.go | grep -n
+> 'sessionCacheMaxSize\|evictIdleLocked'` prints nothing). Every (agent, session) pair the pod serves
+> stays resident for the life of the process, each carrying that session's whole LLM-facing working set
+> (`Session.Messages []provider.Message`). Its size is therefore bounded by **how much history this pod
+> has served**, which is precisely what a serverless process must not do — and the two production
+> replicas, started in the same minute with **0 restarts**, do not have the same footprint:
+> `kubectl -n production top pod` on 2026-09-19 read **96Mi** (62mx9) and **88Mi** (vxrcx) after 2d9h.
+>
+> **Fix (landed in the working tree, not yet deployed)**: an LRU bound — `sessionCacheMaxSize = 128`,
+> never dropping the caller's own session or any session with work in flight — plus one footprint line
+> per 100 cache-touching `Get`s. `TestSessionCacheEvictsIdleEntriesAndRebuildsThem` pins that a dropped
+> entry is rebuilt from the authoritative store (so eviction is unobservable) and
+> `TestSessionCacheKeepsSessionsWithWorkInFlight` pins that in-flight state is never dropped.
+> **The first implementation was a pure idle TTL and the test caught it**: when every entry was touched
+> recently nothing is "idle" and the map still grew to 136 > 128. An idle TTL is a *preference*; only
+> eviction reaches the *bound*.
+>
+> **The budget's unit is sessions — decided 2026-09-19, after measuring both alternatives.** Byte and
+> line budgets were implemented and then dropped: a byte budget needs an estimate maintained on every
+> mutation path (and drifts the moment one forgets), and lines are not a fixed size either. The session
+> count is the unit the cache can enforce exactly and cheaply, and the thing it must bound — how many
+> entries the pod accumulates — is genuinely a count. `TestSessionCacheBudgetIsCountedInSessionsNotSize`
+> pins the unit: the cache saturates at exactly the budget even when every session is 64 KiB heavy
+> (**falsification run for real**: gating the sweep on line count instead saturates at 51, and the test
+> goes red).
+>
+> **The unit and the scope, decided 2026-09-19** — the budget is **10 sessions per agent**
+> (`agentSessionCacheMaxSessions`; a Manager is built per agent, so the scope is a real one and the
+> constant's name now says it — §10.7 keeps the pod-wide alternative and what it would cost). Ten is
+> small on purpose: what the cache saves is allocation work, because `Get` re-reads the working set
+> from the store on **every** call, so keeping ten conversations warm buys the same thing as keeping a
+> hundred. The residual is measured, not hidden — a session is not a fixed size (the same ten can cost
+> 2.3 MiB or 77.1 MiB depending on shape, §10.3) — and eviction is now the normal path rather than the
+> exception, which is exactly why §10.6's field-by-field proof exists: dropping an entry is
+> unobservable except for one field, `snapshot` (§10.5), which is the accepted cost.
+
+> **G27 (found in the same audit; fixed the same day — see the addendum below)** — duty `—`
+> (**E bucket: retired resources**): two per-agent tables
+> keep entries for work that is **already over**, and neither has a single `delete`:
+> `tools.shellManager.shells` (`internal/agent/tools/bash_session.go:157`) and `tools.sandboxJobs.live`
+> (`internal/agent/tools/sandbox_background.go:104`). Both only ever **add** (`Start` / `start`), and
+> `rg 'delete\(m\.shells|delete\(s\.live'` finds nothing repo-wide. The code says so out loud:
+> *"we deliberately do NOT remove the session from the map here. bash_output remains useful after exit …
+> Registry.Close handles cleanup, or a future TTL eviction can be layered on top."* But
+> `Registry.Close()` has **zero production callers** — the only two call sites in the repo are tests
+> (`internal/agent/workspace_signal_e2e_test.go:91,124`). The Registry is constructed once per agent in
+> `newAgentWithActor` (`internal/agent/loop.go:338`), so in production the table's lifetime is the
+> agent's, and the agent's is the `UserSpace`'s — 30-minute idle TTL, refreshed by every use.
+>
+> **Cost**: a host background shell holds an `outputBuffer` capped at `bufferCap = 4 MiB`
+> (`bash_session.go:25`), so the worst case is **4 MiB × every host background job this agent has ever
+> started**. The sandbox table's entries are small (a path, a read cursor, a runner) — the same shape at
+> lower weight. Reaching the host path additionally requires `run_in_background` **and**
+> `useSandbox == false` (`internal/agent/tools/exec.go:292` refuses background work on the sandbox path
+> when no executor is bound), so how *large* this gets depends on the deployment; that it is
+> **unbounded** does not.
+>
+> **Fixed (2026-09-19, working tree)** — retirement moved onto the transition that actually happens,
+> because the one that didn't (`Registry.Close`) is unreachable in production:
+>
+> | Table | Retired when | What is kept | Bound |
+> |---|---|---|---|
+> | `shellManager.shells` | the reaper, immediately after `cmd.Wait` returns | the tail that explains the exit | `shellExitedTailBytes` = 64 KiB per shell · `shellRetainedExited` = 32 exited shells per agent |
+> | `sandboxJobs.live` | the first poll that observes `exited` / `missing` (there is no process handle to wait on, so the poll **is** the observation) | the entry itself (a path + a read cursor) | `sandboxRetainedFinished` = 64 finished jobs per agent |
+>
+> Running work is never forgotten in either table. The trim lands **before** `done` is published, so a
+> reader that sees "exited" cannot be handed a tail without also being told it is a tail — and the
+> sentence names the real reason (*"is no longer buffered (the shell exited; only its last 64 KiB is
+> kept)"*) instead of reusing the 4 MiB running-cap wording, which would have been a false explanation
+> of a real loss (08 §2.2, O1).
+>
+> **Cost, stated**: `bash_output` on a forgotten job answers exactly like an id that never existed —
+> the message already says ids are valid only within the same agent process, and the honest contract is
+> "the most recent N finished jobs stay addressable". The caps (32 shells / 64 sandbox jobs) are high
+> enough that a working session never notices; they exist so the table stops being sized by history.
+>
+> Tests: `TestRetiredShellKeepsOnlyItsTail` (200 KB of output → ≤64 KiB kept, the end survives, the
+> reader is told the exit reason), `TestRetiredShellsAreCappedAndRunningOnesSurvive`,
+> `TestSandboxJobsForgetFinishedJobsBeyondTheRetention`, `TestSandboxJobsNeverForgetARunningJob`.
+> **Falsifications run for real**: disable the trim ⇒ the first fails at *"retired shell holds 200022
+> bytes"*; disable the shell cap ⇒ the second times out; disable the job-table cap ⇒ the third fails at
+> *"72 finished entries"*.
+
+> **G28 (found in the same audit, minor)** — `session.StoreAdapter.ownerCache`
+> (`internal/session/store_adapter.go:55`) is a map with no bound and no eviction: one entry per
+> `session_key` that adapter has ever resolved. Entries are tiny (a key → a user id) and the adapter dies
+> with its `UserSpace`, so this is a note rather than a defect — recorded because the audit's test has to
+> be applied uniformly, not only where a problem is expected.
+
+> **G30 (found 2026-09-19, while checking what the budget's *scope* actually covers; resolved the same
+> day)** — duty `—` (**S1's scope**): `sessionCacheMaxSessions` read like a pod-wide quota and was in
+> fact **per agent** — `internal/gateway/userspace.go:1115` builds one `agent.Manager` per user space,
+> and `internal/agent/manager.go:246` builds one `session.Manager` **per agent**, so a pod with K loaded
+> agents could hold K × the budget. **Per agent is the intended scope** (each agent's own conversations
+> are the ones worth keeping warm); what was wrong was only that the name and the comment invited the
+> pod-wide reading. The field is now `agentSessionCacheMaxSessions` and §10.7 records what the pod-wide
+> alternative would cost, so the choice is documented rather than implied.
 
 ## 5. Conclusions
 
@@ -561,6 +727,17 @@ A second probe drops `IsRemoteWorkspace()` (the docker shape: a single copy) and
 **byte-for-byte identical** — which is precisely G5's verdict: "the exit does not know whether a second
 copy exists, only that it did not compare this time".
 
+> **How the E2B key reaches a run (recorded 2026-09-20, because "it is not in my shell" and "there is no key" are different facts).**
+> Two sources, in this order: ① `E2B_API_KEY` from the environment — in the cluster it is injected from the Secret
+> `fastagent-secrets` key `E2B_API_KEY` (never a ConfigMap), read once at startup into `config.Sandbox.E2BKey`
+> (`internal/config/env.go:132`) and then **unset from the environment** (it is in the read-then-`Unsetenv` list at
+> `env.go:236`, the same family of guard that keeps daemon secrets out of the agent's `exec`); ② an admin-saved
+> `SandboxE2BKey` (`internal/setup/handlers_admin.go:352`), which **overrides** the environment one
+> (`env.go:271-272`). Live tests do not read config at all — they read `FASTAGENT_E2B_LIVE=1` + `E2B_API_KEY` directly
+> (`apply_patch_live_scope_e2e_test.go:50`), and the template comes from `FASTAGENT_E2B_TEMPLATE` (prod: `fastclaw-sandbox`).
+> A shell where `E2B_API_KEY` is unset does **not** mean the key is unavailable — it can be taken from the cluster secret for a
+> local run, which is how the proof above was produced.
+
 ## 8. Not verified (honestly recorded)
 
 - neither direction of G10 (a cron job deleted from the UI, `HEARTBEAT.md` rewritten) has a test; the
@@ -593,3 +770,233 @@ constants, no `ws_baseline` key/column or env var. What was removed:
 evolution record), and one **negative assertion** (a test asserting the tool result never contains
 `resolve_workspace_conflict`) — that is a regression guard against re-introducing the "let the agent pick
 a side" design, not a leftover.
+
+## 10. The harness's own residency: the test that answers "does any design violate serverless?" (2026-09-19)
+
+"We are supposed to be a serverless fastagent, so why does pod memory keep growing with turn count?"
+is not a σ question (F2/F3) and not a precondition question (F1). It is the **fourth kind of question**
+this document set keeps meeting: *what may a process keep in memory, and for how long?* It sits in
+[00 §7](./00-formal-systems.md)'s E bucket, under "retention / GC policy".
+
+### 10.1 The test
+
+Applied to every process-resident container in the gateway:
+
+| # | Test | A container fails when |
+|---|------|------------------------|
+| **S1** | Its size is bounded by **work in flight**, not by how much history this process has served | it gains one entry per session / turn / job ever seen |
+| **S2** | Anything **rebuildable from a durable store** must not be the only copy in memory. Judged **per field, not per struct** (see §10.5 — this is the clause the audit added) | dropping an entry at any moment would change something observable |
+| **S3** | A **retired** resource (a finished job, a dead session) must be droppable without losing a fact someone still needs | "keep it forever in case the agent asks again" is the design |
+
+One corollary is used below, and is the whole reason §10.3 exists: **a count bound is only a proxy for a
+byte bound, and the proxy is as good as the largest element.** "At most 128 sessions" bounds memory
+only if a session is itself bounded.
+
+### 10.2 The audit (every container, verdict, evidence)
+
+| Container | Bounded by | Verdict |
+|-----------|-----------|---------|
+| `session.Manager.sessions` + each `Session.Messages` | LRU 128 in the working tree; **nothing at all in the build production runs** | **fails S1 in `a24c0a8`** (G26; fixed in the working tree). Its byte bound is still open — §10.3 |
+| `tools.shellManager.shells` | nothing in the running build; **now**: retired at exit (tail-trimmed) and capped at 32 | **failed S3** (G27), **fixed 2026-09-19** |
+| `tools.sandboxJobs.live` | nothing in the running build; **now**: retired on the poll that observes the end, capped at 64 | **failed S3** (G27), **fixed 2026-09-19** |
+| `session.StoreAdapter.ownerCache` | nothing; dies with its `UserSpace` (30-minute idle TTL) | minor (G28) |
+| `gateway.userSpaceRegistry.spaces` | 30-minute idle TTL, refreshed on use (`idleTTL`, `startEvictor`) | **passes S1** — bounded by *concurrent users*, and holding a space is what "this user is working" means |
+| `gateway.dedup` (`sync.Map`) | TTL 60 s + a sweep every 30 s (`cleanupDedup`, started at `gateway.go:853`) | **passes** |
+| `gateway.deferredTurns.items` | drained every 1 s (`run`), `maxWait` 5 min, expiry speaks a σ | **passes** |
+| `agent.EventHub.subs` | deleted on unsubscribe, and all three production subscribe sites `defer unsubscribe()` (`internal/setup/handlers.go:1284`, `:1566`, `handlers_team_chat.go:187`) | **passes** |
+| `gateway.modelCostCache.cache` | keyed by configured (provider, model) pairs | **passes** |
+| `sandbox.E2BExecutorPool.executors` / `leaseEpochs` | one entry per scope; removed by `takeExecutor` on release / sleep | **passes S1** — bounded by scopes holding a live lease |
+
+The three failures share one shape: **a table keyed by history with no retirement path.**
+
+### 10.3 What could be measured, and what could not
+
+"Read the online footprint" was the wrong plan, and the user was right to reject it. The in-process
+footprint line is **not in the deployed build** (`a24c0a8` predates it), and neither `a24c0a8` nor the
+working tree registers `net/http/pprof` (`rg 'pprof|expvar|/metrics' cmd internal` → nothing), so a heap
+profile cannot be pulled out of a live pod without shipping an endpoint. What **is** available without
+deploying anything:
+
+| Without deploying | What it gives |
+|---|---|
+| `git show <prod-tag>:<file>` plus `rg` for `delete` / eviction | the **categorical** answer: which containers grow with history. This is a property of the source, not of the running pod |
+| `kubectl -n production top pod`, `.status.startTime`, restart count, image tag | the symptom and its shape: same start minute, **different** footprints |
+| A local probe driving the real `Manager` and reading `runtime.ReadMemStats` deltas | **bytes per session** — the coefficient that turns "N sessions" into "N bytes" |
+| A read-only query against the production store (`sessions` count, message bytes) | how much history the pod was actually asked to hold |
+| `kubectl exec … kill -QUIT 1` → `kubectl logs` | a goroutine dump. Useful for leaked goroutines; useless for the heap |
+
+**Measured** (local probe, real `session.Manager`, `runtime.GC()` before and after; the probe was deleted
+after the run). The cache saturates at its bound, so every row is "128 sessions resident":
+
+| Message shape per session | Resident heap | Per session |
+|---|---|---|
+| 20 messages × 512 B | **2.3 MiB** | 18.5 KiB |
+| 40 messages × 2 KiB | **12.1 MiB** | 96.8 KiB |
+| 30 messages × 10 KiB (≈300 KiB of text — roughly what compaction leaves behind) | **38.5 MiB** | 308.4 KiB |
+| 60 messages × 8 KiB (tool-output-heavy) | **62.1 MiB** | 496.7 KiB |
+| 60 messages × 10 KiB | **77.1 MiB** | 616.8 KiB |
+
+**Measured against the production store** (read-only; via a temporary `pgprobe` pod in the `production`
+namespace, which deleted itself after the query — the database is VPC-private, so `psql` from outside
+cannot reach it):
+
+| Production `sessions` | value |
+|---|---|
+| rows | **108** |
+| rows updated in the last 2 days | **5** |
+| `messages` as stored (`pg_column_size`, i.e. TOAST-compressed) | **9.1 MiB** total · 449 KiB max · 87 KiB avg |
+| `messages` as text (`octet_length(messages::text)`, i.e. what the process holds) | **31 MiB** total · **1.85 MiB max** · 297 KiB avg |
+
+**The second row is the one that matters, and taking the first would have been a mistake**: JSONB is
+TOAST-compressed on disk, so the stored size understates the resident size by 3.4×. What the process
+holds is the *text*: **31 MiB** for the whole dataset. Add Go struct overhead per message, and at
+`GOGC=100` (no `GOMEMLIMIT` in the deployment env) the runtime's target is roughly **2× live heap** —
+which lands in the **80–100 MiB** band. That is exactly where all four running processes sit, and the
+narrow band *across two builds and two very different uptimes* (prod `a24c0a8` at 2d9h: 96Mi / 88Mi;
+dev `8984c99` at 21h: 87Mi / 82Mi) is explained by the same thing: a **finite** dataset (~31 MiB) that
+every replica caches in full. A container growing ∝ served history would not plateau; the fact that
+the ceiling here *is* the dataset is what makes the unbounded cache the dominant term rather than a
+slow leak.
+
+> The two environments do **not** share a database (their `STORAGE_DSN` secrets hash differently), so
+> the 31 MiB figure is production's; the band is the *shape* both environments show, and dev's dataset
+> is smaller. The band's meaning is the same in both: a ceiling set by data, not by uptime.
+
+> **The "expected ~15 MiB" baseline was never reachable for this binary.** The floor is not "an empty
+> process" — it is what one or more `UserSpace`s hold resident (agents, each with loaded skills, prompt
+> modules, memory and the full tool catalog) plus the Go runtime and this dataset. The useful target is
+> not a number picked from intuition but a **budget with a mechanism** (see 2 below and G27).
+
+Two conclusions, plus the decision the second one forced:
+
+1. **The unbounded cache explains the symptom, quantitatively.** The build production runs caches every
+   session it has loaded, forever; the dataset it can hold is ~31 MiB of text, and the resulting live
+   heap lands at roughly 2× that in RSS.
+   One source fact explains why a *session* can be that heavy: the largest single session is **1.85 MiB
+   of text = ~460K tokens by `EstimateTokens`** (`len(Content)/4`, `internal/agent/compaction.go:31`),
+   i.e. **well past the 80K-token compaction trigger** — because the trigger measures only `Content` and
+   tool-call arguments, while what is stored (and therefore resident) also carries `Metadata`,
+   `Thinking` and `RawAssistant`. So "compaction ran" does not imply "this session is small".
+2. **A count bound is not a byte bound — and the budget is still counted in sessions (decided
+   2026-09-19).** Byte and line budgets were both implemented (`sessionCacheMaxBytes` /
+   `sessionCacheMaxLines`) and both dropped: a byte budget needs an estimate maintained on every path
+   that mutates history, and lines are no more fixed-size than sessions. What the decision buys is a
+   bound the cache can enforce exactly, cheaply and predictably — and what it costs is stated explicitly
+   rather than implied: **it caps how many sessions are remembered, not how much each one weighs**, and
+   with 108 sessions in production today the 128-session budget does not bind there yet. Choosing a
+   budget small enough to shrink today's resident set is a separate product decision; the number that
+   decision needs is right here, and the cost of each eviction is a rebuild that `Get` already performs
+   on every call (it re-reads from the store unconditionally).
+
+### 10.4 Why this is not a fourth formal system
+
+F2 says "a change to the world must be observable by the agent". S1/S3 are its dual applied to the
+harness's own memory: **state that is not a fact about the world must not be retained, and state that is
+derivable must not be the only copy.** The skeleton is the one F2 uses everywhere else — *recompute from
+the authoritative source; do not remember* — so this is a new instance of an existing shape (a C in
+[00 §7](./00-formal-systems.md)'s vocabulary), not a new question with a new judgement form. What it
+does add to the checklist is one question that must be asked of every new table: **"what removes an
+entry, and is that path reachable in production?"** G27 is what happens when the answer is a `Close()`
+nobody calls.
+
+### 10.5 What this audit put back into the method: "rebuildable" is a per-field property
+
+The eviction rule rests on S2: *anything rebuildable from a durable store must not be the only copy in
+memory.* Applied to `Session` it looked trivially true — the working set is re-read from the store on
+every `Get`, so an entry can be dropped at any moment. Walking the struct field by field, instead of
+trusting that summary, found one field where it is false:
+
+| `Session` field | Rebuildable from the store? |
+|---|---|
+| `Messages` | **yes** — `getByKey` re-reads it on every call, so a dropped entry is unobservable |
+| `channel` / `accountID` / `chatID` / `projectID` / `runReceipt` | yes — columns on the session row |
+| `snapshot` (the `/retry` restore point) | **no** — `Undo()` restores from process memory only; there is no snapshot column, and `HasSnapshot` simply reports `false` after a drop |
+| `turnActive` / `turnWaiters` / `steerBuf` / `turnFence` / `fenceLost` | no — but they exist only while work is in flight, and the sweep is forbidden to drop a busy session |
+| `lastTouched` | no, and it does not matter: it is the cache's own bookkeeping |
+
+So the correct statement of S2 is **per field, not per struct**: *for every field, either it is
+rebuildable, or it is confined to entries the sweep may not drop, or dropping it is an accepted cost
+that is written down.* `snapshot` is the third case, and writing it down is the whole point:
+
+- evicting a session discards its undo point, so `/undo` after a `/retry` can answer "nothing to undo"
+  — which is the same answer it already gives whenever the next turn is served by another replica,
+  because the snapshot was always pod-local. The bound adds one more way to lose it; the loss was
+  already in the contract. What the method requires is that this be **stated**, not discovered.
+
+This is the one place the audit pushed back on the method. It is not enough to change a principle, but
+it sharpens the checklist: the field-by-field question — *which parts of this struct are **not**
+rebuildable, and who pays for them?* — is now part of S2 in §10.1. It is also what would have caught a
+whole-struct eviction that silently dropped undo state if `Snapshot()` were called on every turn
+instead of only by `/retry`.
+
+### 10.6 When the budget actually binds: the eviction-safety audit
+
+The budget is **10 sessions per agent**, and a production agent holds more than ten sessions, so
+eviction is the **normal** path rather than an exception — which is why "the store rebuilds it" is not
+a sufficient argument and had to become a check. "Dropping an entry is unobservable" was verified field
+by field, against the code that reads each field:
+
+| `Session` state | Lost when the entry is dropped | Why that is unobservable |
+|---|---|---|
+| `Messages` | yes | `getByKey` re-reads the working set from the store on **every** call, hit or miss (`internal/session/manager.go:625`) — so a rebuilt entry is identical to a warm one, and eviction costs **zero extra store traffic** |
+| `channel` / `accountID` / `chatID` | yes | routing resolves through `resolveOrMintKey`, which asks the **store** (`ResolveActiveSessionKey`) and never the map — so eviction cannot mint a second key for one conversation |
+| `projectID` | yes | `SaveSession`'s `ON CONFLICT … DO UPDATE` deliberately does **not** list `project_id` (`internal/store/database.go:2985`), so a rebuilt entry carrying an empty hint can neither blank a row's project nor resurrect an old one; the panel and the turn entry points both resolve the project through `LookupSessionProject`, i.e. through the store |
+| `runReceipt` | yes | the environment baseline is read from the **stored message metadata** (`session.RunReceiptOf` → `envBaselineFromReceipt`, `internal/agent/env_changes.go:352`) — which is precisely why G9/G20 moved it there |
+| `LastConsolidated` | yes | nothing reads it: `UnconsolidatedCount` and `MarkConsolidated` have **zero references repo-wide** (G29) |
+| `snapshot` (the `/retry` restore point) | yes | **this one *is* observable** — §10.5. It is the accepted cost of the bound |
+| `turnActive` / `turnDepth` / `turnWaiters` / `steerBuf` / `turnFence` / `fenceLost` | no — the sweep skips busy sessions | and a leftover steer cannot outlive a turn: `EndTurn` hands it back and `flushLeftoverSteer` appends it to history (`internal/agent/loop.go:2150`, `:2236`) |
+| `lastTouched` | yes | cache bookkeeping — the entry it graded no longer exists |
+
+Tests that pin this at the operating budget: `TestEvictionIsUnobservableAtTheOperatingBudget` (40
+sessions → the budget holds and every one still reads back exactly what it said; **falsification run for
+real**: disable the eviction and it fails at *"cache holds 40 sessions, want <= the budget 10"*),
+`TestSessionCacheEvictsIdleEntriesAndRebuildsThem`, `TestSessionCacheBudgetIsCountedInSessionsNotSize`.
+
+Two things this audit produced that outlive it:
+
+- **a recorded position with its reasons** — 10 per agent, because the cache's only product is saved
+  allocation (the store is read on every `Get` regardless), so a small warm set buys what a large one
+  buys; and because a binding budget is one whose behaviour is exercised rather than assumed;
+- **G29**: `LastConsolidated` and its two accessors (`UnconsolidatedCount`, `MarkConsolidated`) are dead
+  state on the hottest struct in the package — nothing reads them, nothing persists them, and the four
+  places that zero the field do so for a reader that does not exist. Recorded rather than deleted here,
+  because "zero references" has twice been a lead rather than a verdict (10 §9).
+
+### 10.7 Scope: per agent, and what a pod-wide budget would cost
+
+Decided 2026-09-19: the budget is **per agent** (`agentSessionCacheMaxSessions = 10`). The alternative
+was considered and is recorded here because the constant used to read as if it were already pod-wide:
+
+| Shape | What it bounds | What it costs |
+|---|---|---|
+| **per agent (chosen)** | one agent's warm conversations; a pod with K loaded agents may hold K × 10 entries | nothing extra: the Manager already exists per agent, and eviction is local |
+| pod-wide | the whole process, one shared budget of N entries | a shared budget object the composition root creates and every Manager registers with, plus a global sweep that gathers candidates from all Managers and drops the globally oldest |
+
+Two hazards make the pod-wide shape a genuine change rather than a constant, and they are the reason it
+is recorded instead of quietly implemented:
+
+1. **Lock order.** `getByKey` inserts and sweeps while holding `m.mu`; a global sweep would hold the
+   cache's lock and then each `m.mu`. The per-Manager sweep would have to stop running under `m.mu`
+   first, or the two orders deadlock under load.
+2. **Lifecycle.** A registry of Managers is itself an unbounded structure unless something unregisters
+   them — and nothing tears a `session.Manager` down today (the same missing-teardown shape as
+   `Registry.Close` in G27). Adding a registry to fix an unbounded cache, without a teardown to remove
+   entries from it, would trade one unbounded structure for another.
+
+A per-Manager *share* of the budget (budget ÷ live Managers) avoids both hazards but makes the bound
+drift with load, which is worse than a stated per-agent bound: an operator can reason about "10 per
+agent"; nobody can reason about "N ÷ however many agents are loaded right now".
+
+### 10.8 The other missing teardown, decided rather than assumed
+
+G27 named a second missing-teardown fact and left it as a question: `Registry.Close()` still has no
+production caller, so when a `UserSpace` is evicted for idleness the agent's host background shells are
+**not** killed — they keep running (now holding at most 64 KiB each, G27).
+
+**Decision (2026-09-19): leave it unwired.** Killing a user's background process because they went quiet
+for thirty minutes changes a product promise, and the only version of it that does not create a silent
+destruction is the one that also *says so* (a σ: "your background tasks were reclaimed") — which needs a
+stated idle parameter and a delivery point. Until that exists, "not wired" is the honest option: the
+resource cost is bounded and visible, whereas "wired" would make a user's dev server disappear with
+nobody explaining it. Reopen when the idle-reclaim promise is defined; the parameter should be the
+existing 30-minute idle TTL rather than a new knob.

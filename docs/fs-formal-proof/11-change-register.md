@@ -3,9 +3,13 @@
 > Status: register (2026-09-18) · It answers one question: **given the file-system formalisation (F1/F2/F3)
 > and the state-observability principle, what did we change, and where are the UT and the live e2e for each
 > change?**
-> **Deployment status**: every row's "deployed" column is ❌ — all of it lives in the **working tree**
-> (uncommitted, undeployed). Production runs `HEAD` (2026-09-17), which contains **none** of it. See the
-> "deployment status" banner in [10](./10-harness-state-audit.md).
+> **Deployment status (corrected 2026-09-19)**: rows #1–#31 (T1–T6) **are committed** on branch
+> `fastagent` (HEAD `8984c99`, anchored at `a0080a5`) and **deployed in dev** (`8984c99`);
+> **production is still `a24c0a8` (34 commits behind), so every row's "deployed" column is still ❌ for
+> production**. The original "working tree only (uncommitted)" text was written on 09-18 and is stale;
+> two remotes: `fastagent` (private, already carries `8984c99`) and `origin` = `tokenaissance/fastclaw`
+> (the **public mirror, 34 commits behind, deliberately not pushed for now**).
+> see the "deployment status" banner in [10](./10-harness-state-audit.md).
 > Division of labour: **10 §4** tracks the *state of the gaps*, **05** holds the *plans and decisions*, **this
 > document** maps *change points to their evidence*.
 
@@ -341,7 +345,8 @@ Branch `ship/incident-2026-09-17` (from `fastagent`'s `16a7532`), **seven commit
 
 **Final state check (on HEAD after T5)**: `git status` clean; against the BK3 baseline,
 `verify.sh <repo> HEAD` → `verify OK: 112 files match` (the split lost nothing); offline 34/34; the full live suite
-green (sandbox 179.0s, agent/tools 42.9s). Production still runs `16a7532`; nothing is deployed.
+green (sandbox 179.0s, agent/tools 42.9s). Production ran `16a7532` **at that time**. (Measured
+2026-09-19: dev runs `8984c99`, which contains all seven; production runs `a24c0a8`.)
 
 ### 11.7.1 Differences from §11.3's plan (six, each recorded in the matching commit message)
 
@@ -355,3 +360,33 @@ green (sandbox 179.0s, agent/tools 42.9s). Production still runs `16a7532`; noth
 | `internal/gateway/userspace.go`'s boxlite wiring | T3 | **rides T2** | it sits next to the same file's `SetSignalStore` wiring and has to move with `boxlite_executor.go`'s signature |
 
 Apart from those six, §11.2's whole-file assignment and §11.3's function-level assignment match what landed exactly.
+
+## 12. Cross-replica turn integrity (design adopted 2026-09-19, **implemented 2026-09-19/20** — see the status correction below)
+
+> How this section differs from every section above: **these are designs, not changes**. The user decided
+> "finish all the design first, then implement in one unit"
+> ([../session-turn-integrity.md](../session-turn-integrity.md), the Adopted section). So every row's
+> "shipped" cell is ❌ and **there is not even code yet**; the rows are registered here so the gap between
+> design and witness stays visible rather than being pre-claimed. The formal basis is
+> [12](./12-lease-formal-design.md).
+
+> **Status correction (2026-09-20): it is implemented.** The paragraph above was true when written and is
+> false now — A1-a…A1-e, the fence by explicit signature (`session.WriteScope` + an inner-owned
+> `ErrSessionFenceLost`), A2's projection vocabulary, the cancel contract (`chat/cancel` answering
+> `{canceled, wasRunning, isRunning}`, the retired `409 already_started`), the cross-replica E2E
+> (`TestCancelledTurnStopsAndSignalsOnce`) and the cloud half (X7: the Stop affordance reads the fact and
+> calls the server) all landed on 2026-09-19/20, each with its witness and, where stated, a falsification
+> run. What is genuinely still open, and therefore the row that keeps this section honest: **the E2B live
+> proof for the tool-path delete** (10 §4, G7b) and the **chat e2e** for the client half — neither is
+> runnable without credentials/a dev server, and neither is claimed.
+
+| # | Change | Formal (duty) | Code anchor | Planned UT (with falsification) | Live e2e | Shipped |
+|---|--------|---------------|-------------|---------------------------------|----------|---------|
+| 32 | **A1** cross-replica turn lease: `session_turns` in the store (key = the `sessions` primary key), CAS `Acquire/Renew/Release/Get` + monotonic token; a lost acquire ⇒ the existing `queued` event | F1 (L1/L3/L5) + F2 (L6) | **landed (working tree)**: `internal/store/database.go` (DDL + four methods), `internal/store/session_lease_test.go` (2 tests), `internal/agent/sessionlease.go` (port + `Turn` + `NopSessionLease`), `internal/gateway/sessionlease.go` (adapter; the holder is minted there). **all landed (working tree)**: both admission points (the lease first, the local FIFO slot second, the lease released last, in `loop.go`'s `HandleMessage`/`HandleMessageStream`), the IfIdle verdict reading `Live` (`admission.go`), renewal / release / loss-notice (`internal/agent/turnlease.go`), and the wiring (`WithSessionLease` + `storeSessionLease` injected in `gateway/userspace.go`) | green: 3 store tests (8-way single winner, expiry hand-off, a stale token cannot renew or release) + 3 agent tests (waiting and reporting the holder and its ETA, an automatic turn deferring without queueing, a superseded turn stopping and telling the user). **Two falsifications run for real**: dropping the lease from admission ⇒ `no queued event`; dropping `Live` from IfIdle ⇒ `RunTurn error = <nil>` | cross-replica e2e **done for the cancel path** (`TestCancelledTurnStopsAndSignalsOnce`, real lease + a peer stamping the request, with a falsification run); the *queue* variant (two gateway replicas, two `chat/stream` POSTs ⇒ the second queues) is still owed | ❌ (partly) |
+| 33 | **A1's fence**: `SaveSession` / `AppendSessionMessage` carry an `EXISTS(session_turns …)` predicate **when a fence is present**; a mismatched token ⇒ the write is refused (`ErrSessionFenceLost`) | F1 (L4a: the fence lives on the **resource** side, in the same atomic step as the write) | **landed (working tree)**: `internal/store/sessionfence.go` (`SessionFence` + ctx stamp + `ErrSessionFenceLost`), the two write statements in `database.go` (both dialects; `SaveSession` in `ON CONFLICT … DO UPDATE … WHERE`, `AppendSessionMessage` in `HAVING`), `internal/session/manager.go` (`TurnFence` + `Set/ClearTurnFence`, stamped by `ctx()`). **As reviewed**: `session.SessionStore`'s two write methods take a `*session.TurnFence` (the port names only its own layer's type) and the adapter translates it into `store.SessionFence`; the store keeps its plain methods and adds `SaveSessionFenced` / `AppendSessionMessageFenced` — the same "capability beside the capability-free form" shape A3 plans for `PutIfVersion`. No implicit ctx carriage | green: `TestSessionFenceRefusesASupersededWriter` (both writes land under a live token, both return `ErrSessionFenceLost` after a takeover, the new holder writes normally, the unfenced path is unchanged); **falsify: remove the `EXISTS` ⇒ the stale-writer assertions stop failing** | in the #32 scenario, a taken-over turn must not land another row | ❌ |
+| 34 | **A2** the projection stops asserting "interrupted": three shapes (holder dead / holder alive / no fact) and a test that "no evidence ⇒ the word *interrupted* may not appear" | F2 (O1, tell the truth) | **step 1 landed (working tree)**: `internal/provider/provider.go` (the three-sentence vocabulary + `SyntheticToolPads`), `internal/agent/normalize.go` (uses the no-fact sentence for every open call). **both steps landed (working tree)**: `Agent.openCallAnswer` in `internal/agent/turnlease.go` (unreadable lease ⇒ no fact; a peer holding ⇒ still running; no other holder ⇒ *interrupted* is provable) and both projection sites call `normalizeForPromptWith`. | green: `TestProjectionDoesNotClaimInterruptedWithoutEvidence`, `TestOpenCallAnswerFollowsTheLeaseFacts` (3 sub-cases) and three existing tests now checking the whole vocabulary; **two falsifications run for real**: restoring the unconditional claim makes the peer-held and unreadable sub-cases red | none (pure projection; see §7's criterion) | ❌ |
+| 35 | **A3** overwrite protection for tool→store writes — **decided: family B (versioned conditional writes)**; the change list B1–B11 is in [../session-turn-integrity.md](../session-turn-integrity.md) A3.1: `ObjectInfo.Version` (an opaque token), `PutIfVersion` + `ErrVersionConflict`, S3 via ETag (`SetMatchETag`, verified present in minio-go v7.3.0), LocalFS via `size:mtime_ns` **declared best-effort**, a per-backend strength table, and seven writer integrations | F1 (G24: the precondition of the `tool→store` direction) + F4's first declared fragment (**B1–B5 landed**: the version token, LocalFS's declared best-effort conditional write, S3's ETag conditional PUT, `Metered` pass-through; UT `TestLocalFSPutIfVersionRefusesAStaleExpectation`, falsification run for real. **B6–B11a landed** (strength table in `01 §2.x`; the three file tools, attachments, skills publish and the panel upload, whose conflicts answer 409 with the current version); **B11-b's server half landed** (the upload accepts an optional `expectedVersion` ⇒ replace-that-version; absent ⇒ create-only; UT + falsification run); **the cloud panel's three answers and auto-rename are to come**) | `internal/workspace/{workspace,s3,localfs,metering}.go`, `internal/agent/tools/{file,apply_patch}.go`, `agent/attachments.go`, `skills/objectstore.go`, `setup/handlers_agents.go` | one UT per writer: a peer writes between read and write ⇒ refusal + σ; **falsify: drop the conditional predicate ⇒ the peer's version is silently overwritten** | panel upload racing a turn (B11) | ❌ pending approval |
+| 36 | **A4** the client stops inferring the server's state from its own socket: three states (interrupted / unknown / running) + `turnActive{holder, epoch, expiresAt}` + `queued{holder, ETA}` + `subagent_progress.id` | F3 (the take side must not answer a question only the produce side can) | **server half landed (working tree)**: `handleChatSubscribe` (`event: turn_active`) and `handleChatHistory` (`turnActive`) in `internal/setup/handlers.go`, plus `queued{holder, expires_at}` in `internal/agent/turnlease.go`. **Landed 2026-09-19/20 (cloud)**: the client's states — `selectTurnState` (running / interrupted / unknown / idle) drives the loading bubble, the tool rows **and** the Stop affordance (`chat-composer.tsx` reads it instead of the local `streaming` flag, and Stop calls `chat/cancel`); the message rows take `turnState` as a prop rather than deriving it from `msg.streaming`; the queue σ's expiry is honoured (`isQueuedTurnLive`), and the wire spells it `expiresAt` on both exits (the `expires_at` above is retired). Witnesses: `chat-composer-stop.test.tsx` (three sequences), `message-list-tool-status.test.tsx` (fact outranks the coarse flag), `turn-state.test.ts` (state mapping + queue liveness). **Still to come**: `subagent_progress.id` | to come: three event sequences ⇒ three labels; **falsify: revert the wording ⇒ a stale view renders *Interrupted* again** | drop the SSE mid-turn, send another message ⇒ the UI reads "still running / queued" | ❌ |
+| 37 | **G25's fix**: the sandbox lease's claim branch becomes `epoch = epoch + 1` (the token never returns to 1) | F1 (L4c: the token is unique per acquisition) | **✅ landed (working tree)**: `internal/store/sandbox_leases.go:69-80` | green: `TestSandboxLeaseEpochNeverResetsAcrossTakeover` (strictly increasing + a stale release refused + the live row still there); **falsification run for real**: restore `epoch = 1` ⇒ `gen1=1 gen2=1` fails | none needed (pure store semantics) | ❌ |
+
+> Paths prefixed `tokenaissance-cloud:` are relative to the cloud repository ([tokenaissance/tokenaissance-cloud](https://github.com/tokenaissance/tokenaissance-cloud), branch `develop`).

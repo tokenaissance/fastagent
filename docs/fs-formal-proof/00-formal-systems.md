@@ -1,10 +1,15 @@
 # 00 · The three formal systems: an index
 
-> Status: index · last verified: 2026-09-18
+> Status: index · last verified: 2026-09-20 (added the single-source family to §4.1, with its boundary note)
 > This directory (`文件系统形式化证明`, formerly `文件系统`) actually carries **three** formal systems:
 > its name only describes the first one's application area; the other two constrain the whole harness.
 > This document is their **single entry point** — what each defines, how they compose, which code each
 > symbol lands on, and which test pins each obligation.
+> **It is also the single entry point for formal reasoning across the repository**: §4.1 turns "formal
+> system → mechanism → the design documents it constrains" (including files outside this directory —
+> `../session-turn-integrity.md`, `../sandbox-pool-leases.md`, `../chat-event-delivery.md`, …) into one
+> inverse index.
+> **Full inventory** (A formal systems / B mechanism layer / C subsystem contracts / D models / E unformalised) is §7.
 
 ## 1. Three systems, three questions
 
@@ -66,6 +71,78 @@ For a mechanism M that changes the agent's world:
 | [09](./09-sandbox-lifecycle-audit.md) | F2/F3 applied cell by cell to the **sandbox lifecycle** | §2 the transition verdicts, §3 G1–G4 |
 | [10](./10-harness-state-audit.md) | F2/F3 applied to the **whole harness** | §1 the whole picture, **§4 the gap table (with the duty column)** |
 | [**11**](./11-change-register.md) | the **delivery index for all three systems**: every change ↔ code anchor ↔ UT ↔ live e2e ↔ deployment status | the row-by-row register (F1 #1–#4 · F2 #5–#18 · F3 #19–#20 · path/scope #21–#27) |
+| [12](./12-lease-formal-design.md) | **F1's mechanism layer**: the contract induced from the four existing lease implementations (L1–L6), the as-built classification, the G25 counterexample, `session_turns`' instantiation and its four-layer placement | §3 the obligations, §4 the classification, §5 the counterexample (measured), §6 the design rules |
+
+### 4.1 The inverse index: formal system → mechanism → the design documents it constrains
+
+> The table above is "document → system"; this one is its **inverse**, and it is **the single entry
+> point for formal reasoning**: find out which system constrains whatever you are about to touch, then
+> read the design documents listed under that mechanism. Links inside this directory are relative;
+> documents outside it use `../` or a repository path. **Register a new mechanism or document here first.**
+
+```
+F1 preconditions / zero migration (criteria from 06, authoritative definition in 07)
+├── mechanism 1 · the reconcile (reconciler + BLOCKED + zero migration)
+│     └─ 05 §2/§5 · 07 §3.3 · register #1–#2 · code: sandbox/lifecycle.go syncSnapshot
+├── mechanism 2 · write-through + the delivery stamp (the host write also lands in the sandbox copy, stamped with the store's time)
+│     └─ 07 §3.3/§3.11.3 · register #3–#4 · code: lifecycle.go WriteThrough
+├── mechanism 3 · leases (one writer per key across replicas; the L1–L6 contract)
+│     ├─ 12 here (induction + the G25 counterexample + session_turns' instantiation)
+│     ├─ ../session-turn-integrity.md (A1 admission / A1.4 the fence / the IfIdle path)
+│     └─ ../sandbox-pool-leases.md (the as-built cell: clauses U/A/I)
+└── mechanism 4 · conditional writes (**decided: family B — versioned conditional writes**; the change list B1–B11 is in ../session-turn-integrity.md A3) → 10 §4 G24
+      (the family is chosen by **L7, preconditions must be evaluable**: witness co-located with the effect's actor ⇒ B; only in-band inside a copy ⇒ A. See [12 §3/§3.1](./12-lease-formal-design.md))
+
+F2 observability (defined in 08 §2/§2.1)
+├── mechanism 1 · the turn receipt (the baseline travels with the turn, not in the process) → 10 §4 G9/G20 · register #11
+├── mechanism 2 · the unified environment-signal exit (identity files / config / cron / skills and tools)
+│     └─ 08 §5 · 10 §4 G8/G10/G14 · register #10/#12/#13/#18
+├── mechanism 3 · the tool result is the receipt (write-through, "replaced a different version", store-only, the unhydrated declaration)
+│     └─ register #5–#9 · ../tool-output-limits.md (bounded + the delivered-frames clause)
+└── mechanism 4 · the projection does not lie (three pad shapes: holder dead / holder alive / no fact)
+      └─ ../session-turn-integrity.md A2/A2.1 · 10 §4 G5/G6
+
+F3 delivery (defined in 08 §2.2)
+├── mechanism 1 · separation of powers + the four exits (tool result D₁ / turn prompt D₂ / exception channel) → 08 §2.2/§9.1 · register #19–#20
+├── mechanism 2 · durable carriers (a signal rides the instance/turn into the store, never an in-process queue)
+│     └─ 09 §3 G3 · 10 §4 G3/G19 · register #9
+├── mechanism 3 · the event log as the transport of record (cross-replica delivery + seq dedup) → ../chat-event-delivery.md
+└── mechanism 4 · the client reads facts only (turnActive / queued{holder,ETA} / progress.id + the five states)
+      └─ ../session-turn-integrity.md A4 · [tokenaissance-cloud › design/09-delegate-task-design.md](https://github.com/tokenaissance/tokenaissance-cloud/blob/develop/docs/fastagent/design/09-delegate-task-design.md)
+
+Subsystem contracts (same style, their own alphabets; instances of the three above, not a fourth system)
+├── W/P/O/T session turn integrity → ../session-turn-integrity.md §Invariant
+├── U/A/I sandbox pool lease → ../sandbox-pool-leases.md
+├── bounded output + delivered frames → ../tool-output-limits.md
+├── path and scope identity (one path, one key) → 01 §3.5/§8 · 02 §5
+├── the project-tree invariant (one project, one tree) → 10 §4 G17
+├── the data-domain scope contract → ../configs-kv-scope-decision.md · ../configs-kv-scope-adaptation.md
+├── identity and per-chatter routing → ../per-chatter-files.md
+└── the protocol-compliance family (not F1–F3) → ../mcp-oauth-design.md · ../issues/ext-skills-conformance-checklist.md
+
+**Single source / one expression family** (**a peer contract, not a fourth system**; its judgement form is
+"how many expressions does this one fact have", unlike any of F1–F3. Basis: §7's verdict on S1/S2/S3 —
+"recompute from the authority, do not remember" is F2's dual, i.e. a C)
+├── one rule must not have a second expression (layout table / writer folding, each one pure function) → 10 §4 G23 · code `workspace/scope.go` `ScopeSegments` / `WriteScope`
+├── one input must not have two sources (the heartbeat file: the prompt reads the store, the tick read the disk) → 10 §4 G14 · code `agent/heartbeat.go` `loadHeartbeatTasks`
+├── one guard must not be written twice (the skill-mask merge) → 10 §4 G16 · code `setup/handlers.go` `mergeSkillEntry` / `mergeSkillEntries` / `cloneSkillEntries`
+├── a judgement must not invent a second copy (ask first: does this fact already have an owner?) → 08 §2.2.3 landing 2 · 10 §4 G20 (the turn receipt carries the whole snapshot; the counterexample is the `cfg_seen` row)
+├── the scope contract (blob authoritative / KV a faithful mirror — a **temporary invariant during migration**; the exit condition is flipping authority) → ../configs-kv-scope-decision.md · ../configs-kv-scope-adaptation.md
+└── one exit per category (within one package, mechanisms must not each assemble their own sentence for the model) → 08 §9.1
+
+```
+
+> **The difference from the "subsystem contracts" block above is the cut**: that block cuts by **domain**
+> (who may touch this key); this family cuts by **form** (how many expressions does this fact have).
+> So G17/G22/G23 appear in both — the gap table records the domain, this records the form.
+> **One boundary left to decide**: §7 draws the A/C line as "a C row asks the same question in the same
+> form as A", and this family's form is different. Filing it as a C follows §7's verdict on S1/S2/S3,
+> not that line. See the note in §7.
+
+```
+
+Covered by none of them → §7's bucket E (the F4 candidate: concurrency and visibility — not adopted)
+```
 
 ## 5. Obligation ↔ gap ↔ witness (the checkable index)
 
@@ -104,6 +181,17 @@ sense** — G11 is (the transport has no channel) and G4's remaining half is (no
 other three belong to different families (a product decision, a scope invariant, protocol compliance) and
 should not be booked as "observability left unfinished".
 
+**One cell added on 2026-09-19 (F1's family, not F2/F3)**: **G25** — the sandbox lease's fencing token
+`epoch` resets to `1` on every takeover (`internal/store/sandbox_leases.go:72`/`:81`), so after the same
+`owner` changes generation a delayed release can delete the new generation's live row (measured:
+`released=true`). It violates **L4(c)** of [12 §3](./12-lease-formal-design.md) (the token must be unique
+per acquisition); the fix is one clause (`epoch = epoch + 1` in the claim branch) — **landed 2026-09-19 in the working
+tree**, witnessed by `TestSandboxLeaseEpochNeverResetsAcrossTakeover` (falsification run for real). The
+same section states how that obligation lands on `session_turns`, whose **A1 is fully landed
+(working tree)**: the four `session_turns` methods in `internal/store`, the port in
+`internal/agent/sessionlease.go`, the adapter in `internal/gateway/sessionlease.go`, both admission
+points and the IfIdle verdict wired onto it, and the fence (`…Fenced` write statements).
+
 > **What actually remains (2026-09-18, after the closing pass)**: in the formal sense, **only the HTTP
 > half of G11** (the MCP transport has no notification channel; it needs SSE or a periodic re-list).
 > G15 (`notifications/initialized`) belongs to the same MCP family and is out of this round's scope by
@@ -113,7 +201,129 @@ should not be booked as "observability left unfinished".
 > (`--selftest` needs no deployment; it only lists a copy for deletion when the same bytes survive at the project root — and it should run **after** A ships, or the old sync keeps recreating them).; see the "closed" list
 > below and [10 §4](./10-harness-state-audit.md).
 
-## 7. In one sentence
+## 7. The full inventory: formal systems ↔ mechanism layer ↔ subsystem contracts ↔ models ↔ unformalised
+
+> This section answers "what formalisation actually exists in this system today". Four buckets; the
+> criterion is the **question and the shape of the judgement**, not how many symbols there are:
+> **A is a formal system, B is a formal system's mechanism layer; C is the same style but an *instance*
+> of A inside one subsystem; D is merely a model used as A's domain; E is covered by none of them.**
+>
+> The A/C line: every row of A answers a **different question** with a different judgement shape
+> (declarative / universal / constructive); a row of C asks the *same* question in the *same* shape and
+> only changes the key and the obligations. Hence **the bar for a new formal system = a new question +
+> a new judgement shape**; otherwise it is a mechanism or an instance of an existing one — a lease is
+> exactly F1's mechanism layer ([12](./12-lease-formal-design.md)).
+
+| Bucket | Members | Where | Why this bucket |
+|--------|---------|-------|-----------------|
+| **A** formal systems | **F1 / F2 / F3** | §1; defined in [06](./06-cordis-review.md) · [07](./07-formal-rootcause-and-fix.md) · [08](./08-state-observability-principle.md) | three different questions + three different judgement shapes; missing one loses one failure mode |
+| **B** mechanism layer | the lease contract **L1–L6** + the per-cell classification of the four existing implementations | [12](./12-lease-formal-design.md) | it still answers F1's question; its verdict is F2's δ/σ and its delivery is F3's duty ⇒ **not a fourth system** |
+
+**C. Subsystem contracts** (falsifiable clause tables in the same style, each with its own alphabet — all instances of A)
+
+| Contract | Defined in | Clauses | Where the code cites it | Witness |
+|----------|-----------|---------|-------------------------|---------|
+| session turn integrity | [../session-turn-integrity.md](../session-turn-integrity.md) §Invariant | **W** single writer · **P** call/reply pairing · **O** ordering · **T** a projection that does not lie | `internal/session/manager.go:86`, `internal/agent/loop.go:2322`/`:2526`/`:3279` | `turn_queue_test.go:97`/`:148`, `tool_recovery_test.go:215`, `TestConcurrentWebAndCronTurnSerialize` |
+| sandbox pool lease | [../sandbox-pool-leases.md](../sandbox-pool-leases.md) | **U** naming authority · **A** no rebuild per call · **I** the row names the live instance | `internal/sandbox/lease.go:57-61` | `lease_rebuild_test.go:421`/`:469`, `TestE2BPool*` |
+| bounded tool output | [../tool-output-limits.md](../tool-output-limits.md) | a result is bounded as it leaves its producer + the **delivered-frames clause** | `internal/sandbox/e2b_executor.go:1161` | `TestE2BExecClockHints` |
+| event delivery | [../chat-event-delivery.md](../chat-event-delivery.md) | the event log is the transport of record: D1–D5 decisions + R1–R4 falsifications | the SSE subscription / tail poll | — |
+| path and scope identity | [01 §3.5/§8](./01-current-implementation.md) · [02 §5](./02-semantics-and-architecture.md) | one path, one key (the G18/G21/G22 family) | `scopeSessionID`/`wsPath`, `sandbox.StoreScope` | `TestE2BLiveOnePathIsOneKey` |
+| project tree invariant | [10 §4](./10-harness-state-audit.md) (G17) | one project, one tree, many containers, writes broadcast | `LiveProjectExecutors`, `syncStoreScope` | — |
+| MCP OAuth security clauses | [../mcp-oauth-design.md](../mcp-oauth-design.md) | state is one-shot (`Take` reads-and-deletes) + PKCE S256 + TTL + bound to userID | `usecase/complete`, `pending_store.go` | `internal/mcp/oauth/...` |
+| MCP conformance (**protocol-compliance family**, not F1–F3) | [../issues/ext-skills-conformance-checklist.md](../issues/ext-skills-conformance-checklist.md) | the spec's MUSTs ↔ the egress implementation; **declaring is promising** | `server/discover`, `skills/list` | that checklist's "status" column; G11's HTTP half and G15 are still open |
+| **single source / one expression** | [10 §4](./10-harness-state-audit.md) (G14/G16/G20/G23) · [08 §2.2.3](./08-state-observability-principle.md) (landing 2) · [08 §9.1](./08-state-observability-principle.md) | **one fact has exactly one expression**: one source (G14) · one guard (G16) · one rule (G23) · a judgement reuses its existing owner (§2.2.3 landing 2) · one exit (§9.1) | `agent/heartbeat.go` `loadHeartbeatTasks`, `setup/handlers.go` `mergeSkillEntry(s)`/`cloneSkillEntries`, `workspace/scope.go` `ScopeSegments`/`WriteScope` | `TestHeartbeatReadsWhatThePromptShows`, `TestMaskedGlobalSkillSecretKeepsTheStoredValue`, `TestScopeSegmentsIsTheLayoutTable`, `TestAWriterScopeIsTheScopeItsKeysLandIn` |
+
+> **Note (2026-09-20, surfaced when the single-source family entered).** The dividing line stated at the top
+> of this section ("a C row asks the **same question in the same form** as A") does **not** cover the last row
+> of the table — its judgement form ("how many expressions does this fact have") differs from all three of
+> F1–F3. Filing it as a C follows §7's verdict on S1/S2/S3 ("recompute from the authority, do not remember"
+> is F2's dual), not that line. So one distinction is **left undecided**: either accept "a different form but
+> the same origin (an instance of one discipline)" as a C, or give it a bucket of its own. **Not decided now**:
+> there is only one such family, and the house rule is to extract on the third variant that proves the seam.
+
+**D. Models used as domains** (not formal systems; they are the objects A's judgements point at)
+
+| Model | Where |
+|-------|-------|
+| two registers (docker: one register / e2b: two registers + one-way write-back) | [03 §2/§3](./03-state-machine-and-timing.md) |
+| the sandbox's 7-state lifecycle and its per-transition verdicts | [09 §1/§2](./09-sandbox-lifecycle-audit.md) |
+| `delegate_task`'s four states → five (client side) | [tokenaissance-cloud › design/09-delegate-task-design.md](https://github.com/tokenaissance/tokenaissance-cloud/blob/develop/docs/fastagent/design/09-delegate-task-design.md) |
+| the four-layer mapping (Clean Architecture) | [02 §1](./02-semantics-and-architecture.md) · [../mcp-oauth-design.md](../mcp-oauth-design.md) §1 |
+| the MCP OAuth flow states (pending → code → tokens) | [../mcp-oauth-design.md](../mcp-oauth-design.md) |
+
+**E. Covered by none of them yet** (an empty bucket is not the problem; **not knowing it is empty** is)
+
+| Gap | What carries it today | What would absorb it |
+|-----|----------------------|----------------------|
+| the store's concurrent-write semantics: what does one `Put` guarantee under concurrency | the implicit assumption of last-writer-wins | possibly a **genuinely new system** (a new question: visibility and overwrite semantics under concurrency); G24/A3 is its first instance |
+| the `session_key` minting race (the first IM message at two replicas mints a key on each) | nothing | a boundary of F1 ("one key, one migration"); see [12 §6](./12-lease-formal-design.md) |
+| retention / GC policy (who deletes an object, when) | a one-off cleanup script + human judgement | undecided; adjacent to F1's "zero migration" |
+| **process residency: what may the harness keep in memory, and for how long** | implicit "until the process dies". Audited 2026-09-19 ([10 §10](./10-harness-state-audit.md)): three tables grew with history — `session.Manager.sessions` in the running build (G26), `tools.shellManager.shells` and `tools.sandboxJobs.live` (G27) | **not a new system**: this is F2's dual (S1/S2/S3 — *recompute from the authoritative source; do not remember*), i.e. a C, not a new question. The audit test itself is now part of 10 §10 |
+
+> **Note (the F4 candidate, 2026-09-19: analysed, deliberately not adopted).** The candidate is
+> **"what one operation means / concurrency and visibility"**: the question is not "who may act" (that is
+> F1) but "when two operations touch one key concurrently, which value is visible, to whom, and when";
+> the judgement shape is **membership of an execution history** (linearizable / read-your-writes /
+> monotonic reads / snapshot reads), which none of F1/F2/F3 has ⇒ formally it qualifies. The same seam
+> already has **four** instances: `LocalFS.Put` is an in-place `O_TRUNC` write (a reader can see half a
+> file, `internal/workspace/localfs.go:88`) · `S3.Move` calls itself "Not atomic"
+> (`internal/workspace/s3.go:165`) · G24 (`Put` has no precondition; on 09-18 the same deliverable was
+> written twice, 15 348 → 11 492 bytes) · A3's three-option ladder.
+>
+> **Decision: not adopted.** The root cause is not that someone forgot to write the semantics down but
+> that **the original design's conditions changed** (see §7.1): it was born single-process with local
+> files (sessions as JSONL, `workspace/` merely a template directory), where "what a write means" was
+> free and needed no statement; on 2026-04-20 `950070b` (cloud-ready / stateless gateway) introduced the
+> S3 backend, multiple writers and `LifecyclePool` in one commit (the very commit
+> [04 §6](./04-incident-workspace-2026-09-17.md) names as the defect's birth), turning implicit
+> guarantees into obligations nobody had written down. If it is ever adopted, it lands as the
+> "per-backend axiom table" in [01 §2](./01-current-implementation.md) (zero code) — **not** as a 13th document.
+>
+> Conditions that reopen it (any one): ① F1's criterion fails **because a reader did not see a whole
+> object** (e.g. hydrate reading half a file on LocalFS, measured); ② a **second** silent overwrite
+> (today there is exactly one, 09-18); ③ a **third backend** needing the same axioms.
+
+> Division of labour with §6: §6 lists what is unfinished **inside** the three systems (G11/G15/G4's
+> attribution half…); this section's E bucket is what **no system covers yet**. How to use it: before
+> reading a piece of code, ask "which system constrains it"; before writing a mechanism, answer §6's
+> checklist; and if the answer is "none of them", then either it is a C (a new instance of the same
+> shape) or we are **proposing a fourth formal system** — which requires producing both a new question
+> and a new judgement shape.
+
+### 7.1 The original design (why these semantics were never written down)
+
+> This subsection answers "was it an oversight at the start?". **It was not an oversight — the conditions
+> changed.** The evidence, in order:
+
+| When | Event | The semantic premise at the time |
+|------|-------|----------------------------------|
+| 2026-03-09 | `d04a132` the MVP; the same day `500b793` moved `DESIGN.md` (184 lines) **out of the repo and into .gitignore** | The original design states **"Minimal / Go-native / Message bus (channels) / Files as memory"**; sessions are **"append-only + JSONL file persistence"**; `workspace/` is merely a **template directory** (AGENTS.md/SOUL.md/USER.md/TOOLS.md). **One process, one host, one writer** ⇒ atomicity, visibility and versioning needed no statement |
+| 2026-03-17 | `0cdb64e` "pluggable storage backend (file + database)" | the first **two backends**; the difference was still "where the bytes live", with no concurrent writers |
+| 2026-04-20 | `950070b` "cloud-ready architecture — stateless gateway, per-key scoping" | one commit introduced the **S3 backend + the `LocalFS`/`S3` pair + `LifecyclePool` (hydrate-on-create / flush-on-evict)**. Multiple writers, two physical copies and three backends became true **on the same day**, and not one of the original design's implicit guarantees was restated |
+| 2026-09-17 | deliverables silently reverted in production | [04](./04-incident-workspace-2026-09-17.md): the defect's birth is `950070b`; the lease was only an amplifier |
+
+Two traces still visible today:
+
+1. Today's README §Architecture still says **"Output files | Application | Your app / S3"** — in the
+   original design the produced files **did not belong to the runtime**; `internal/workspace` appeared
+   only once the runtime took that over (`950070b`).
+2. The only "laws" the original design did write down were **prompt-cache-friendly append and placement
+   rules** ("Session messages are append-only", "Variable runtime info placed in user messages") — in the
+   same document, **the invariants that were written down survived**; the ones that were not (what a write
+   means) silently expired when the conditions changed. That is exactly why this document set (F2/F3 and
+   the checklist in [08 §6](./08-state-observability-principle.md)) exists.
+
+
+> **Patches (2026-09-19, brought back from auditing the cloud side)**: the three systems need four additions
+> for the case where **the consumer is a user interface** — **O1′** (a state σ must carry its expiry so the reader
+> can degrade to unknown; an **event σ** is immutable and must not be erased by an expiry rule), **D₃** (for a UI
+> the delivery point is *a render*: reading its cache/component state; O3/O4 must be restated on D₃), **O6**
+> (the **revocation** of a δ must be as visible as its arrival — "absence is invisible" is promoted from corollary
+> to obligation), plus two orthogonal C-family contracts: **C1 one fact, one wire shape** (every exit for a fact
+> shares one schema; the root fix is a shared type) and **C2 witnesses come from the producer's real payload**
+> (contract-test fixtures must not be hand-written). Full statements in [08 §10](./08-state-observability-principle.md).
+
+## 8. In one sentence
 
 > Three formal systems answer three different questions, and missing any one of them produces its own
 > failure: **without F1** a mechanism overwrites what someone else wrote; **without F2** the agent

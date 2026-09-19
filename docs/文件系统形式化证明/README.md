@@ -5,6 +5,7 @@
 > F2 可观测性（[08 §2](./08-state-observability-principle.md)）· F3 投递（[08 §2.2](./08-state-observability-principle.md)）——
 > 总索引见 [00-formal-systems.md](./00-formal-systems.md)。
 > **改动点总册**（每一处改动 ↔ 代码锚点 ↔ UT ↔ 真机 e2e ↔ 是否上线）：[11-change-register.md](./11-change-register.md)。
+> **上层索引（L2）**：[../README.md](../README.md)（全部文档分桶 + 每篇一行；形式化入口同样指向 00）。
 > 对象：`fastagent` 的 workspace（持久存储）与 sandbox `/workspace`（执行副本）之间的同步机制
 > **英文版**：[`../fs-formal-proof/`](../fs-formal-proof/README.md)（同一套文档的 1:1 译本；代码、标识符、
 > 路径、符号与面向 agent 的引文保持原样。中文版是 origin，两者章节编号一一对应，可并排阅读。）
@@ -23,7 +24,7 @@
 
 | 文件 | 内容 | 读者 |
 |------|------|------|
-| [**00-formal-systems.md**](./00-formal-systems.md) | **三套形式化系统的总索引**：F1 前置条件/零迁移（06/07）· F2 可观测性（08 §2）· F3 投递（08 §2.2）——各回答什么问题、如何组合、符号总表、文档地图、义务 ↔ 缺口 ↔ witness、仍开放项的形式化归类 | **任何人**（从这里进） |
+| [**00-formal-systems.md**](./00-formal-systems.md) | **三套形式化系统的总索引**：F1 前置条件/零迁移（06/07）· F2 可观测性（08 §2）· F3 投递（08 §2.2）——各回答什么问题、如何组合、符号总表、文档地图、义务 ↔ 缺口 ↔ witness、仍开放项的形式化归类，以及 **§7 全量清点**（形式系统 / 机制层 / 子系统契约 / **单一来源族** / 模型 / 未形式化） | **任何人**（从这里进） |
 | [01-current-implementation.md](./01-current-implementation.md) | 当前实现实录：端口、后端、写入者、同步路径、可观测性 | 需要改这块代码的人 |
 | [02-semantics-and-architecture.md](./02-semantics-and-architecture.md) | 用 Clean Architecture 四层拆解系统语义，定位职责错位 | 做设计决策的人 |
 | [03-state-machine-and-timing.md](./03-state-machine-and-timing.md) | 从状态变更 / 时序看同步原理，Docker 与 E2B 的差异为何成立 | 想理解"为什么 Docker 没事"的人 |
@@ -35,6 +36,7 @@
 | [09-sandbox-lifecycle-audit.md](./09-sandbox-lifecycle-audit.md) | **沙箱完整生命周期 × 文件系统交互的审计**：7 个状态、逐迁移可观测性判定、四个缺口与处置顺序 | 排查沙箱问题 / 设计生命周期改动 |
 | [10-harness-state-audit.md](./10-harness-state-audit.md) | **全 harness 状态变更审计**：按"被 agent 触发 / 触发 agent"两类逐组件过 δ→σ，缺口 G5–G13（含一个本地复现的 P0：假信号） | 改任何 agent 状态前必读 |
 | [11-change-register.md](./11-change-register.md) | **改动点总册**：F1/F2/F3 的每一处改动 ↔ 代码锚点 ↔ UT ↔ 真机 e2e ↔ 上线状态（工作区 vs 线上 HEAD） | 上线排期 / 评审 / 交付核对 |
+| [12-lease-formal-design.md](./12-lease-formal-design.md) | **租约的形式化设计**：从 `channel_leases` / Redis / `sandbox_leases` 归纳出的六条义务 L1–L6、as-built 归类、**反例 G25（沙箱围栏令牌每代归 1，实测）**、`session_turns` 的实例化与四层归属 | 设计任何跨副本串行化机制前必读 |
 
 ## 一句话结论
 

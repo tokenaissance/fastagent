@@ -33,8 +33,8 @@
 > **Reviewed by**: pending review (this document)
 > **Incident**: 2026-09-13 production, agent `agt_cda27bbfbf4a84e2dfa6`,
 > session `hJKMWwtOp3mJOtqN8Uz2mW` (see [Appendix A](#appendix-a--incident-evidence)).
-> **Reference design**: Codex (`/Users/reina/Project/tokenaissance/codex`,
-> `openai/codex`), cited inline.
+> **Reference design**: Codex ([github.com/openai/codex](https://github.com/openai/codex),
+> a local checkout may live at `~/Project/tokenaissance/codex`), cited inline.
 
 ## Problem
 
@@ -82,6 +82,12 @@ serialize against each other:
 `Agent.HandleMessage` (`internal/agent/loop.go:2239`) or `HandleMessageStream`
 (`:3092`), and neither path takes a per-session lock. Two turns on one
 session can therefore interleave their appends.
+
+**This layer was not hypothetical.** On 2026-09-04 a `continue` sent while an
+`exec` was open started exactly such a second writer, on whatever pod served it
+— ten days before the gate existed. The session log is
+[Appendix E](#appendix-e--the-same-shape-on-2026-09-04-before-the-gate); it is
+the same shape as the 2026-09-18 incident, in the form P1 removed.
 
 ### Layer 2 — the pad is a global scan, executed by a *different* turn
 
@@ -259,6 +265,15 @@ Accepted windows / known gaps (to keep the table honest):
   Postgres lease). Accepted deliberately rather than solved: decided
   2026-09-14, with the evidence that would reopen it written down in
   [Deferred: cross-replica session lease](#deferred-cross-replica-session-lease-q6).
+  **That evidence arrived on 2026-09-18** — see
+  [Trigger fired](#trigger-fired-2026-09-18-two-replicas-one-session) and
+  [Appendix D](#appendix-d--cross-replica-repro-2026-09-18). Until the lease
+  exists, treat "two replicas, one session" as a live defect, not a gap.
+* The projection's synthetic reply says *why* the call is unanswered: it
+  always says "interrupted". That is true when the owning turn died and false
+  when the owning turn is still running on another replica — the case below.
+  A truthful pad needs the same fact the lease would provide (does anyone
+  still hold this session?), so both fixes are the same work.
 * P is guaranteed for OpenAI-compatible and Anthropic wire builds; other
   providers inherit `normalizeForPrompt` because it runs before the provider
   split.
@@ -590,7 +605,7 @@ split that landed:
 
 * **A sub-agent's wall budget is clamped to the turn it runs in.**
   (Product-facing design record with the historical comparison:
-  `tokenaissance-cloud/docs/fastagent/design/09-delegate-task-design.md`.
+  [tokenaissance-cloud › docs/fastagent/design/09-delegate-task-design.md](https://github.com/tokenaissance/tokenaissance-cloud/blob/develop/docs/fastagent/design/09-delegate-task-design.md).
   This section stays the implementation record — test names and line references
   live here, the intent and the before/after table live there.)
   `delegate_task` is registered serial, so N calls in one round cost N × the
@@ -605,7 +620,7 @@ split that landed:
   a pod holds an Agent object per user space (plus rebuilds), each with its own
   slot, so cross-tenant calls do not serialize while same-tenant cross-session
   ones do. The table and its evidence live in
-  [09 §5.3](tokenaissance-cloud/docs/fastagent/design/09-delegate-task-design.md#53-并发上限与串行关系按对象而不是pod--agent).
+  [09 §5.3](https://github.com/tokenaissance/tokenaissance-cloud/blob/develop/docs/fastagent/design/09-delegate-task-design.md#53-并发上限与串行关系按对象而不是pod--agent).
   `subagentWallBudget(ctx, explicit)` (subagent.go) is now the one owner of that
   number — resolve the caller's request / the configured default / the built-in,
   then hold it inside the turn. It reserves `subagentTurnMargin`, derived as
@@ -931,6 +946,96 @@ election and no session→pod routing for them, so affinity covers the web half
 of the traffic while the combination that actually produced the incident
 (dashboard turn + cron tick) is only serialized when both land on one pod.
 
+### Trigger fired: 2026-09-18 (two replicas, one session)
+
+**What happened.** One user message and two follow-up `continue` messages
+reached the same session over 34 minutes. Two of the three turns ran **at the
+same time on two replicas**, and the concurrent turn — reading a history whose
+tool calls were still in flight — concluded those calls had been interrupted
+and re-issued the same two research sub-tasks. Nothing crashed; the damage was
+duplicated work, duplicated writes and a UI that read "Interrupted".
+
+| time (UTC) | turn | landed on | admission |
+|---|---|---|---|
+| 16:18:40 | `深度调研一下 quantconnect` (the real ask) | pod A `…-6mswd` | ran (long turn: 16:18:40 → `done` 16:52:35) |
+| 16:31:21 | follow-up `continue` | pod A | **correct**: emitted `queued{position:1}`, waited 1 274 666 ms, started 16:52:35 → `done` 17:01:58 |
+| 16:34:22 | follow-up `continue` | pod B `…-wxtbn` | **wrong**: pod B's gate knew nothing of pod A's turn, so it ran immediately → `done` 16:45:33 |
+
+**Which triggers fired.** #3 in its sharpest form — not "both replicas logged
+`turn admission: waited`" but "both replicas *ran* a turn for one session at
+once". #2's shape (cross-turn interleaving) followed from it: pod B appended an
+assistant message and duplicate tool calls inside pod A's batch window.
+
+**Not the first time — and not this deploy's doing.** The precondition (a user
+message arriving while a tool call was open) occurs on exactly two days in the
+whole `session_events` history: 2026-09-04 and 2026-09-18. The 09-04 case is the
+same defect in the form P1 removed, with no cross-replica coincidence needed;
+its log and the day-by-day census are in
+[Appendix E](#appendix-e--the-same-shape-on-2026-09-04-before-the-gate).
+
+The week's changes moved the *likelihood* and the *visibility*, not the rule:
+the deployed range `a24c0a8..8984c99` contains no change touching `AcquireTurn`,
+`SteerWeb` or the `queued` path, and `gateway.replicas` has been 2 since at least
+helm revision 72 (2026-09-14). Longer turns came from the sub-agent wall budgets
+and salvage (09-13) plus the turn budgets and tool grace (09-14/15) — the open
+window in this incident was 605 s, five times the 120 s window the 09-04 case had
+— and the symptoms became visible in the cloud chat rewrite (`f7d106e3` 09-14
+streaming parity + sub-agent progress + resend, `9004bccf` 09-15 the queued
+block, `28ef00a5` 09-16 "the tool group follows the row — interrupted, not
+running forever").
+
+**The amplifier (worth fixing even with the lease).** Pod A's batch
+(`apply_patch` + two `delegate_task`) writes its tool results only when the
+whole batch returns — 10 minutes later, seq 358–360 — and `delegate_task` is
+sequential, so those calls stay open for that entire window. Pod B read the
+open calls and `normalizeForPrompt` answered them with
+`provider.StoppedToolResult` = *"(stopped — execution was interrupted before
+the tool returned)"*. The model acted on that sentence: *"补查的两条线刚才被打断了，重新发起"*.
+The sentence was false — the calls were running, not interrupted — so a σ that
+should have said "still running" caused exactly the duplication clause W exists
+to prevent (O1 of `docs/文件系统形式化证明/08-state-observability-principle.md`).
+
+**Measured cost.** Two research sub-tasks ran twice (11 467 / 5 330 chars from
+pod A, 13 339 / 9 057 from pod B), `apply_patch(todo.md)` ran twice, and one
+turn spent 21 minutes queued. The client rendered pod A's three calls as
+`Interrupted — this call never returned a result` for those 10 minutes even
+though the results were written (10 minutes late). A full join over
+`session_messages` — every call id inside an assistant row against every
+`role='tool'` row — comes back **57 calls, 57 replies, 0 unanswered, 0 orphan
+replies**: the stored history is intact, and "Interrupted" was a rendering
+verdict, not a fact.
+
+**What the verification pass added (2026-09-19 re-read of the whole session).**
+
+* **FIFO is broken across replicas too, not just mutual exclusion.** Of the two
+  follow-ups, the earlier one (16:31:21) was served *after* the later one
+  (16:34:22): pod A queued it behind the long turn and started it at 16:52:36,
+  while pod B ran the later one immediately. Same-pod FIFO held (pod A's own
+  queue was ordered); the pair across pods did not.
+* **The two turns then fought over the sandbox lease.** Pod B adopted pod A's
+  instance at 16:34:49 (`e2b sandbox adopted from shared lease`), hit
+  `adopted after lease race` at 16:36:33, and then logged *three* consecutive
+  `e2b rebuilt sandbox superseded by another pod; adopting current lease` /
+  `adopted (local cache stale)` at 16:44:06, 16:44:48 and 16:45:06. The scope
+  was hydrated **12 times in ~40 minutes** (7 on pod A, 5 on pod B; the normal
+  number is one or two), and the session carries the resulting
+  `[workspace] the sandbox was REPLACED — the previous instance had …` signals
+  at 16:52:12, 17:01:03 and 17:01:41. A cross-replica turn costs more than a
+  duplicated prompt: it thrashes the executor lease both turns depend on.
+* **Both turns wrote the same deliverable, and one version was lost.** Pod B
+  wrote `quantconnect-deep-research.md` at 16:44:07 (`Written 15348 bytes`,
+  its iteration 6); pod A wrote the same path at 16:50:16
+  (`Written 11492 bytes`, its iteration 8) and then patched it repeatedly. A
+  store `Put` is last-writer-wins, so the 15 KB version was replaced — the
+  workspace has no admission policy at all, because until now nothing could
+  produce two writers for one session.
+
+**Not decided here.** The 2026-09-14 "not now" rested on "the gap is real but
+unobserved". It has been observed, so the trade-off — one store round trip per
+turn against duplicated multi-minute sub-agent work — now has a number
+attached. The fix shape below is unchanged (the same lease the sandbox pool
+already uses) and it now has two consumers: admission, and the truthful pad.
+
 ### Shape of the fix when it is triggered
 
 Reuse the sandbox lease design rather than inventing one
@@ -1064,3 +1169,905 @@ That replaces the local arm64 tags — re-pull them (`docker pull <img>`) if an
 arm64 build is needed later. The in-container `pnpm install` uses npmjs
 (reachable) and `go mod download` falls back to `direct` → github.com
 (reachable), so only the base images need the mirror.
+
+## Appendix D — cross-replica repro, 2026-09-18
+
+Everything the finding rests on is in `session_events` / `session_messages`
+plus the two gateway pods' logs. Session: agent
+`agt_e5867879c33d9e98662b`, session `qCxrNG3tgTl4C10xvaOYBL` (dev).
+Read-only recipe; run the SQL from a throwaway pod that borrows the DSN
+(`envFrom: secretRef: fastagent-secrets`, then strip the pgx-only parameter:
+`sed -E 's/[?&]default_query_exec_mode=[^&]*//'`).
+
+```sql
+-- 1. the user messages: three, not one — the extra two are the trigger
+SELECT to_char(created_at,'HH24:MI:SS'), role, content
+FROM session_messages
+WHERE agent_id='agt_e5867879c33d9e98662b' AND session_key='qCxrNG3tgTl4C10xvaOYBL'
+  AND role='user' ORDER BY created_at;
+--   16:18:40 | user | 深度调研一下 quantconnect
+--   16:34:22 | user | continue          <- ran on pod B, concurrently
+--   16:52:36 | user | continue          <- queued on pod A for 21 minutes
+
+-- 2. the queue, and the proof that only ONE of the two was queued
+SELECT seq, to_char(created_at,'HH24:MI:SS'), type, data FROM session_events
+WHERE agent_id='agt_e5867879c33d9e98662b' AND session_key='qCxrNG3tgTl4C10xvaOYBL'
+  AND type IN ('queued','done') ORDER BY seq;
+--   186 | 16:31:21 | queued | {"position":1}
+--   438 | 16:45:33 | done            <- pod B's turn
+--   517 | 16:52:35 | done            <- pod A's turn
+--   595 | 17:01:58 | done            <- the queued turn
+
+-- 3. every call has a reply (so "Interrupted" was a rendering verdict, not a fact)
+--    LEFT JOIN tool_call -> tool_result on data::json->>'id'; expect 0 NO-RESULT.
+--    The three calls of the 16:32:27 batch land as seq 200-202, their results as
+--    seq 358-360 at 16:42:32 — 10 minutes later, all three at once.
+
+-- 4. what the concurrent turn's model was told, and what it did
+SELECT seq, to_char(created_at,'HH24:MI:SS'), left(content,60) FROM session_messages
+WHERE agent_id='agt_e5867879c33d9e98662b' AND session_key='qCxrNG3tgTl4C10xvaOYBL'
+  AND role='assistant' ORDER BY created_at LIMIT 5 OFFSET 1;
+--   ~16:34:29 | 补查的两条线刚才被打断了，重新发起（范围收紧一点）。
+
+-- 5. every call has exactly one reply (the "Interrupted" claim, settled)
+WITH calls AS (
+  SELECT (e->>'id') AS id
+  FROM session_messages m, jsonb_array_elements(m.tool_calls::jsonb) e
+  WHERE m.agent_id='agt_e5867879c33d9e98662b' AND m.session_key='qCxrNG3tgTl4C10xvaOYBL'
+    AND m.role='assistant' AND coalesce(m.tool_calls,'') NOT IN ('','null','[]')
+), reps AS (
+  SELECT tool_call_id AS id FROM session_messages
+  WHERE agent_id='agt_e5867879c33d9e98662b' AND session_key='qCxrNG3tgTl4C10xvaOYBL'
+    AND role='tool' AND coalesce(tool_call_id,'')<>''
+)
+SELECT (SELECT count(*) FROM calls), (SELECT count(*) FROM reps),
+       (SELECT count(*) FROM calls c LEFT JOIN reps r ON r.id=c.id WHERE r.id IS NULL),
+       (SELECT count(*) FROM reps r LEFT JOIN calls c ON c.id=r.id WHERE c.id IS NULL);
+--   57 | 57 | 0 | 0
+
+-- 6. the two turns wrote the same deliverable
+SELECT to_char(created_at,'HH24:MI:SS'), left(content,60) FROM session_messages
+WHERE agent_id='agt_e5867879c33d9e98662b' AND session_key='qCxrNG3tgTl4C10xvaOYBL'
+  AND role='tool' AND content LIKE '%quantconnect-deep-research.md%' ORDER BY created_at;
+--   16:44:07 | Written 15348 bytes to quantconnect-deep-research.md   <- pod B
+--   16:50:16 | Written 11492 bytes to quantconnect-deep-research.md   <- pod A
+```
+
+```bash
+# the two replicas, one session (the trigger itself)
+kubectl -n development logs <pod-A> | grep -E 'turn: refreshing skills|turn admission'
+#   pod A: 16:18:40 refreshing skills      + 16:52:35 "waited for the in-flight turn … 1274666 ms"
+#   pod B: 16:34:22 refreshing skills      <- same chat_id, no wait, no queue
+
+# two independent loops, same chat (iteration counters restart per turn)
+for p in <pod-A> <pod-B>; do
+  kubectl -n development logs "$p" | grep 'agent loop iteration' | grep qCxrNG3tgTl4C10xvaOYBL
+done
+#   pod A: iteration 1..18  16:18:40 → 16:52:28   (then 1 again at 16:52:36: the queued turn)
+#   pod B: iteration 1..13  16:34:22 → 16:45:26   (then 1 again at 17:12:52: the next question)
+
+# the lease thrash the pair caused (12 hydrates for one scope in ~40 min)
+kubectl -n development logs <pod> | grep 'scopeKey=agt_e5867879c33d9e98662b:s:qCxrNG3tgTl4C10xvaOYBL' \
+  | grep -E 'adopted|superseded|hydrated|rebuilt'
+#   pod B: 16:34:49 adopted from shared lease (pod A's instance)
+#           16:36:33 adopted after lease race · 16:44:06/16:44:48/16:45:06
+#            "rebuilt sandbox superseded by another pod; adopting current lease"
+```
+
+The reproduction needs no fault injection: send a follow-up while a long turn
+runs, and let the two requests land on different replicas (the ingress's
+ClientIP affinity does not cover server-originated traffic, and a browser whose
+second request goes through the cloud app's server-side fetch is not pinned
+either).
+
+## Appendix E — the same shape on 2026-09-04, before the gate
+
+Session: agent `agt_e5867879c33d9e98662b` (the same agent as the 2026-09-18
+incident), `session_key` `oMdMoz8imLGDtFrH21fMuA`, owner
+`u_4ab6b430b5ee1cc12a20`, model `deepseek-v4-flash`. The pod logs and the
+gateway image that served it are gone (replicas are recreated on every
+rollout); the event log survives and is enough to identify the shape. **No
+`queued` event exists in this session** — the gate that emits it (P1) landed ten
+days later, on 2026-09-14.
+
+```text
+17:36:50 content   "仍在跑（~3 分钟）。再等 2 分钟：" + tool_call exec call_00_iieZuVk…
+                                                    ↑ open until 17:38:50 (120 s)
+17:36:55 user      "continue"                       ← arrives INSIDE the open call
+17:37:06 content   "继续。等 2 分钟后查变体回测状态：" + tool_call exec call_00_AOGpXgCI…
+                                                    ← a SECOND writer, while the first
+                                                      writer's call is still open
+17:38:50 tool_result exec call_00_iieZuVk…          (no output — response stream truncated…)
+17:38:53 first writer continues (content + mcp call)
+17:39:07 tool_result exec call_00_AOGpXgCI…         (no output — response stream truncated…)
+17:39:10 second writer continues
+17:39:25 done    ← a turn ends
+17:41:02 done
+17:41:58 done    ← three turns ended within 2 m 33 s
+```
+
+The loop is strictly sequential — it never issues a new assistant message while
+its own tool call is unanswered — so line 17:37:06 cannot belong to the writer
+that opened `call_00_iieZuVk…` at 17:36:50. It is a second writer, and its
+wording ("继续") matches the user message that arrived 11 seconds earlier.
+
+Census of the whole session: 750 tool calls, 749 replies (one call left
+unanswered), 340 `done`, 399 `content`, 67 `error`, 1 `steer`, and **0
+duplicated replies**. So unlike Appendix A, the interleaving did not poison the
+history: each writer answered its own calls, and no pad collided with a late
+result (`normalizeForPrompt` and Q4 came later). The damage was the duplication
+itself — two writers deciding what the same session does next, one of them blind
+to the other's open call.
+
+**Why it belongs next to the 09-18 record.** Across the whole `session_events`
+history these are the only two days on which a user message arrived while a tool
+call was open:
+
+| day | occurrences | sessions | admission in force | form that resulted |
+|---|---|---|---|---|
+| 2026-09-04 | 1 | `oMdMoz8imLGDtFrH21fMuA` | none (P1 landed 09-14) | two writers, interleaved on whatever pod(s) served them |
+| 2026-09-18 | 3 | `qCxrNG3tgTl4C10xvaOYBL` | per-process (P1) | the same-pod copy queued for 21 min; the cross-replica copy ran |
+
+Reproduce the precondition for any session, any day:
+
+```sql
+WITH tc AS (SELECT agent_id, session_key, data::json->>'id' AS cid, created_at AS ctime
+            FROM session_events WHERE type='tool_call'),
+     tr AS (SELECT agent_id, session_key, data::json->>'id' AS cid, created_at AS rtime
+            FROM session_events WHERE type='tool_result'),
+     um AS (SELECT agent_id, session_key, created_at AS utime
+            FROM session_messages WHERE role='user')
+SELECT date_trunc('day', tc.ctime) AS day, count(*) AS occurrences, count(DISTINCT tc.session_key) AS sessions
+FROM tc
+JOIN tr ON tr.cid=tc.cid AND tr.agent_id=tc.agent_id AND tr.session_key=tc.session_key
+JOIN um ON um.agent_id=tc.agent_id AND um.session_key=tc.session_key
+WHERE um.utime > tc.ctime AND um.utime < tr.rtime
+GROUP BY 1 ORDER BY 1;
+-- 2026-09-04 | 1 | 1
+-- 2026-09-18 | 3 | 1
+```
+
+**What this changes about the plan.** The 09-04 record removes the last reading
+in which the 09-18 incident could be "a new feature misbehaving": the defect
+predates the gate, the gate removed its *common* form (a same-pod duplicate now
+queues), and what is left is the cross-replica form Q6 describes. It also dates
+the second half of the fix: a truthful pad is not a new requirement invented on
+09-18 — the 09-04 history already contains a writer that could not tell "my peer
+is still running" from "the call died".
+
+## Adopted (2026-09-19): four fixes, in order
+
+Decided after the 09-18 incident and the 09-04 precedent. Each item states the
+cause, the layer that owns it, the formal home, the shape of the fix, and the
+"cheaper alternative" the Musk gate rejects (Question → Delete → Simplify →
+Accelerate → Automate, order invariant). Interfaces are named, not built here.
+
+> **Status (2026-09-19): design complete, implementation pending — and it is one
+> unit.** A1–A4 each carry their port/table/wording/anchor-level design, the tests
+> they must pass, and the falsification that proves the test bites. No code is
+> written until all four designs are agreed (the sequencing table at the end of
+> this section is the implementation order). Anything the design leaves open is
+> marked *not built now* with the condition that would reopen it.
+>
+> **Landing log (working tree, 2026-09-19).** Landed and green: **G25** (sandbox
+> lease's claim branch `epoch = epoch + 1`, `TestSandboxLeaseEpochNeverResetsAcrossTakeover`,
+> falsification run for real); **A2 step 1** (the three-sentence vocabulary in
+> `internal/provider/provider.go`, `normalizeForPrompt` using the no-fact sentence,
+> `TestProjectionDoesNotClaimInterruptedWithoutEvidence`); **A1-a/b/e** — the
+> `session_turns` table and its four CAS methods + two store tests, the port
+> `internal/agent/sessionlease.go`, the adapter `internal/gateway/sessionlease.go`, and
+> the fence, **by explicit signature as reviewed**: `session.SessionStore`'s two write
+> methods take a `*session.TurnFence` (the port names its own type), the adapter
+> translates it into `store.SessionFence`, and the store exposes
+> `SaveSessionFenced` / `AppendSessionMessageFenced` whose statements carry the
+> `EXISTS (session_turns …)` predicate (the same shape A3 plans for
+> `PutIfVersion`); `Session.SetTurnFence` is set at admission, refreshed on renew,
+> cleared on loss, and a refused write records `Session.FenceLost()`.
+> **A1-c/d landed too (same day)**: both entry points (`loop.go` `HandleMessage` /
+> `HandleMessageStream`) take the lease first and the local FIFO slot second, release the
+> lease last, and emit `queued{position, holder, expires_at}` while waiting; `RunTurn`'s
+> `TurnStartIfIdle` verdict now reads the lease (`Live`) so an automatic turn defers instead
+> of queueing behind a peer; both ReAct loops stop at the iteration boundary once the lease
+> is lost. The real `SessionLease` is wired at the composition root
+> (`agent.WithSessionLease(storeSessionLease{st: st})` in `internal/gateway/userspace.go`).
+> Agent-level witness: `internal/agent/turnlease_test.go` (3 tests; two falsifications run
+> for real — dropping the lease from admission and from the IfIdle verdict both go red).
+> **A2 step 2 landed too**: the projection's sentence for an open call now follows the
+> lease (`Agent.openCallAnswer`: an unreadable lease ⇒ *not known*; a live holder that is
+> not us ⇒ *still running, do not re-issue*; nobody else holds the session ⇒ *interrupted*
+> is provable again). Both projection sites use `normalizeForPromptWith(...)`.
+> **A4's server half landed (same day)**: `/api/chat/subscribe` announces
+> `event: turn_active` (`{holder, epoch, expires_at}`) when a live holder exists, and
+> `/api/chat/history` carries the same fact as `turnActive`; silence means "no live
+> holder", which the client must render as its *unknown* branch rather than as a
+> death claim. The `queued` event already carries holder + ETA (A1-c).
+> **Not landed yet**: A4's client half (the five states, the composer reading
+> `turnActive`, Stop/detach) and A3.
+>
+> **Added the same day, while checking every existing lease against A1's
+> requirements (12):** A1.2 is now a designed port (types, the fact-carrying
+> error, layer placement), A1.3 answers the epoch question with a measured
+> counterexample in the *existing* sandbox lease (**G25**: its token resets to 1
+> per generation, and a delayed same-owner release deletes a live row), and A1.4
+> pins the fence inside the store's write statement rather than the caller. The
+> induced contract (L1–L6) and the as-built classification of all four lease
+> mechanisms are in [12](./文件系统形式化证明/12-lease-formal-design.md).
+
+### A1 — One turn per session, across replicas (the root cause)
+
+**Cause.** The invariant "at most one writer per session" (clause W) is real at
+the *entity* level but its enforcement lives in a framework detail — the
+in-process `a.sessions` map (`internal/agent/loop.go:2318-2340`). Its scope
+(the fleet) is wider than its storage (one process), so the assertion holds only
+until two requests land on two pods. Formal home: **F1** — "start a turn" is a
+migration whose preconditions must be evaluated by the system, not by each
+process.
+
+**Fix.** A session turn lease in the store, keyed `(user_id, agent_id,
+session_key)`: owner = pod identity, `acquired_at`/`expires_at`, a monotonic
+`fencing_token`, renewed while the turn runs (TTL ≥ turn budget + tool grace).
+Acquire is CAS; a loser gets the existing `queued{position}` event and waits
+FIFO. The in-process gate stays as the fast path. **The fencing token is checked
+where the session appends** (`session.Append` — the single write point), so a
+holder that lost its lease cannot keep writing when its goroutine resumes.
+Lease-store failure is fail-closed for *starting* a turn: refusing to start is
+recoverable, two writers are not.
+
+**Gate.** Cheaper alternatives rejected: *stickiness* (hash the session to one
+pod) covers browser traffic only — cron/goal/heartbeat/webhook ignore it, and it
+puts the policy in the routing detail, i.e. outside-in; *fencing without
+admission* still lets the second turn spend a full model+tool budget before its
+appends are refused. The lease is the smallest mechanism that yields admission,
+FIFO **and** fencing together.
+
+**Evidence / verification.** UT: two pools over one store racing `Acquire` ⇒ one
+winner, one `queued`; expiry hands off; a stale holder's append is refused.
+E2E: two gateway instances, one session, two `chat/stream` POSTs ⇒ the second
+queues (assert one `iteration=1` at a time). Falsify: drop the store check ⇒ two
+concurrent `iteration=1` loops, the 09-18 shape.
+
+#### A1.1 Where the coordination lives (and why not Redis)
+
+Redis in this system, verified 2026-09-19:
+
+| Redis is used for | Code | Default when Redis is off |
+|---|---|---|
+| per-`(channel, account)` singleton lease | `internal/rediscoord/lease.go:28-30` (`SetNX` + TTL), `:77` (Lua release that checks the holder) | `storeLeaser` → `AcquireChannelLease` (`internal/gateway/channels.go:16-30`; `internal/store/database.go:4975-5055`) |
+| cross-replica inbound/outbound | `internal/bus/bus.go:177` `NewRedis` (Streams + consumer group + `XAck`) | in-process channels |
+| user-space cache invalidation | `internal/rediscoord/invalidator.go` (pub/sub) | nothing (one process) |
+| OAuth refresh-rotation mutex | `internal/mcp/oauth/adapter/redis_locker.go` | nothing |
+
+`FASTAGENT_REDIS_ENABLED` defaults **off** (`internal/config/env.go:45-51`), and
+**neither dev nor prod sets it**: no `FASTAGENT_REDIS_*` in either deployment's
+env, no Redis keys in `fastagent-secrets`, and no Redis/Valkey pod in the cluster
+(checked 2026-09-19). The gateway's default leaser is the **store** one —
+`internal/gateway/gateway.go:424` — and the store's naming is deliberately
+kind-specific so it "can grow other lease kinds without renaming"
+(`internal/gateway/channels.go:18-20`).
+
+**Conclusion.** The turn lease is a *second lease kind in the same store*, not a
+new Redis mechanism. Redis stays what it already is (an optional accelerator for
+IM delivery and channel singletons); correctness must not depend on a component
+that the incident's own environment does not run. A Redis-backed implementation
+would be a legitimate fast path later — the port below would not change — but
+per the gate it is not built now.
+
+The shape is not new to the codebase: `channels.Leaser` exists for the *same*
+failure ("two replicas sharing the same bot token would both long-poll the
+upstream and the user would receive every reply twice",
+`internal/channels/lease.go:9-16`). A1 applies that pattern to the key nobody has
+covered yet.
+
+#### A1.2 Port
+
+```go
+// internal/agent/sessionlease.go — the admission port. The consumer is the turn,
+// not IM: do NOT reuse channels.Leaser, whose key has no session dimension.
+type SessionKey struct{ UserID, AgentID, SessionKey string } // = the sessions primary key
+
+// Turn is what a successful Acquire yields: everything the caller (and the
+// signals it emits) needs to name this possession.
+type Turn struct {
+    Holder    string    // "<pod>/<uuid>" — unique per acquisition, not per process
+    Epoch     int64     // fencing token: strictly increasing inside the row, never reset
+    ExpiresAt time.Time // what the dashboard's ETA and this turn's timer read
+}
+
+// ErrSessionTurnBusy carries the *facts* of the other holder, because the only
+// consumers are the signals: the queued event needs a holder and an ETA, and a
+// caller that retries needs to know when retrying could work. A bare bool would
+// force the caller to invent those numbers (A4.1).
+type SessionTurnBusyError struct{ Holder string; ExpiresAt time.Time }
+func (e *SessionTurnBusyError) Error() string
+func (e *SessionTurnBusyError) Is(target error) bool // errors.Is(err, ErrSessionTurnBusy)
+
+type SessionLease interface {
+    // Acquire returns the Turn when this holder now owns the session, and
+    // *SessionTurnBusyError when a live holder already does. Every other error
+    // (store unreachable, …) is a refusal to start: fail closed.
+    Acquire(ctx context.Context, s SessionKey, ttl time.Duration) (*Turn, error)
+    // Renew extends the lease and returns the new Turn. A lost lease is
+    // *SessionTurnBusyError again: the caller MUST stop writing and say so.
+    Renew(ctx context.Context, s SessionKey, t Turn, ttl time.Duration) (*Turn, error)
+    // Release is guarded on the same pair (12 §3, L5).
+    Release(ctx context.Context, s SessionKey, t Turn) error
+}
+```
+
+Implementations: `storeSessionLease` (**default** — the store is always present),
+`NopSessionLease` (single-instance / not wired, mirroring `NopLeaser`), and — see
+the gate — no Redis one.
+
+Three design choices worth naming, because each replaces a cheaper shape that
+cannot express a fact the signals need:
+
+* **`Turn` instead of `(epoch int64, ok bool)`.** The loser of a race must be able
+  to say *who* holds the session and *until when* (`queued{holder, ETA}`, A4.1)
+  without a second read that can race the hand-off. The error carries the fact,
+  so the fact has one source.
+* **`Acquire` generates the holder, not the caller.** `SessionLease` owns the
+  nonce because the nonce's uniqueness is the fence's premise (12 §3, L4(c)); a
+  caller that passes `host:pid` would silently reintroduce the sandbox lease's
+  weakness (12 §5). The store adapter is the only place that knows how a holder
+  is minted.
+* **`Renew` takes the whole `Turn`, not `(holder, epoch)`.** A turn that lost its
+  lease and renews again must not be able to "renew itself back": the token it
+  presents is the one it was given, and the store's CAS is on the pair. Two
+  loose arguments invite a caller to update one of them.
+
+**Layer placement (Clean Architecture; details in [12 §7](./文件系统形式化证明/12-lease-formal-design.md)).**
+
+| Layer | What lives here | Anchor |
+|---|---|---|
+| Entities | the invariant (one writer per session) + `SessionKey` — the session's identity, never the transport's | `internal/session` |
+| Use case | the admission policy (`TurnStartOrQueue` / `TurnStartIfIdle`) and the turn that holds the lease; **owns the port** | `internal/agent/admission.go`, `internal/agent/sessionlease.go` |
+| Interface adapter | the port's implementation and the wiring into each agent | `internal/gateway` (`storeLeaser`'s sibling), `agent.WithSessionLease` (`internal/agent/manager.go:86-150`) |
+| Frameworks & drivers | the DDL + CAS SQL, Redis (later, optional), `NopSessionLease` | `internal/store` |
+
+The dependency rule decides one thing here that is easy to get backwards: the
+**fence SQL lives in the outermost layer** and the port only carries the token.
+That is not an inversion problem — it is what L4(a) requires: the resource
+validates the token in the same atomic step as the effect (A1.4).
+
+#### A1.3 Storage
+
+```sql
+CREATE TABLE IF NOT EXISTS session_turns (
+  user_id     TEXT NOT NULL,
+  agent_id    TEXT NOT NULL,
+  session_key TEXT NOT NULL,
+  holder_id   TEXT NOT NULL,
+  epoch       INTEGER NOT NULL DEFAULT 0,   -- fencing token; both acquire paths supply it
+                                            -- explicitly (insert → 1, claim → epoch + 1),
+                                            -- so this default is never observed
+  acquired_at TIMESTAMP NOT NULL,
+  expires_at  TIMESTAMP NOT NULL,
+  PRIMARY KEY (user_id, agent_id, session_key)
+);
+```
+
+Acquire is the `channel_leases` CAS verbatim (`internal/store/database.go:4975-5055`)
+plus one clause — `epoch = epoch + 1` on the successful path, returned to the
+holder; `Renew`/`Release` both carry `AND holder_id = ? AND epoch = ?`. Both
+dialect branches (Postgres `ON CONFLICT … WHERE`, SQLite `excluded.…`) are copied
+as-is. Expiry is lazy, like the sandbox lease: the next `Acquire` claims a row
+whose `expires_at <= now` (`internal/store/sandbox_leases.go:68-73`).
+
+**Does the epoch start at 0 and grow per row?** No — and it must not, which the
+sandbox lease demonstrates the hard way. In `sandbox_leases` the token is *not*
+per-row: both write paths of `AcquireSandboxLease` hard-code `epoch = 1`
+(`internal/store/sandbox_leases.go:72` and `:81`) and only renew/replace
+increment, so it means "renewals inside this possession", not "which generation
+of this row". Measured consequence (probe, deleted after the run): the same
+owner (`host:pid` — repeatable) re-acquires the scope after expiry and gets
+`epoch=1` again; a delayed `ReleaseSandboxLease(scope, "pod-a", 1)` from the
+first generation then returns **`released=true`** and deletes the *new*
+generation's live row. The claim in `docs/sandbox-pool-leases.md:237-240` ("any
+stale destroy fails closed") is false; `:87-89` of the same file already admits
+why. It is registered as **G25** and generalised as obligation **L4(c)** in
+[12 §3](./文件系统形式化证明/12-lease-formal-design.md) — *the `(holder, epoch)`
+pair must be unique per acquisition*.
+
+For `session_turns` the rule is therefore explicit, and it is two-part because
+either half alone is not enough:
+
+* `epoch` starts at 1 on the **insert** and is `epoch + 1` on **every**
+  successful acquisition, including the claim of an expired row. It never
+  returns to 1 while the row exists.
+* `holder` is `<pod>/<uuid>`, minted per acquisition, so even a row that is
+  deleted (release) and re-created cannot hand out a `(holder, epoch)` pair that
+  a stale caller still holds.
+
+The second clause is the one that covers the deletion case (the epoch restarts
+at 1 by construction when a row has no predecessor); the first is the one that
+makes the epoch usable as an *ordering* fact, which the signals need to say "your
+turn was superseded by a newer one" rather than just "refused".
+
+#### A1.4 Renewal, fencing, waiting, failure
+
+* **TTL = turn budget + tool grace** (today 45 m + 60 s), renewed **on a timer at
+  TTL/3 by the turn's own goroutine**. Deliberately *not* the sandbox lease's
+  rule ("renew when an operation has been running > `defaultLongOpRenew`",
+  `internal/sandbox/lifecycle.go:145-149`): a turn spends minutes inside one
+  delegate call without appending anything, so activity-driven renewal would let
+  the lease lapse mid-turn — the 605-second window of the 09-18 incident is
+  exactly that shape.
+* **Fencing**: the epoch is checked before each append. `session.Append` is the
+  only writer of `session_messages`, so that is the one place to check. A lost
+  lease stops the turn and emits a σ; it never keeps writing. (A store failover
+  or a TTL race can produce two *holders*; only the fence stops two *successful
+  writers*, which is why it is part of A1 rather than a later nicety.)
+  **Where the check executes matters, and it is not the caller.** A guard of the
+  shape "read the lease, then append" leaves a TOCTOU window of one round trip —
+  exactly the window a TTL race needs. The token therefore travels *with the
+  write*: `Session.append` carries `(holder, epoch)` into the store, and the
+  store's `INSERT`/`UPDATE` for `session_messages` and `sessions` carries
+  `AND EXISTS (SELECT 1 FROM session_turns WHERE user_id = ? AND agent_id = ?
+  AND session_key = ? AND holder_id = ? AND epoch = ? AND expires_at > now)`, so
+  a refused append reports 0 rows affected. One statement, one snapshot: the
+  fence and the effect cannot be separated. The same shape is what makes the
+  sandbox lease's `DELETE … WHERE owner = ? AND epoch = ?` sound *within* a
+  generation (12 §4).
+
+#### A1.4a Why "with the write" means *in the signature*, and what else converged
+(decided 2026-09-19)
+
+The sentence above says the token travels with the write. What it did not say is
+**how** — and until 2026-09-19 this package carried that kind of fact three
+different ways:
+
+| fact | route | owner of the type |
+|---|---|---|
+| `fence` | method argument | this package (`TurnFence`) |
+| `channel` / `accountID` / `chatID` / `projectID` | method arguments | this package |
+| `chatterUserID` | a **context value** | the `store` package |
+
+Two mechanisms for one concept, and the second one cost the Dependency Rule:
+`internal/session/manager.go` imported `internal/store` for a single context
+tagging helper. The rule that decided the survivor is not taste, it is the
+**obligation each fact discharges**:
+
+* a **precondition** (the fence: "a write without the possession must not land")
+  must be *distinguishable when absent*. A context value cannot do that — "no
+  fence" and "the caller forgot the fence" are the same thing at the type level,
+  so `L4a` would be unenforceable;
+* a **record** (the chatter: a column that may legitimately be empty) needs only
+  to arrive with the call.
+
+So the survivor is the explicit one, and everything of that family rides one
+value: `session.WriteScope{Channel, AccountID, ChatID, ProjectID, ChatterUserID,
+Fence}`, assembled in exactly one place (`Session.writeScope()`). The judgement,
+stated for reuse: **within one family of facts, the strongest obligation decides
+the transport** (refusal semantics > record semantics), and age is only a
+tie-breaker — the context value here was older precisely because the obligation
+it served was weaker.
+
+The same derivation applies to the *refusal* itself, which is a value too:
+`ErrSessionFenceLost` is now owned by this package, and `store_adapter.go`
+translates the store's sentinel into it. The store **produces** the refusal; the
+use case **names** it; only the adapter knows both. `manager.go` no longer
+imports `internal/store` at all.
+
+Witnesses: `TestWriteScopeCarriesTheChatterAndTheFence` (the chatter, the fence
+and the triple arrive by that one route), `TestWriteRefusalTranslatesTheStoresSentinel`
+(the store's sentinel becomes this package's). Falsifications run for real:
+dropping `ChatterUserID` from `writeScope()` fails the first; removing the
+mapping fails the second.
+* **Where the fence type lives, and why the store has a second pair of write
+  methods.** The precondition belongs to the write, so it travels as an
+  argument, never as a context value. It is *this* layer's type
+  (`session.TurnFence`) that the port names: an inner interface must not name an
+  outer package's type, so the adapter (`internal/session/store_adapter.go`) is
+  the single place that translates `session.TurnFence` into `store.SessionFence`.
+  The store keeps the plain `SaveSession` / `AppendSessionMessage` untouched and
+  adds the fenced pair beside them, because the fenced call has a different
+  contract (it may refuse) and a different caller set (turns vs. the doctor,
+  migrations and tests) — the same "capability beside the capability-free form"
+  shape A3's `PutIfVersion` will take.
+* **A loss leaves the fence in place (stale), and the turn stops.** `Stop()` clears
+  the fence only when the turn still owns the session; after a takeover the stale
+  pair stays on the cached `Session` so every later write — including whatever the
+  loop emits after it notices — is refused by the store rather than landing in the
+  peer's history. The next turn overwrites it at admission.
+* **Waiting**: `Acquire` failure ⇒ the existing `queued{position}` event
+  (`internal/agent/loop.go:2330-2336`). `position` counts this pod's waiters only
+  — best effort, stated as such — and there is no cross-pod waiter registry
+  (deleted by the gate). The payload also gets the holder and the ETA (A4.1),
+  because "position 1" cannot say *whose* turn you are waiting for or whether
+  waiting is even the right move.
+* **Failure**: store unreachable ⇒ refuse to start the turn (fail-closed) with an
+  explicit message; single-instance or not wired ⇒ `NopSessionLease`. Refusing to
+  start is recoverable; two writers are not.
+* **Holder identity**: `<pod>/<uuid>`. The sandbox lease uses `host:pid`
+  (`internal/gateway/userspace.go:91-97`); including the pod name makes rows and
+  logs attributable, which the 09-18 investigation needed and did not have.
+* **The `TurnStartIfIdle` path must consult the lease too (found in the 09-19
+  review).** `RunTurn` (`internal/agent/admission.go:60-70`, called by the
+  gateway's task queue at `internal/gateway/gateway.go:593`) decides "is the
+  session busy?" from the **in-process** gate (`sess.TurnActive()`). Across
+  replicas that check is blind: an automatic turn (cron tick, goal
+  continuation, heartbeat, sub-agent delivery) arriving at pod B sees "idle"
+  while pod A holds the session, and then falls into `HandleMessage`, where the
+  lease makes it **queue** instead of being refused. That inverts P2's decision:
+  `TurnStartIfIdle` exists precisely so automatic work does not hold a queue
+  worker and its turn budget hostage ("must not hold a queue worker and its turn
+  budget hostage", `internal/agent/admission.go:26-33`). So A1's implementation
+  must move the IfIdle verdict onto the lease: try the lease first, and map "a
+  live holder exists" to `ErrTurnNotAdmitted` (no queue entry, no budget spent)
+  rather than letting the caller fall through to the waiting path. **Landed (2026-09-19, working tree)**: `admission.go` reads the lease
+  (`Live`) before the in-process gate; witness `TestAutomaticTurnDefersWhenAPeerHoldsTheLease`. Without this,
+  A1 closes the user-turn race and leaves the automatic-turn race in place —
+  the same duplicate-work shape, just sourced from cron instead of a human.
+
+#### A1.5 Why not one table with the sandbox lease
+
+The mechanisms are the same (a CAS row + TTL + monotonic epoch); what they guard
+is not.
+
+| Dimension | `sandbox_leases` (as built) | `session_turns` (this design) |
+|---|---|---|
+| key | `scope_key` = `agent[:p:<proj>][:s:<sid>]`, **no `user_id`** (`internal/sandbox/docker_executor.go:219-227`) | `(user_id, agent_id, session_key)` — the identity `session_messages` uses (`internal/store/database.go:1735-1739`) |
+| rows per turn | **one turn can touch N scopes** (its chat container `agent:s:<sid>` *and* the project-addressed preview container `agent:p:<pid>`; `LiveProjectExecutors` matches both prefixes, `internal/sandbox/e2b_executor.go:2058-2065`) | exactly one |
+| row contents | the resource's facts: `sandbox_id / envd_token / template / state / paused_at / unhydrated` (`internal/store/database.go:1679-1691`) | only the exclusion: `holder / epoch / expires_at` |
+| acquire means | "is this row my instance?" — compared on `sandbox_id` + `envd_token` (`internal/store/sandbox_leases.go:96-100`) | "is anyone else holding it?" |
+| transferable | **yes, by design** — "Ownership moves to the renewing pod only when the row still points at sandboxID and has not expired" (`internal/store/sandbox_leases.go:105-113`), because the sandbox outlives the pod | **no** — a dead pod's turn is dead; a peer waits for expiry and starts a *new* turn |
+| renewal trigger | activity: an operation running longer than `defaultLongOpRenew` (2 m) renews (`internal/sandbox/lifecycle.go:145-149`; `internal/sandbox/e2b_executor.go:2264/2402/2471`) | a timer in the turn's goroutine |
+| TTL tuned for | **cost** — `DefaultSandboxLeaseTTL = 15 m` (`internal/sandbox/lease.go:134`); too short costs one extra provision (measured 32 208 ms) and no correctness | **correctness** — must exceed the longest turn, or a live writer is evicted |
+| epoch fences | destroys/replacements — but **only within one generation**: the token resets to 1 on a takeover, so a delayed same-owner release can still match a newer row (**G25**, measured; [12 §5](./文件系统形式化证明/12-lease-formal-design.md)) | appends to the transcript, with a token that never resets |
+| holder | `host:pid` (`internal/gateway/userspace.go:91-97`) | `<pod>/<uuid>` |
+| when the store is down | may degrade (wait / skip a rebuild) — it guards cost and instance identity | must fail closed — it guards a data invariant |
+
+What is shared is exactly three things, and they are enough: the CAS statement
+shape, an `epoch` column whose *purpose* is fencing (the sandbox's resets per
+generation — G25 — which is why the turn lease states the invariant instead of
+copying the implementation), and the fixture pattern (`lease_pool_test.go`,
+`sandbox_pool_lease_test.go` already assert "two pools, one store", "expiry hands
+off", "a stale epoch is refused").
+
+### A2 — The pad must not assert what it does not know
+
+**Cause.** `normalizeForPrompt` answers every open tool call with
+`provider.StoppedToolResult` = *"(stopped — execution was interrupted…)"*. When
+the owning turn is alive on another replica that sentence is false, and it is
+not inert: the 09-18 model read it and re-issued the same two sub-tasks
+(16:34:29, "补查的两条线刚才被打断了，重新发起"). Formal home: **F2 / O1** — σ must be
+true; this σ also *produced* the duplication clause W exists to prevent.
+
+**Fix, in two steps (Delete before Simplify, per the gate).** **Both steps have landed
+(working tree, 2026-09-19).** the vocabulary is `provider.{StoppedToolResult,
+NoReplyTurnAliveResult, NoReplyUnknownResult}` + `provider.SyntheticToolPads`, and
+`normalizeForPrompt` answers every open call with the *no-fact* sentence until A1's
+`turnActive` supplies the holder fact (A2.1's third row). Step 1 reads (and is what the no-argument `normalizeForPrompt` still does, so a
+caller with no fact cannot accidentally claim more); step 2 is `openCallAnswer` in
+`turnlease.go`, whose witness is `TestOpenCallAnswerFollowsTheLeaseFacts` (peer-held
+and unreadable-lease cases go red when the unconditional claim is restored). replace the claim with the fact the projector
+actually has — "no reply was recorded for this call; the owning turn may still
+be running" — and never use the word *interrupted* without evidence. Step 2,
+once A1 exists: split into the two sentences that are now provable — holder
+dead ⇒ interrupted; holder alive ⇒ *still running, do not re-issue; wait or read
+what landed*. (An optional `tool_call` execution heartbeat would give the
+projector the same distinction without the lease, but it is a second mechanism
+for one fact; do it only if a third consumer appears.)
+
+**Evidence / verification.** UT: three history shapes ⇒ the wording for each;
+no "interrupted" when no lease/heartbeat fact says so. Falsify: restore the old
+string ⇒ the "must not assert" test goes red.
+
+#### A2.1 The sentence, decided
+
+The substitution lives in one place: `internal/agent/normalize.go:81` writes
+`provider.StoppedToolResult` (`internal/provider/provider.go:59`) into the prompt
+projection for every open call (`normalizeForPrompt`, `internal/agent/normalize.go:21`;
+its own comment at `:11` states the rule). Replace that single write with a
+choice over three shapes:
+
+| shape | what the projector knows | the sentence |
+|---|---|---|
+| open call, **holder dead** (A1's lease expired or was released, no heartbeat) | the owning turn ended without replying | keep today's `"(stopped — execution was interrupted before the tool returned)"` — now a provable claim |
+| open call, **holder alive elsewhere** (A1's lease is live and is not ours) | a peer owns the session; this call has no reply *yet* | `"(no reply recorded yet — the owning turn is still running; do not re-issue this call; wait, or read what has already landed)"` |
+| open call, **no fact available** (no lease wired, pre-A1 history, single instance) | nothing | `"(no reply recorded yet; whether the owning turn is still running is not known to this projection)"` |
+
+Keep the three strings as named constants next to `StoppedToolResult` so the
+vocabulary has one home, and make "the word *interrupted* may only appear with
+evidence" a test rather than a convention.
+
+#### A2.2 Tests and falsification
+
+* extend `TestNormalizeForPromptShapes` (`internal/agent/normalize_test.go`) and
+  the dangling-reply cases in `internal/provider/openai_dangling_tool_test.go`
+  with the three shapes above;
+* new assertion: with no lease fact present, the projection contains **no**
+  occurrence of "interrupted" (today it always does);
+* falsify: restore `provider.StoppedToolResult` for the alive-holder case ⇒ the
+  new assertion goes red, and the 09-18 transcript shows why it matters (the
+  model re-issued the two sub-tasks word-for-word).
+
+### A3 — Writer uniqueness for the store and the sandbox
+
+**Cause.** A tool's `Put` is last-writer-wins and a scope is assumed to have one
+sandbox instance. Both assumptions are single-writer assumptions; A1's absence
+breaks them. Measured on 09-18: the same deliverable written twice (pod B
+15348 bytes at 16:44:07, pod A 11492 bytes at 16:50:16 — the first version lost),
+and the two turns fought over the sandbox lease (adopt → lease race → three
+"rebuilt sandbox superseded by another pod"; 12 hydrates in ~40 minutes for one
+scope; three `[workspace] the sandbox was REPLACED` signals). Formal home:
+**F1 / R1–R2** — the "refuse, don't migrate" rule currently covers the
+sandbox→store direction only; the tool→store direction has no precondition at
+all.
+
+#### A3.0 In plain words: what this item is, and what it is not
+
+Every file the agent produces ends up in one place — a **key** in the workspace
+store (`<agent>/<project>/<session>/<path>`). "One key" is the whole design: the
+dashboard, the sandbox, the download endpoint, the preview container all read
+that one object. What varies is **who writes it, and when**.
+
+A single-writer world looks like this:
+
+```
+turn starts → tool writes <path> → (write-through) sandbox copy updated → turn ends
+```
+
+The 09-18 world had two of these in flight at once:
+
+```
+16:44:07  pod B  → Put(<path>, 15348 bytes)  → the agent sees "written"
+16:50:16  pod A  → Put(<path>, 11492 bytes)  → the same key, silently replaced
+```
+
+Nothing refused, nothing was reported, nothing in either transcript says the
+other turn existed. That is what "no precondition" means concretely: the store
+accepts a `Put` on a key that another live writer may already own. Compare the
+**sandbox→store** direction, where T1 already refuses and reports
+(`BLOCKED`) — same shape of hazard, one direction protected and one not.
+
+So A3 is *not* "we need a merge algorithm", and *not* "make the store
+transactional". It is the narrow question: **when two writers can touch one key,
+does the second one find out?** There are exactly three answers, and they differ
+in cost by an order of magnitude:
+
+| Answer | What the second writer does | What changes for the user/agent | Cost |
+|---|---|---|---|
+| do nothing | overwrite | the first version is gone, silently | 0 |
+| notice and say it | overwrite, then report *"another writer replaced `<path>` while this turn was working; re-read before editing further"* | the loss is still a loss, but it is **on the record**, so the agent can re-derive it | one extra `Stat` per write |
+| refuse | refuse + report | the loss becomes a **refusal**, one policy for all divergence (same as T1's `BLOCKED`) | `Version` on `ObjectInfo`, `PutIfVersion`, 3 implementations, 11 call sites |
+
+**Why the "delete" option comes before both**: with A1 in force, the 09-18
+sequence cannot happen, because pod B never runs a turn while pod A holds the
+session. A3 is therefore a belt, and the gate's order (question → delete →
+simplify → …) says a belt is only bought once the braces are on. The one thing
+worth checking before deleting it entirely: are there writers that A1 does **not**
+serialise? Today there are — a panel upload (`internal/setup/handlers_agents.go:1445`),
+an attachment write (`internal/agent/attachments.go:118`), a skill file publish
+(`internal/skills/objectstore.go:105`), and the sandbox's own write-back
+(`internal/sandbox/lifecycle.go:767`, `:1247`) all write the store without
+holding a turn lease. Those are the paths that decide between option 1 and
+option 2.
+
+**Decision (2026-09-19, this review): family B — versioned conditional writes.**
+Every tool→store write path gets a precondition the *store* evaluates, rather
+than a client-side "read the metadata and compare" (family A). Why B:
+
+* S3's `LastModified` has **one-second** resolution, so an A-family `size+mtime`
+  judge silently misses a same-second, same-size overwrite — the exact class this
+  item exists for — while an ETag is exact.
+* ETag is already trusted in this repository as a content identity (the cleanup
+  script keys on "the same non-multipart ETag"), so this promotes something
+  already used for *equality* into a *write precondition*, rather than
+  introducing a new concept.
+* It works for the blind-overwrite path too: `write_file` has no "version I last
+  saw", so no honest A-family check exists for it — and that path is what lost
+  the 09-18 deliverable.
+* The mechanism is already proven here: A1's fence is the same shape
+  (`…Fenced` statements that refuse), so B makes the whole store speak one
+  language: **a write may carry a precondition, and the resource enforces it**.
+
+Boundary (unchanged, and deliberately so): the *sandbox→store reconcile* (T1)
+keeps its A-family judge and stays "observe once, then say what was replaced". A
+version-based refusal was tried there on 2026-09-18 and withdrawn because
+refusing the write-back deadlocks the turn (docs 07 §3.11: "不做 CAS"). A3 is
+about the *tool→store* direction, where refusing is safe: nothing is waiting on
+that write, and the model can re-read and re-issue.
+
+The concrete change list (B1–B11) is in the register, §A3.1 below.
+
+**Fix (as originally framed).** First choice is *delete*: with A1 in force there is no second writer to
+defend against, so this item is a belt, not the braces — build it only if A1
+cannot cover a path (e.g. a panel upload racing a turn). If it is built, make it
+optimistic concurrency on the object (`Put(if-match: etag)`), refusing and
+reporting rather than overwriting — the same "refuse + say so" shape as T1's
+`BLOCKED`, which keeps one policy for divergence instead of two. Explicitly
+rejected: auto-merge (no semantics) and per-turn directories (changes the
+product's "one project, one tree").
+
+**Evidence / verification.** UT: two clients with the same etag ⇒ second is
+refused and reported. E2E: two instances writing one path ⇒ one wins, the loser
+is told. Falsify: drop the etag check ⇒ the overwrite reappears.
+
+#### A3.1 The change list (family B; each item is reviewed before it lands)
+
+> **Landing log (2026-09-19, working tree).** **B1–B5 landed**: `ObjectInfo.Version` + `workspace.Version`
+> (+ `VersionAbsent`, `ErrVersionConflict`) on the port; LocalFS `Version = size:mtime_ns` and a
+> best-effort `PutIfVersion` **declared as such**; S3 `Version = ETag` and a real conditional PUT
+> (`SetMatchETag` / `SetMatchETagExcept("*")` for create-only, 412 → `ErrVersionConflict`); `Metered`
+> passes both through. Witness: `TestLocalFSPutIfVersionRefusesAStaleExpectation` (create-only on a live
+> key, a stale expectation, and the stale writer's bytes proven not to have landed), with the
+> falsification run for real. The port's doc states the per-backend strength (S3 exact, LocalFS
+> best-effort) — B6's code half; its table in `01 §2` is still to write. **B7–B9 landed**: `write_file`, `edit_file` and `apply_patch` now write through
+> `Registry.putGuarded` (Stat → `PutIfVersion`); a conflict returns "another writer changed <path> while
+> this turn was working; nothing was overwritten — read it again and re-apply your change", and the
+> bytes provably do not land. **B6 landed** as the per-backend strength table in `01 §2.x`.
+> **B10 landed**: attachments are create-only (`VersionAbsent`); a skills publish reads the
+> current version and conditions on it (an intentional re-publish, so read-modify-write).
+> **B11-a landed**: the panel's upload is create-only, and a name collision answers **409 with the
+> current version / size / modified-at**, so the panel can offer the industry's three answers
+> (keep both = server-side auto-rename, replace = re-send with that version, or cancel).
+> **B11-b's server half landed**: the upload accepts an optional `expectedVersion` form field — with
+> it the write means "replace the version I saw" (`PutIfVersion(expected)`; exactly one file per
+> request), without it the write stays create-only. Witness
+> `TestFileUpload_NameCollisionOffersTheCurrentVersionThenReplaces` (create → 409 with the current
+> version → replace with it → content is the new one), falsification run for real. The cloud panel's
+> three answers (keep both / replace / cancel) and the auto-rename half ride the cloud work.
+
+| # | change | anchor | cost | verification |
+|---|--------|--------|------|--------------|
+| **B1** | `ObjectInfo` gains `Version string` — an **opaque** token owned by `internal/workspace` (never `minio.ETag` / `syscall.Stat_t`); supplied by `Stat`/`List` | `internal/workspace/workspace.go:76` | 0 | DTO test: every implementation fills it |
+| **B2** | the port gains `PutIfVersion(ctx, …, expected Version) error` + `ErrVersionConflict`; `Put` keeps its meaning (blind overwrite) | `workspace.go:48-72` | 0 | interface doc + the two error strings |
+| **B3** | S3: conditional PUT via `PutObjectOptions.SetMatchETag` (minio-go v7.3.0 has it; verified); `Stat` returns the ETag as `Version` | `internal/workspace/s3.go:91/118` | 0 extra requests | fake/emulator test: stale ETag ⇒ conflict |
+| **B4** | LocalFS: `Version = size:mtime_ns`; `PutIfVersion` compares before writing. **Declared as best-effort** (read-then-write, no kernel CAS) — honest, because multi-replica installs must use S3/PG anyway | `internal/workspace/localfs.go:88/119` | 0 extra requests | test: stale version ⇒ conflict; doc states the strength |
+| **B5** | `Metered` passes both through (no cost, no behavior) | `internal/workspace/metering.go:48` | 0 | existing decorator test |
+| **B6** | per-backend **strength table** written down (exact: S3/PG; best-effort: LocalFS) and the port doc states "callers may rely on the declared strength only" | `01 §2` + the port's L3 header | 0 | doc |
+| **B7** | `write_file` writes with `PutIfVersion` (version read right before; `VersionAbsent` when the object must not exist) | `internal/agent/tools/file.go:1172` | +1 HEAD (0 bytes) | UT: peer wrote between read and write ⇒ refusal + σ |
+| **B8** | `edit_file` uses the version from its own read (it already `Get`s the object) | `internal/agent/tools/file.go:501/688` | 0 extra | UT: same |
+| **B9** | `apply_patch` uses the version captured by `plannedWrite` (today it carries content; carry the version instead) | `internal/agent/tools/apply_patch.go:505/616/547` | 0 extra | UT: same |
+| **B10** | attachments (`attachments.go:118`) and skills publish (`skills/objectstore.go:105`) declare their posture explicitly: attachments = must-not-exist (`VersionAbsent`), skills = **decided later** (they are intentional republish) | as listed | 0 | UT per posture |
+| **B11** | panel upload / delete (`setup/handlers_agents.go:1445/1512`): condition on the version the panel last listed (owner-visible UI), refuse + report on conflict | as listed | +1 HEAD per upload | UT + a panel-shaped E2E |
+
+**Not in this list, on purpose**: the sandbox→store reconcile (T1) and the
+sandbox mirror's "observe once, then report" — see the boundary note above.
+
+#### A3.2 Formal home and cross-reference
+
+T1 turned the *sandbox→store* direction into a reconciler with preconditions
+(`BLOCKED`: refuse, don't migrate). The *tool→store* direction has **no
+precondition at all** — a plain `Put`. That is an F1 gap, recorded as **G24** in
+`docs/文件系统形式化证明/10-harness-state-audit.md` §4 (and its English mirror),
+pointing back here. A1 is the primary closure (there is no second writer);
+A3.1's options are the belt.
+
+### A4 — The client must not infer "the server is still running" from its own socket
+
+**Cause.** The dashboard treats its local `streaming` flag as the server's turn
+state: Stop aborts the fetch while the server keeps working
+(`handleChatCancel` answers `already_started` for a running turn), the composer
+immediately offers Send again, and unresolved rows are rendered as
+`Interrupted — this call never returned a result` from `streaming !== true`.
+What the client knows is "my connection ended"; what it claims is "the call
+never returned" (all 57 calls in the 09-18 session had replies). Formal home:
+**F3's take-side fact used as F2's world fact** — the consumer answering a
+question only the producer can answer.
+
+**Fix, in the gate's order.** Delete the assertion first: state what the view
+knows ("no reply in this view yet; the turn may still be running"), which is the
+same wording A2 adopts on the server. Then make Stop mean something: either
+cancel server-side, or relabel it *detach* and say the turn continues. Then
+replace inference with fact: carry the turn-active/lease state (A1) into the
+subscription/history payload so the composer and the tool rows read the server's
+state instead of guessing. Progress binding by `tool_call_id` (the earlier note)
+is part of this item, not a separate one.
+
+**Evidence / verification.** Component tests over three event sequences ⇒ three
+labels, and "connection lost, turn alive" must not render *Interrupted*. E2E:
+drop the SSE, send a second message, assert the UI says the turn is still
+running / queued.
+
+#### A4.1 What the wire must carry (server side, one field)
+
+The client cannot be fixed by wording alone: it needs the fact. A1's lease row is
+already that fact, so expose it read-only:
+
+* `chat/subscribe` (and the session-history payload) gains `turnActive:
+  {holder, epoch, expiresAt}` — present while a live lease exists, absent
+  otherwise. One field, one reader (`internal/setup/handlers.go` subscription
+  writer + the history handler).
+* `queued`'s payload (`internal/agent/loop.go:2330-2336`) gains the holder and an
+  ETA for honest wording ("waiting for the turn that holds this session" rather
+  than a bare position).
+* `subagent_progress` gains `id` (the `tool_call_id`) so progress can be bound by
+  identity instead of "the first unresolved `delegate_task`" —— the binding that
+  made two concurrent turns look like one restarting.
+
+#### A4.2 The client edits (anchors are in `tokenaissance-cloud`)
+
+> Paths in this table are relative to the cloud repository
+> ([tokenaissance/tokenaissance-cloud](https://github.com/tokenaissance/tokenaissance-cloud), branch `develop`);
+> prefix a path with `https://github.com/tokenaissance/tokenaissance-cloud/blob/develop/` to open the file.
+
+| what | where | change |
+|---|---|---|
+| "Interrupted" assertion | `src/features/chat/components/session/message-list.tsx:182` (`interrupted = !allDone && msg.streaming !== true`) and the label at `:96` | three states: **interrupted** only when the server says the turn is gone; **unknown** ("no reply in this view yet; the turn may still be running") when `turnActive` is present or absent-with-no-fact; keep the current wording only for the confirmed-dead case |
+| progress binding | `:184` `activeDelegateId = first unresolved delegate_task` and `:50` (`tool_queued`) | bind by the heartbeat's new `id`; keep "queued" for rows that are genuinely waiting |
+| Send while a turn runs | `src/features/chat/components/owner/chat-composer.tsx:158,162` (Send is enabled whenever local `streaming` is false) | enable/disable from `turnActive`, not from the local socket; a send during a live turn should say it will queue |
+| Stop | `src/features/chat/use-stream-pipeline.ts:137-140` (`handleStop` aborts the fetch only) | either call `POST /api/chat/cancel` and treat `already_started` as "detached, still running", or relabel the control to *detach* and say so |
+| strings | `src/config/locale/messages/en/fastagent/chat.json:137` `tool_interrupted`, `:138` `tool_queued` | reword the first, keep the second |
+
+The reference webui (`fastagent/web/src/components/chat-screen.tsx`) makes the
+same inference from its own `streaming` flag and has the same wording; it follows
+the same change, or the divergence gets written down as deliberate (the cloud
+client is the one the incident ran on).
+
+#### A4.3 Documentation to update when this lands
+
+[tokenaissance-cloud › docs/fastagent/design/09-delegate-task-design.md](https://github.com/tokenaissance/tokenaissance-cloud/blob/develop/docs/fastagent/design/09-delegate-task-design.md) defines
+the panel's four states (queued / running / running-without-heartbeat /
+interrupted). It becomes **four values plus one orthogonal
+property** (reviewed 2026-09-19: three independent axes — does a live holder
+exist / is something of mine pending / is the fact usable — whose reachable
+combinations are exactly `running` / `interrupted` / `unknown` / `idle`; the
+panel's "running-without-heartbeat" is a label variant of `running`, and
+"queued" is a property of the pending message, not a turn state). **Unknown
+(stale view)** is the value that was missing — the
+view cannot tell "the call died" from "I lost the connection" and must say so.
+
+**Why four grew to five, stated so the implementer cannot collapse them back.**
+The four as-built states are decided by facts the *view* happens to have
+(`§5.5`, commits `8eb8ff93` and `b566bbe5`):
+
+| as-built state | what decides it | where |
+|---|---|---|
+| queued | not `active` (the first unresolved `delegate_task` owns the live heartbeat) | `message-list.tsx:50` (and the ordering rationale at `:19-34`) |
+| running | `active` + a heartbeat arrived | `message-list.tsx:51-61` |
+| running (no heartbeat yet) | `active`, no heartbeat yet | the fallback at `message-list.tsx:63` |
+| interrupted | `msg.streaming !== true` — **the bubble stopped streaming** | `message-list.tsx:49` (`turnOver`), passed as `:238`; message-level copies at `:96`, `:182`, `:289`; string `chat.json:137` |
+
+The fourth row is a **transport inference, not a world fact**: the client knows
+"my stream ended", and claims "this call never returned a result". On 09-18 the
+stream ended because the view lost its connection while a *different replica*
+was running the turn, and **every one of the 57 calls in that session had a
+reply** in `session_messages`. So the fourth state is really two:
+
+| the world (server's fact) | the view's knowledge | the state |
+|---|---|---|
+| a live holder exists | `turnActive` present | running / running-without-heartbeat / queued |
+| no live holder, the call has no reply | `turnActive` absent *and* the turn is provably over | **interrupted** (now a provable claim) |
+| — | no fact at all (stale view, subscription gap, pre-A1 history) | **unknown** — say "no reply in this view yet; the turn may still be running" |
+
+The fifth state is therefore **epistemic, not a world state**: it exists because
+the consumer was answering a question only the producer can answer (F3's
+take-side fact used as F2's world fact). It is the same partition A2.1 applies
+on the server (holder dead / holder alive / no fact), seen from the client; and
+it is why A2 and A4 are one fix in two places rather than two features — the
+09-18 model read the mirrored claim and re-issued the two sub-tasks.
+
+Rule for the implementer: **a state may only be entered from a delivered fact,
+never from the transport**; and each state must lead to a different action
+(wait / wait-with-hint / re-issue / refresh), which is what keeps the count at
+five instead of "always unknown".
+
+#### A4.4 Tests
+
+Component tests over the three event sequences that decide the partition (turn
+alive + connection dropped; turn gone; no fact) ⇒ the five labels of §A4.3;
+"connection lost, turn alive" must not render *Interrupted*, and the no-fact
+case must render *unknown* rather than either claim. E2E: drop the SSE mid-turn,
+send a second message, assert the UI reads "still running / queued" and the row
+does not claim "never returned".
+
+**Sequencing (all four, in order).** A1 is the root and the long pole. A2 and A4
+are wording-first changes that can ship independently and immediately, and they
+shrink the blast radius while A1 is being built. A3 lands last, and only if a
+path exists that A1 does not already serialise.
+
+| step | item | files | tests | falsification |
+|---|---|---|---|---|
+| 0 (done) | A1–A4 design | this document; G24 row in `docs/文件系统形式化证明/10-harness-state-audit.md` §4 | — | — |
+| 1 | A2 step 1 — the pad stops asserting | `internal/provider/provider.go:48-59`, `internal/agent/normalize.go:21-90` | three shapes; "no fact ⇒ no *interrupted*" | restore `StoppedToolResult` for the alive-holder case |
+| 2 | A4 steps 1–2 — the client stops asserting, Stop means something | cloud: `message-list.tsx`, `chat-composer.tsx`, `use-stream-pipeline.ts`, `chat.json`; cloud `docs/.../09-delegate-task-design.md` | three-sequences component tests | revert the wording; the stale-view case renders *Interrupted* again |
+| 3 | **A1** — store lease + port + admission + fence | `internal/store` (DDL + `Acquire/Renew/ReleaseSessionLease`), `internal/agent/sessionlease.go` (port + `Turn`), `internal/agent/loop.go:2337` and `:3190` (the two `AcquireTurn` points), `internal/agent/admission.go:60-70` (**the IfIdle verdict moves onto the lease**, A1.4), the store's session write statements (`session_messages` + `sessions`) carrying the `EXISTS(session_turns …)` fence handed down by `internal/session/store_adapter.go:175`, `internal/agent/manager.go` (`WithSessionLease`), `internal/gateway` wiring | two-pool race; expiry hand-off; stale-token append refused (0 rows); `NopSessionLease` path; an automatic source on a peer ⇒ `ErrTurnNotAdmitted` **without** queueing; two-instance E2E | drop the store check ⇒ two concurrent `iteration=1` loops; drop the `EXISTS` ⇒ a taken-over turn keeps appending; leave `RunTurn` on the in-process gate ⇒ a cron turn queues behind a peer's turn instead of deferring |
+| 4 | A2 step 2 + A4 steps 3–4 — the fact reaches the projection and the view | `internal/agent/normalize.go` (holder alive ⇒ *still running*), `internal/setup/handlers.go` (subscription/history `turnActive`), `internal/agent/loop.go` (`queued` payload, `subagent_progress.id`); cloud binding | UT + component + E2E | force a stale `turnActive` ⇒ the client must say *unknown*, not *interrupted* |
+| 5 | A3 option 1 — detect and report the overwrite | file tools' write paths (`internal/agent/tools/file.go`, `apply_patch.go`), `internal/workspace` (no interface change) | UT: version moved between read and write ⇒ σ | drop the re-`Stat` ⇒ the loss is silent again |
+| 6 | **G25** — the sandbox lease's token stops resetting (one clause, independent of A1) | `internal/store/sandbox_leases.go:70-76` (claim branch → `epoch = epoch + 1`) | UT: the token strictly increases across two takeovers; the existing insert-path assertions stay valid | restore `epoch = 1` ⇒ the new test goes red |
+
+**No code before step 0 is complete**: design first, then implement in this
+order — the order is the Musk gate's output (delete the second writer, simplify
+the vocabulary, and only then add surface).

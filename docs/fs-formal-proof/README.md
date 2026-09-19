@@ -6,6 +6,7 @@
 > F2 observability ([08 §2](./08-state-observability-principle.md)) · F3 delivery ([08 §2.2](./08-state-observability-principle.md)) —
 > the index is [00-formal-systems.md](./00-formal-systems.md).
 > **Change register** (every change ↔ code anchor ↔ UT ↔ live e2e ↔ shipped?): [11-change-register.md](./11-change-register.md).
+> **Parent index (L2)**: [../README.md](../README.md) (every document bucketed, one line each; the formal entry point is 00 as well).
 > Subject: the sync mechanism between `fastagent`'s workspace (durable store) and the sandbox's
 > `/workspace` (execution copy).
 > Translation policy: prose is translated 1:1; code, identifiers, paths, symbols and quoted
@@ -28,7 +29,7 @@ reviews can cite it.
 
 | File | Content | Reader |
 |------|---------|--------|
-| [**00-formal-systems.md**](./00-formal-systems.md) | **The index of the three formal systems**: F1 preconditions / zero migration (06/07) · F2 observability (08 §2) · F3 delivery (08 §2.2) — what each answers, how they compose, the symbol table, the document map, obligation ↔ gap ↔ witness, and the formal classification of what is still open | **anyone** (start here) |
+| [**00-formal-systems.md**](./00-formal-systems.md) | **The index of the three formal systems**: F1 preconditions / zero migration (06/07) · F2 observability (08 §2) · F3 delivery (08 §2.2) — what each answers, how they compose, the symbol table, the document map, obligation ↔ gap ↔ witness, the formal classification of what is still open, and **§7 the full inventory** (formal systems / mechanism layer / subsystem contracts / **single-source family** / models / unformalised) | **anyone** (start here) |
 | [01-current-implementation.md](./01-current-implementation.md) | As-built record: ports, backends, writers, sync paths, observability | Anyone changing this code |
 | [02-semantics-and-architecture.md](./02-semantics-and-architecture.md) | The system semantics decomposed along Clean Architecture's four layers; where responsibility is misplaced | Anyone making design decisions |
 | [03-state-machine-and-timing.md](./03-state-machine-and-timing.md) | Sync from the angle of state change / timing, and why Docker vs E2B differ | Anyone asking "why is Docker fine?" |
@@ -40,6 +41,7 @@ reviews can cite it.
 | [09-sandbox-lifecycle-audit.md](./09-sandbox-lifecycle-audit.md) | **Sandbox lifecycle × filesystem audit**: 7 states, per-transition observability verdicts, four gaps and the order to handle them | Sandbox triage / lifecycle design |
 | [10-harness-state-audit.md](./10-harness-state-audit.md) | **Whole-harness state-change audit**: every component that the agent triggers or that triggers the agent, checked δ→σ, gaps G5–G13 (including a locally reproduced P0: a signal that is always false) | Required reading before changing any agent state |
 | [11-change-register.md](./11-change-register.md) | **Change register**: every F1/F2/F3 change ↔ code anchor ↔ UT ↔ live e2e ↔ deployment status (working tree vs production `HEAD`) | Release planning / review / delivery checks |
+| [12-lease-formal-design.md](./12-lease-formal-design.md) | **The formal design of leases**: the six obligations L1–L6 induced from `channel_leases` / Redis / `sandbox_leases`, the as-built classification, **the G25 counterexample (the sandbox fencing token resets each generation — measured)**, `session_turns`' instantiation and its four-layer placement | Required reading before designing any cross-replica serialisation |
 
 ## Conclusions in one line each
 

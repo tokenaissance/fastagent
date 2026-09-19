@@ -4,7 +4,7 @@
 **Scope**: `/api/chat/subscribe` — an SSE subscriber must see a turn's events no
 matter which replica ran the turn.
 **Related**: `docs/session-turn-integrity.md` (turn + event semantics),
-`tokenaissance-cloud/docs/fastagent/design/09-delegate-task-design.md` §5.5
+[tokenaissance-cloud › design/09-delegate-task-design.md](https://github.com/tokenaissance/tokenaissance-cloud/blob/develop/docs/fastagent/design/09-delegate-task-design.md) §5.5
 (the user-visible symptom this fixes).
 
 ## 1. The problem, in one screen

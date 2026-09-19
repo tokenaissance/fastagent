@@ -1,5 +1,8 @@
 # Tool output limits: nothing a tool returns may be unbounded
 
+> **状态**：已实现（`sandbox.OutputHeadCap` / `OutputTailCap` 在**产生处**截断；真机 `TestE2BExecClockHints`）
+> · **日期**：2026-09-14 · **形式**：F2（机制 3：工具结果即回执）+ F3（排空不丢已交付字节）
+
 Every tool result becomes a message in the conversation, and the conversation
 is re-sent on the next model round of the same turn. Unbounded tool output is
 therefore not a one-off memory spike — it is a permanent weight on the turn

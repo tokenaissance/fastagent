@@ -10,6 +10,13 @@
 > ## ⚠️ 部署状态（2026-09-18 记；读本文前先看这一段）
 >
 > **本文所有"已修（2026-09-18）"指的都是工作区（worktree）状态：未提交、未部署。**
+>
+> **更正（2026-09-19 实测）**：T1–T6 **已提交**（分支 `fastagent`，HEAD `8984c99`；`a0080a5` 是 HEAD 的祖先；
+> **私有仓库 `tokenaissance/fastagent` 已含该提交**），**dev 已部署** `8984c99`，
+> **production 落后 34 个提交**（`a24c0a8`，镜像 `…:20260917035926-fastagent-a24c0a8`）。
+> 本仓有两个远端：`fastagent`（私有，当前所在）与 `origin` = `tokenaissance/fastclaw`（**公开镜像，落后 34 个提交，按决定暂不推送**）。
+> 所以下面那句"未提交"已经过期；"**未上 production**"仍然成立。下文表格里的 `HEAD` 指 2026-09-17 的 `16a7532`，
+> 读时以本行为准。
 > `HEAD` = `16a7532`（2026-09-17）；工作区相对它 +2163/−359、76 个文件。差别不是细节，而是
 > **整批机制的有无**：
 >
@@ -423,6 +430,132 @@ stdio 读循环识别 method 消息   →  StdioClient.SetNotificationHandler
 > 所以那条读数是**测量**而非反证。盖章真正的钉法是单测 `TestWriteThroughStampsTheSandboxCopyWithTheStoreTime`
 > （钉住命令里的那个时刻）与真机 `TestE2BLiveHydrateKeepsStoreStamp`（[11 §10](./11-change-register.md) 的 10-4/10-5/10-8）。
 
+> **G24（2026-09-19，跨副本轮次事件中发现）** —— 义务 `—`（**F1 前置条件**：工具写 store 这条路）：
+> 工具的 `workspace.Store.Put` **没有任何前置条件**（last-writer-wins）。T1 把 `sandbox→store` 回写变成了
+> 带前置条件的对账（不同字节 ⇒ `BLOCKED` 拒绝 + 报告），但 **`tool→store` 这条路径从来没被检查过**。
+> 当同一会话存在两个写者（跨副本并发轮次）时，同一路径被直接覆盖：2026-09-18 实测同一份交付物被写两次
+> （pod B 16:44:07 **15348 字节** → pod A 16:50:16 **11492 字节**），**前一版内容丢失**，而且**沉默**——
+> 没有任何一方被告知。
+>
+> **修法**：主修**不在本层**——跨副本 turn 租约让"第二个写者"根本不存在
+> （[docs/session-turn-integrity.md](../session-turn-integrity.md) A1）。本层两级保险：
+> ① **检测并报告**（写入前后各一次 `Stat` 比 `size+mtime`，无接口变更，把静默丢失变成 σ）；
+> ② **条件写**（`ObjectInfo` 加 `Version`；`PutIfVersion` + `ErrVersionConflict`；3 个实现 + **11** 个
+> `.Put(` 调用点），冲突 ⇒ 拒绝 + 报告——与 T1 的 `BLOCKED` **同一条政策**。**2026-09-19 决定：走 ②（B 族），清单 B1–B11**（`Move` 已是同姿态：
+> 拒绝覆盖非空目标 `ErrMoveDestinationExists`）。
+>
+> **备注（上游）**：这条缺口的上游是"**一次写在并发下意味着什么**"从未被声明（同一端口上 `LocalFS` 是
+> `O_TRUNC` 原地写、`S3.Move` 自称 "Not atomic"）。它是形式化意义上的第四套候选，分析与重开条件见
+> [00 §7](./00-formal-systems.md) 的备注与 §7.1「原始设计」；**当前决定：不落地**——A1（去掉第二个写者）
+> + A3（检测/条件写）已足够。
+
+> **G25（2026-09-19，设计跨副本轮次租约时逐条核对既有租约发现）** —— 义务 `—`（**F1 的机制层**：
+> 租约本身作为前置条件的见证）：沙箱租约的围栏令牌 **每代归 1**——`AcquireSandboxLease` 的抢占与插入
+> 两条语句都写死 `epoch = 1`（`internal/store/sandbox_leases.go:72` / `:81`），只有续租/替换才自增
+> （`:118-124` / `:151-160`）。于是 `epoch` 表达的是"本次持有周期内续租了几次"，不是"这一行第几代"。
+>
+> **实测反例**（探针，跑完即删）：同一个 `owner`（`host:pid`，可重复）在上一代过期后重新取得同一 scope，
+> 世代 2 的 `epoch` 回到 `1`；此时携带世代 1 令牌的迟到释放 `ReleaseSandboxLease(scope,"pod-a",1)`
+> 返回 **`released=true`**，**新世代的活行被删除**（随后 `GetSandboxLease` 为 `nil`）。
+> 这也解释了同一份文档为什么自相矛盾：`docs/sandbox-pool-leases.md:87-89` 承认"只在持有周期内单调"，
+> 而 `:237-240` 说"任何迟到的销毁都会 fail closed"——后者为假。
+>
+> **归属与修法**：它不是 F2/F3 的缺口，而是 [12 §3](./12-lease-formal-design.md) 的 **L4(c)**
+> （围栏令牌必须**逐次获取唯一**：要么持有者身份内嵌一次性 nonce，要么令牌在行的整个生命期内严格单调）。
+> 修法一 clause：抢占分支改 `epoch = epoch + 1`（插入分支保持 `1`，首行没有前驱），
+> 反证测试 = "两代接管后令牌严格递增"，把该 clause 改回去即红。
+> `session_turns` 不继承这个弱点：它用 `<pod>/<uuid>` 作持有者（逐次唯一），并要求令牌永不复位——见
+> [12 §6](./12-lease-formal-design.md)。
+>
+> **已修（2026-09-19，工作区）**：抢占分支改为 `epoch = epoch + 1`（`internal/store/sandbox_leases.go:69-80`），
+> 插入分支保持 `1`；`TestSandboxLeaseEpochNeverResetsAcrossTakeover` 钉住"两代接管后严格递增 +
+> 老令牌释放被拒 + 活行仍在"，**反证已实跑**（把 `epoch = 1` 改回去即红）。文档同步：
+> [../sandbox-pool-leases.md](../sandbox-pool-leases.md) 的 U 条款与 "Hardening" 段已从"未覆盖"改为"已修"。
+
+> **G26（2026-09-19 发现，为回答"我们说好的是 serverless fastagent——有没有设计违背了它"）** — 义务 `—`
+> （**E 桶：保留策略**；这是 harness 自身的内存驻留，不是 σ）：在**生产真正在跑的那个构建**里
+> （`a24c0a8`，镜像 tag `20260917035926-fastagent-a24c0a8`，pod 启动于 2026-09-17T04:02Z），
+> `session.Manager.sessions` 是一个**无上限**的进程内 map —— `internal/session/manager.go:389` 与 `:446`
+> 各有一处 `m.sessions[key] = s`，而**全仓没有任何淘汰路径**
+> （`git show a24c0a8:internal/session/manager.go | grep -n 'sessionCacheMaxSize\|evictIdleLocked'` 无输出）。
+> 进程服务过的每一个 (agent, session) 组合都会一直驻留到进程结束，并各自带着那一整个 LLM 可见工作集
+> （`Session.Messages []provider.Message`）。也就是说它的规模由**"这个 pod 到现在服务过多少历史"**决定，
+> 而这恰恰是 serverless 进程绝不能有的性质。两个生产副本同一分钟启动、**0 次重启**，footprint 却不同：
+> 2026-09-19 `kubectl -n production top pod` 读到 **96Mi**（62mx9）与 **88Mi**（vxrcx），均已运行 2d9h。
+>
+> **修法（已落在工作区，尚未部署）**：LRU 上限 —— `agentSessionCacheMaxSessions = 10`（**每个 agent** 的预算；名字里带 agent 是因为作用域就是它，见 §10.7），调用方正在用的那个会话与
+> 任何有在途工作的会话永不被淘汰 —— 外加每 100 次穿过缓存的 `Get` 打一行 footprint 日志。
+> `TestSessionCacheEvictsIdleEntriesAndRebuildsThem` 钉住"被淘汰的条目会从权威 store 重建（所以淘汰不可观测）"，
+> `TestSessionCacheKeepsSessionsWithWorkInFlight` 钉住"在途状态永不被丢"。
+> **第一版实现是纯 idle TTL，被测试当场抓住**：当每个条目都刚被碰过时没有一个是"空闲"的，map 照样涨到
+> 18 > 10。idle TTL 只是**偏好**，只有淘汰才**碰到上限**。
+>
+> **预算的单位是「会话数」—— 2026-09-19 在两种备选都实测过之后定下。** 字节预算与行数预算都实现过、
+> 又撤掉了：字节预算需要在每一条变更路径上维护一个估算值（哪条路径忘了，估算就漂），而行数同样不是固定
+> 大小。会话数是这个缓存能**精确且廉价**执行下去的单位，而它要约束的东西 —— 这个 pod 会攒下多少条目 ——
+> 本来就是个数。`TestSessionCacheBudgetIsCountedInSessionsNotSize` 把这个单位钉住：即使每个会话都是
+> 64 KiB 的重会话，缓存也会恰好停在预算数上（**反证已实跑**：把闸门改成按行数，缓存停在 51，测试当场变红）。
+>
+> **单位与作用域，2026-09-19 决定** —— 预算是**每个 agent 10 个会话**（`agentSessionCacheMaxSessions`；
+> Manager 本来就是每个 agent 一个，所以"按 agent"是一个真实的作用域，常量名现在也把它写出来了 ——
+> pod 级的备选与它的代价记在 §10.7）。10 这个数是有意取小的：缓存唯一省下的是分配开销，因为 `Get`
+> 在**每一次**调用都从 store 重读工作集，所以"热着 10 个会话"和"热着 100 个"买到的是同一样东西。
+> 残留是量出来的、不是藏起来的 —— 会话之间大小不等（同样 10 个会话的代价可以是 2.3 MiB 到 77.1 MiB，
+> 见 §10.3）—— 而淘汰现在是常态而非例外，这正是 §10.6 那份逐字段证明存在的原因：丢掉一个条目不可观测，
+> 只有一个字段例外，`snapshot`（§10.5），那是这个上限被接受的代价。
+
+> **G27（同一轮审计发现；当天即修 —— 见下方补记）** — 义务 `—`（**E 桶：已退役的资源**）：两张按 agent 建的表会永久保留**已经结束**的
+> 工作的条目，且各自**一个 `delete` 都没有**：`tools.shellManager.shells`
+> （`internal/agent/tools/bash_session.go:157`）与 `tools.sandboxJobs.live`
+> （`internal/agent/tools/sandbox_background.go:104`）。两者只在 `Start` / `start` 里**加**，
+> 全仓 `rg 'delete\(m\.shells|delete\(s\.live'` **零命中**。代码自己就写着这件事：
+> *"we deliberately do NOT remove the session from the map here. bash_output remains useful after exit …
+> Registry.Close handles cleanup, or a future TTL eviction can be layered on top."*
+> 但 `Registry.Close()` 在**生产里零调用点** —— 全仓仅有的两处在测试里
+> （`internal/agent/workspace_signal_e2e_test.go:91,124`）。Registry 在 `newAgentWithActor`
+> （`internal/agent/loop.go:338`）里**每个 agent 建一次**，所以在生产里这张表的生命周期就是 agent 的，
+> 而 agent 的生命周期是 `UserSpace` 的 —— 30 分钟 idle TTL，且每次使用都会续期。
+>
+> **代价**：host 模式的后台 shell 各持一个上限 `bufferCap = 4 MiB` 的 `outputBuffer`（`bash_session.go:25`），
+> 所以最坏情况是 **4 MiB × 这个 agent 至今启动过的每一个 host 后台任务**。sandbox 那张表的条目很小
+> （一条路径、一个读游标、一个 runner）—— 同一形态，重量更低。要走到 host 这条路径还需要
+> `run_in_background` **且** `useSandbox == false`（未绑定 executor 时 `internal/agent/tools/exec.go:292`
+> 会拒绝在 sandbox 路径上跑后台），所以它**能涨多大**取决于部署；但它**无上限**这一点不取决于部署。
+>
+> **已修（2026-09-19，工作区）** —— 退役挂到**真正会发生**的那个转换上，因为原来指望的那个
+> （`Registry.Close`）在生产里根本不可达：
+>
+> | 表 | 何时退役 | 留什么 | 上限 |
+> |---|---|---|---|
+> | `shellManager.shells` | 收尸 goroutine，在 `cmd.Wait` 返回后立刻 | 足以解释这次退出的尾部 | `shellExitedTailBytes` = 每 shell 64 KiB · `shellRetainedExited` = 每 agent 32 个已退出 shell |
+> | `sandboxJobs.live` | 第一次观测到 `exited` / `missing` 的那次 poll（sandbox 里没有进程句柄可等，**poll 就是那次观测**） | 条目本身（一条路径 + 一个读游标） | `sandboxRetainedFinished` = 每 agent 64 个已结束任务 |
+>
+> 两张表都**永不遗忘正在跑的工作**。收缩发生在 `done` 发布**之前**，所以一个看到 "exited" 的读者不可能
+> 拿到一段尾巴却不知道那是尾巴 —— 而且告知它的那句话说的是**真实原因**（*"is no longer buffered (the
+> shell exited; only its last 64 KiB is kept)"*），没有沿用 4 MiB 运行期上限那套措辞：那会对一次真实的
+> 丢失给出错误的解释（08 §2.2，O1）。
+>
+> **代价明写**：对一个已被遗忘的任务调用 `bash_output`，回答与"这个 id 从未存在"完全一样 —— 那句话本来
+> 就写着 id 只在同一 agent 进程内有效，而诚实的契约是"最近 N 个已结束任务仍可寻址"。上限（32 个 shell /
+> 64 个 sandbox 任务）高到正常工作会话根本碰不到；它存在的意义是让这张表不再由历史决定大小。
+>
+> 测试：`TestRetiredShellKeepsOnlyItsTail`（200 KB 输出 → 只留 ≤64 KiB，结尾仍在，读者被告知退出原因）、
+> `TestRetiredShellsAreCappedAndRunningOnesSurvive`、`TestSandboxJobsForgetFinishedJobsBeyondTheRetention`、
+> `TestSandboxJobsNeverForgetARunningJob`。**反证均已实跑**：关掉收缩 ⇒ 第一条在 *"retired shell holds
+> 200022 bytes"* 变红；关掉 shell 上限 ⇒ 第二条超时；关掉任务表上限 ⇒ 第三条在 *"72 finished entries"* 变红。
+
+> **G28（同一轮审计发现，次要）** — `session.StoreAdapter.ownerCache`（`internal/session/store_adapter.go:55`）
+> 是一个既无上限也无淘汰的 map：该 adapter 解析过的每个 `session_key` 一条。条目极小（一个键 → 一个用户 ID），
+> 且 adapter 随它的 `UserSpace` 一起消亡，所以这是备注而不是缺陷 —— 记下来是因为这条审计判据必须**一视同仁**地
+> 施加到每一处，而不是只在预期有问题的对方检查。
+
+> **G30（2026-09-19 发现，当天定性）** — 义务 `—`（**S1 的作用域**）：`sessionCacheMaxSessions` 读起来像
+> 一份 pod 级配额，实际是**按 agent** —— `internal/gateway/userspace.go:1115` 每个 user space 建一个
+> `agent.Manager`，`internal/agent/manager.go:246` 再为**每个 agent** 建一个 `session.Manager`，所以载入了
+> K 个 agent 的 pod 最多持有 K × 预算。**按 agent 就是它应有的作用域**（值得热着的是这个 agent 自己的会话）；
+> 错的只是名字与注释在邀请人们按 pod 级去读。字段现在叫 `agentSessionCacheMaxSessions`，pod 级备选的代价
+> 记在 §10.7，于是这个选择是被文档化的，而不是靠默认值暗示的。
+
 ## 5. 结论
 
 1. **A 类的问题不是"缺机制"，而是"σ 说假话"。** G5/G6 都在既有出口内部，
@@ -523,3 +656,203 @@ baseline 一族是**零残留**——没有 `baselineDigestMax`/`staleWrites`/`d
 **故意保留的**：05/06/07 里那几段"已下线"的历史（每处都有显式标注，属于演进记录）；
 以及一条**反向断言**（测试断言工具结果里不含 `resolve_workspace_conflict`）——它是回归护栏，
 防止"让 agent 选边"那套设计被重新引入，不是残留。
+
+## 10. harness 自身的内存驻留：回答"有没有设计违背 serverless"的判据（2026-09-19）
+
+"我们说好的是 serverless fastagent，那为什么 pod 内存会随会话轮次一直涨？"既不是 σ 问题（F2/F3），
+也不是前置条件问题（F1）。它是这套文档反复撞见的**第四类问题**：*一个进程允许在内存里留住什么，留多久？*
+它属于 [00 §7](./00-formal-systems.md) 的 E 桶，落在"保留 / GC 策略"那一行。
+
+### 10.1 判据
+
+施加到 gateway 里**每一个进程内容器**上：
+
+| # | 判据 | 什么情况下算不通过 |
+|---|------|------------------|
+| **S1** | 它的规模由**在途工作量**决定，而不是由"这个进程服务过多少历史"决定 | 每见过一个会话 / 一个回合 / 一个任务就多一条 |
+| **S2** | 凡是**能从持久化 store 重建**的东西，都不该是内存里的唯一副本。判定按**字段**做，不按结构体做（见 §10.5 —— 这条就是本轮审计补进方法的） | 任意时刻丢掉一条会改变可观测结果 |
+| **S3** | **已退役**的资源（跑完的任务、死掉的会话）必须可丢，且不因此丢掉别人还需要的事实 | 设计成"怕它以后还要问，就永远留着" |
+
+下面要用到一个推论，也正因为它才有 §10.3：**条数上限只是字节上限的代用品，而代用的好坏取决于最大的那个元素。**
+"最多 128 个会话"只有在"一个会话本身有界"时才真的约束了内存。
+
+### 10.2 审计（每一个容器 · 判定 · 证据）
+
+| 容器 | 被什么约束 | 判定 |
+|------|-----------|------|
+| `session.Manager.sessions` 及每个 `Session.Messages` | 工作区版本是**每个 agent LRU 10**；**生产在跑的构建里什么都没有** | **在 `a24c0a8` 里不通过 S1**（G26；工作区已修）。它的字节上限仍未落地 —— 见 §10.3 |
+| `tools.shellManager.shells` | 在跑的构建里无约束；**现在**：退出即退役（收缩到尾部）并封顶 32 | **曾不通过 S3**（G27），**2026-09-19 已修** |
+| `tools.sandboxJobs.live` | 在跑的构建里无约束；**现在**：观测到结束的那次 poll 即退役，封顶 64 | **曾不通过 S3**（G27），**2026-09-19 已修** |
+| `session.StoreAdapter.ownerCache` | 无约束；随它的 `UserSpace` 一起消亡（30 分钟 idle TTL） | 次要（G28） |
+| `gateway.userSpaceRegistry.spaces` | 30 分钟 idle TTL，使用即续期（`idleTTL`、`startEvictor`） | **通过 S1** —— 由*并发用户数*约束，而"持有一个 space"正是"这个用户正在工作"的意思 |
+| `gateway.dedup`（`sync.Map`） | TTL 60 秒 + 每 30 秒扫一次（`cleanupDedup`，在 `gateway.go:853` 启动） | **通过** |
+| `gateway.deferredTurns.items` | 每秒 drain 一次（`run`），`maxWait` 5 分钟，过期会发 σ | **通过** |
+| `agent.EventHub.subs` | 退订即删除，且三处生产订阅点都 `defer unsubscribe()`（`internal/setup/handlers.go:1284`、`:1566`、`handlers_team_chat.go:187`） | **通过** |
+| `gateway.modelCostCache.cache` | 键是配置里的 (provider, model) 对 | **通过** |
+| `sandbox.E2BExecutorPool.executors` / `leaseEpochs` | 每个 scope 一条；release / sleep 时由 `takeExecutor` 删除 | **通过 S1** —— 由持有活租约的 scope 数约束 |
+
+三处不通过共享同一个形态：**一张按历史增长的键表，没有退役路径。**
+
+### 10.3 能测到什么，测不到什么
+
+"去读线上 footprint"是个错误的计划，用户叫停得对。那行进程内 footprint 日志**不在已部署的构建里**
+（`a24c0a8` 早于它），而且 `a24c0a8` 与工作区都**没有注册 `net/http/pprof`**
+（`rg 'pprof|expvar|/metrics' cmd internal` 无命中），所以不额外发一个端点就**无法**从活着的 pod 里取堆剖面。
+**不部署任何东西**就能拿到的：
+
+| 手段 | 能给出什么 |
+|------|-----------|
+| `git show <生产tag>:<文件>` 再用 `rg` 找 `delete` / 淘汰 | **定性**答案：哪些容器随历史增长。这是源码的性质，不是运行中 pod 的性质 |
+| `kubectl -n production top pod` + `.status.startTime`、重启次数、镜像 tag | 症状及其形状：同一分钟启动，footprint **不同** |
+| 本地探针驱动真的 `Manager`，读 `runtime.ReadMemStats` 差值 | **每会话字节数** —— 把"N 个会话"换算成"N 字节"的系数 |
+| 对生产 store 的一次只读查询（`sessions` 行数、消息字节数） | 这个 pod 实际被要求留住多少历史 |
+| `kubectl exec … kill -QUIT 1` → `kubectl logs` | goroutine 转储。查 goroutine 泄漏有用，查堆没用 |
+
+**实测**（本地探针，用真的 `session.Manager`，前后各 `runtime.GC()`；跑完探针即删）。缓存会吃满上限，
+所以每一行都是"128 个会话常驻"：
+
+| 每个会话的消息形状 | 常驻堆 | 每会话 |
+|---|---|---|
+| 20 条 × 512 B | **2.3 MiB** | 18.5 KiB |
+| 40 条 × 2 KiB | **12.1 MiB** | 96.8 KiB |
+| 30 条 × 10 KiB（≈300 KiB 文本 —— 大致就是压缩后留下的量） | **38.5 MiB** | 308.4 KiB |
+| 60 条 × 8 KiB（工具输出很重） | **62.1 MiB** | 496.7 KiB |
+| 60 条 × 10 KiB | **77.1 MiB** | 616.8 KiB |
+
+**对着生产 store 实测**（只读；经由 `production` 命名空间里一个临时 `pgprobe` pod，查完自删 ——
+数据库在 VPC 内网，外面 `psql` 连不进去）：
+
+| 生产 `sessions` | 值 |
+|---|---|
+| 行数 | **108** |
+| 最近 2 天更新过的行 | **5** |
+| `messages` 的存储尺寸（`pg_column_size`，即 TOAST 压缩后） | 合计 **9.1 MiB** · 最大 449 KiB · 均值 87 KiB |
+| `messages` 的文本尺寸（`octet_length(messages::text)`，即进程实际持有的量） | 合计 **31 MiB** · **最大 1.85 MiB** · 均值 297 KiB |
+
+**要看的是第二行，只看第一行就会判断错**：JSONB 在磁盘上是 TOAST 压缩的，所以存储尺寸把常驻尺寸
+低估了 3.4 倍。进程真正持有的是那份*文本*：整个数据集 **31 MiB**。再加上每条消息的 Go 结构体开销，
+并且在 `GOGC=100` 下（部署 env 里没有 `GOMEMLIMIT`）运行时的目标是**活堆的两倍**，结果就落在
+**80–100 MiB** 这一带 —— 这正是四个在跑的进程所在的位置。而跨两个构建、两个差别很大的运行时长仍在
+同一条窄带里（生产 `a24c0a8` 跑 2d9h：96Mi / 88Mi；开发 `8984c99` 跑 21h：87Mi / 82Mi），
+原因只有一个：一个**有限**的数据集（约 31 MiB）被每个副本整份缓存。按服务历史线性增长的容器不会出现
+平台期；这里的天花板*就是*数据集本身，正是这一点让"无上限缓存"成为主项，而不是一次缓慢泄漏。
+
+> 两个环境**并不共用同一个库**（各自 `STORAGE_DSN` secret 的哈希不同），所以 31 MiB 是生产的数字；
+> 窄带是两个环境共同呈现的*形状*，开发的库更小。窄带在两边含义相同：天花板由数据决定，不由运行时长决定。
+
+> **"预期十几 M"对这个二进制从来就不可达。** 地板不是"一个空进程"，而是一到多个 `UserSpace` 常驻
+> 的东西（agent，各自带着已加载的技能、提示词模块、记忆与完整工具目录）加上 Go 运行时与这份数据集。
+> 有用的目标不是一个凭直觉选的数字，而是**一个带机制的预算**（见下面第 2 条与 G27）。
+
+两条结论，外加第二条逼出来的那个决定：
+
+1. **无上限那一版在数量上解释了症状。** 生产在跑的构建把它加载过的每一个会话永远留着；它能持有的
+   数据集约 **31 MiB 文本**，由此得到的活堆在 RSS 上大体就是它的两倍。
+   有一条源码事实解释了*一个会话*为什么能这么重：最大的单个会话是 **1.85 MiB 文本 ≈ 46 万 token（按
+   `EstimateTokens`，`len(Content)/4`，`internal/agent/compaction.go:31`）**，即**远远超过 8 万 token
+   的压缩触发线** —— 因为触发线只统计 `Content` 与工具调用参数，而存储（因而常驻）的东西还带着
+   `Metadata`、`Thinking` 与 `RawAssistant`。所以"压缩跑过了"并不等于"这个会话很小"。
+2. **条数上限不等于字节上限 —— 但预算仍然按「会话数」计（2026-09-19 决定）。** 字节预算与行数预算
+   都实现过（`sessionCacheMaxBytes` / `sessionCacheMaxLines`），又都撤掉了：字节预算需要在每一条会变更
+   历史的路径上维护估算，而行数并不比会话数更"固定大小"。这个决定买到的是一个缓存能**精确、廉价、可预期**
+   执行的约束；它的代价则明写出来而不是暗示：**它限制的是记住多少个会话，不是每个有多重**，而生产今天只有
+   108 个会话、而预算按**每个 agent 10** 计，所以它在生产上会真的触发（不再只是防未来增长）。残留仍是量出来的：会话之间大小不等；
+   这个决策需要的数字就在上面，而每次淘汰的代价只是 `Get` 本来每次都要做的那一次重建（它无条件从 store
+   重读）。
+
+### 10.4 为什么这不是第四套形式系统
+
+F2 说的是"世界发生变更必须让 agent 可观测"。S1/S3 是它施加到 harness 自身内存上的对偶：
+**不是关于世界的事实的东西不得驻留；可推导的东西不得作为唯一副本。** 骨架就是 F2 到处都在用的那一个 ——
+*从权威来源重算，不要记住* —— 所以这是既有形态的一个新实例（[00 §7](./00-formal-systems.md) 词汇里的 C），
+不是"新问题 + 新判断形态"。它真正给清单加上的，是一条必须对每一张新表提出的问题：
+**"什么东西会删掉一条记录，那条路径在生产里可达吗？"** G27 就是答案为一个没人调用的 `Close()` 时的样子。
+
+### 10.5 本轮审计反过来补进方法的一条：可重建性是**按字段**的属性
+
+淘汰规则建立在 S2 上：*凡是能从持久化 store 重建的东西，都不该是内存里的唯一副本。* 套到 `Session` 上
+看起来显然成立 —— 工作集在每次 `Get` 都从 store 重读，所以条目随时可以丢。但把结构体**逐字段**走一遍
+（而不是相信这个概括），就找到了一个字段并不成立：
+
+| `Session` 字段 | 能从 store 重建吗 |
+|---|---|
+| `Messages` | **能** —— `getByKey` 每次调用都重读它，所以丢掉一个条目不可观测 |
+| `channel` / `accountID` / `chatID` / `projectID` / `runReceipt` | 能 —— 都是会话行上的列 |
+| `snapshot`（`/retry` 的还原点） | **不能** —— `Undo()` 只从进程内存恢复；没有 snapshot 列，丢掉之后 `HasSnapshot` 直接报 `false` |
+| `turnActive` / `turnWaiters` / `steerBuf` / `turnFence` / `fenceLost` | 不能 —— 但它们只在有在途工作时存在，而清扫被禁止淘汰忙会话 |
+| `lastTouched` | 不能，但不影响：它是缓存自己的记账 |
+
+所以 S2 的正确表述是**按字段，而不是按结构体**：*对每一个字段，要么它可重建，要么它只出现在清扫不得
+淘汰的条目里，要么丢掉它是**写明了的**代价。* `snapshot` 属于第三种，而把它写下来正是要点：
+
+- 淘汰一个会话就丢掉了它的还原点，于是 `/retry` 之后的 `/undo` 可能回答"没有可撤销的内容" —— 这与
+  "下一回合被另一个副本服务"时给出的答案是同一个，因为 snapshot 本来就是 pod 局部的。这个约束只是
+  多给了一种丢失方式；而这个丢失早已在契约里。方法要求的是把它**写下来**，而不是让人自己发现。
+
+这是本轮审计唯一一处对方法提出异议的地方。它不足以改动某条原则，但把清单磨利了：
+*这个结构体里哪些部分**不**可重建，代价由谁付？* —— 这一问现在已经并入 §10.1 的 S2。也正是这一问，
+如果 `Snapshot()` 是每回合都调用（而不是只有 `/retry` 调用），就能拦住"整结构体淘汰悄悄丢掉撤销状态"。
+
+### 10.6 当预算真的生效时：淘汰安全性审计
+
+预算是**每个 agent 10 个会话**，而生产里一个 agent 的会话多于 10 个，所以淘汰是**常态**而不是例外 ——
+正因为如此，"store 能重建"这句话不足以作数，必须换成核查。"丢掉一个条目不可观测" 是**逐字段**
+对着读这些字段的代码验出来的：
+
+| `Session` 的状态 | 条目被丢时是否丢失 | 为什么不可观测 |
+|---|---|---|
+| `Messages` | 丢失 | `getByKey` 在**每一次**调用（命中或不命中）都从 store 重读工作集（`internal/session/manager.go:625`）—— 所以重建出来的条目与热条目完全一致，而淘汰**不产生任何额外 store 流量** |
+| `channel` / `accountID` / `chatID` | 丢失 | 路由经 `resolveOrMintKey` 解析，它问的是 **store**（`ResolveActiveSessionKey`），从不问内存 map —— 所以淘汰不可能给同一个会话铸出第二个 key |
+| `projectID` | 丢失 | `SaveSession` 的 `ON CONFLICT … DO UPDATE` 有意**不含** `project_id`（`internal/store/database.go:2985`），所以带空 hint 重建的条目既不能抹掉行上的项目，也不能复活旧项目；面板与回合入口都经 `LookupSessionProject` 从 store 解析项目 |
+| `runReceipt` | 丢失 | 环境基线是从**已存储的消息元数据**读出来的（`session.RunReceiptOf` → `envBaselineFromReceipt`，`internal/agent/env_changes.go:352`）—— G9/G20 当初把它搬进 receipt 正是为了这个 |
+| `LastConsolidated` | 丢失 | 没有任何地方读它：`UnconsolidatedCount` 与 `MarkConsolidated` 全仓**零引用**（G29） |
+| `snapshot`（`/retry` 的还原点） | 丢失 | **这一条是*可观测*的** —— 见 §10.5。它是这个上限被接受的代价 |
+| `turnActive` / `turnDepth` / `turnWaiters` / `steerBuf` / `turnFence` / `fenceLost` | 不丢 —— 清扫跳过忙会话 | 而且残留的 steer 不可能活过一回合：`EndTurn` 把它交还，`flushLeftoverSteer` 把它落到历史里（`internal/agent/loop.go:2150`、`:2236`） |
+| `lastTouched` | 丢失 | 缓存记账 —— 它评价的那个条目已经不存在了 |
+
+在运行预算下钉住这件事的测试：`TestEvictionIsUnobservableAtTheOperatingBudget`（40 个会话 → 预算守住，
+而且每一个重新读回来仍是它当初说过的内容；**反证已实跑**：关掉淘汰，它在
+*"cache holds 40 sessions, want <= the budget 10"* 变红）、`TestSessionCacheEvictsIdleEntriesAndRebuildsThem`、
+`TestSessionCacheBudgetIsCountedInSessionsNotSize`。
+
+这轮审计留下了两样超出它自身的东西：
+
+- **一条带理由的立场记录** —— 每个 agent 10 个：因为缓存的唯一产出是省下的分配（无论如何每次 `Get`
+  都要读 store），小的热集与大的热集买到的是同一样东西；也因为**会触发的上限才是被检验过的上限**；
+- **G29**：`LastConsolidated` 和它的两个访问器（`UnconsolidatedCount`、`MarkConsolidated`）是本包里最热的
+  结构体上的死状态 —— 没人读、没人持久化，而那四处把它清零的代码是在为一个不存在的读者服务。
+  这里只记录不删，因为"零引用"已经两次只是线索而不是判决（10 §9）。
+
+### 10.7 作用域：按 agent，以及 pod 级预算要付什么
+
+2026-09-19 决定：预算**按 agent**（`agentSessionCacheMaxSessions = 10`）。另一个形状被考虑过，记在这里，
+因为这个常量过去读起来像是已经是 pod 级的：
+
+| 形状 | 约束什么 | 代价 |
+|---|---|---|
+| **按 agent（已选）** | 单个 agent 的热会话；一个载入了 K 个 agent 的 pod 最多持有 K × 10 条 | 无额外代价：Manager 本来就是每个 agent 一个，淘汰是局部的 |
+| pod 级 | 整个进程，一份共享预算 N 条 | 需要一个由组装根创建、每个 Manager 注册进去的共享预算对象，以及一次全局清扫（从所有 Manager 收集候选，丢掉全局最老的） |
+
+两个隐患让 pod 级成为一次真正的改动而不是改一个常量，这也是它被记录而不是悄悄实现的原因：
+
+1. **锁序。** `getByKey` 现在是持着 `m.mu` 插入并清扫的；全局清扫会先持缓存锁、再逐个取 `m.mu`。
+   per-Manager 的清扫必须先停止在 `m.mu` 下运行，否则两种顺序在负载下会死锁。
+2. **生命周期。** Manager 注册表本身就是个无界结构，除非有东西把它们注销 —— 而今天没有任何东西会
+   拆掉一个 `session.Manager`（与 G27 里 `Registry.Close` 是同一种"没有拆卸路径"的形状）。为了修一个
+   无界缓存而引入注册表、却没有拆卸路径去移除条目，等于用一个无界结构换另一个。
+
+预算的 per-Manager **分摊**（预算 ÷ 在线 Manager 数）能同时避开这两个隐患，但会让上限随负载漂移 ——
+那比一条写明的 per-agent 上限更糟：运维能对"每个 agent 10 个"做推理，没人能对"N ÷ 此刻载入了多少 agent"
+做推理。
+
+### 10.8 另一处缺失的拆卸，被决定而不是被默认
+
+G27 点出了第二件"没有拆卸路径"的事实并把它留成了问题：`Registry.Close()` 至今没有生产调用点，所以当一个
+`UserSpace` 因闲置被驱逐时，该 agent 的 host 后台 shell **不会被杀** —— 它们继续跑（现在每条最多留
+64 KiB，见 G27）。
+
+**决定（2026-09-19）：不接。** 因为用户安静了三十分钟就杀掉他的后台进程，是在改一条产品承诺；而唯一不会
+造成"沉默的破坏"的版本，是**同时把它说出来**的那个版本（一条 σ："你的后台任务被回收了"）—— 那需要一个
+写明了的闲置参数和一个投递点。在它存在之前，"不接"才是诚实的选择：资源代价有界且可见，而"接上"会让用户的
+dev server 无声消失、没人解释。等"闲置回收"这条承诺被定义时再重开；参数就用现有的 30 分钟 idle TTL，
+不要再引入新旋钮。

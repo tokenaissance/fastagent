@@ -312,6 +312,14 @@ When adding any mechanism that changes harness state, answer each line:
 - [ ] **Which context does this change belong to?** It only has to be perceivable in the
       scope/session **where it happened**. Before broadcasting to all contexts, ask: does the agent
       really need to know there? (Cross-scope broadcast is the over-design §5.1 rules out.)
+- [ ] **If a control acts on this fact, is the control's predicate the fact itself?** (Added
+      2026-09-19 from the cloud re-audit.) D₃ says the delivery point for a UI is the render; the same
+      rule applies one level in: a button that *acts* on a fact ("stop the turn", "retry", "cancel")
+      must be shown by reading that fact, not by reading a local proxy such as "this tab's stream is
+      open". A local proxy is right exactly when the fact is absent, and wrong in the case the whole
+      mechanism exists for — the fact being true *somewhere else* (another tab, another replica).
+      Worked example: the composer's Stop button was driven by local `streaming` while `turnState` was
+      already in the same tree, so a turn held elsewhere had no stop affordance at all.
 
 Reference implementations (inside this directory):
 `TestExecObservesSandboxChanges`, `TestExecIsQuietWhenNothingChanged`,
@@ -381,7 +389,10 @@ designed?**):
 | **Is the policy duplicated?** | the policy "when to attach to a tool result / when to queue / when to stay silent" was written once per mechanism — and **was missed once** (the idle-eviction signal was dropped, §6.1) | **yes**; what repeats is the policy, not the rendering |
 | **Is an abstraction needed?** (YAGNI: with one implementation, do not invent an interface) | there are only two delivery channels: **the tool result** ("what happened to the thing I just called") and **the per-turn prompt** ("what happened while I was away") | only **one event type + two delivery points**; no bus/subscriber framework |
 
-**Proposed shape** (decision record, not implemented):
+**The shape that was proposed for a unified mechanism — and REJECTED (§9.1), not pending.** Read the list below as the
+record of a design that lost, so nobody picks it up as a TODO: §9.1's decision was the opposite — **one exit per category, no
+cross-package framework**, with the criterion stated there (two exits, one question each; a framework would be a fourth
+abstraction over two calls). What survived from the analysis is only item 3's durability property, which landed on its own:
 
 1. **Unify δ, not the channel**: subsystems stop writing their own prose and instead produce one
    structured fact (the δ of §2.1: `{kind, paths, bytes, detail}`); **one** use case decides σ's
@@ -430,3 +441,88 @@ The discipline shared by all three: **tools/mechanisms only produce δ; placemen
 belong to the exit**; nothing outside the exit builds its own string (`addSignal` warns instead of
 silently dropping when it cannot reach the exit). That keeps "why was this sentence never delivered
 to the agent?" a question with **one place to look per package**.
+
+
+## 10. Patches (2026-09-19, brought back from auditing the cloud side)
+
+> These are **method-level** additions: auditing real changes on the cloud (a different repository, a
+> different runtime) forced four refinements. They are not a new system — they are the existing
+> obligations made complete for the case where **the consumer is a user interface, not the agent**.
+
+### 10.1 O1′ — freshness, split by the kind of σ
+
+Plain O1 asks only that a σ be true *when placed*. The cloud counterexample: a σ that was true when
+placed ("a holder exists") stays true **forever** because its expiry was lost in transit, so a view that
+lost its connection keeps showing "running elsewhere".
+
+Adding freshness to *every* σ is equally wrong: `notice` ("your turn was superseded" / "stopped at your
+request") is an **event σ** — once it happened it is true forever, and an "expired ⇒ unknown" rule would
+**erase** that history (worse than a lie).
+
+| kind of σ | examples | O1′ requirement |
+|---|---|---|
+| **state σ** ("how things are now") | `turnActive`, `queued`, `subagent_progress` | **must carry its expiry/version**; the reader judges by it; expired ⇒ degrade to `unknown` (never keep claiming) |
+| **event σ** ("what happened") | `notice` (superseded / cancelled), `done` | **immutable**: needs no expiry and **must not** be degraded or erased by an expiry rule |
+
+In one line: **a state σ goes false with time; an event σ does not.**
+
+### 10.2 D₃ — for a UI, the delivery point is "the render"
+
+F3 originally had D₁ (tool result) and D₂ (turn prompt) — both **for the agent**. The cloud consumer is a
+**user interface**, and its act of taking is a **render** (reading its own cache/state).
+
+> **D₃ has a capability precondition, measured 2026-09-19.** "The delivery point is the render" only
+> holds if the renderer can actually draw what arrived. The chat bubble's markdown pipeline had no math
+> support at all (`react-markdown` + `remark-gfm` only), so a model that wrote `$$\max E[V]$$` delivered
+> backslashes: the fact was produced, placed, and taken — and still not received. Fixed by adding
+> `remark-math` + `rehype-katex` to both the bubble and the document renderer, with one delimiter
+> policy shared by both: **only `$$…$$` is math**; a single `$` is deliberately not a delimiter,
+> because measured on this product's own text (`价格是 $12 与 $30 两档`) the default rule turns ordinary
+> prose into a formula. The rule the model needs in order to comply lives in the always-on
+> `response_format` prompt module — a *renderer* convention belongs in the base prompt, not in a
+> sandbox-specific block (that mistake was made and caught by `TestSandboxPromptStaysUnderItsBudget`).
+
+| delivery point | consumer | act of taking |
+|---|---|---|
+| D₁ | agent | the next model call reads the tool result |
+| D₂ | agent | the next turn's prompt |
+| **D₃ (new)** | **UI** | **one render** (Query cache / component state) |
+
+Corollary: O3 (the moment of taking) and O4 (no loss) must be restated on D₃ — "the server sent it" is not
+"the UI has it". Both cloud defects (`notice` dropped, `queued` with no landing point) live in this cell.
+
+### 10.3 O6 — an absence must be as visible as an arrival
+
+"Absence is invisible" was a corollary; the cloud audit promotes it to an **obligation**: **the revocation of a δ
+(a fact disappearing or expiring) must be as visible as the δ itself.**
+
+Measured counterexample: the server pushes nothing when a turn ends, so a disconnected view keeps showing
+"running elsewhere" until expiry or a reload. The fix is to **declare the absence** (`done ⇒ turnActive = null`)
+rather than hoping the next read notices.
+
+### 10.4 Two C-family contracts (orthogonal to F1–F3; they belong to port vocabulary)
+
+| # | contract | criterion | counterexample (measured) |
+|---|---|---|---|
+| **C1** | **one fact, one wire shape** | every exit for the same fact uses one schema; consumers parse one shape | one lease expiry had three exits and two spellings (SSE `expires_at`, history `expiresAt`, `queued` snake again) ⇒ a fact arriving over SSE **never expired** |
+| **C2** | **witnesses come from the producer's real payload** | contract tests must build fixtures from a live payload (or from a shared type), never by hand | 229 green UTs missed both the spelling bug and the missing `notice` type, because the fixtures were hand-written camel objects |
+
+C1's root fix is a **shared type** (two exits, one struct ⇒ shape drift fails at compile time); C2's is a
+**capture-style contract test** (grab one live payload once and keep it as the fixture).
+
+### 10.5 Three disciplines the landing process forced (measured on the cloud side)
+
+| # | discipline | what forced it |
+|---|---|---|
+| **D-1** | **never guess a location; read first, then anchor narrowly** | two consecutive failures in one wiring task: the first regex hit the field inside the **result type** (not the result object), the second missed because `queuedTurn` and `handleQueuedTurnAction` sit on the same line. Both were "guessing structure from shape" — the same root as **C2 (witnesses from real payloads)** |
+| **D-2** | **a new field in an implementation must land in its return type too** | added `setQueuedTurn` to `useStreamPipeline`'s result object but not to `UseStreamPipelineResult` ⇒ `TS2339/TS2561`; earlier the same shape happened with `turnState` vs `UseChatSessionResult`. The type face is the machine-checkable half of the contract; the two must move together |
+| **D-3** | **close the value domain in the type** | `QueuedTurn.turnId` is a required `string` while the queue σ may omit it ⇒ `TS2322`. If "no id" is a legitimate case, say so in the type (`string \| undefined` or an explicit unknown branch) instead of papering over it with `?? ''` at the call site |
+
+### 10.6 Iteration 2's conclusions (two, one of them a **non-defect**)
+
+| cell | conclusion | evidence |
+|---|---|---|
+| the `subagent_progress` heartbeat's delivery point | **not a new defect**; it collapses into an already-registered item (A4.1: the heartbeat has a live D₃ but no *reconstructible* one, and it binds by position rather than identity) | the client subscription does take it (`case 'subagent_progress'` → `setSubagentProgress`) |
+| a turn ending in another tab | **not a defect** — the hub publishes per (user, agent, session) and events land in `session_events` first for replay on reconnect | `internal/agent/events.go:72-86` (`AppendSessionEvent` → `hub.Publish(userID, agentID, sessionKey, …)`) |
+
+> Why record a non-defect: **the method's value is not only finding bugs but also refusing to book non-bugs as bugs** — a false positive pulls attention away from the real ones.

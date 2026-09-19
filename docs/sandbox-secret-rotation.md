@@ -1,5 +1,8 @@
 # Sandbox lease secret rotation runbook
 
+> **状态**：可执行的运维手册（加密实现在 `store.EncryptedSandboxLeaseStore`，主密钥 `FASTAGENT_OAUTH_SECRET`）
+> · **日期**：2026-09-09（最后更新 2026-09-14） · **形式**：—（运维）
+
 `sandbox_leases.envd_token` is encrypted at rest with AES-256-GCM keyed by
 `FASTAGENT_OAUTH_SECRET` (the same master secret that protects MCP OAuth
 refresh tokens). This runbook covers rotating that secret.

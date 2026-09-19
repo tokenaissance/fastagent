@@ -1,5 +1,8 @@
 # Background execution inside a sandbox
 
+> **状态**：已实现（`internal/agent/tools/sandbox_background.go`；UT `TestSandboxJobOutputReturnsDeltaThenStatus`、`TestSandboxJobOutputReportsUnreadTail`）
+> · **日期**：2026-09-14（最后更新 2026-09-17） · **形式**：F3（机制 1/2：排空 + 持久载体）
+
 How a long-running command (batch job, training run, dev server) is started
 inside a sandbox, observed from later turns, and stopped — without tying up a
 tool call or the turn budget.

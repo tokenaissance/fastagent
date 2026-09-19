@@ -67,6 +67,27 @@ type Store interface {
 - docker 的 `SnapshotWorkspace` **返回的就是宿主的那一份**（它 walk 的是 bind mount 的源目录），所以"快照"与 store 天然一致；
 - e2b / boxlite 的 `SnapshotWorkspace` 返回的是**另一份**，且这份内容停留在上一次 hydrate（或上一次沙箱内写入）的时刻。
 
+### 2.x 每后端对"一次写"的承诺（强度表，2026-09-19）
+
+> 端口加了条件写 `PutIfVersion(expected Version)`（B 族，义务 L7）。**强度按后端不同，且必须声明**——
+> 调用方只被允许依赖被声明的那部分。
+
+| 后端 | `Version` 是什么 | `PutIfVersion` 的强度 | 依赖它的后果 |
+|---|---|---|---|
+| **S3 / Spaces（多副本生产）** | 对象 ETag | **精确**：`If-Match`（或 `If-None-Match: *` 表"必须不存在"）与写在同一请求内，412 ⇒ `ErrVersionConflict` | 可以据此**拒绝**覆盖 |
+| **LocalFS（单机/开发）** | `size:mtime_ns` | **尽力而为**：stat → 比对 → 写，其间无内核 CAS | 只能"检测并拒绝已过期的期望"，不能承诺并发安全；多副本必须用 S3/PG |
+| **Metered** | 透传 | 与内层相同 | — |
+
+写者姿态（谁在用什么前置条件）：
+
+| 写者 | 前置条件 | 状态 |
+|---|---|---|
+| `write_file` / `edit_file` / `apply_patch` | 写前 `Stat` 取版本 ⇒ `PutIfVersion` | ✅ 已接（B7–B9） |
+| 附件 | `VersionAbsent`（必须不存在） | ✅ 已接（B10）—— `internal/agent/attachments.go:123` 传 `workspace.VersionAbsent`；S3 上即 `If-None-Match: *`，LocalFS 上是 stat-比较（best effort，见上表） |
+| 技能发布 | 读当前版本再条件写 | ✅ 已接（B10）—— `internal/skills/objectstore.go:113` 读版本后 `PutIfVersion`，并映射 `ErrVersionConflict` |
+| 面板上传/删除 | 面板最后列出的版本 | ✅ 已接（B11）—— 上传读可选 `expectedVersion` 字段、冲突时 409 + `current{version,size,modified_at}`（`internal/setup/handlers_agents.go:1492-1531`）；删除本身没有覆盖语义，它的第二半是 d1 镜像删除（`sandbox.LiveWorkspaceFileRemover`：面板 2026-09-18、工具路径 2026-09-20，见 [10 §4](./10-harness-state-audit.md) G7b） |
+| 沙箱↔store（穿透/回写） | **不用条件写**：见证只 in-band 存在于副本的 mtime 戳里（L7 §3.1 的论证） | 保持 A 族 |
+
 ## 3. 写入者与写入路径
 
 ### 3.1 宿主文件工具 → store

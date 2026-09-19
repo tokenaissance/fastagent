@@ -1,5 +1,8 @@
 # Agent Commit Checks
 
+> **状态**：已生效（两个 hook 在树上：`.githooks/pre-commit`、`.githooks/pre-push`；Codex 侧 `.codex/hooks/pre_tool_use.py`）
+> · **日期**：2026-09-16 · **形式**：—（流程；本清单当前无任何引用，见 [README §2](./README.md)）
+
 Two hooks ask an agent to review work at the boundary where it stops being
 private: `.codex/hooks/pre_tool_use.py` (inside a Codex session, before the
 commit exists) and `.githooks/pre-push` (before the commits leave the machine).

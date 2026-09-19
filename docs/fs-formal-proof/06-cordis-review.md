@@ -51,7 +51,7 @@ agent already acted on it".**
 | C2 | no witness (no test proving "after a revert it can be restored to the application site") | ❌ T1–T6 only assert final byte counts, which is not a witness |
 | C3 | the `shadow` path is created anew on every conflict, so repeated runs differ | ❌ violates "one-shot" and cannot be replayed |
 | C4 | `shadow` changes the workspace's **entry set** | ❌ observers (the file panel, `list_dir`, `read_file`) can see the extra object → observationally inequivalent |
-| C5 | `sync` has no preconditions; everything is inferred from "the current state" | ❌ **the core violation**: it migrates even on a conflict (writing a shadow), and the paper's "zero migration" is not implemented |
+| C5 | `sync` has no preconditions; everything is inferred from "the current state" | ❌ **the core violation as reviewed — since fixed.** The `shadow` path is gone from the code (a grep for it under `internal/sandbox/` returns nothing), and the reconciler now **refuses and reports** when the two copies hold different bytes (`BLOCKED`, `internal/sandbox/lifecycle.go:744-764`, the 2026-09-18 T1 work). The review text below is kept as the record of what was true when it was written, not as the current state |
 | C6 | no distinction between "recoverable inside" and "compensatable only across the boundary" | ❌ undeclared (which also explains "fixing the store doesn't stick": fixing the store is inside, while the old copy still sitting in the sandbox is a different chain) |
 | C7 | `shadow` makes one reconcile **change the entry set**, and each run differs | ❌ violates both halves of keyed diff: convergence and "one entry does not affect its neighbours" |
 
