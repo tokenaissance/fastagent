@@ -642,8 +642,10 @@ func (r *Registry) writeForPatchSandbox(ctx context.Context, ex sandbox.Executor
 		return r.systemFileStore.SaveWorkspaceFile(ctx, r.agentID, r.systemFileUserID(name), name, []byte(content))
 	}
 	if r.workspaceStore != nil && r.agentID != "" && r.isWorkspacePath(path) {
-		return r.workspaceStore.Put(ctx, r.agentID, r.projectID, r.scopeSessionID(), r.wsPath(path),
-			strings.NewReader(content), int64(len(content)), "")
+		// The SAME family-B guard as writeForPatch above. registerSandboxedApplyPatch
+		// is a second registration, not a wrapping of the first, and it is the one
+		// SetExecutor installs — so this is the branch a cloud turn runs.
+		return r.putGuarded(ctx, "apply_patch", path, []byte(content))
 	}
 	_, err := ex.WriteFile(ctx, path, content)
 	return err

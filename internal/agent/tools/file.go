@@ -908,8 +908,16 @@ func (r *Registry) putGuarded(ctx context.Context, tool, path string, data []byt
 	if errors.Is(err, workspace.ErrVersionConflict) {
 		return fmt.Errorf("another writer changed %s while this turn was working; nothing was overwritten — read it again and re-apply your change", path)
 	}
-	if friendly := asIsDirToolError(tool, path, err); friendly != nil {
-		return friendly
+	if err != nil {
+		// One answer is this function's to add — a stale expectation. Everything
+		// else the store can say (a 500, a permission error, a closed
+		// connection) belongs to the caller: returning nil here reported a write
+		// that never happened as a success, the silent-loss class this family
+		// exists to remove.
+		if friendly := asIsDirToolError(tool, path, err); friendly != nil {
+			return friendly
+		}
+		return fmt.Errorf("workspace put: %w", err)
 	}
 	return nil
 }
@@ -1190,12 +1198,14 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 			// (docs 10 §2.1, G6). Best-effort: "" means "no expectation", and the
 			// mirror then only states what it could establish.
 			previous := r.previousStoreVersion(ctx, r.wsPath(args.Path))
-			if err := r.workspaceStore.Put(ctx, r.agentID, r.projectID, r.scopeSessionID(), r.wsPath(args.Path),
-				strings.NewReader(args.Content), int64(len(args.Content)), ""); err != nil {
-				if friendly := asIsDirToolError("write_file", args.Path, err); friendly != nil {
-					return "", friendly
-				}
-				return "", fmt.Errorf("workspace put: %w", err)
+			// The SAME family-B guard as the non-sandbox registration above.
+			// These are two separate registrations, not one body called twice:
+			// this one is what SetExecutor installs, so it is the branch a cloud
+			// turn runs — a guard that lives only in the other branch leaves the
+			// production path blind-writing, whatever the tests on that branch
+			// say.
+			if err := r.putGuarded(ctx, "write_file", args.Path, []byte(args.Content)); err != nil {
+				return "", err
 			}
 			r.addSignal(ctx, r.writeThroughSignal(ctx, args.Path, args.Content, previous))
 			return fmt.Sprintf("Written %d bytes to %s", len(args.Content), args.Path), nil
