@@ -325,5 +325,5 @@ repeatedly-reimplemented mechanism of F1.
 token never resetting (`TestSandboxLeaseEpochNeverResetsAcrossTakeover`, sandbox side; the turn side
 follows A1), L5 a late release refused (`TestSessionLeaseAcquireRenewReleaseAndTakeover`) — all in
 `internal/store`.
-- **landed (2026-09-19/20)**: L6's queue payload carries holder + `expiresAt` (`internal/agent/turnlease.go:163`), and the live cross-replica e2e exists (`TestCancelledTurnStopsAndSignalsOnce`), with the client half X7 done. The line that remains open is the *previous* one:
+- **landed (2026-09-19/20)**: L6's queue payload carries holder + `expiresAt` (`internal/agent/turnlease.go:163`), with the client half X7 done. **Corrected 2026-09-21**: this bullet used to name `TestCancelledTurnStopsAndSignalsOnce` as "the live cross-replica e2e" — it is not one, and never was: its peer stamp is a fake lease in-process. The two-replica pair now exists (`internal/setup/cross_replica_turn_e2e_test.go`: one store, two servers, the lease wired on both — admission *and* a cancel issued from the replica that is not running the turn), each with its falsification run; see [11 §12](./11-change-register.md) row 32. The line that remains open is the *previous* one:
 L1/L4/L5 (with A1) — written down in [11 §12](./11-change-register.md).
