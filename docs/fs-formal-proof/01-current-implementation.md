@@ -98,6 +98,13 @@ Writer postures (who uses which precondition):
 | panel upload/delete | the version the panel last listed | ✅ landed (B11) — the upload reads the optional `expectedVersion` form field and answers 409 with `current{version,size,modified_at}` (`internal/setup/handlers_agents.go:1492-1531`); a **delete** has no content to overwrite, so its second half is the d1 mirror removal instead (§: `sandbox.LiveWorkspaceFileRemover` — panel 2026-09-18, tool path 2026-09-20, [10 §4](./10-harness-state-audit.md) G7b) |
 | sandbox↔store (write-through / write-back) | **no conditional write**: the witness exists only in-band, in the copy's mtime stamp (L7 §3.1) | stays family A |
 
+> **A checkable reading (added 2026-09-21; the structural component of "the cost of refusal", 19-5 §19.5.8.8)**:
+> the backend strength table has **3 cells** = exact (buys **prevention**) **1** · best-effort (buys only **detection**) **1** · pass-through **1**;
+> the writer postures have **5 rows** = buys prevention **4** (**on S3**; the same four degrade to detection on LocalFS) · **buys nothing 1** (sandbox↔store stays family A).
+> **Two conclusions**: ① **the only place in this system where refusal is actually exercised is 1 row**
+> (the family-A write-back where the sandbox would overwrite the store) **plus 1 conditional cell** (lease store unavailable ⇒ [12 §3.2](./12-lease-formal-design.md));
+> ② 19.4.6.2’s self-check passes on the spot: **the count of "prevention" cells (1) does not exceed the count of "co-located check" cells (1)** — this table is not lying yet.
+
 ## 3. Writers and write paths
 
 ### 3.1 Host file tools → the store

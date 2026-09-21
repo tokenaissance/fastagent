@@ -568,6 +568,19 @@ The baseline `B` and `staleWrites` of §3.2/§3.8/§3.10 are gone: the decision 
 remember "what was last handed to the sandbox", because **the sandbox file's own mtime is that
 record** (§3.11.3).
 
+**A methodological note (added 2026-09-20): why those three decision rows could be written before
+anything went wrong.** That elimination was not waited out of an incident — it was read off the
+specification, because the unit of analysis in this system is **stipulated**, not observed: who
+`produce`s, who `place`s, who `take`s (invariant I1), which two delivery points a signal must land on
+(`D₁` / `D₂`), and the "∀δ ⇒ ∃σ" duty of the channel are all written down and can simply be read out.
+Hence: **an omission is a claim about a complement, and a complement can only be stated against a
+specification** — observation always tells you what happened; to say that something is *missing* you
+must first have the specification, and only whoever wrote it is entitled to say "missing".
+**The price (which must be stated too)**: the verdict holds only inside **this system's own** scope —
+where the specification is silent, this method is blind as well.
+(The full form of this criterion is in *The Mathematical Principles of Cognitive Philosophy*, 19.4.9,
+"is the unit stipulated or observed".)
+
 #### 3.11.3 The current implementation: the baseline is retired, the criteria come from the two copies themselves (settled 2026-09-18)
 
 The reason for retiring the baseline is directly tied to cross-pod sandbox leases: a lease can be

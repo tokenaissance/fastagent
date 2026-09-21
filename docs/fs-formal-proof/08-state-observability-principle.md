@@ -16,6 +16,47 @@ This is not a restatement of "write logs". The reader of a log is an operator; *
 principle is the agent**, so the signal has to appear in a channel the agent actually consumes
 (tool results, the next turn's context) — not in slog.
 
+### 1.1 The shape of this principle: two layers, not two rules — and real tension between them
+
+The harness **keeps no representation** — it recomputes from what is there every time (baselines
+deleted, fallback copies deleted), because **anything it remembers goes stale**; what was deleted is
+not state but a memory that never expires and is taken to be oneself.
+
+The agent **must have a representation** — it has a context, which is a world model by nature;
+without one it cannot act.
+
+> **This principle is the interface between the two**: a representation-free harness keeping a
+> representation-based agent from drifting.
+
+It is therefore not "one extra safety requirement" but the **reason the asymmetry exists**: one side
+deletes its model, the other cannot do without one, and between them there must be a channel that
+says "what you remember is no longer true".
+
+**But there is real tension between the two layers — the split is not that clean.** The wording above
+is easy to read as "each side minds its own business". In fact two oppositely directed requirements
+are welded into one system. Four points, each with a landing place inside this document:
+
+1. **Opposite directions**: the harness **must forget** (anything it remembers goes stale), the agent
+   **must remember** (without a representation it cannot act) — inside one system, "remembering" is
+   simultaneously a **duty** and a **failure source**.
+2. **Different sources of judgement**: the harness judges from the two replicas themselves (the scene,
+   §2), the agent judges from its context (a model) — the two judgements **can each be right and still
+   contradict each other** (whether one may witness for the other: §2.2.3 landing 2 and
+   [12 §3 L7](./12-lease-formal-design.md)).
+3. **The interface is one-way only**: P1′ says there is no push (§2.2.4) ⇒ the harness cannot "tell" an
+   agent that is mid-inference; it can only **leave it there** for the agent to take at its next
+   entry point (the only landings are D₁ and D₂).
+4. **Who pays**: the more the agent's memory economises (fewer reads, fewer checks), the heavier A2's
+   load — **this principle is not a free interface; it is the channel that pays the agent's memory bill.**
+
+**The tension is not resolved, only declared.** This principle does not promise to abolish the
+asymmetry; it promises to make the asymmetry **observable** — to give "what the agent remembers is no
+longer true" **a landing place** (D₁ / D₂). The test is one sentence: **the moment someone proposes
+"let the harness remember a little too, to save a round trip", that line has already been crossed** —
+that is exactly the pod-local baseline deleted after the 09-17 incident
+([07 §2.4](./07-formal-rootcause-and-fix.md) / §3.11.1), i.e. "letting the side that keeps no books
+start keeping books".
+
 ## 2. The formal statement
 
 Let the agent's belief about its own world at time `t` be `Belief(t)` — everything it holds to be
@@ -157,6 +198,38 @@ keeps running into. **Ask whether the fact already has a home before building on
 >
 > **Corollary P1′**: every harness δ must land on D₁ or D₂. "Later than the fact" is acceptable
 > (09 §4, caution A); "no delivery point" is not.
+
+##### P1’s assumption health-check (a watchable trigger condition; added 2026-09-21)
+
+P1’s proof rests on two **factual assumptions about the driver layer**: ① the consumer is a **synchronous model call**
+(it takes `(messages, tools)` and returns one response); ② the driver layer **exposes no receiving end**. Those two are
+**not theorems** — they can change. So here is the criterion for **when the whole delivery-point table must be redrawn**
+(source: *The Mathematical Principles of Cognitive Philosophy*, 19-5 §19.5.8.7, row 1).
+
+**One question decides it: does the injected content change the *same* generation?**
+
+| Channel shape | Where the receiving end is | When it is taken | Does it refute P1? |
+|---|---|---|---|
+| user steering | application layer (a session buffer) | **between two tool iterations** | **No** — still "between two calls" |
+| continuation between tool iterations | application layer | between two model calls | **No** (this row is here to **prevent false positives**: a turn contains several model calls, so do not mistake injection between them for a counter-example) |
+| streaming **output** | — | — | **No** (streaming output and input injection are two different things) |
+| **injection consumable mid-generation** (the receiving end is *inside* the model call, or the protocol has a "inject mid-generation" slot) | inside the driver layer | **within the same generation** | **Yes** ⇒ assumption ② is broken |
+
+**When to run this table**: ① on every **driver-layer upgrade** (provider SDK / API version);
+② whenever someone proposes "giving the agent a live input channel", answer the question above once; and
+③ **do not** count "we can slip a message in between two tool calls" as a hit — that is steering, not injection.
+
+**If it does hit (blast radius, stated up front).** It would not mean "P1 was wrong"; it means **the delivery-point table has to be redrawn**:
+
+- a third delivery point appears next to `D₁` / `D₂` (call it **D₀ = mid-reasoning** for now) ⇒ the **three attribution questions**
+  in 19.5.1 of *The Mathematical Principles of Cognitive Philosophy* become four, and the answer set of question ② grows;
+- this section’s **O3** (taking happens at the consumer’s next read) and **O5** (do not interrupt reasoning in flight) were both written
+  against "it cannot be done" — after a hit they **downgrade from obligations to choices**;
+- the **③ impossible** cells in 19.4.6.1 that rest on "the interface does not exist" (R4 / P1′) must be re-judged:
+  once the interface exists they fall back to **②** (a landing point exists but nothing was done) ⇒ back to the ordinary fix (attach a production point).
+
+> **In one line**: **P1 is a theorem with assumptions, and this health-check is its expiry date.**
+> As of 2026-09-21: **the assumptions hold, the table is unchanged.**
 
 #### 2.2.5 The decision procedure (run a new mechanism through it)
 
