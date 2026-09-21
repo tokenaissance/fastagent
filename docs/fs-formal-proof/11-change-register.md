@@ -23,6 +23,14 @@
 | **Live e2e** | An E2B test needing `FASTAGENT_E2B_LIVE=1 E2B_API_KEY=…`; the run command is in each file's header |
 | **Deployed** | ❌ = working tree only (currently everything); it becomes ✅ when the change ships |
 
+> **This register does not carry the "shape of the control action".** That shape is a property of a
+> *gap* (not provided / provided / wrong order / duration); the cell-by-cell verdicts and the checkable
+> reading live in the header of [10 §4](./10-harness-state-audit.md). This register maps *change points to
+> evidence*. **One fact does not get two expressions** — to look things up by shape, go to 10 §4; to look
+> them up by change, stay here.
+> (Reason: changes and gaps are not one-to-one — #23 closes two cells at once, and a new change may not
+> belong to any existing gap yet. Forcing a column in means that cell will eventually lie.)
+
 **Four-layer placement** (Clean Architecture): the F1 group sits in the **Use Case** (the reconcile policy) and
 the **Frameworks** (store / sandbox); the F2 group spans **Entities** (the turn receipt) → **Use Cases** (signal
 rendering) → **Interface Adapters** (tool results); and all seven rows of §4 land on the **Interface Adapters ↔

@@ -400,30 +400,63 @@ stdio 读循环识别 method 消息   →  StdioClient.SetNotificationHandler
 > 「义务」列按 08 §2.2 的 O1–O5 归一：**O1** 该产生而没产生 / 说了假话；**O2** 产生了却没落在 D₁ 或 D₂；
 > **O3** 取走时机错（要求消费方订阅）；**O4** 送达前丢了（进程内状态）；**O5** 无变化也说或打断推理。
 > 「—」表示这一条不是投递义务的违反（是别族问题，另注原因）。
+>
+> **「控制动作形态」列（2026-09-20 加，取值就是 STPA 的四个引导词）**：它记的是**这一格上出问题的那种动作形态**——
+> **不提供**（该说没说）／**提供**（说了，但那句话说出去本身导致危险：假话、空动作、覆盖）／
+> **顺序**（说了，但时机或次序错）／**时长**（该停没停、该退役没退役）。
+> **「—」表示这一格根本不是形态问题**——它属于别的族（单一来源、作用域不变式、资源上界、死代码、协议合规）。
+> **为什么加它**：原来的表只有「义务」列（O1–O5），它能判**违规**，判不了**遗漏**——
+> 「在这个条件下我们什么都不提供」在表里是隐形的。加上这一列之后，**遗漏本身变成一行可见的记录**。
+> **下一步（未落地，候选）**：给每类 δ 规定一个**允许的动作形态集**（提供／不提供／顺序／时长），
+> 并要求**「拒绝」具名**（拒的是哪一类 δ、依据哪一条判据）——那就是把这张「带义务登记的会计」
+> 升级成「带控制动作清单的会计」。现在只做到**可见**，没有做到**控制**；
+> 且这一层管不到「agent 收到之后仍然做错」（那半边在《认知哲学的数学原理》19.5.1 的第③行）。
+> 完整表述见同书 19.4.6.2 的「从会计升级成控制」。
+> **可核查的读数**：本表 23 行 = 不提供 **13** · 提供 **2** · 顺序 **1** · 时长 **0** · 非形态 **7**。
+> 「时长」为空不是漏填，而是一条**可被推翻的读数**——找到一行「该停没停」即可推翻它。
+> **它已经被找到了一半**：表外的块引用条目里有一行是「时长」（**G27**，已退役的资源被永久保留）。
+> 表内 0 行、全表 1 行——两个数字都写出来，才叫读数。
+>
+> **这张表为什么能判「遗漏」**（2026-09-20 补）：因为这套系统的分析单位是**规定的**，不是观察的——
+> 三个角色（I1）、两个落点（`D₁` / `D₂`）、一条通道责任（∀δ ⇒ ∃σ）都写在文档里，可以照着念。
+> 于是"该发生的事没发生"能**对着规格**判，不必等事故：**G3、G14 这类行，读代码就能判**
+> （载体在进程内存里、同一份事实有两个来源）——它们是**结构性质，不是事故性质**。
+> **代价**：裁决只在**这套系统自己**的范围内有效——规格没写到的地方，这里同样看不见。
+> 完整形态见 07 §3.11.1 的方法论备注与《认知哲学的数学原理》19.4.9。
 
-| # | 义务（08 §2.2） | 缺口 | 触发者 | 代价 | 修法方向 |
-|---|------|------|--------|------|---------|
-| ~~G5~~ | O1 | ~~`write_file` / `apply_patch` 的 σ 恒为假（over 2 MiB），docker 上也照发~~ | agent 自己 | **P0 已修（2026-09-18）**：`CompareResult` 四态 + docker 静默，同仪器复验见 §2.1 | — |
-| ~~G6~~ | O1 | ~~`apply_patch` / `write_file` 永远不会报"替换了不同版本"~~ | agent 自己 | **P1 已修（2026-09-18）**：`previousStoreVersion` + `plannedWrite.previous`；`write_file` 现在报得出 | — |
-| ~~**G7a**~~ | O1 | ~~分歧不可见~~ | 用户 | **P1 已修（2026-09-18）**：`list_dir` 现在把"store 有、沙箱没有"的路径点出来（含原因与出路），docker 不问、问不到不说 | — |
-| ~~**G7b**~~ | —（写路径对称性，属 Cordis 前置条件） | 上传/删除不写进活沙箱 | 用户 | **上传半边已决策（2026-09-18）：不做穿透 = 选项 a**。产品语义 = **面板是"文件库"**，"上传后下一次 `exec` 立刻 `ls` 得到"**不是**要求；代价与补救都已由既有信号说清（`list_dir` 与每次 exec 后的同步都会点名"store 有、沙箱没有"，并给出 `read_file`+`write_file` 的搬法）。澄清：在 LocalFS+docker 上它天然立刻可见（同一棵树），**不做**为把它藏起来而改架构——准确表述是"不承诺立刻可见，也不阻止（由后端决定）"。**删除半边仍未修，且必须修**：见下 | 删除半边 = 待决策（d1 穿透删除 vs d5 删除墓碑），见 [05 §8](./05-remediation-plan.md) |
-| ~~**G21**~~（2026-09-18 新发现；与 G7b 同族） | —（路径/作用域约定不一致；属 F1 的"同一路径一个键"） | ~~面板删除静默无效：列表返回带作用域前缀的 agent 相对路径，面板原样 DELETE 又附带 `?sessionId=`，handler 再把作用域拼一次 ⇒ 键多一层前缀 ⇒ 目标不存在；两个后端对"删不存在的目标"都返回成功 ⇒ 200 + UI 以为删掉了 + 刷新后那行又回来~~ | 用户 | **已修（2026-09-18）**：① **Fix 0** —— 删除改用与下载同一个约定（路径自带前缀时按 agent 相对解释，`Delete(agent,"","",path)`；旧的无前缀+query 形状继续可用，`sandbox.StorePathScope` 是唯一判定点）；② **d1** —— 同一次删除也把**活沙箱**里那份删掉（`Gateway.RemoveWorkspaceFile` → `sandbox.LiveWorkspaceFileRemover`，经 `LiveExecutorPool` **只找活实例、绝不建实例**），否则下一次同步会把它写回（真机两半都钉住）。失败时返回 `sandboxRemoved:false` + warning，不假装干净 | — |
-| ~~G8~~ | O1 | ~~身份/系统文件被外部改写无信号~~ | 用户 / 其他会话 / 其他 pod | **P1 已修（2026-09-18）**：回合级采样加入 7 个身份文件的指纹；只报文件名、不报内容 | 见 §3.3 的落点（`identitySampleFiles`） |
-| ~~**G9**~~ | O4 | ~~agent 配置被外部改写无信号；基线随实例消失，而配置变更恰恰靠重建实例生效~~ | 用户 | **已修（2026-09-18）**：采样加入 `model` + `prompt_mode`；before 不再自造，而是**读对话自己的回合收据**——零新增存储、零新增写路径、天然跨实例与跨副本。重建后的**新实例首回合**即可说出 `my configuration changed: <旧> → <新>`；取不到收据即沉默。收据后来承载整张快照（见 G20） | —（G20 已把同一机制推广到其余五族） |
-| ~~**G20**~~ | O4（G9 的推广） | ~~技能 / 工具名 / 记忆 / 身份文件 / cron 五族的基线仍在进程内 `envTracker.last`：pod 重启或热重载后首回合沉默；且 `handlePlanMode`、API 的 `HandleMessageStream` 两条回合路径既不采样也不盖戳~~ | 用户 / harness | **已修（2026-09-18）**：收据改为承载**整张 `envSnapshot`**（metadata `run_receipt`），`envTracker` 类型连同 `last` map / mutex / `configWas` 分支一起删除，判定变成纯函数 `renderEnvDelta(prev, seen, cur)`；三条回合入口统一采样 + 盖戳 | 见 §3.3：这是"判据复用既有耐久记录"这条落点的第一次完整落地；仍存的边界只有"取不到收据 ⇒ 沉默"（首回合／压缩后） |
-| ~~**G19**~~（2026-09-18 新发现） | O1 | 未水合声明（Policy C）的判据 `workspaceUnhydrated` 只在**创建它的那个进程**里：`adoptFromLease` 明确不重放 hydrate（"the creating pod hydrated the same scope"），于是换手后的副本 flag 恒为 false ⇒ **声明消失**，agent 把空 `/workspace` 读成"文件没了" | 沙箱生命周期族 | P1 **已修（2026-09-18）**：该位随**实例**落进 `sandbox_leases.unhydrated`（`SetSandboxLeaseUnhydrated`，owner+sandbox_id CAS，Acquire/Replace 时归零 ⇒ 不会钉到继任实例上）；采纳时 `ex.setWorkspaceUnhydrated(rec.Unhydrated)` 读回，创建/替换发布实例时 `publishUnhydrated` 写入 | 真机 E2E：pod A 用坏 store 建实例（列表失败）→ pod B 采纳同一实例 → 仍报未水合；反证（去掉采纳读取）该 E2E 变红 |
-| ~~**G10**~~ | O1 | ~~cron job / HEARTBEAT.md 被外部改删无信号~~ | 用户 | **P2 已修（2026-09-18）**：定时任务清单进回合级采样（`scheduled jobs added / changed / no longer exist: <name>`）；`HEARTBEAT.md` 的内容变化本就被 G8 的身份文件指纹覆盖；读不到清单时声明"读不到"，**不谎报删除** | — |
-| ~~G14~~ | —（单一来源，不是投递义务） | ~~`HEARTBEAT.md` 有**两个来源**：提示词读 store（`loadFileForUser`），heartbeat 触发却只读 `<home>/HEARTBEAT.md`~~（`heartbeat.go`） | 用户 / 运维 | **P2 已修（2026-09-18）**：`loadHeartbeatTasks` 改走与提示词**同一个解析器**（`ctxBuilder.loadFileForUser("HEARTBEAT.md", ownerUserID)`，store 优先、磁盘回落）；owner 正是该回合 `chatterUserID` 对 `SourceHeartbeat` 的解析结果，所以"看到的"与"触发的"必然同一份。没有 ctxBuilder 的形态（嵌入式/CLI）保持原有磁盘读法 | — |
-| ~~**G11**~~ | O1 | ~~MCP server 侧通知被丢弃~~ | 外部 server | **stdio 侧 P2 已修（2026-09-18）**：捕获 → 闸门（每 server 30s）→ 复用 `mcpConfigNotify` 重建 → 回合级工具集信号自动报出；**HTTP 侧仍无通知通道**（见 §3.4 的两个边界，需要 SSE 或定期 re-list 才能补） | — |
-| **G15** | —（协议合规，不是投递义务） | `notifications/initialized` 从未发送（stdio 与 HTTP 都没有） | — | P3：规范要求 initialize 之后发；现有 server 不要求，可能是某些 server 开始推送通知的前提 | 补发这条通知，但必须先在真机（QC / Quandora）上验证握手不受影响 |
-| ~~G16~~ | —（setup API 的遮罩写回，非投递义务） | ~~技能密钥被自己的遮罩覆盖~~（2026-09-18 死码扫描发现） | 运维面板 | **P1 已修（2026-09-18）**：规则收成**一个家** —— `mergeSkillEntry`（条目级）+ `mergeSkillEntries`（补丁级），被**两条**写入路径共用：全局 `skills.entries`（namespace 扫描前先与库中现值合并）与 per-agent 覆盖行（`scope.SettingInto` 取现值再合并）；providers/channels 既有的内联守卫**保持不动**（请求形状不同，等第三个变体证明同一缝再抽）。实现中撞到一个真坑：JSON 解码器**复用**（不替换）map，所以"覆盖前快照"必须**深拷贝**（`cloneSkillEntries`），否则比值比的是被就地改写的自己——第一次接线正是这样悄悄保留了遮罩 | — |
-| ~~**G12**~~ | O2 | ~~自动回合被推迟/丢弃只有 slog~~ | harness | **P2 已修（2026-09-18）**：丢弃逐条带全信息（原来只有 `count=N`）；用户创建的 cron 额外在该会话发一条注记（有界发送，不启动回合）；harness 自己的来源只记录，不打扰用户 | — |
-| ~~**G13**~~ | O3（不是 O2） | ~~后台 shell / 沙箱 job 结束不推送~~ | agent 自己 | **改判：不是缺口（2026-09-18 形式化复核）**。δ = 进程退出；σ **存在且每次读取从世界重算**：`bash_output` 返回 `[status] exited (code=N)`（`killed` / `lost — the sandbox was replaced` 同样由现场推出，[sandbox_background.go](../../internal/agent/tools/sandbox_background.go) 第 350–375 行）。按 08 §2.2.2，**D₁ 只在调用期间存在**，所以"空闲时不推送"不等于"没有投递点"——投递点是消费侧那次读取本身（O3）。判据可重算 ⇒ 三落点里的**落点 1**，不需要任何载体 | ⛔ **不要实现"下一个工具结果附'后台 X 已退出'"**：那要引入一张进程内的"已退出但还没报告"集合，正好是 O4 形状（实例一换就丢），而这条事实本来就能重算 —— 用一次新的进程内状态换一个已经可达的 σ，是净亏 |
-| ~~**G18**（= 01 §8）~~ | —（实体不变式：一条路径一个键，非投递义务） | ~~`apply_patch` 用 `r.sessionID` + 原样路径写 store，而镜像与另两个工具用 `scopeSessionID()` + `wsPath()` ⇒ 一次写入自相矛盾：store 落 A 键、镜像落 B 路径，一份文件两个键~~ | agent 自己 | **P1 已修（2026-09-18）**：6 个触点（host 3 + 沙箱 3）统一到同一解析；沙箱模式的 `apply_patch` 同时补上逐文件穿透（此前完全不调用镜像）。单测 3 + 1 条、真机 E2E 1 条，三条都做过反证（改回旧写法即变红），详见 01 §8.1 | — |
-| ~~**G17**~~ | —（作用域不变式：同一族，比 G18 低一层） | 项目里"一个文件树、多个容器"的可见性：项目会话的容器是**每 chat 一个**（有意为之：并发 chat 不共享 shell），而预览的 dev server 只跑在其中一个里 ⇒ ① 控制台起的预览用的容器（`agent:p:<pid>`）**agent 的回合永远不用** ⇒ 写入永远到不了它；② 兄弟 chat 改了文件，dev server 那个容器收不到（docker 靠 bind mount 天然没有这个问题） | agent / 用户 | **已决策 + 已修（2026-09-18，方案 G+H）**：**G** = 预览容器统一按项目寻址（`previewSandboxSession`：有项目就 `session=""`，两个入口从此同一个容器，一个项目一个预览）；**H** = 写入与删除**广播到项目内所有活容器**（`LiveProjectExecutors` + `mirrorToProjectPeers`/删除扇出）——把 docker 的挂载语义在云后端显式做出来，**保留"每 chat 独立 shell"**。部分失败会给出 σ（见 §2.1）。真机：同一项目两个容器，A 写 → B 读得到；A 删 → B 也没了且不会被 B 的同步复活 | **A 也已修（同日决策）**：`syncStoreScope` 让回写在项目会话里折叠到项目根（与 hydrate、与文件工具同一个键）⇒ 不再产生 `<项目>/<会话>/…` 副本，`exec` 新建的文件立刻可被 `read_file`/`list_dir` 看见。**未做迁移**：折叠前已产生的副本仍在库里（不再刷新、也无人清理）——一次性清理见 [05 §6](./05-remediation-plan.md) 的 `scripts/workspace_project_chat_duplicate_cleanup.py`（只在「同样字节在项目根另有存活」时才列入删除）。：无副本、exec 产物落项目根且工具可见、沙箱改既有路径仍被拒（且拒绝指向工具读的那个键） |
-| ~~**G22**~~（2026-09-18 实现中发现） | —（作用域不变式，同一族的**第三处**） | 写入穿透的 **mtime 盖章**用**沙箱作用域**查 store（`Stat(sc.agentID, sc.projectID, sc.sessionID, storeKey)`），而工具在 coding-root 项目会话里写的是**项目根**（`session=""`）⇒ 项目会话里这次 Stat 永远 miss ⇒ **盖章静默不发生**。代价：对账拿不到"size+mtime 相同"的廉价判据，每次同步对这种路径回落到字节比较（`equalToStore`），**功能不受损** | agent / 沙箱 | **已修（2026-09-18，同一轮）**：写入方把 store 作用域一起交下来 —— `WriteThroughScope(storeScope, storeKey, sandboxPath, content, previous)`（`sandbox.StoreScope`），盖章与 H 的广播份都用**调用方声明的那个作用域**，不再从容器推断。**实测**（真机 E2B，`TestE2BLiveSyncReadsNoBodiesForStampablePaths`）：一次同步里这条路径的**整对象读取 1 → 0**（stats 仍 2 次）。单测 `TestWriteThroughStampsWithTheStoreScopeItWasGiven` 钉住“盖章用的是被声明的作用域”；**反证**：把 pool 改回用沙箱作用域查 store → 立刻红。**为什么只有性能影响也做**：这条缝（store 作用域跨层传给沙箱层）在同一轮已产出三处缺陷（G21 删除、G17/A 同步、本条），满足“投资边界要有 3+ 次历史变更”的判据；而修法是把“猜”换成“传参”（端口修正），不新增机制 |
-| ~~**G23**~~（2026-09-18 评审发现；**同日已修**） | —（作用域不变式，同一族的**第四/第五处**：同一条规则被写成多种表达式） | ~~「项目会话 ⇒ 键落项目根」被写在**三处、用两种判据**：agent 侧 `Registry.scopeSessionID()` 用 `codingRootScope`（= `a.projectRuntime != nil && projectID != ""`），沙箱侧 `syncStoreScope()` 用 `projectID != ""`，面板侧 `StorePathScope()` 用"路径带不带作用域前缀"~~ 顺着查还发现**第五处**：**布局表**（`pid/sid` → 目录）在 `LocalFS.scopeDir` 与 `S3.key`/`S3.scopePrefix` **各写了一遍** | agent / 面板 / 沙箱 / 两个 store 后端 | ~~今天不可达，所以不是缺陷；但这条等式是"靠接线成立"的~~ **P3 已修（2026-09-18）**：规则收进 [`internal/workspace/scope.go`](../../internal/workspace/scope.go) 的两个纯函数 —— `ScopeSegments`（布局表，LocalFS + S3 共用）与 `WriteScope`（写者折叠，文件工具 + 沙箱回写共用）；`Registry.codingRootScope` / `SetCodingRootScope` 整个删除，`sandbox.StoreScope` 改成 `workspace.Scope` 的**类型别名**（端口不再自带第二份事实）。**行为差（唯一一处）**：折叠判据从"有运行时且在有项目中"变成"在有项目中"，两者只在"有项目、但没有 runtime manager"的部署里不同 —— 而 `cmd/fastclaw/main.go` 无条件构造并接线 runtime manager，那种部署里项目本身也建不出来 | 单测：`go test ./internal/workspace/ -run 'TestScopeSegments\|TestWriteScope\|TestAWriterScope'`（布局表、写者规则、两者描述同一文件系统）、`go test ./internal/sandbox/ -run 'TestLayoutWriteScopeAndParserAgree\|TestProjectWritersAndTheSyncShareOneScope\|TestAProjectChatSubdirKeyIsItsOwnPath'`（布局/写者/面板解析三者一致；以及"项目 chat 子目录的键是另一个对象"这条被钉住）、`go test ./internal/agent/tools/ -run TestScopeSessionIDCollapsesInsideAProject`。**反证**：把 `syncStoreScope` 改回"不折叠" ⇒ `TestProjectWritersAndTheSyncShareOneScope`、`TestSyncWritesBackToTheProjectRootNotTheChatSubdir`、`TestSyncScopeEqualsHydrateScopeForProjects` 三条变红；把 `scopeSessionID()` 改回 `r.sessionID` ⇒ `TestScopeSessionIDCollapsesInsideAProject`、`TestApplyPatchUsesTheSameStoreKeyAsWriteFile` 变红（两条都实测过） |
-| G1–G4 | G1/G2 = **O2**（原无投递点，已修）；G3 = **O4**（进程内队列，已修）；**G4 = O1（2026-09-18 已修到"事实已声明"为止）**：同步里加一次 store List，把"store 有、沙箱没有"的路径报出来（与 G7a 共用同一句话 `sandbox.StoreOnlyLine`）；**归属（"沙箱删的"还是"后来上传的"）＝ 已决策不做**（2026-09-18，选项 a）：后果已送达，清单只买因果，且"交付清单"要在每次 hydrate 落上千行、"写者清单"要动 6 条写路径 —— 见 [05 §8](./05-remediation-plan.md) 决策记录 | 沙箱生命周期族（重建、删除） | provider / harness | 见 09 | 见 09 §6 |
+| # | 义务（08 §2.2） | 缺口 | 触发者 | 代价 | 修法方向 | **控制动作形态** |
+|---|------|------|--------|------|---------|------|
+| ~~G5~~ | O1 | ~~`write_file` / `apply_patch` 的 σ 恒为假（over 2 MiB），docker 上也照发~~ | agent 自己 | **P0 已修（2026-09-18）**：`CompareResult` 四态 + docker 静默，同仪器复验见 §2.1 | — | 提供 |
+| ~~G6~~ | O1 | ~~`apply_patch` / `write_file` 永远不会报"替换了不同版本"~~ | agent 自己 | **P1 已修（2026-09-18）**：`previousStoreVersion` + `plannedWrite.previous`；`write_file` 现在报得出 | — | 不提供 |
+| ~~**G7a**~~ | O1 | ~~分歧不可见~~ | 用户 | **P1 已修（2026-09-18）**：`list_dir` 现在把"store 有、沙箱没有"的路径点出来（含原因与出路），docker 不问、问不到不说 | — | 不提供 |
+| ~~**G7b**~~ | —（写路径对称性，属 Cordis 前置条件） | 上传/删除不写进活沙箱 | 用户 | **上传半边已决策（2026-09-18）：不做穿透 = 选项 a**。产品语义 = **面板是"文件库"**，"上传后下一次 `exec` 立刻 `ls` 得到"**不是**要求；代价与补救都已由既有信号说清（`list_dir` 与每次 exec 后的同步都会点名"store 有、沙箱没有"，并给出 `read_file`+`write_file` 的搬法）。澄清：在 LocalFS+docker 上它天然立刻可见（同一棵树），**不做**为把它藏起来而改架构——准确表述是"不承诺立刻可见，也不阻止（由后端决定）"。**删除半边仍未修，且必须修**：见下 | 删除半边 = 待决策（d1 穿透删除 vs d5 删除墓碑），见 [05 §8](./05-remediation-plan.md) | 不提供（已决策） |
+| ~~**G21**~~（2026-09-18 新发现；与 G7b 同族） | —（路径/作用域约定不一致；属 F1 的"同一路径一个键"） | ~~面板删除静默无效：列表返回带作用域前缀的 agent 相对路径，面板原样 DELETE 又附带 `?sessionId=`，handler 再把作用域拼一次 ⇒ 键多一层前缀 ⇒ 目标不存在；两个后端对"删不存在的目标"都返回成功 ⇒ 200 + UI 以为删掉了 + 刷新后那行又回来~~ | 用户 | **已修（2026-09-18）**：① **Fix 0** —— 删除改用与下载同一个约定（路径自带前缀时按 agent 相对解释，`Delete(agent,"","",path)`；旧的无前缀+query 形状继续可用，`sandbox.StorePathScope` 是唯一判定点）；② **d1** —— 同一次删除也把**活沙箱**里那份删掉（`Gateway.RemoveWorkspaceFile` → `sandbox.LiveWorkspaceFileRemover`，经 `LiveExecutorPool` **只找活实例、绝不建实例**），否则下一次同步会把它写回（真机两半都钉住）。失败时返回 `sandboxRemoved:false` + warning，不假装干净 | — | 提供 |
+| ~~G8~~ | O1 | ~~身份/系统文件被外部改写无信号~~ | 用户 / 其他会话 / 其他 pod | **P1 已修（2026-09-18）**：回合级采样加入 7 个身份文件的指纹；只报文件名、不报内容 | 见 §3.3 的落点（`identitySampleFiles`） | 不提供 |
+| ~~**G9**~~ | O4 | ~~agent 配置被外部改写无信号；基线随实例消失，而配置变更恰恰靠重建实例生效~~ | 用户 | **已修（2026-09-18）**：采样加入 `model` + `prompt_mode`；before 不再自造，而是**读对话自己的回合收据**——零新增存储、零新增写路径、天然跨实例与跨副本。重建后的**新实例首回合**即可说出 `my configuration changed: <旧> → <新>`；取不到收据即沉默。收据后来承载整张快照（见 G20） | —（G20 已把同一机制推广到其余五族） | 不提供 |
+| ~~**G20**~~ | O4（G9 的推广） | ~~技能 / 工具名 / 记忆 / 身份文件 / cron 五族的基线仍在进程内 `envTracker.last`：pod 重启或热重载后首回合沉默；且 `handlePlanMode`、API 的 `HandleMessageStream` 两条回合路径既不采样也不盖戳~~ | 用户 / harness | **已修（2026-09-18）**：收据改为承载**整张 `envSnapshot`**（metadata `run_receipt`），`envTracker` 类型连同 `last` map / mutex / `configWas` 分支一起删除，判定变成纯函数 `renderEnvDelta(prev, seen, cur)`；三条回合入口统一采样 + 盖戳 | 见 §3.3：这是"判据复用既有耐久记录"这条落点的第一次完整落地；仍存的边界只有"取不到收据 ⇒ 沉默"（首回合／压缩后） | 不提供 |
+| ~~**G19**~~（2026-09-18 新发现） | O1 | 未水合声明（Policy C）的判据 `workspaceUnhydrated` 只在**创建它的那个进程**里：`adoptFromLease` 明确不重放 hydrate（"the creating pod hydrated the same scope"），于是换手后的副本 flag 恒为 false ⇒ **声明消失**，agent 把空 `/workspace` 读成"文件没了" | 沙箱生命周期族 | P1 **已修（2026-09-18）**：该位随**实例**落进 `sandbox_leases.unhydrated`（`SetSandboxLeaseUnhydrated`，owner+sandbox_id CAS，Acquire/Replace 时归零 ⇒ 不会钉到继任实例上）；采纳时 `ex.setWorkspaceUnhydrated(rec.Unhydrated)` 读回，创建/替换发布实例时 `publishUnhydrated` 写入 | 真机 E2E：pod A 用坏 store 建实例（列表失败）→ pod B 采纳同一实例 → 仍报未水合；反证（去掉采纳读取）该 E2E 变红 | 不提供 |
+| ~~**G10**~~ | O1 | ~~cron job / HEARTBEAT.md 被外部改删无信号~~ | 用户 | **P2 已修（2026-09-18）**：定时任务清单进回合级采样（`scheduled jobs added / changed / no longer exist: <name>`）；`HEARTBEAT.md` 的内容变化本就被 G8 的身份文件指纹覆盖；读不到清单时声明"读不到"，**不谎报删除** | — | 不提供 |
+| ~~G14~~ | —（单一来源，不是投递义务） | ~~`HEARTBEAT.md` 有**两个来源**：提示词读 store（`loadFileForUser`），heartbeat 触发却只读 `<home>/HEARTBEAT.md`~~（`heartbeat.go`） | 用户 / 运维 | **P2 已修（2026-09-18）**：`loadHeartbeatTasks` 改走与提示词**同一个解析器**（`ctxBuilder.loadFileForUser("HEARTBEAT.md", ownerUserID)`，store 优先、磁盘回落）；owner 正是该回合 `chatterUserID` 对 `SourceHeartbeat` 的解析结果，所以"看到的"与"触发的"必然同一份。没有 ctxBuilder 的形态（嵌入式/CLI）保持原有磁盘读法 | — | — |
+| ~~**G11**~~ | O1 | ~~MCP server 侧通知被丢弃~~ | 外部 server | **stdio 侧 P2 已修（2026-09-18）**：捕获 → 闸门（每 server 30s）→ 复用 `mcpConfigNotify` 重建 → 回合级工具集信号自动报出；**HTTP 侧仍无通知通道**（见 §3.4 的两个边界，需要 SSE 或定期 re-list 才能补） | — | 不提供 |
+| **G15** | —（协议合规，不是投递义务） | `notifications/initialized` 从未发送（stdio 与 HTTP 都没有） | — | P3：规范要求 initialize 之后发；现有 server 不要求，可能是某些 server 开始推送通知的前提 | 补发这条通知，但必须先在真机（QC / Quandora）上验证握手不受影响 | 不提供 |
+| ~~G16~~ | —（setup API 的遮罩写回，非投递义务） | ~~技能密钥被自己的遮罩覆盖~~（2026-09-18 死码扫描发现） | 运维面板 | **P1 已修（2026-09-18）**：规则收成**一个家** —— `mergeSkillEntry`（条目级）+ `mergeSkillEntries`（补丁级），被**两条**写入路径共用：全局 `skills.entries`（namespace 扫描前先与库中现值合并）与 per-agent 覆盖行（`scope.SettingInto` 取现值再合并）；providers/channels 既有的内联守卫**保持不动**（请求形状不同，等第三个变体证明同一缝再抽）。实现中撞到一个真坑：JSON 解码器**复用**（不替换）map，所以"覆盖前快照"必须**深拷贝**（`cloneSkillEntries`），否则比值比的是被就地改写的自己——第一次接线正是这样悄悄保留了遮罩 | — | — |
+| ~~**G12**~~ | O2 | ~~自动回合被推迟/丢弃只有 slog~~ | harness | **P2 已修（2026-09-18）**：丢弃逐条带全信息（原来只有 `count=N`）；用户创建的 cron 额外在该会话发一条注记（有界发送，不启动回合）；harness 自己的来源只记录，不打扰用户 | — | 顺序 |
+| ~~**G13**~~ | O3（不是 O2） | ~~后台 shell / 沙箱 job 结束不推送~~ | agent 自己 | **改判：不是缺口（2026-09-18 形式化复核）**。δ = 进程退出；σ **存在且每次读取从世界重算**：`bash_output` 返回 `[status] exited (code=N)`（`killed` / `lost — the sandbox was replaced` 同样由现场推出，[sandbox_background.go](../../internal/agent/tools/sandbox_background.go) 第 350–375 行）。按 08 §2.2.2，**D₁ 只在调用期间存在**，所以"空闲时不推送"不等于"没有投递点"——投递点是消费侧那次读取本身（O3）。判据可重算 ⇒ 三落点里的**落点 1**，不需要任何载体 | ⛔ **不要实现"下一个工具结果附'后台 X 已退出'"**：那要引入一张进程内的"已退出但还没报告"集合，正好是 O4 形状（实例一换就丢），而这条事实本来就能重算 —— 用一次新的进程内状态换一个已经可达的 σ，是净亏 | —（已改判） |
+| ~~**G18**（= 01 §8）~~ | —（实体不变式：一条路径一个键，非投递义务） | ~~`apply_patch` 用 `r.sessionID` + 原样路径写 store，而镜像与另两个工具用 `scopeSessionID()` + `wsPath()` ⇒ 一次写入自相矛盾：store 落 A 键、镜像落 B 路径，一份文件两个键~~ | agent 自己 | **P1 已修（2026-09-18）**：6 个触点（host 3 + 沙箱 3）统一到同一解析；沙箱模式的 `apply_patch` 同时补上逐文件穿透（此前完全不调用镜像）。单测 3 + 1 条、真机 E2E 1 条，三条都做过反证（改回旧写法即变红），详见 01 §8.1 | — | — |
+| ~~**G17**~~ | —（作用域不变式：同一族，比 G18 低一层） | 项目里"一个文件树、多个容器"的可见性：项目会话的容器是**每 chat 一个**（有意为之：并发 chat 不共享 shell），而预览的 dev server 只跑在其中一个里 ⇒ ① 控制台起的预览用的容器（`agent:p:<pid>`）**agent 的回合永远不用** ⇒ 写入永远到不了它；② 兄弟 chat 改了文件，dev server 那个容器收不到（docker 靠 bind mount 天然没有这个问题） | agent / 用户 | **已决策 + 已修（2026-09-18，方案 G+H）**：**G** = 预览容器统一按项目寻址（`previewSandboxSession`：有项目就 `session=""`，两个入口从此同一个容器，一个项目一个预览）；**H** = 写入与删除**广播到项目内所有活容器**（`LiveProjectExecutors` + `mirrorToProjectPeers`/删除扇出）——把 docker 的挂载语义在云后端显式做出来，**保留"每 chat 独立 shell"**。部分失败会给出 σ（见 §2.1）。真机：同一项目两个容器，A 写 → B 读得到；A 删 → B 也没了且不会被 B 的同步复活 | **A 也已修（同日决策）**：`syncStoreScope` 让回写在项目会话里折叠到项目根（与 hydrate、与文件工具同一个键）⇒ 不再产生 `<项目>/<会话>/…` 副本，`exec` 新建的文件立刻可被 `read_file`/`list_dir` 看见。**未做迁移**：折叠前已产生的副本仍在库里（不再刷新、也无人清理）——一次性清理见 [05 §6](./05-remediation-plan.md) 的 `scripts/workspace_project_chat_duplicate_cleanup.py`（只在「同样字节在项目根另有存活」时才列入删除）。：无副本、exec 产物落项目根且工具可见、沙箱改既有路径仍被拒（且拒绝指向工具读的那个键） | — |
+| ~~**G22**~~（2026-09-18 实现中发现） | —（作用域不变式，同一族的**第三处**） | 写入穿透的 **mtime 盖章**用**沙箱作用域**查 store（`Stat(sc.agentID, sc.projectID, sc.sessionID, storeKey)`），而工具在 coding-root 项目会话里写的是**项目根**（`session=""`）⇒ 项目会话里这次 Stat 永远 miss ⇒ **盖章静默不发生**。 | 对账拿不到"size+mtime 相同"的廉价判据，每次同步对这种路径回落到字节比较（`equalToStore`），**功能不受损** | agent / 沙箱 | **已修（2026-09-18，同一轮）**：写入方把 store 作用域一起交下来 —— `WriteThroughScope(storeScope, storeKey, sandboxPath, content, previous)`（`sandbox.StoreScope`），盖章与 H 的广播份都用**调用方声明的那个作用域**，不再从容器推断。**实测**（真机 E2B，`TestE2BLiveSyncReadsNoBodiesForStampablePaths`）：一次同步里这条路径的**整对象读取 1 → 0**（stats 仍 2 次）。单测 `TestWriteThroughStampsWithTheStoreScopeItWasGiven` 钉住“盖章用的是被声明的作用域”；**反证**：把 pool 改回用沙箱作用域查 store → 立刻红。**为什么只有性能影响也做**：这条缝（store 作用域跨层传给沙箱层）在同一轮已产出三处缺陷（G21 删除、G17/A 同步、本条），满足“投资边界要有 3+ 次历史变更”的判据；而修法是把“猜”换成“传参”（端口修正），不新增机制 | — |
+| ~~**G23**~~（2026-09-18 评审发现；**同日已修**） | —（作用域不变式，同一族的**第四/第五处**：同一条规则被写成多种表达式） | ~~「项目会话 ⇒ 键落项目根」被写在**三处、用两种判据**：agent 侧 `Registry.scopeSessionID()` 用 `codingRootScope`（= `a.projectRuntime != nil && projectID != ""`），沙箱侧 `syncStoreScope()` 用 `projectID != ""`，面板侧 `StorePathScope()` 用"路径带不带作用域前缀"~~ 顺着查还发现**第五处**：**布局表**（`pid/sid` → 目录）在 `LocalFS.scopeDir` 与 `S3.key`/`S3.scopePrefix` **各写了一遍** | agent / 面板 / 沙箱 / 两个 store 后端 | ~~今天不可达，所以不是缺陷；但这条等式是"靠接线成立"的~~ **P3 已修（2026-09-18）**：规则收进 [`internal/workspace/scope.go`](../../internal/workspace/scope.go) 的两个纯函数 —— `ScopeSegments`（布局表，LocalFS + S3 共用）与 `WriteScope`（写者折叠，文件工具 + 沙箱回写共用）；`Registry.codingRootScope` / `SetCodingRootScope` 整个删除，`sandbox.StoreScope` 改成 `workspace.Scope` 的**类型别名**（端口不再自带第二份事实）。**行为差（唯一一处）**：折叠判据从"有运行时且在有项目中"变成"在有项目中"，两者只在"有项目、但没有 runtime manager"的部署里不同 —— 而 `cmd/fastclaw/main.go` 无条件构造并接线 runtime manager，那种部署里项目本身也建不出来 | 单测：`go test ./internal/workspace/ -run 'TestScopeSegments\|TestWriteScope\|TestAWriterScope'`（布局表、写者规则、两者描述同一文件系统）、`go test ./internal/sandbox/ -run 'TestLayoutWriteScopeAndParserAgree\|TestProjectWritersAndTheSyncShareOneScope\|TestAProjectChatSubdirKeyIsItsOwnPath'`（布局/写者/面板解析三者一致；以及"项目 chat 子目录的键是另一个对象"这条被钉住）、`go test ./internal/agent/tools/ -run TestScopeSessionIDCollapsesInsideAProject`。**反证**：把 `syncStoreScope` 改回"不折叠" ⇒ `TestProjectWritersAndTheSyncShareOneScope`、`TestSyncWritesBackToTheProjectRootNotTheChatSubdir`、`TestSyncScopeEqualsHydrateScopeForProjects` 三条变红；把 `scopeSessionID()` 改回 `r.sessionID` ⇒ `TestScopeSessionIDCollapsesInsideAProject`、`TestApplyPatchUsesTheSameStoreKeyAsWriteFile` 变红（两条都实测过） | — |
+| G1–G4 | G1/G2 = **O2**（原无投递点，已修）；G3 = **O4**（进程内队列，已修）；**G4 = O1（2026-09-18 已修到"事实已声明"为止）**：同步里加一次 store List，把"store 有、沙箱没有"的路径报出来（与 G7a 共用同一句话 `sandbox.StoreOnlyLine`）；**归属（"沙箱删的"还是"后来上传的"）＝ 已决策不做**（2026-09-18，选项 a）：后果已送达，清单只买因果，且"交付清单"要在每次 hydrate 落上千行、"写者清单"要动 6 条写路径 —— 见 [05 §8](./05-remediation-plan.md) 决策记录 | 沙箱生命周期族（重建、删除） | provider / harness | 见 09 | 见 09 §6 | 不提供 |
+| **G31**（2026-09-21 新增；缝登记 #2 的判决） | O1（该产生而没产生） | **租约存储不可用时，准入互斥被静默放行**：`GetSandboxLease` / `AcquireSandboxLease` 一旦报错，代码保留本地沙箱或本地 executor 继续跑（`e2b_executor.go:2182` / `:2434-2435` / `:2445` / `:2489`），只留一行 `slog.Warn`——**agent 看不到**；且这是被测试钉住的契约（`lease_pool_test.go:415` `TestE2BPoolFreshGetLeaseErrorsFailOpen`，注释原话 "Registry errors fail open"）。在 DB 抖动窗口内，两个 pod 可以各自跑同一 scope——这正是 09-18 跨副本双轮次事故的形态 | harness | **未修**：见证不可求值 ⇒ 消缝 / 移址都不通（本系统唯一的强制点是 DB）⇒ 按 12 §3.2 应**收手 + 申报**，或保留放行但**必须产生 σ**（"本次未取得跨副本准入"）落在 `D₁`/`D₂`；现状 = 19.4.6.1 反面清单里的 ✗「沉默地降级」 | 见 [12 §3.2](./12-lease-formal-design.md)（两条路任选其一，都必须具名） | **不提供** |
+| **G32**（2026-09-21 新增；缝登记 #5 的 P-WAD 第 1 行**实测**） | O1（该产生而没产生） | **释放时"载体里没有 epoch" ⇒ 释放被静默丢弃**：`p.leaseEpochs`（`e2b_executor.go:1868`）是 fencing epoch 的**进程内镜像**（epoch 本身由共享表 `sandbox_leases` 发放）。发放那一刻注册表报错时，executor 照常登记而 epoch **不**登记（`:2215-2216` 注释原话 `fail-open; release will not destroy the sandbox`）⇒ 此后 `Release` 把 **epoch=0** 交给 `DELETE ... AND epoch = ?`（`internal/store/sandbox_leases.go:237`）⇒ 一行也匹配不到 ⇒ `deleted=false` ⇒ `:2615` 直接 `return nil`。**受控实验（`internal/sandbox/lease_epoch_gap_test.go`，2026-09-21）**：`Release` 返回 `nil`、销毁 **0** 次、日志 **0** 行，且**那一行仍记着释放者自己**（owner=pod-a）——而它与"被兄弟副本围栏挡下"（另一种**正确**情形）**观测上逐项相同**：两个不同的世界，一个观测 | harness（沙箱池释放路径） | **未修**：现状 = 19.4.6.1 反面清单里的 ✗「沉默地降级」，即 12 §3.2 判过的"放行"那一半**少了申报**。后果：一次驱逐 / 一次面板删除**静默地什么都没释放**（实例与行都活着，下一位使用者会**采纳**它而不是另建）。**边界**：这不是 §3.2 判过的"见证不可求值"（那里 `:2609` 的方向被记为"方向相反，是对的"），而是**见证可求值、而调用方手里的键是空的** | ① **申报**（最小）：`epoch == 0` 时产生 σ（"本次释放未作用于任何行"）；② **换判据**：无 epoch 时改按 (owner, sandbox_id) 做 CAS 删除——那条判据是调用方**确实持有**的事实，但要在 [12 §5](./12-lease-formal-design.md) 的 L4(c)（G25 陈旧 epoch 实测）语境里过一遍。两者都必须具名 | **不提供** |
+
+> **G32 的三条出路与代价对账（2026-09-21 新增）**：
+> ① **申报**：`epoch == 0` ⇒ 产生 σ（"本次释放未作用于任何行"）——验收标准是**一个数**，不是一行日志；
+> ② **换判据**：无 epoch 时改按 `(owner, sandbox_id)` 做 CAS 删除——**这条路在 G25 上过不去**（12 §5 的陈旧令牌实测），
+> 除非先把署名换成逐次唯一（`owner = <pod>/<uuid>`，12 §6），而那本身又是一张进程内载体；
+> ③ **消缝**：发放失败 ⇒ 不登记（当场销毁 + `Get` 失败）。
+> 三者的代价表（治哪一段 / 买到什么 / 代价 / 风险 / 前置条件）见《认知哲学的数学原理》19-5 §19.5.8.9 **§九**。
+> **选哪条待裁定**——本表只登记，不裁定。
 
 > **G22 的边界（2026-09-18 实测）**：把穿透盖章**整个移除**后，`TestE2BLiveSyncReadsNoBodiesForStampablePaths`
 > 仍然读到 **0** 个整对象 —— 判据的 ±1 秒容差（`sameVersion`）把"store 写与镜像写落在同一秒"这件事盖住了，
@@ -448,6 +481,8 @@ stdio 读循环识别 method 消息   →  StdioClient.SetNotificationHandler
 > `O_TRUNC` 原地写、`S3.Move` 自称 "Not atomic"）。它是形式化意义上的第四套候选，分析与重开条件见
 > [00 §7](./00-formal-systems.md) 的备注与 §7.1「原始设计」；**当前决定：不落地**——A1（去掉第二个写者）
 > + A3（检测/条件写）已足够。
+>
+> **控制动作形态：提供**（写动作被提供了，但它是覆盖式的——前一版丢失且沉默）
 
 > **G25（2026-09-19，设计跨副本轮次租约时逐条核对既有租约发现）** —— 义务 `—`（**F1 的机制层**：
 > 租约本身作为前置条件的见证）：沙箱租约的围栏令牌 **每代归 1**——`AcquireSandboxLease` 的抢占与插入
@@ -471,6 +506,8 @@ stdio 读循环识别 method 消息   →  StdioClient.SetNotificationHandler
 > 插入分支保持 `1`；`TestSandboxLeaseEpochNeverResetsAcrossTakeover` 钉住"两代接管后严格递增 +
 > 老令牌释放被拒 + 活行仍在"，**反证已实跑**（把 `epoch = 1` 改回去即红）。文档同步：
 > [../sandbox-pool-leases.md](../sandbox-pool-leases.md) 的 U 条款与 "Hardening" 段已从"未覆盖"改为"已修"。
+>
+> **控制动作形态：提供**（围栏令牌被提供了，但它不围栏）
 
 > **G26（2026-09-19 发现，为回答"我们说好的是 serverless fastagent——有没有设计违背了它"）** — 义务 `—`
 > （**E 桶：保留策略**；这是 harness 自身的内存驻留，不是 σ）：在**生产真正在跑的那个构建**里
@@ -503,6 +540,8 @@ stdio 读循环识别 method 消息   →  StdioClient.SetNotificationHandler
 > 残留是量出来的、不是藏起来的 —— 会话之间大小不等（同样 10 个会话的代价可以是 2.3 MiB 到 77.1 MiB，
 > 见 §10.3）—— 而淘汰现在是常态而非例外，这正是 §10.6 那份逐字段证明存在的原因：丢掉一个条目不可观测，
 > 只有一个字段例外，`snapshot`（§10.5），那是这个上限被接受的代价。
+>
+> **控制动作形态：—**（资源上界问题，不是形态问题）
 
 > **G27（同一轮审计发现；当天即修 —— 见下方补记）** — 义务 `—`（**E 桶：已退役的资源**）：两张按 agent 建的表会永久保留**已经结束**的
 > 工作的条目，且各自**一个 `delete` 都没有**：`tools.shellManager.shells`
@@ -543,11 +582,15 @@ stdio 读循环识别 method 消息   →  StdioClient.SetNotificationHandler
 > `TestRetiredShellsAreCappedAndRunningOnesSurvive`、`TestSandboxJobsForgetFinishedJobsBeyondTheRetention`、
 > `TestSandboxJobsNeverForgetARunningJob`。**反证均已实跑**：关掉收缩 ⇒ 第一条在 *"retired shell holds
 > 200022 bytes"* 变红；关掉 shell 上限 ⇒ 第二条超时；关掉任务表上限 ⇒ 第三条在 *"72 finished entries"* 变红。
+>
+> **控制动作形态：时长**（该退役而不退役：表会永久保留已经结束的记录）
 
 > **G28（同一轮审计发现，次要）** — `session.StoreAdapter.ownerCache`（`internal/session/store_adapter.go:55`）
 > 是一个既无上限也无淘汰的 map：该 adapter 解析过的每个 `session_key` 一条。条目极小（一个键 → 一个用户 ID），
 > 且 adapter 随它的 `UserSpace` 一起消亡，所以这是备注而不是缺陷 —— 记下来是因为这条审计判据必须**一视同仁**地
 > 施加到每一处，而不是只在预期有问题的对方检查。
+>
+> **控制动作形态：—**（资源上界问题，不是形态问题）
 
 > **G30（2026-09-19 发现，当天定性）** — 义务 `—`（**S1 的作用域**）：`sessionCacheMaxSessions` 读起来像
 > 一份 pod 级配额，实际是**按 agent** —— `internal/gateway/userspace.go:1115` 每个 user space 建一个
@@ -555,6 +598,8 @@ stdio 读循环识别 method 消息   →  StdioClient.SetNotificationHandler
 > K 个 agent 的 pod 最多持有 K × 预算。**按 agent 就是它应有的作用域**（值得热着的是这个 agent 自己的会话）；
 > 错的只是名字与注释在邀请人们按 pod 级去读。字段现在叫 `agentSessionCacheMaxSessions`，pod 级备选的代价
 > 记在 §10.7，于是这个选择是被文档化的，而不是靠默认值暗示的。
+>
+> **控制动作形态：—**（命名/作用域问题，不是形态问题）
 
 ## 5. 结论
 
