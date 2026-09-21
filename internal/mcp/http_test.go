@@ -3,8 +3,10 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 )
@@ -123,5 +125,68 @@ func TestHTTPClientNoAuthStaticHeaders(t *testing.T) {
 	defer srv.Close()
 	if _, err := NewHTTPClient(srv.URL, map[string]string{"X-Static": "v"}).ListTools(); err != nil {
 		t.Fatalf("ListTools: %v", err)
+	}
+}
+
+// The client must advertise both content types, and the advertisement has to
+// be true: parseResponseBody reads an SSE reply, so the header promises exactly
+// what this client can handle.
+func TestHTTPClientAdvertisesBothContentTypes(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Accept"); got != "application/json, text/event-stream" {
+			t.Errorf("Accept = %q; want both content types", got)
+		}
+		json.NewEncoder(w).Encode(jsonRPCResponse{
+			JSONRPC: "2.0", ID: 1,
+			Result: json.RawMessage(`{"tools":[]}`),
+		})
+	}))
+	defer srv.Close()
+
+	if _, err := NewHTTPClient(srv.URL, nil).ListTools(); err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+}
+
+// The transport lets a server answer a request with text/event-stream instead
+// of one JSON object, and the client must support both cases. Reading only the
+// JSON case meant such a server was dropped with `invalid character 'e'
+// looking for beginning of value`.
+func TestHTTPClientReadsAnSSEReplyToARequest(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		// A keep-alive comment, a server message that is not our answer, then
+		// the answer itself — split over two data lines and ended with CRLF.
+		io.WriteString(w, ": keep-alive\n\n")
+		io.WriteString(w, "event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/message\"}\n\n")
+		io.WriteString(w, "data: {\"jsonrpc\":\"2.0\",\"id\":1,\r\n")
+		io.WriteString(w, "data: \"result\":{\"tools\":[{\"name\":\"qc_backtest\"}]}}\r\n\r\n")
+	}))
+	defer srv.Close()
+
+	tools, err := NewHTTPClient(srv.URL, nil).ListTools()
+	if err != nil {
+		t.Fatalf("ListTools over an SSE reply: %v", err)
+	}
+	if len(tools) != 1 || tools[0].Name != "qc_backtest" {
+		t.Fatalf("tools = %+v; want the one the stream carried", tools)
+	}
+}
+
+// A stream that carries only server-initiated messages is not the reply we
+// asked for: that must surface as an error, not as an empty answer.
+func TestHTTPClientDoesNotTakeAServerMessageForTheReply(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/tools/list_changed\"}\n\n")
+	}))
+	defer srv.Close()
+
+	_, err := NewHTTPClient(srv.URL, nil).ListTools()
+	if err == nil {
+		t.Fatal("a stream carrying no reply must error, not answer")
+	}
+	if !strings.Contains(err.Error(), "id 1") {
+		t.Fatalf("error = %v; want it to name the id that never came", err)
 	}
 }
