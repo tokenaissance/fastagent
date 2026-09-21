@@ -13,6 +13,7 @@ package setup
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -183,5 +184,100 @@ func TestDelegateTaskFanOutTurnE2E(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// sseEvents parses an SSE body into the events it carried (the "id: N" lines are
+// framing; each event is one `data: {...}` line).
+func sseEvents(t *testing.T, body string) []map[string]any {
+	t.Helper()
+	var out []map[string]any
+	for _, block := range strings.Split(body, "\n\n") {
+		for _, line := range strings.Split(block, "\n") {
+			payload, ok := strings.CutPrefix(line, "data: ")
+			if !ok {
+				continue
+			}
+			var evt map[string]any
+			if err := json.Unmarshal([]byte(payload), &evt); err != nil {
+				t.Fatalf("stream event is not JSON: %v (%q)", err, line)
+			}
+			out = append(out, evt)
+		}
+	}
+	return out
+}
+
+// Every heartbeat says which delegate_task call it belongs to.
+//
+// The dashboard draws a sub-agent's heartbeat on one tool row, and without an id
+// it could only guess: "the first call with no result yet". A round's tool
+// results are all emitted after the whole round returns, so during a fan-out
+// that guess names a call that finished long ago — three serial sub-agents, and
+// the user watches the first row's iteration counter climb while the third one
+// runs. This pins the fact that replaces the guess, and the ordering that makes
+// the guess wrong in the first place.
+func TestSubagentHeartbeatsNameTheirOwnCallE2E(t *testing.T) {
+	const n = 3
+	prov := &fanOutE2EProvider{fanout: n}
+	s, _ := newChatHarness(t, prov, n+2)
+
+	body := runSingleChatStream(t, s, "chat-heartbeat-id", "go-heartbeat-id")
+
+	var callIDs []string
+	for _, evt := range sseEvents(t, body) {
+		if evt["type"] != "tool_call" {
+			continue
+		}
+		data, _ := evt["data"].(map[string]any)
+		if data["name"] != "delegate_task" {
+			continue
+		}
+		id, _ := data["id"].(string)
+		callIDs = append(callIDs, id)
+	}
+	if len(callIDs) != n {
+		t.Fatalf("%d delegate_task calls on the wire, want %d; stream=%q", len(callIDs), n, body)
+	}
+
+	var seen []string
+	perCall := map[string]int{}
+	for _, evt := range sseEvents(t, body) {
+		if evt["type"] != "subagent_progress" {
+			continue
+		}
+		data, _ := evt["data"].(map[string]any)
+		id, _ := data["id"].(string)
+		if id == "" {
+			t.Fatalf("a heartbeat named no call, so the dashboard has to guess: %v", data)
+		}
+		seen = append(seen, id)
+		perCall[id]++
+	}
+	if len(perCall) != n {
+		t.Fatalf("heartbeats named %d distinct calls, want %d: %v", len(perCall), n, perCall)
+	}
+	for _, id := range callIDs {
+		if perCall[id] == 0 {
+			t.Fatalf("call %s never named itself; heartbeats=%v (calls=%v)", id, perCall, callIDs)
+		}
+	}
+
+	// One run at a time, in emission order: each call's heartbeats are one
+	// contiguous block, and the blocks follow the calls. That is exactly why "the
+	// first call with no result yet" is the wrong row for runs 2..n.
+	var order []string
+	for _, id := range seen {
+		if len(order) == 0 || order[len(order)-1] != id {
+			order = append(order, id)
+		}
+	}
+	if len(order) != n {
+		t.Fatalf("heartbeats interleaved across calls: %v", seen)
+	}
+	for i, id := range order {
+		if id != callIDs[i] {
+			t.Fatalf("heartbeat block %d names call %s, want %s (calls=%v)", i, id, callIDs[i], callIDs)
+		}
 	}
 }
