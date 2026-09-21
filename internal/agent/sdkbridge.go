@@ -53,6 +53,15 @@ func (t *toolAdapter) InputSchema() sdktypes.ToolInputSchema {
 }
 
 func (t *toolAdapter) Call(ctx context.Context, input map[string]interface{}, tCtx *sdktypes.ToolUseContext) (*sdktypes.ToolResult, error) {
+	// The call's id arrives as a reserved argument (see tools.ToolCallIDInputKey:
+	// the executor has no other per-call channel). Strip it before the tool's
+	// own arguments are marshalled, and hand it to the tool as a context value —
+	// so a tool that must name its own call (delegate_task's heartbeats) can,
+	// and no tool ever sees an argument it did not ask for.
+	if id, ok := input[tools.ToolCallIDInputKey].(string); ok {
+		delete(input, tools.ToolCallIDInputKey)
+		ctx = tools.WithToolCallID(ctx, id)
+	}
 	// Convert input map to JSON for FastAgent's ToolFunc
 	argsJSON, err := json.Marshal(input)
 	if err != nil {
@@ -150,6 +159,10 @@ func (e *sdkEngine) executeToolsConcurrently(ctx context.Context, fcRegistry *to
 			ToolName:  tc.Function.Name,
 			Input:     input,
 		}
+		// Carry the call's id to the tool body: the SDK's ToolUseContext is one
+		// pointer shared by every call in this batch, so the call's own arguments
+		// are the only per-call channel there is. The adapter strips it again.
+		input[tools.ToolCallIDInputKey] = tc.ID
 	}
 
 	start := time.Now()

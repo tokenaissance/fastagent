@@ -87,6 +87,23 @@ func (a *Agent) subagentWallBudget(ctx context.Context, explicit time.Duration) 
 		budget, clamped.Round(time.Second), subagentTurnMargin), nil
 }
 
+// subagentHeartbeat builds one `subagent_progress` event, naming the call it
+// belongs to.
+//
+// The id is the tool_use id of the delegate_task call this run was spawned by
+// (tools.ToolCallID, stamped by the SDK bridge). Without it the dashboard can
+// only guess which row a heartbeat belongs to — it takes the first call with no
+// result yet, and since a round's tool results are all emitted after the whole
+// round returns, that guess is wrong for every call but the first in a fan-out
+// (2026-09-21). A run reached without an id (RunSubagent called directly) emits
+// the event without one; the dashboard falls back to its old rule then.
+func subagentHeartbeat(ctx context.Context, data map[string]any) ChatEvent {
+	if id, ok := tools.ToolCallID(ctx); ok {
+		data["id"] = id
+	}
+	return ChatEvent{Type: "subagent_progress", Data: data}
+}
+
 // RunSubagent implements tools.SubagentRunner so the delegate_task tool
 // can call back into the Agent without creating an import cycle.
 //
@@ -98,9 +115,7 @@ func (a *Agent) subagentWallBudget(ctx context.Context, explicit time.Duration) 
 // delegate_task.
 func (a *Agent) RunSubagent(ctx context.Context, req tools.SubagentRequest) (out string, err error) {
 	defer func() {
-		emitEvent(ctx, ChatEvent{Type: "subagent_progress", Data: map[string]any{
-			"phase": "done",
-		}})
+		emitEvent(ctx, subagentHeartbeat(ctx, map[string]any{"phase": "done"}))
 	}()
 	return a.runSubagentLoop(ctx, req)
 }
@@ -207,11 +222,11 @@ func (a *Agent) runSubagentLoop(ctx context.Context, req tools.SubagentRequest) 
 		// the start of every iteration plus right before tool execution
 		// (with the tool name) so the user sees both "thinking" and
 		// "running web_search" phases.
-		emitEvent(ctx, ChatEvent{Type: "subagent_progress", Data: map[string]any{
+		emitEvent(ctx, subagentHeartbeat(ctx, map[string]any{
 			"iteration": i + 1,
 			"max":       maxIterations,
 			"phase":     "thinking",
-		}})
+		}))
 
 		callTools := toolDefs
 		llmMsgs := messages
@@ -298,12 +313,12 @@ func (a *Agent) runSubagentLoop(ctx context.Context, req tools.SubagentRequest) 
 		for _, tc := range resp.ToolCalls {
 			toolNames = append(toolNames, tc.Function.Name)
 		}
-		emitEvent(ctx, ChatEvent{Type: "subagent_progress", Data: map[string]any{
+		emitEvent(ctx, subagentHeartbeat(ctx, map[string]any{
 			"iteration": i + 1,
 			"max":       maxIterations,
 			"phase":     "running",
 			"tools":     toolNames,
-		}})
+		}))
 
 		// Same contract as the main loop (loop.go): an in-flight tool gets the
 		// grace window to finish after this sub-agent's wall budget expires,
@@ -367,10 +382,10 @@ func (a *Agent) runSubagentLoop(ctx context.Context, req tools.SubagentRequest) 
 // reach this when the parent is alive, because a cancelled parent means nobody
 // is waiting for the result.
 func (a *Agent) finalizeSubagent(parentCtx context.Context, messages []provider.Message, lastContent string, nudge provider.Message, iteration int, budget time.Duration) (string, error) {
-	emitEvent(parentCtx, ChatEvent{Type: "subagent_progress", Data: map[string]any{
+	emitEvent(parentCtx, subagentHeartbeat(parentCtx, map[string]any{
 		"iteration": iteration,
 		"phase":     "final-delivery",
-	}})
+	}))
 
 	finalCtx, cancel := context.WithTimeout(context.WithoutCancel(parentCtx), subagentSalvageTimeout)
 	defer cancel()
