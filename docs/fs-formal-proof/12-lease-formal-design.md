@@ -46,7 +46,7 @@ semantics are maintained by **the store** ("this row says who holds it, until wh
 always evaluated on the store's side — that is the ground for L4/L5 below, and the reason all three
 existing implementations put the truth in the row.
 
-## 3. Obligations L1–L6
+## 3. Obligations L1–L7
 
 | # | Obligation | Statement | Cost of violating it |
 |---|---|---|---|
@@ -56,14 +56,26 @@ existing implementations put the truth in the row.
 | **L4** | fencing | (a) `A`'s effect **carries** the token and the **resource** validates it in the same atomic step; (b) what is validated is the **pair** `(h, e)` against the live row; (c) that **pair** must be unique per acquisition — either `h` embeds a one-shot nonce, or `e` is strictly monotonic over the **whole life of the row** | a delayed effect lands on a newer generation's resource (the classic "paused writer wakes and overwrites") |
 | **L5** | guarded release | `Release`/takeover carry the same `(h, e)` predicate; a release without one is a hole | a lapsed holder's late cleanup deletes the **current** holder's lease |
 | **L6** | verdict observability | the result of `Acquire`, the failure of `Renew`, every loss is a σ (F2) and must be delivered (F3) | the consumer reads silence as "I am alone" ([08 §2.2](./08-state-observability-principle.md), P1′) |
-| **L7** | preconditions must be evaluable | a write's precondition must be evaluable **at the effect's linearization point**, and its **witness must be co-located with the actor performing the effect**. Holds ⇒ conditional write (family B); does not hold ⇒ client-side comparison (family A), and that must be **declared as detection, not prevention** | the predicate is evaluated on a stale observation: when the conflict is missed the mechanism migrates while `pre` is false (**R2 fails silently**) and emits **no σ at all** (O1 fails in the silence direction — the hardest kind to notice) |
+| **L7** | preconditions must be evaluable | a write's precondition must be evaluable **at the effect's linearization point**, and its **witness must be co-located with the actor performing the effect** (precondition: the witness must be **evaluable** — the store holding it must be reachable; see the condition (c) in §3.2). Holds ⇒ conditional write (family B); does not hold ⇒ client-side comparison (family A), and that must be **declared as detection, not prevention** | the predicate is evaluated on a stale observation: when the conflict is missed the mechanism migrates while `pre` is false (**R2 fails silently**) and emits **no σ at all** (O1 fails in the silence direction — the hardest kind to notice) |
 
-### 3.1 What L7 implies: how the seven file-change seams should choose a family
+### 3.1 What L7 implies: how the eight file-change seams should choose a family (W1–W8; the heading said "seven" until 2026-09-20, corrected against the table)
 
 > L4(a) says the **lease's** token must be checked by the resource in the same atomic step; L7 generalises it — **every** write's precondition obeys the same rule:
-> **the witness must be in the hands of whoever performs the effect.** In hand ⇒ family B is free; only in-band inside a copy ⇒ family B means
-> manufacturing metadata that itself must stay consistent across replicas (solving a synchronisation problem by introducing a new synchronisation
-> problem), and family A is free.
+> **the witness must be in the hands of whoever performs the effect.** In hand ⇒ family B is free; only in-band inside a copy ⇒ family A is free.
+>
+> **Why "manufacture a consistent fact" does not fix it** (do not read this as "such a fact cannot be built":
+> **a database lease *is* exactly such a cross-replica consistent independent fact** — one row per scope, CAS, cheap).
+> Whether you can buy **prevention** depends on two things:
+>
+> | Condition | Satisfied (prevention is buyable) | Not satisfied (you only buy detection) |
+> |---|---|---|
+> | **(a) the resource can check it inside the same atomic step** (= L4a) | row CAS in a database; an object store's conditional PUT on ETag | a POSIX file inside a container: no conditional write, no atomicity between the check and the write |
+> | **(b) that resource has a chokepoint every writer must pass** | the storage API is the only entry | a container is not: the agent's `exec`, scripts, snapshot unpacking all bypass the mediator |
+>
+> Both satisfied ⇒ one round trip buys prevention; either missing ⇒ whatever fact you build, you only buy **detection**
+> (which L7 requires you to **declare as detection**). W2/W3 sit in family A because they fail these two conditions,
+> not because "nothing could be thought up". A further cost: even if you build that fact, it must be born and die with
+> the container's lifecycle (rewritten on every hydrate, every eviction) — and it describes precisely the thing that can be bypassed.
 
 | seam | where the witness is | consequence of all-A | consequence of all-B | answer |
 |---|---|---|---|---|
@@ -83,6 +95,75 @@ consistent across replicas, and it brings back the livelock shape recorded at 07
 **L4(c) is the one demand this round added, and it was measured into existence**: the other five all
 have instances in the existing code; only this one was forced out by the sandbox lease's observed
 behaviour while designing `session_turns` (§5).
+
+### 3.2 The degradation path (verdict on gap-register #2): when the lease store is unavailable, today the system **lets it through**
+
+> Source: row 2 of the gap register in *认知哲学的数学原理* (The Mathematical Principles of Cognitive Philosophy) 19.5.8.7
+> ("the degradation path when the database is unavailable **has not been judged cell by cell**"). This section is that verdict.
+> **Evidence date: 2026-09-21.**
+
+**As-built evidence (the status quo).** The sandbox pool is fail-open on **every** lease **admission** read path:
+
+| Site | Failure | What the code does |
+|---|---|---|
+| `internal/sandbox/e2b_executor.go:2182` | `AcquireSandboxLease` errors | `slog.Warn("e2b lease acquire failed (keeping local sandbox)")` and **keeps using the local sandbox** |
+| `:2434-2435` | `GetSandboxLease` errors | comment verbatim: `Registry unavailable: fail open on the local executor.` |
+| `:2445` | reclaim after expiry errors | keeps the local executor |
+| `:2489` | a rebuilt sandbox was never published | keeps the local executor |
+
+And this is a **contract pinned by a test**: `internal/sandbox/lease_pool_test.go:415`
+`TestE2BPoolFreshGetLeaseErrorsFailOpen`, whose comment reads
+`Fail-open contract (design doc: "Registry errors fail open: the sandbox is left alive")`.
+
+**Which kind of cell this is.** The witness (the lease row) **lives in the DB**; the effect (handing out / reusing a sandbox) happens on a pod.
+While the DB is reachable this cell is family B with (a)(b) both satisfied — exactly what §3.1 means by "a database lease is cheap".
+When the DB is **unreachable**, what breaks is not "the witness is not in hand" but **the witness cannot be evaluated at all**:
+two worlds ("nobody holds it" vs "someone holds it but we cannot see the row") produce **the same observation** (an error).
+So this cell is not ③ (impossible), it is **②’s sibling: undecidable**.
+
+**Hence a third implicit condition on L7.** L7’s first two conditions (atomic check + chokepoint) are about **where the witness is**;
+this section adds the third, which is about **whether the witness can be evaluated**:
+
+> **(c) The witness must be evaluable** (the store holding it must be reachable).
+> When (a)(b) hold but (c) does not, the predicate is **not evaluable** — "carry on" and "refuse" are then not decided by the witness
+> but are an **availability choice**, and therefore must be **declared**.
+
+**Walking 19.4.6.1’s three actions.**
+① Where is the witness? — In the DB, and **out of reach** right now. ② Can it be relocated? — This system’s only chokepoint is the DB
+(a sandbox instance in object storage has no conditional-write semantics), so **no**. ③ Neither works ⇒ **hold back + label**.
+**The current implementation takes a fourth option: let it through, and say nothing** — the ✗ "silently degrading" entry in 19.4.6.1’s negative list.
+
+**Two landable paths (pick one; either way it must be named).**
+
+- **Path A (hold back)**: a lease that cannot be read ⇒ **do not hand out, do not reuse** a writable sandbox; refuse this turn.
+  Cost: DB jitter = a failed turn (availability). Benefit: two writers cannot appear inside that window.
+- **Path B (let it through + declare)**: keep fail-open, but **produce a σ** — one true sentence, e.g.
+  "this turn did not obtain cross-replica admission: the lease store was unreachable, so there may be two writers" — and **place it at `D₁` or `D₂`**
+  (an in-flight call takes `D₁`, the tool result; otherwise `D₂`, the turn entry; if it cannot be taken, design the future delivery point explicitly per 08 §6.1).
+  At the same time, declare this cell’s admission **as let-through** in the strength table (neither prevention nor detection).
+
+**Why Path B is this section’s recommendation.** It costs **nothing** (one true sentence) and yet extends A1’s discipline from the refusal direction
+to the **let-through direction** — **refusal ≠ silence, and letting it through ≠ silence either**. Its output also lands in machinery that already exists:
+no new table, no extra round trip.
+
+**Boundaries (all four must be written together).**
+
+1. **Not every fail-open is the same thing.** `:2609` in the same file (`ReleaseSandboxLease` errors ⇒ **leave the sandbox alive**) points the other way:
+   that is the conservative choice that **avoids irreversible damage**, it **does not violate L7**, and it must not be changed along with the rest.
+   So "fail-open" needs **two senses here**: **admission-side fail-open (let it through)** and **lifecycle-side fail-open (do not destroy)** —
+   one word carrying two opposite meanings inside one file, a new member of the single-source / one-expression family (same shape as G23 / G16).
+2. **When the DB is entirely unavailable**, the turn itself cannot start and σ’s landing site may be gone too ⇒ that cell degrades into "② no landing site",
+   where R4 / P1′ requires **designing the future delivery point** (a later `D₂` report), not pretending it was said.
+3. **This section judges; it does not build.** No code was changed; the **G31** row in `10 §4` is a registration, not a fix.
+4. **`releaseExecutor` has a third branch that fits neither sense above (added 2026-09-21; see G32).**
+   The `!deleted` branch at `:2615` is **not** "the store errored" (that is `:2609`) — it is **the store successfully answering "no row matches the key you gave"**.
+   When the pool’s **in-process epoch mirror** (`internal/sandbox/e2b_executor.go:1868` `leaseEpochs`) holds no epoch for that scope,
+   the release presents `epoch=0`, `DELETE ... AND epoch = ?` matches no row, and the code reads that `false` as
+   "another holder fenced me out" — **while in the other world (the truth) the row still names the releasing pod itself**.
+   See G32 for the controlled experiment (`internal/sandbox/lease_epoch_gap_test.go`: returns `nil`, destroys **0**, logs **0** lines,
+   **observationally indistinguishable** from the release that a sibling correctly fenced out). ⇒ That branch is **not** the conservative choice;
+   it is **a release silently dropped**, and by this section’s own discipline (letting it through must be declared) it must at least produce a σ.
+   **This section does not pick the path** — it is registered as **G32** in `10 §4`.
 
 ## 4. The existing implementations vs the six obligations (as-built)
 
@@ -236,6 +317,8 @@ repeatedly-reimplemented mechanism of F1.
 | the sandbox token resets each generation; a late release deletes a live row | probes `TestProbeSandboxLeaseEpochOnTakeover` / `TestProbeSandboxLeaseEpochResetFenceCollision` (run for real on 2026-09-19, output in §5; the probe file was deleted afterwards). **The fix and its witness**: `internal/store/sandbox_leases.go`'s claim branch + `TestSandboxLeaseEpochNeverResetsAcrossTakeover` (falsification run for real) |
 | the sandbox doc contradicts itself | `docs/sandbox-pool-leases.md:87-89` vs `:237-240` |
 | the turn lease's values | [../session-turn-integrity.md](../session-turn-integrity.md) A1.1–A1.5 |
+| **when the lease store is unavailable: let through, or hold back (§3.2 / G31)** | `internal/sandbox/e2b_executor.go:2182` (an acquire error keeps the local sandbox), `:2434-2435` (a get error; comment verbatim `fail open`), `:2445` (reclaim error), `:2489` (rebuild never published), `:2609` (release error keeps it alive — **the opposite direction, and correct**); test `internal/sandbox/lease_pool_test.go:415` `TestE2BPoolFreshGetLeaseErrorsFailOpen` (**evidence taken 2026-09-21**) |
+| **a release with no recorded epoch is silently dropped (§3.2 boundary 4 / G32; the measured P-WAD row #1 of gap-register #5)** | carrier `internal/sandbox/e2b_executor.go:1868` `leaseEpochs` (write `:2040`, read `:2111`, use `:2607`), **the drop point `:2615`** (`!deleted` ⇒ `return nil`, no error, no log), the issuance-time fail-open comment `:2215-2216`, the SQL predicate `internal/store/sandbox_leases.go:237`; controlled experiment `internal/sandbox/lease_epoch_gap_test.go` `TestPWAD1_ReleaseWithNoRecordedEpochIsSilent` (**evidence taken 2026-09-21**: `err=nil` / destroys 0 / logs 0, item-by-item identical to a correctly fenced-out release; putting the σ probe back turns it red — measured) |
 
 **Witness status**:
 - **landed**: L1 one winner under concurrency (`TestSessionLeaseConcurrentAcquireHasOneWinner`), L4(c) the

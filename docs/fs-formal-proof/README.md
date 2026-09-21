@@ -41,7 +41,7 @@ reviews can cite it.
 | [09-sandbox-lifecycle-audit.md](./09-sandbox-lifecycle-audit.md) | **Sandbox lifecycle × filesystem audit**: 7 states, per-transition observability verdicts, four gaps and the order to handle them | Sandbox triage / lifecycle design |
 | [10-harness-state-audit.md](./10-harness-state-audit.md) | **Whole-harness state-change audit**: every component that the agent triggers or that triggers the agent, checked δ→σ, gaps G5–G13 (including a locally reproduced P0: a signal that is always false) | Required reading before changing any agent state |
 | [11-change-register.md](./11-change-register.md) | **Change register**: every F1/F2/F3 change ↔ code anchor ↔ UT ↔ live e2e ↔ deployment status (working tree vs production `HEAD`) | Release planning / review / delivery checks |
-| [12-lease-formal-design.md](./12-lease-formal-design.md) | **The formal design of leases**: the six obligations L1–L6 induced from `channel_leases` / Redis / `sandbox_leases`, the as-built classification, **the G25 counterexample (the sandbox fencing token resets each generation — measured)**, `session_turns`' instantiation and its four-layer placement | Required reading before designing any cross-replica serialisation |
+| [12-lease-formal-design.md](./12-lease-formal-design.md) | **The formal design of leases**: the six obligations L1–L7 induced from `channel_leases` / Redis / `sandbox_leases`, the as-built classification, **the G25 counterexample (the sandbox fencing token resets each generation — measured)**, `session_turns`' instantiation and its four-layer placement | Required reading before designing any cross-replica serialisation |
 
 ## Conclusions in one line each
 

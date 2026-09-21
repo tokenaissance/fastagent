@@ -67,11 +67,11 @@ For a mechanism M that changes the agent's world:
 | [05](./05-remediation-plan.md) | F1's **historical plan** | §2 P0 (corrected by 06), §5 the T1–T7 test matrix |
 | [06](./06-cordis-review.md) | where F1's criteria come from | §1 the seven principles, §4 the corrected design |
 | [07](./07-formal-rootcause-and-fix.md) | F1's **authoritative definition** | part 2 (domain and constructive proof), §3.3, §3.11.3 |
-| [08](./08-state-observability-principle.md) | **F2 + F3** | §2/§2.1/§3 (F2), **§2.2 (F3)**, §5 the audit, §6 the checklist, §9.1 the exits |
+| [08](./08-state-observability-principle.md) | **F2 + F3** | **§1.1 the two-layer statement (the interface and its tension)**, §2/§2.1/§3 (F2), **§2.2 (F3)**, §5 the audit, §6 the checklist, §9.1 the exits |
 | [09](./09-sandbox-lifecycle-audit.md) | F2/F3 applied cell by cell to the **sandbox lifecycle** | §2 the transition verdicts, §3 G1–G4 |
 | [10](./10-harness-state-audit.md) | F2/F3 applied to the **whole harness** | §1 the whole picture, **§4 the gap table (with the duty column)** |
 | [**11**](./11-change-register.md) | the **delivery index for all three systems**: every change ↔ code anchor ↔ UT ↔ live e2e ↔ deployment status | the row-by-row register (F1 #1–#4 · F2 #5–#18 · F3 #19–#20 · path/scope #21–#27) |
-| [12](./12-lease-formal-design.md) | **F1's mechanism layer**: the contract induced from the four existing lease implementations (L1–L6), the as-built classification, the G25 counterexample, `session_turns`' instantiation and its four-layer placement | §3 the obligations, §4 the classification, §5 the counterexample (measured), §6 the design rules |
+| [12](./12-lease-formal-design.md) | **F1's mechanism layer**: the contract induced from the four existing lease implementations (L1–L7), the as-built classification, the G25 counterexample, `session_turns`' instantiation and its four-layer placement | §3 the obligations, §4 the classification, §5 the counterexample (measured), §6 the design rules |
 
 ### 4.1 The inverse index: formal system → mechanism → the design documents it constrains
 
@@ -86,14 +86,14 @@ F1 preconditions / zero migration (criteria from 06, authoritative definition in
 │     └─ 05 §2/§5 · 07 §3.3 · register #1–#2 · code: sandbox/lifecycle.go syncSnapshot
 ├── mechanism 2 · write-through + the delivery stamp (the host write also lands in the sandbox copy, stamped with the store's time)
 │     └─ 07 §3.3/§3.11.3 · register #3–#4 · code: lifecycle.go WriteThrough
-├── mechanism 3 · leases (one writer per key across replicas; the L1–L6 contract)
+├── mechanism 3 · leases (one writer per key across replicas; the L1–L7 contract)
 │     ├─ 12 here (induction + the G25 counterexample + session_turns' instantiation)
 │     ├─ ../session-turn-integrity.md (A1 admission / A1.4 the fence / the IfIdle path)
 │     └─ ../sandbox-pool-leases.md (the as-built cell: clauses U/A/I)
 └── mechanism 4 · conditional writes (**decided: family B — versioned conditional writes**; the change list B1–B11 is in ../session-turn-integrity.md A3) → 10 §4 G24
       (the family is chosen by **L7, preconditions must be evaluable**: witness co-located with the effect's actor ⇒ B; only in-band inside a copy ⇒ A. See [12 §3/§3.1](./12-lease-formal-design.md))
 
-F2 observability (defined in 08 §2/§2.1)
+F2 observability (defined in 08 §2/§2.1; **the layer statement and its tension, §1.1**)
 ├── mechanism 1 · the turn receipt (the baseline travels with the turn, not in the process) → 10 §4 G9/G20 · register #11
 ├── mechanism 2 · the unified environment-signal exit (identity files / config / cron / skills and tools)
 │     └─ 08 §5 · 10 §4 G8/G10/G14 · register #10/#12/#13/#18
@@ -217,7 +217,7 @@ points and the IfIdle verdict wired onto it, and the fence (`…Fenced` write st
 | Bucket | Members | Where | Why this bucket |
 |--------|---------|-------|-----------------|
 | **A** formal systems | **F1 / F2 / F3** | §1; defined in [06](./06-cordis-review.md) · [07](./07-formal-rootcause-and-fix.md) · [08](./08-state-observability-principle.md) | three different questions + three different judgement shapes; missing one loses one failure mode |
-| **B** mechanism layer | the lease contract **L1–L6** + the per-cell classification of the four existing implementations | [12](./12-lease-formal-design.md) | it still answers F1's question; its verdict is F2's δ/σ and its delivery is F3's duty ⇒ **not a fourth system** |
+| **B** mechanism layer | the lease contract **L1–L7** + the per-cell classification of the four existing implementations | [12](./12-lease-formal-design.md) | it still answers F1's question; its verdict is F2's δ/σ and its delivery is F3's duty ⇒ **not a fourth system** |
 
 **C. Subsystem contracts** (falsifiable clause tables in the same style, each with its own alphabet — all instances of A)
 

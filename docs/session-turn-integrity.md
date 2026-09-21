@@ -1390,7 +1390,7 @@ Accelerate → Automate, order invariant). Interfaces are named, not built here.
 > counterexample in the *existing* sandbox lease (**G25**: its token resets to 1
 > per generation, and a delayed same-owner release deletes a live row), and A1.4
 > pins the fence inside the store's write statement rather than the caller. The
-> induced contract (L1–L6) and the as-built classification of all four lease
+> induced contract (L1–L7) and the as-built classification of all four lease
 > mechanisms are in [12](./文件系统形式化证明/12-lease-formal-design.md).
 
 ### A1 — One turn per session, across replicas (the root cause)
