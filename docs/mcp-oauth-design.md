@@ -658,7 +658,13 @@ runOnce(msg)
 - [ ] 多用户多 Agent 凭证隔离
 - [ ] 静态 header MCP server 完全兼容（零行为变化）
 - [ ] 测试：domain 纯函数单测 + usecase 集成（fake 适配器）+ e2e（mock token endpoint）
-- [ ] 观测：`/api/mcp/oauth/status` 聚合展示；日志无敏感信息。**2026-09-21 登记**：该端点（单 server 状态）的 cloud 客户端 `useQueryMcpOAuthStatus` 自 2026-09-05 起零调用点，审计后**保留并在钩子上写明理由**——不是漏接线：它覆盖 `servers` 列表答不了的两件事（server 已从配置删除但凭证仍在；单台查询失败被 `continue` 静默丢行），且是本端点的唯一客户端。云指南记有完整裁决与**可反驳的删除条件**（整链删除，并先把 `TestMcpOAuthStartOwnershipAndFullFlow` 的见证改指向）：[tokenaissance-cloud › docs/fastagent/guides/auth/mcp-oauth-authorization-flow.md](https://github.com/tokenaissance/tokenaissance-cloud/blob/develop/docs/fastagent/guides/auth/mcp-oauth-authorization-flow.md) §7。要删除本端点，本行就是那个产品决策的入口。
+- [ ] 观测：`/api/mcp/oauth/status` 聚合展示；日志无敏感信息。**2026-09-21 登记（同日补全判据链）**：该端点（单 server 状态）的 cloud 客户端 `useQueryMcpOAuthStatus` 自 2026-09-05 起零调用点，审计后**保留并在钩子上写明理由**——不是漏接线，而是**凭证层**的唯一读者。
+  - **声明与凭证是两个存储、两条生命周期**：`mcp remove` 只删 `agent_mcp_servers`（§13.6：刻意不吊销，保 `add` 是 `remove` 的逆）；凭证在 `mcp_oauth_tokens`，键 `oauth/{user}/{agent}/{server}.json`（`domain.StoreKey`），**唯一**删除路径是 revoke（`usecase/revoke.go`）。`DeleteAgent`/`DeleteUser` 的级联扫 per-agent 表（含 `agent_mcp_servers`）但**不含凭证表**（无外键、无级联，§13.7）。于是"有凭证、无声明"是常态。
+  - **`servers` 列表答不了它**：名字来自 `ListMCPServers`；单台状态查询失败 `slog.Warn` + `continue` **静默丢行**（分不清"没配"与"查不到"）。
+  - **`status` 能答它（手上已有名字时）**：`handleMcpOAuthStatus` 传 `UserID/AgentID/ServerName`（**不传 ServerURL**），`Status.Execute` 直接 `StoreKey` → `Tokens.Load`，不查配置；未声明的名字也答 authorized/expired/none，而列表吞掉的那类失败在这里是 `ok:false` + 错误文本。同一处失败、两种姿态。
+  - **边界（写下来以免被过度解读）**：这是**点查，不是发现路径**。`port.TokenStore` 只有 Save/Load/Delete，没有任何东西能枚举凭证，所以控制台无法主动列出孤儿凭证；要补需先给 port 加 List，属产品决策。
+  - **待裁决的相邻发现（2026-09-21 读出，未修）**：删 agent / 删 user 之后凭证行留存，而 `oauthAgentOwner` 要求 agent 行存在 ⇒ 该凭证**再无可达读者**（`/status` 与 `/servers` 都 403），只能等一次按名字的 `logout`；远端 provider 授权同样留存（只有 revoke 会触网）。修法二选一：**(a)** 给 `port.TokenStore` 加 `DeleteByAgent(user, agent)`（adapter 按 `StoreKey` 前缀 + `escapeLike` 删），在两条删除路径（`handlers_agents.go` 的 delete、`agentcli.go`）调用；**(b)** 给 `mcp_oauth_tokens` 加 `agent_id`/`user_id` 列 + 外键级联（迁移更重，但在唯一 choke point 上生效）。见证落点：`delete_user_consistency_cloudpath_e2e_test.go`（它已经在比对两条删除路径的表集合）。
+  - 云指南记有同一份裁决与**可反驳的删除条件**（整链删除，并先把 `TestMcpOAuthStartOwnershipAndFullFlow` 的见证改指向）：[tokenaissance-cloud › docs/fastagent/guides/auth/mcp-oauth-authorization-flow.md](https://github.com/tokenaissance/tokenaissance-cloud/blob/develop/docs/fastagent/guides/auth/mcp-oauth-authorization-flow.md) §7。要删除本端点，本行就是那个产品决策的入口。
 
 ---
 
@@ -1996,7 +2002,7 @@ add/remove 行写成功（或 dashboard `ReplaceMCPServers` 事务完成）→ `
 
 ### 13.7 实现落点与测试（witness）
 
-- store：[agent_mcp_servers.go](../internal/store/agent_mcp_servers.go)（List/Add/Delete/Replace，PK 前置条件）；DDL [database.go:1447](../internal/store/database.go)；DeleteAgent/DeleteUser 级联。
+- store：[agent_mcp_servers.go](../internal/store/agent_mcp_servers.go)（List/Add/Delete/Replace，PK 前置条件）；DDL [database.go:1666](../internal/store/database.go)（2026-09-21 校正：旧锚点 `:1447` 落在 agent_files 的 PG 迁移块里）；`DeleteAgent`/`DeleteUser` 级联——扫的是一组 per-agent 表（含 `agent_mcp_servers`），**不含凭证表 `mcp_oauth_tokens`**，该表无外键、无级联（见 §8 观测行 2026-09-21 登记）。
 - agent 工具：[mcp_config_tool.go](../internal/agent/mcp_config_tool.go)（per-key 写 + `requireAgentOwner`；旧 JSON helper 已删；add/remove 输出追加 `<mcp-undo>` 逆参数 marker，remove 携带完整被删 entry）。
 - undo 机器回放：[mcp_undo.go](../internal/agent/mcp_undo.go)（**限定当前会话**：`ListSessionEventsSince(user, agent, session)` 倒序读 tool_result marker，LIFO 自动重放；消费集存 `configs_kv` kind=`mcp_undo`、name=`undo:<sessionKey>`）。
 - fail-loud：[events.go](../internal/agent/events.go) `emitEventChecked`——mcp add/remove 的 tool_result 持久化失败或无 chat journal 时，结果附加 `[undo journal warning]`；`markUndoCursor` 写失败在 undo 结果中显式报错（已应用但未记账）。
