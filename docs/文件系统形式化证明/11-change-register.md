@@ -18,7 +18,7 @@
 | **代码锚点** | 函数名或 `文件:行`；行号会漂，函数名不会，所以以函数名为准 |
 | **UT** | 进程内测试（`go test`）。标「反证」的，表示把修复改回去该测试会红 |
 | **真机 e2e** | 需要 `FASTAGENT_E2B_LIVE=1 E2B_API_KEY=…` 的 E2B 测试；运行命令写在各自文件头部 |
-| **上线** | ❌ = 只在工作区（当前全部如此）；部署之后才变 ✅ |
+| **上线** | ❌ = **未部署到生产**。它不说明代码是否存在：09-19/20/21 那几行**已提交**（见表格下方说明）。这一列里的 ✅ 等于声称发过一次版，所以没发布之前它保持 ❌ |
 
 > **本册不收录「控制动作形态」。** 形态是**缺口**的属性（不提供／提供／顺序／时长），
 > 逐格判定与可核查读数在 [10 §4 的表头](./10-harness-state-audit.md)；本册只做「改动点 ↔ 证据」。
@@ -371,3 +371,11 @@ agent/tools 42.9s 全绿。**当时的**线上是 `16a7532`。（2026-09-19 实�
 | 39 | **O1**：pod 的 `{baseDir}` 诊断改为在技能的 **manifest** 带 token 时触发，而不是"任何一个文件带 token"。这条 warning 携带的句子陈述的是**两个读者之间的差异**，而只有 `SKILL.md` 会被替换——随包脚本没有任何人替换，agent 同样读到字面量，"客户端读到的不一样"对它就是假的。`Files` 仍是**测量**（列出每个携带者），这才让剩下那句"in every file listed"可核对 | **O1**（只说真话）；在 O7 自己的实例投递面被扩大之后重读它时发现（[08 §10.5](./08-state-observability-principle.md) D-4） | **✅ 已落地（工作区）**：fastagent `internal/skills/catalog.go`（`skillManifestName` + `BuildCatalog` 的触发条件与句子）、`internal/skills/catalog_scan.go` | 已绿：`TestBaseDirTokenInABundledFileIsNotAReaderDifference`、`TestBaseDirWarningListsEveryCarrierNotOnlyTheManifest`、`TestCatalogHandlerCarriesTheCodesAndTheWarnings`（**wire**）、`TestScanAndCatalogReportTheBaseDirTokenAsAWarning`（句子点名 `SKILL.md`）；**反证已实跑**：触发条件改回"任何携带者" ⇒ 2 条红（规则 + wire），句子改回"replaced when this agent loads the skill" ⇒ 1 条红 | 无需真机（pod 自己那份应答；两个消费面由第 38 行的链式测试覆盖） | ❌ 未部署 |
 
 > 表中 `tokenaissance-cloud:` 前缀的路径相对 cloud 仓库（[tokenaissance/tokenaissance-cloud](https://github.com/tokenaissance/tokenaissance-cloud)，分支 `develop`）。
+
+> **状态列更正（2026-09-21）**：09-19/20/21 那一批（第 32–39 行）里仍写着"已落地（工作区）"的格子，
+> 写的时候为真，现在则**低报**了——代码已提交：fastagent 在 `fastagent` 分支（`c4c4220` 栅栏、
+> `ce6ffb4` 租约/投影/epoch 修法、`3f3c02e` 条件写、`95204aa` 附件保留双方、`bc1d9d6` 第 39 行），
+> cloud 在 `develop`（`27736153` 工具行、`b453fef8` 输入框、`7af1224b` 会过期的回合事实、`29a2a23c`
+> 附件应答、`81bc9296` 第 38 行、`74c69858` 第 39 行的客户端那份文案）。这些格子读作"在分支上、未部署"
+> ——上面的 ❌ 只有一个含义。逐格写明 commit 是另一趟文档活儿（这里的锚点正是函数名，因为它不漂移）；
+> 本注拒绝的是另一种错，即用一个 ✅ 声称发过版。

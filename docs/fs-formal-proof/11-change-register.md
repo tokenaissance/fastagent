@@ -21,7 +21,7 @@
 | **Code anchor** | A function name (preferred: line numbers drift) or `file:line` |
 | **UT** | In-process test (`go test`). Where marked "falsified", reverting the fix turns it red |
 | **Live e2e** | An E2B test needing `FASTAGENT_E2B_LIVE=1 E2B_API_KEY=…`; the run command is in each file's header |
-| **Deployed** | ❌ = working tree only (currently everything); it becomes ✅ when the change ships |
+| **Deployed** | ❌ = **not deployed to production**. It says nothing about whether the code exists: the rows of 09-19/20/21 are **committed** (see the note under the table). In this column ✅ would claim a release, so it stays ❌ until one happens |
 
 > **This register does not carry the "shape of the control action".** That shape is a property of a
 > *gap* (not provided / provided / wrong order / duration); the cell-by-cell verdicts and the checkable
@@ -404,3 +404,13 @@ Apart from those six, §11.2's whole-file assignment and §11.3's function-level
 | 39 | **O1**: the pod's `{baseDir}` diagnostic fires on the skill's **manifest** carrying the token, not on any file that carries it. The sentence the warning carries states a difference between two readers, and only `SKILL.md` is substituted — nothing substitutes a bundled script, so the agent reads the literal token there too, and "a client reads something else" would be false. `Files` stays the measurement (every carrier), which is what keeps the remaining sentence ("in every file listed") checkable | **O1** (say only what is true), found while re-reading O7's own instance after its delivery widened ([08 §10.5](./08-state-observability-principle.md) D-4) | **✅ landed (working tree)**: fastagent `internal/skills/catalog.go` (`skillManifestName` + `BuildCatalog`'s trigger and sentence), `internal/skills/catalog_scan.go` | green: `TestBaseDirTokenInABundledFileIsNotAReaderDifference`, `TestBaseDirWarningListsEveryCarrierNotOnlyTheManifest`, `TestCatalogHandlerCarriesTheCodesAndTheWarnings` (**the wire**), `TestScanAndCatalogReportTheBaseDirTokenAsAWarning` (the sentence names `SKILL.md`); **falsification run for real**: the trigger back to "any carrier" ⇒ 2 red (rule + wire), the sentence back to "replaced when this agent loads the skill" ⇒ 1 red | none (the pod's own answer; both consumer surfaces are covered by row 38's chain test) | ❌ not deployed |
 
 > Paths prefixed `tokenaissance-cloud:` are relative to the cloud repository ([tokenaissance/tokenaissance-cloud](https://github.com/tokenaissance/tokenaissance-cloud), branch `develop`).
+
+> **Status-column correction (2026-09-21)**: every cell of the 09-19/20/21 rows (32–39) that still says
+> "landed in the working tree" was written when that was true and now **under-states** — the code is
+> committed: fastagent on branch `fastagent` (`c4c4220` the fence, `ce6ffb4` the lease / projection /
+> the epoch fix, `3f3c02e` the conditional writes, `95204aa` the keep-both attachment, `bc1d9d6` row
+> 39), cloud on `develop` (`27736153` the tool row, `b453fef8` the composer, `7af1224b` the expiring
+> fact, `29a2a23c` the attachment answers, `81bc9296` row 38, `74c69858` row 39's client copy). Read
+> those cells as "on the branch, not deployed" — the ❌ above keeps its one meaning. A per-cell commit
+> is a documentation pass of its own (the anchors are function names here precisely because they do
+> not drift); what this note refuses is the other error, a ✅ that would claim a release.
