@@ -622,7 +622,7 @@ C1's root fix is a **shared type** (two exits, one struct ⇒ shape drift fails 
 
 | cell | conclusion | evidence |
 |---|---|---|
-| the `subagent_progress` heartbeat's delivery point | **not a new defect**; it collapses into an already-registered item (A4.1: the heartbeat has a live D₃ but no *reconstructible* one, and it binds by position rather than identity) | the client subscription does take it (`case 'subagent_progress'` → `setSubagentProgress`) |
+| the `subagent_progress` heartbeat's delivery point | **not a new defect**; it collapses into an already-registered item (A4.1: the heartbeat has a live D₃ but no *reconstructible* one, and it binds by position rather than identity — **that second half was not merely registered, it was a real defect; row 42 closed it on 2026-09-21: every heartbeat names its call, and the client draws it only on the row it names**) | the client subscription does take it (`case 'subagent_progress'` → `setSubagentProgress`) |
 | a turn ending in another tab | **not a defect** — the hub publishes per (user, agent, session) and events land in `session_events` first for replay on reconnect | `internal/agent/events.go:72-86` (`AppendSessionEvent` → `hub.Publish(userID, agentID, sessionKey, …)`) |
 
 > Why record a non-defect: **the method's value is not only finding bugs but also refusing to book non-bugs as bugs** — a false positive pulls attention away from the real ones.

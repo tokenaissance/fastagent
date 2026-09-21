@@ -555,7 +555,7 @@ C2 的根治手段是**捕获式契约测试**（从活体服务端抓一次载�
 
 | 格子 | 结论 | 证据 |
 |---|---|---|
-| `subagent_progress` 心跳的投递点 | **不是新缺陷**，收敛为已登记项（A4.1：心跳只有"活体 D₃"、没有"可重建 D₃"；且按位置而非身份绑定） | 客户端订阅确实承接它（`case 'subagent_progress'` → `setSubagentProgress`） |
+| `subagent_progress` 心跳的投递点 | **不是新缺陷**，收敛为已登记项（A4.1：心跳只有"活体 D₃"、没有"可重建 D₃"；且按位置而非身份绑定——**后半个"已登记"不是空话：它是个真缺陷，2026-09-21 由 #42 关闭（每条心跳都报出自己的调用，客户端只在被点名的那一行画它）**） | 客户端订阅确实承接它（`case 'subagent_progress'` → `setSubagentProgress`） |
 | 跨标签页的回合结束 | **非缺陷**——hub 按 (user, agent, session) 发布，且事件先落 `session_events` 供重连回放 | `internal/agent/events.go:72-86`（`AppendSessionEvent` → `hub.Publish(userID, agentID, sessionKey, …)`） |
 
 > 记录这条"非缺陷"的理由：**方法的价值不只在找错，也在于避免把非缺陷记成缺陷**——误报会把注意力从真问题上引开。

@@ -2032,9 +2032,14 @@ already that fact, so expose it read-only:
 * `queued`'s payload (`internal/agent/loop.go:2330-2336`) gains the holder and an
   ETA for honest wording ("waiting for the turn that holds this session" rather
   than a bare position).
-* `subagent_progress` gains `id` (the `tool_call_id`) so progress can be bound by
+* `subagent_progress` carries `id` (the `tool_call_id`) so progress is bound by
   identity instead of "the first unresolved `delegate_task`" —— the binding that
-  made two concurrent turns look like one restarting.
+  made two concurrent turns look like one restarting. **Landed 2026-09-21** (register
+  row 42): the call's id rides that call's own arguments out of the SDK bridge
+  (`internal/agent/tools/toolcall.go`, `internal/agent/sdkbridge.go`), and the client
+  draws a heartbeat only on the row it names (`message-list.tsx`, `heartbeatOwnerId`).
+  Witnesses: `TestSubagentHeartbeatsNameTheirOwnCallE2E`, `TestToolCallIDReachesTheToolAndNotItsArguments`,
+  and two per-row cases in `message-list-tool-status.test.tsx` — each falsified for real.
 
 #### A4.2 The client edits (anchors are in `tokenaissance-cloud`)
 
@@ -2045,7 +2050,7 @@ already that fact, so expose it read-only:
 | what | where | change |
 |---|---|---|
 | "Interrupted" assertion | **landed 2026-09-21** — the rule is `src/features/chat/turn-state.ts` (`toolPhase`, `toolRowLabelKey`), read by the row (`message-list.tsx:61`, `:120`, call site `:256-265`), the group header (`:217-219`) and the bundle (`:335-337`) | three states: **interrupted** only when the fact says nobody holds the session (or no fact + the bubble stopped); **unknown** when the fact is unusable; a peer-held turn says *running elsewhere*. The row previously re-derived this from `msg.streaming` alone and was never passed the fact — so the requirement was unmet while the old spec (which read only the *header*) stayed green; the anchors once cited here (`:182`/`:96`) are superseded |
-| progress binding | `:184` `activeDelegateId = first unresolved delegate_task` and `:50` (`tool_queued`) | bind by the heartbeat's new `id`; keep "queued" for rows that are genuinely waiting |
+| progress binding | **landed 2026-09-21** — `message-list.tsx` (`heartbeatOwnerId` in `ToolCallGroup`; the row keeps `tool_queued` for non-owners) | the heartbeat names its call (`id`, `tools.ToolCallID` → register row 42) and the row it names owns it; with no id the old rule stands (the first unresolved call). A name matching no live row in the group draws nothing rather than a counter on another bubble's row |
 | Send while a turn runs | `src/features/chat/components/owner/chat-composer.tsx:158,162` (Send is enabled whenever local `streaming` is false) | enable/disable from `turnActive`, not from the local socket; a send during a live turn should say it will queue |
 | Stop | `src/features/chat/use-stream-pipeline.ts:137-140` (`handleStop` aborts the fetch only) | either call `POST /api/chat/cancel` and treat `already_started` as "detached, still running", or relabel the control to *detach* and say so |
 | strings | `src/config/locale/messages/en/fastagent/chat.json:137` `tool_interrupted`, `:138` `tool_queued` | reword the first, keep the second |
@@ -2074,7 +2079,7 @@ The four as-built states are decided by facts the *view* happens to have
 
 | as-built state | what decides it | where |
 |---|---|---|
-| queued | not `active` (the first unresolved `delegate_task` owns the live heartbeat) | `message-list.tsx:50` (and the ordering rationale at `:19-34`) |
+| queued | not the owner — the heartbeat names the live `delegate_task`, and with no id the first unresolved one is it | `message-list.tsx` (`tool_queued` in `toolProgressLabel`; the owner rule lives in `ToolCallGroup`) — quoted by name, since the line numbers this table used had drifted |
 | running | `active` + a heartbeat arrived | `message-list.tsx:51-61` |
 | running (no heartbeat yet) | `active`, no heartbeat yet | the fallback at `message-list.tsx:63` |
 | interrupted | `msg.streaming !== true` — **the bubble stopped streaming** | `message-list.tsx:49` (`turnOver`), passed as `:238`; message-level copies at `:96`, `:182`, `:289`; string `chat.json:137` |
