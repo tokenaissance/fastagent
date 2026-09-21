@@ -24,6 +24,11 @@ type StdioClient struct {
 	// onNotification receives server-initiated notifications. Nil means they are
 	// still read off the wire (they cannot be un-read) but not acted upon.
 	onNotification func(method string)
+	// protocolVersion is the revision the server settled on in its initialize
+	// reply. Recorded, not used: stdio has no header to carry it, but a caller
+	// asking "which revision are we really speaking" should get the server's
+	// answer rather than the one we asked for.
+	protocolVersion string
 }
 
 // NewStdioClient creates a new stdio MCP client.
@@ -76,12 +81,48 @@ func (c *StdioClient) Connect() error {
 		return fmt.Errorf("start process: %w", err)
 	}
 
-	// Send initialize
-	_, err = c.sendRequest("initialize", initializeParams{
+	return c.handshake()
+}
+
+// handshake is the protocol half of Connect, split out so a test can drive it
+// over a fake pipe (the existing stdio tests build the client as a struct).
+//
+// It sends initialize and then the notification the spec requires next. G15 was
+// measured live on 2026-09-22: the reference SDK server answers tools/list with
+// 12 tools without `notifications/initialized` and 13 with it (its
+// `oninitialized` hook registers one) — skipping it silently understates the
+// server's capabilities. See HTTPClient.Connect for the same measurement.
+func (c *StdioClient) handshake() error {
+	resp, err := c.sendRequest("initialize", initializeParams{
 		ProtocolVersion: "2024-11-05",
 		ClientInfo:      clientInfo{Name: "fastagent", Version: "0.1.0"},
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	if resp != nil && len(resp.Result) > 0 {
+		var res initializeResult
+		if uerr := json.Unmarshal(resp.Result, &res); uerr == nil && res.ProtocolVersion != "" {
+			c.protocolVersion = res.ProtocolVersion
+		}
+	}
+	return c.notify("notifications/initialized", nil)
+}
+
+// notify writes a JSON-RPC notification (a method and no id) and returns without
+// waiting for anything: the spec makes no reply to it.
+func (c *StdioClient) notify(method string, params interface{}) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	data, err := json.Marshal(jsonRPCNotification{JSONRPC: "2.0", Method: method, Params: params})
+	if err != nil {
+		return fmt.Errorf("marshal notification: %w", err)
+	}
+	data = append(data, '\n')
+	if _, err := c.stdin.Write(data); err != nil {
+		return fmt.Errorf("write notification: %w", err)
+	}
+	return nil
 }
 
 func (c *StdioClient) sendRequest(method string, params interface{}) (*jsonRPCResponse, error) {

@@ -372,21 +372,31 @@ client 的读反应堆识别 method 消息，不论它从哪条线来：
 1. ~~HTTP 那半边没修~~ —— **2026-09-22 关闭（登记册第 45 行）**：client 打开规范里的 GET 流，把 server 发来的每条消息
    交给 stdio 侧同一条 sink。第 43 行的两条 MUST（`Accept` 头、读"以 SSE 流形态回来的应答"）活在一次请求的生命周期里；
    这一条是**站着**的那半。它只能排在 44 之后落地，因为一条流 = 一个 goroutine + 一条连接，而在此之前没有东西拥有它们；
-2. **`notifications/initialized` 两个传输都没发**（全仓搜 `initialized` 无命中）：MCP 规范要求 client 在
-   initialize 之后发这条通知。现有 server（QC/Quandora）不要求它，所以今天不致命——但它可能是某些 server
-   开始推送通知的前提。记为 **G15（开放）**：先不动，因为它会改变与真实 server 的握手行为，需要真机验证。
+2. ~~**`notifications/initialized` 两个传输都没发**~~——**2026-09-22 关闭（登记册第 48 行）**，而它等的
+   那次真机验证把"可能是前提"这个假设变成了实测：用我们的 client 驱动**参考实现** SDK server
+   （`npx @modelcontextprotocol/server-everything`，协议 2024-11-05），**不发这条通知 `tools/list` 答 12 个工具、
+   发了答 13 个**——那个 server 从自己的 `oninitialized` 钩子里注册 `simulate-research-query`。所以跳过它
+   不是"不致命"：那是 client 对一个 server 还没建完的清单下了断言，而下游每个信号都会一致地描述这份
+   ——本来不存在的——工具集。现在两个传输都在 initialize 之后发送它，并记录 server 定下来的修订
+   （是 Streamable-HTTP 修订时还会把它作为 `MCP-Protocol-Version` 回带）。
 3. **从不宣告的 server 仍然不可见。** 规范里"宣告"是可选的，因此一个工具列表变了却**不发**
    `notifications/tools/list_changed` 的 server，在**两个传输上都**会被漏掉——stdio 读循环和 SSE 流对"没人提起的变化"
    一样看不见。要看见它需要**拉**：每回合重新 tools/list，有差异就重建。那是另一种机制（比较，而不是推送），
-   所以它是一个待裁决的决定，而不是一个待修的缺陷——记在这里，而不是假装不存在。
+   **2026-09-22 已裁决：暂时以推送通道为准**——client 听的是 SSE 流（第 45 行），不采用每回合 re-list，
+   所以这条边界是**接受的限制**，不是待办项。理由是成本与形状，不是原则：re-list 是每 server 每回合多一次
+   网络往返，去抓一个规范并不要求 server 制造的场景，而且它把"server 告诉了我们"换成"我们比对过"——正是
+   这一族在能做的时候要避免的那种判断。若将来真的实测到某个 server 静默改了列表，那次实测就重开这一条，
+   效力与上面那次 12-vs-13 的实测相同。
+   它是**被裁决过的决定**，而不是一个待修的缺陷——记在这里，而不是假装不存在。
 
 **落地第 43 行时看到的三件事——只作事实记录，未裁决**（不新增 gap 编号）：
 
 1. **协商出来的协议版本从来没被读过。** `Connect` 请求的是 `2024-11-05`，而 client 忽略 server 在应答里给出的
    版本，于是它无法知道自己到底在对哪个修订说话。本轮实现的那几条 MUST 来自 Streamable HTTP 那一版
    （每个请求带 `Accept`、两种应答形态、后续请求带 `MCP-Protocol-Version`、`notifications/initialized`）。
-   其中两条仍未满足——版本头与 G15——而版本头是从握手里读出来的结果，所以**声明无法在 G15 落地之前修正**：
-   这是一个顺序，不是偏好。
+   其中两条当时还未满足——版本头与 G15——而版本头是从握手里读出来的结果，所以**声明无法在 G15 落地之前
+   修正**：这是一个顺序，不是偏好。**两者都已在 2026-09-22 落地（第 48 行）**：通知发了，握手里协商出的
+   修订被读进来，并且只在修订确实定义了该头的 Streamable-HTTP 版本上回带 `MCP-Protocol-Version`。
 2. **没有东西拥有"长生命周期资源"**——*2026-09-22 已修，登记册第 44 行*。原来的样子是：`mcp.Manager.Close`
    会关掉每个已连接的 client，但没有任何生产调用点到达它，而丢下 agent 的那几条路——`userSpaceRegistry.invalidate`、
    `evictIdle`、`setSystemSandboxPool`——只是删掉 map 里的那一项。所以一次丢弃什么都不释放：stdio 的子进程被交给
@@ -465,7 +475,7 @@ client 的读反应堆识别 method 消息，不论它从哪条线来：
 | ~~**G10**~~ | O1 | ~~cron job / HEARTBEAT.md 被外部改删无信号~~ | 用户 | **P2 已修（2026-09-18）**：定时任务清单进回合级采样（`scheduled jobs added / changed / no longer exist: <name>`）；`HEARTBEAT.md` 的内容变化本就被 G8 的身份文件指纹覆盖；读不到清单时声明"读不到"，**不谎报删除** | — | 不提供 |
 | ~~G14~~ | —（单一来源，不是投递义务） | ~~`HEARTBEAT.md` 有**两个来源**：提示词读 store（`loadFileForUser`），heartbeat 触发却只读 `<home>/HEARTBEAT.md`~~（`heartbeat.go`） | 用户 / 运维 | **P2 已修（2026-09-18）**：`loadHeartbeatTasks` 改走与提示词**同一个解析器**（`ctxBuilder.loadFileForUser("HEARTBEAT.md", ownerUserID)`，store 优先、磁盘回落）；owner 正是该回合 `chatterUserID` 对 `SourceHeartbeat` 的解析结果，所以"看到的"与"触发的"必然同一份。没有 ctxBuilder 的形态（嵌入式/CLI）保持原有磁盘读法 | — | — |
 | ~~**G11**~~ | O1 | ~~MCP server 侧通知被丢弃~~ | 外部 server | **两侧都已修**：stdio 2026-09-18，HTTP 2026-09-22（登记册第 45 行）——捕获 → 闸门（每 server 30s）→ 复用 `mcpConfigNotify` 重建 → 回合级工具集信号自动报出。HTTP 那半就是规范里的 GET 流：client 在 sink 接线的同时打开它，由第 44 行的主人负责收回；405 被当作"此处没有流"，不重试。剩下的边界**与传输无关**：一个**不宣告**就改掉自己工具列表的 server，两个传输都看不见（§3.4 边界 3） | — | 不提供 |
-| **G15** | —（协议合规，不是投递义务） | `notifications/initialized` 从未发送（stdio 与 HTTP 都没有） | — | P3：规范要求 initialize 之后发；现有 server 不要求，可能是某些 server 开始推送通知的前提 | 补发这条通知，但必须先在真机（QC / Quandora）上验证握手不受影响 | 不提供 |
+| ~~**G15**~~ | —（协议合规，不是投递义务） | ~~`notifications/initialized` 从未发送（stdio 与 HTTP 都没有）~~ | — | **已修 2026-09-22（第 48 行）**：规范要求 initialize 之后发，而作为前置条件的那次真机验证说明了它为什么不止是合规——参考 SDK server 在**不发**它时 `tools/list` 只答 **12** 个工具、**发了**答 **13** 个（它从 `oninitialized` 钩子注册其中一个）。不发它是对 server 能力的错误陈述，不是少一句客套 | 两个传输现在都在 initialize 之后发送，并记录协商修订；Streamable-HTTP 修订会回带 `MCP-Protocol-Version` | ✅ 已落地（工作区） |
 | ~~G16~~ | —（setup API 的遮罩写回，非投递义务） | ~~技能密钥被自己的遮罩覆盖~~（2026-09-18 死码扫描发现） | 运维面板 | **P1 已修（2026-09-18）**：规则收成**一个家** —— `mergeSkillEntry`（条目级）+ `mergeSkillEntries`（补丁级），被**两条**写入路径共用：全局 `skills.entries`（namespace 扫描前先与库中现值合并）与 per-agent 覆盖行（`scope.SettingInto` 取现值再合并）；providers/channels 既有的内联守卫**保持不动**（请求形状不同，等第三个变体证明同一缝再抽）。实现中撞到一个真坑：JSON 解码器**复用**（不替换）map，所以"覆盖前快照"必须**深拷贝**（`cloneSkillEntries`），否则比值比的是被就地改写的自己——第一次接线正是这样悄悄保留了遮罩 | — | — |
 | ~~**G12**~~ | O2 | ~~自动回合被推迟/丢弃只有 slog~~ | harness | **P2 已修（2026-09-18）**：丢弃逐条带全信息（原来只有 `count=N`）；用户创建的 cron 额外在该会话发一条注记（有界发送，不启动回合）；harness 自己的来源只记录，不打扰用户 | — | 顺序 |
 | ~~**G13**~~ | O3（不是 O2） | ~~后台 shell / 沙箱 job 结束不推送~~ | agent 自己 | **改判：不是缺口（2026-09-18 形式化复核）**。δ = 进程退出；σ **存在且每次读取从世界重算**：`bash_output` 返回 `[status] exited (code=N)`（`killed` / `lost — the sandbox was replaced` 同样由现场推出，[sandbox_background.go](../../internal/agent/tools/sandbox_background.go) 第 350–375 行）。按 08 §2.2.2，**D₁ 只在调用期间存在**，所以"空闲时不推送"不等于"没有投递点"——投递点是消费侧那次读取本身（O3）。判据可重算 ⇒ 三落点里的**落点 1**，不需要任何载体 | ⛔ **不要实现"下一个工具结果附'后台 X 已退出'"**：那要引入一张进程内的"已退出但还没报告"集合，正好是 O4 形状（实例一换就丢），而这条事实本来就能重算 —— 用一次新的进程内状态换一个已经可达的 σ，是净亏 | —（已改判） |
@@ -660,7 +670,7 @@ client 的读反应堆识别 method 消息，不论它从哪条线来：
 | G10（已修） | `go test ./internal/agent/ -run 'TestEnvSignalCarriesScheduledJobChanges|TestCronFingerprintIgnoresRunBookkeeping|TestEnvSignalStatesUnreadableJobList'`（删除/改期/新增都点名；记账字段不触发；读不到就说读不到） |
 | G14（已修） | `go test ./internal/agent/ -run 'TestHeartbeatReadsWhatThePromptShows|TestHeartbeatFallsBackToTheDiskCopy|TestHeartbeatWithNoFileSendsNothing'`（store 与磁盘内容故意不同 → tick 与提示词必须同源；无 store 回落磁盘；都没有则不发回合） |
 | G11（两侧都已修） | `go test ./internal/mcp/ -run 'TestStdioClientHandsNotificationsToTheHandler|TestManagerWiresNotificationsThroughTheGate|TestManagerLeavesANonSinkTransportAlone'`（stdio、闸门，以及一条真的没有线的传输）+ `go test ./internal/mcp/ -run 'TestServerNotificationArrivesOverTheStandingStream|TestManagerHearsAnHTTPNotificationOverTheStandingStream'`（HTTP 那半：GET 流被打开、带 `Accept: text/event-stream`、无人请求的变化到达 manager）+ `-run 'TestTheStandingStreamIsNotOpenedWithoutAHandler|TestAnEndpointWithoutAStreamIsNotAskedTwice|TestAServerRequestOnTheStreamIsAnswered|TestClosingTheClientEndsTheStandingStream|TestAReconnectResumesWithTheLastEventID|TestMessagesOnAReplyStreamGoThroughTheSameDoor'`。**反证，全部真跑**：不开流 ⇒ 2 红；把流缓冲到结束再读 ⇒ 2 红；把 405 当可重试 ⇒ 1 红；忽略服务端请求 ⇒ 1 红；`Close` 不结束流 ⇒ 包在 `streamWg.Wait()` 上超时；跳过应答流上的 server 消息 ⇒ 1 红 |
-| G15 | —（协议合规，不是投递义务） | `rg 'initialized' internal/mcp/` 无命中（两个传输都没发这条通知） |
+| ~~G15~~ | —（协议合规，不是投递义务） | **已修 2026-09-22（第 48 行）**：两个传输都在 initialize 之后发送 `notifications/initialized`；原来的证据是 `rg 'initialized' internal/mcp/` 无命中 |
 | G12（已修） | `go test ./internal/gateway/ -run 'TestDeferredTurnsAnnouncesADroppedScheduledTask|TestDeferredTurnsDropsMessagesPastBudget|TestDroppedCronNoteWithoutAJobName'`（cron 才发声、点名任务、没有任务名也不留悬空引号） |
 | G18（已修） | `go test ./internal/agent/tools/ -run 'TestApplyPatchUsesTheSameStoreKeyAsWriteFile|TestApplyPatchDeleteUsesTheSameStoreKey|TestApplyPatchKeyInANonCodingSession|TestWriteThroughMirrorsOneKeyAndOnePath'`；真机 `FASTAGENT_E2B_LIVE=1 E2B_API_KEY=… go test ./internal/agent/tools/ -run TestE2BLiveOnePathIsOneKey -v`（命令在文件头）。**反证**：把 `writeForPatch` / `writeForPatchSandbox` 里的键改回 `r.sessionID, path`，前三条立刻变红（`keys = [app/notes.md sessions/<sid>/notes.md]`） |
 | ~~G17~~（已决策 G+H+A，全部已修） | 单测：`go test ./internal/sandbox/ -run 'TestWriteThroughReachesEveryContainer|TestWriteThroughCountsAContainer|TestRemoveLiveWorkspaceFileReaches|TestSyncWritesBackToTheProjectRoot|TestSyncScopeEqualsHydrateScope'`（广播到项目内每个活容器、别的项目不受影响、失败计数；回写落项目根而不是 chat 子目录；折叠规则本身）+ `go test ./internal/runtime/ -run TestPreviewSandboxSession`（预览容器按项目寻址）+ `go test ./internal/agent/tools/ -run TestWriteFileStatesAPartialProjectMirror`（部分失败有 σ）。真机：`go test ./internal/sandbox/ -run TestE2BLiveProjectWriteReachesSiblingContainer -v`（同一项目两个容器：A 写 → B 读得到；A 删 → B 也没了，B 的同步不复活）与 `go test ./internal/agent/tools/ -run TestE2BLiveProjectSessionKeepsOneTree -v`（无副本；exec 产物落项目根且工具可见；沙箱改既有路径仍被拒）。**反证**：去掉广播 → 前者在"A 写 → B 读得到"红；把 `ws := syncStoreScope(sc)` 改回 `sc` → `TestSyncWritesBackToTheProjectRoot` 红（键变成 `chat-1/artifact.txt`） |

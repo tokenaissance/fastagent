@@ -428,17 +428,28 @@ rather than staying silent.
    `Accept` header, reading a reply that arrives as SSE) lived inside one request’s lifetime; this is the
    *standing* half. It could only land after row 44, because a stream is a goroutine plus a connection,
    and before that nothing owned either;
-2. **neither transport sends `notifications/initialized`** (searching the repo for `initialized` finds
-   nothing): the MCP spec requires the client to send it after initialize. Today's servers
-   (QC / Quandora) do not require it, so it is not fatal — but it may be the precondition for some
-   servers to start pushing notifications at all. Recorded as **G15 (open)**: not changed here, because
-   it alters the handshake with real servers and needs a live check first.
+2. ~~**neither transport sends `notifications/initialized`**~~ — **closed 2026-09-22 (register row 48)**,
+   and the live check it was waiting for turned the "it may be a precondition" hypothesis into a
+   measurement. Running the *reference* SDK server (`npx @modelcontextprotocol/server-everything`,
+   protocol 2024-11-05) through our client: **12 tools without the notification, 13 with it** — the
+   server registers `simulate-research-query` from its `oninitialized` hook. So skipping it is not
+   "not fatal"; it is the client reading a smaller world than the server offers, silently, with every
+   downstream signal consistent about a tool set that was never the server's. Both transports now send
+   it after initialize, and the revision the server settles on is recorded (and echoed as
+   `MCP-Protocol-Version` when it is a Streamable-HTTP revision).
 3. **a server that never announces stays invisible.** Announcing is optional in the spec, so a server
    whose tool list changes without a `notifications/tools/list_changed` is missed on **both** transports
    — the stdio reader and the SSE stream are equally blind to a change nobody mentions. Seeing that one
    needs a *pull*: re-list per turn and rebuild on a difference. That is a different mechanism (a
    comparison, not a push), so it is a decision to take rather than a defect to fix — recorded here
    rather than assumed away.
+   **Decided 2026-09-22: the push channel is the answer for now.** The SSE stream (row 45) is what the
+   client listens on; a per-turn re-list is *not* adopted, so this boundary stays an accepted limit
+   rather than a pending item. The reason is cost and shape, not principle: a re-list is one extra
+   network round trip per turn per server to catch a case the spec does not require a server to
+   create, and it turns "the server told us" into "we compared" — the same judgement the whole family
+   exists to avoid when it can. If a real server is ever measured changing its list silently, that
+   measurement reopens this, with the same standing as the 12-vs-13 one above.
 
 **Noticed while landing row 43 — recorded as facts, not decided** (no new gap numbers):
 
@@ -544,7 +555,7 @@ warning instead of stalling the drain loop — a remedy for observability must n
 | ~~**G10**~~ | O1 | ~~cron jobs / `HEARTBEAT.md` edited or deleted from outside, unsignalled~~ | the user | **P2 fixed (2026-09-18)**: the scheduled-job list joined the turn-level sample (`scheduled jobs added / changed / no longer exist: <name>`); a change to `HEARTBEAT.md`'s content was already covered by G8's identity fingerprints; an unreadable list is stated as unreadable and **never reported as a deletion** | — | not provided |
 | ~~G14~~ | — (two sources for one thing, not a delivery duty) | ~~`HEARTBEAT.md` has **two sources**: the prompt reads the store, the trigger reads only `<home>/HEARTBEAT.md`~~ (`heartbeat.go`) | the user / an operator | **P2 fixed (2026-09-18)**: `loadHeartbeatTasks` now goes through the **same resolver the prompt uses** (`ctxBuilder.loadFileForUser("HEARTBEAT.md", ownerUserID)` — store row first, disk fallback). The owner is exactly what `chatterUserID` resolves a `SourceHeartbeat` turn to, so "what the agent sees" and "what fires" are the same bytes by construction. Shapes with no context builder (embedded/CLI) keep reading the disk copy | — | — |
 | ~~**G11**~~ | O1 | ~~MCP server-side notifications are dropped~~ | an external server | **both halves fixed**: stdio 2026-09-18, HTTP 2026-09-22 (row 45) — capture → gate (30s per server) → reuse `mcpConfigNotify` to rebuild → the per-turn tool-set signal reports it. The HTTP half is the spec's GET stream, opened by the client when a sink is wired and released by row 44's owner; a 405 is taken as "no stream here" rather than retried. The remaining boundary is **not transport-specific**: a server that changes its list *without* announcing is invisible on both (§3.4 boundary 3) | — | not provided |
-| **G15** | — (protocol compliance, not a delivery duty) | `notifications/initialized` is never sent (neither transport) | — | P3: the spec requires it after initialize; today's servers do not require it, but it may be the precondition for a server to start pushing notifications at all | send it, but only after verifying the handshake against real servers (QC / Quandora) | not provided |
+| ~~**G15**~~ | — (protocol compliance, not a delivery duty) | ~~`notifications/initialized` is never sent (neither transport)~~ | — | **fixed 2026-09-22 (row 48)**: the spec requires it after initialize, and the live check that had been the gate showed why it matters — the reference SDK server answers `tools/list` with **12 tools without it and 13 with it** (its `oninitialized` hook registers one). Not sending it was a false statement about the server's capabilities, not a missing courtesy | both transports now send it after initialize and record the negotiated revision; `MCP-Protocol-Version` is echoed for the Streamable-HTTP revisions | ✅ landed (working tree) |
 | ~~G16~~ | — (a masked secret written back through the setup API, not a delivery duty) | ~~a skill secret is overwritten by its own mask~~ (found by the 2026-09-18 dead-code scan) | the admin dashboard | **P1 fixed (2026-09-18)**: the rule now has **one home** — `mergeSkillEntry` (per entry) + `mergeSkillEntries` (per patch) — shared by **both** write paths: the global `skills.entries` sweep (merged against the stored value before it is written) and the per-agent override row (loaded with `scope.SettingInto`, then merged). The existing inline guards for providers/channels are **left alone** (different request shapes; revisit once a third variant proves the seam). Wiring it exposed a real trap: Go's JSON decoder **reuses** maps rather than replacing them, so the pre-overlay snapshot must be a **deep copy** (`cloneSkillEntries`) — otherwise the comparison runs against the very map that was mutated in place, which is how the first attempt silently kept the mask | — | — |
 | ~~**G12**~~ | O2 | ~~a deferred/dropped automatic turn leaves only a slog line~~ | the harness | **P2 fixed (2026-09-18)**: each drop carries the specifics (it used to be just `count=N`); a cron drop — the user's own task — also sends a note into that chat (bounded send, no turn started); the harness's own sources are logged without bothering the user | — | wrong timing / order |
 | ~~**G13**~~ | O3 (not O2) | ~~a background shell / sandbox job finishing is not pushed~~ | the agent itself | **reclassified: not a defect (formal re-review, 2026-09-18)**. δ = the process exits; the σ **exists and is recomputed from the world on every read**: `bash_output` answers `[status] exited (code=N)` (`killed` and `lost — the sandbox was replaced` are derived the same way, [sandbox_background.go](../../internal/agent/tools/sandbox_background.go) lines 350–375). By 08 §2.2.2 **D₁ exists only while a call is in flight**, so "nothing is pushed while idle" is not "there is no delivery point" — the delivery point is that read itself (O3). A recomputable criterion is **place 1** of the three placements: no carrier at all | ⛔ **Do NOT build "attach 'background job X exited' to the next tool result"**: it would introduce an in-process "exited but not yet reported" set — exactly the O4 shape (lost when the instance changes) — for a fact that can be recomputed. Trading new in-process state for an already-reachable σ is a net loss | — (reclassified) |

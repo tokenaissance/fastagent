@@ -209,7 +209,7 @@ mirror on the verification side.)
 | ~~**G21**~~ the panel delete was a silent no-op (the path/scope convention applied twice) | **belongs to F1** ("one path, one key") | **fixed (2026-09-18)**: Fix 0 (delete uses the download endpoint's path convention) + d1 (also drop the live sandbox's copy), landed as a pair; both halves pinned on real E2B (without d1 it comes back; with d1 it does not) |
 | ~~**G17**~~ a project's "one file tree, many containers" (the preview container was addressed wrong, sibling containers missed writes, and the sync wrote back into the chat subdir) | **not F1–F3**: a scope invariant | **decided + fixed (2026-09-18: G+H+A)**: the preview container is addressed by project (G); writes and deletes are broadcast to every live container of the project (H); the **sync write-back is collapsed to the project root** (A, `syncStoreScope`); **per-chat shells are kept**. No migration: copies produced before the change remain in the store |
 | ~~**G22**~~ the write-through's mtime stamp silently missed in project sessions (it read the wrong store scope) | **belongs to F1** (the third instance of "one path, one key") | **fixed (2026-09-18)**: the writer hands the store scope down (`sandbox.StoreScope`); measured on real E2B, whole-object reads for that path went **1 → 0**; all three defects at this seam (G21 / G17-A / G22) are now closed |
-| **G15** `notifications/initialized` is never sent | **not F1–F3**: protocol compliance | open (needs live verification that the handshake is unaffected) |
+| ~~**G15**~~ `notifications/initialized` is never sent | **not F1–F3**: protocol compliance | **fixed (2026-09-22, register row 48)**. The live check it was gated on made it more than compliance: the reference SDK server answers `tools/list` with 12 tools without the notification and 13 with it, so a client that skipped it said "these are the server's tools" about a list the server had not finished building. Both transports send it now, and the negotiated revision is read (Streamable-HTTP revisions also get `MCP-Protocol-Version`) |
 
 **Closed the same day (kept here so the index stays comparable; details in [10 §4](./10-harness-state-audit.md))**:
 G1–G3 (delivery point / durable carrier), the signal half of G4, G5/G6 (σ telling lies), G7a (the
@@ -250,8 +250,9 @@ reads its frames live, which is why the G11 row above is struck through.
 > defect in the formal sense — **is closed** (register row 45). What replaces it is not a transport
 > feature: a server that changes its list without announcing it cannot be seen by *any* push channel, so
 > only a per-turn re-list would catch it (10 §3.4 boundary 3) — recorded as an open **decision**.
-> G15 (`notifications/initialized`) belongs to the same MCP family and is out of this round's scope by
-> decision. **The one non-defect worth recording**: the duplicate copies under the chat subdirs that were
+> G15 (`notifications/initialized`) belonged to the same MCP family and was closed on 2026-09-22 (row
+> 48): the live check it waited on showed the notification is the difference between reading a server's
+> capabilities and reading part of them. **The one non-defect worth recording**: the duplicate copies under the chat subdirs that were
 > produced before decision A are still in the store (no longer refreshed, and nobody cleans them) — a
 > one-off cleanup script: `fastagent/scripts/workspace_project_chat_duplicate_cleanup.py`
 > (`--selftest` needs no deployment; it only lists a copy for deletion when the same bytes survive at the project root — and it should run **after** A ships, or the old sync keeps recreating them).; see the "closed" list
@@ -286,7 +287,7 @@ reads its frames live, which is why the G11 row above is struck through.
 | path and scope identity | [01 §3.5/§8](./01-current-implementation.md) · [02 §5](./02-semantics-and-architecture.md) | one path, one key (the G18/G21/G22 family) | `scopeSessionID`/`wsPath`, `sandbox.StoreScope` | `TestE2BLiveOnePathIsOneKey` |
 | project tree invariant | [10 §4](./10-harness-state-audit.md) (G17) | one project, one tree, many containers, writes broadcast | `LiveProjectExecutors`, `syncStoreScope` | — |
 | MCP OAuth security clauses | [../mcp-oauth-design.md](../mcp-oauth-design.md) | state is one-shot (`Take` reads-and-deletes) + PKCE S256 + TTL + bound to userID | `usecase/complete`, `pending_store.go` | `internal/mcp/oauth/...` |
-| MCP conformance (**protocol-compliance family**, not F1–F3) | [../issues/ext-skills-conformance-checklist.md](../issues/ext-skills-conformance-checklist.md) | the spec's MUSTs ↔ the egress implementation; **declaring is promising** | `server/discover`, `skills/list` | that checklist's "status" column; G15 is still open (G11’s HTTP half landed 2026-09-22, row 45) |
+| MCP conformance (**protocol-compliance family**, not F1–F3) | [../issues/ext-skills-conformance-checklist.md](../issues/ext-skills-conformance-checklist.md) | the spec's MUSTs ↔ the egress implementation; **declaring is promising** | `server/discover`, `skills/list` | that checklist's "status" column; G15 closed 2026-09-22 (row 48) — the handshake now says `initialized` and reads the negotiated revision (G11’s HTTP half landed 2026-09-22, row 45) |
 | **single source / one expression** | [10 §4](./10-harness-state-audit.md) (G14/G16/G20/G23) · [08 §2.2.3](./08-state-observability-principle.md) (landing 2) · [08 §9.1](./08-state-observability-principle.md) | **one fact has exactly one expression**: one source (G14) · one guard (G16) · one rule (G23) · a judgement reuses its existing owner (§2.2.3 landing 2) · one exit (§9.1) | `agent/heartbeat.go` `loadHeartbeatTasks`, `setup/handlers.go` `mergeSkillEntry(s)`/`cloneSkillEntries`, `workspace/scope.go` `ScopeSegments`/`WriteScope` | `TestHeartbeatReadsWhatThePromptShows`, `TestMaskedGlobalSkillSecretKeepsTheStoredValue`, `TestScopeSegmentsIsTheLayoutTable`, `TestAWriterScopeIsTheScopeItsKeysLandIn` |
 
 > **Note (2026-09-20, surfaced when the single-source family entered).** The dividing line stated at the top
@@ -339,7 +340,7 @@ reads its frames live, which is why the G11 row above is struck through.
 > object** (e.g. hydrate reading half a file on LocalFS, measured); ② a **second** silent overwrite
 > (today there is exactly one, 09-18); ③ a **third backend** needing the same axioms.
 
-> Division of labour with §6: §6 lists what is unfinished **inside** the three systems (G15/G4's
+> Division of labour with §6: §6 lists what is unfinished **inside** the three systems (G4's
 > attribution half…); this section's E bucket is what **no system covers yet**. How to use it: before
 > reading a piece of code, ask "which system constrains it"; before writing a mechanism, answer §6's
 > checklist; and if the answer is "none of them", then either it is a C (a new instance of the same

@@ -193,7 +193,7 @@ F3 投递（定义 08 §2.2）
 | ~~**G21**~~ 面板删除静默无效（路径/作用域双重前缀） | **属于 F1**（"同一路径一个键"） | **已修（2026-09-18）**：Fix 0（删除与下载同一路径约定）+ d1（同时删掉活沙箱那份），两者成对落地；真机两半都钉住（不加 d1 会复活、加了不复活） |
 | ~~**G17**~~ 项目里"一个文件树、多个容器"（预览容器错位 + 兄弟容器收不到写入 + 同步回写到 chat 子目录） | **不属于 F1–F3**：作用域不变式 | **已决策 + 已修（2026-09-18：G+H+A）**：预览容器按项目寻址（G）；写入/删除广播到项目内所有活容器（H）；**同步回写折叠到项目根**（A，`syncStoreScope`）；**保留每 chat 独立 shell**。未做迁移：折叠前产生的副本仍在库里 |
 | ~~**G22**~~ 写入穿透的 mtime 盖章在项目会话里静默失效（查错 store 作用域） | **属于 F1**（“同一路径一个键”的第三处） | **已修（2026-09-18）**：写入方把 store 作用域交下来（`sandbox.StoreScope`）；真机实测同一路径的整对象读取 **1 → 0**；这条缝的三处缺陷（G21 / G17-A / G22）已全部修完 |
-| **G15** `notifications/initialized` 未发送 | **不属于 F1–F3**：协议合规 | 开放（需真机验证握手不受影响） |
+| ~~**G15**~~ `notifications/initialized` 未发送 | **不属于 F1–F3**：协议合规 | **已修（2026-09-22，登记册第 48 行）**。它等的正是那次真机验证，而验证把它变成了不止"合规"：参考 SDK server 在**不发**这条通知时 `tools/list` 只答 12 个工具、**发了**答 13 个——跳过它就等于对着一份 server 还没建完的清单说"这就是这个 server 的工具"。现在两个传输都在 initialize 之后发送，并记录协商出的版本（Streamable-HTTP 修订还会回带 `MCP-Protocol-Version`） |
 
 **已关闭（同日，供索引对照；细节见 [10 §4](./10-harness-state-audit.md)）**：
 G1–G3（投递点/耐久载体）、G4 的信号半边、G5/G6（σ 说假话）、G7a（分歧可见）、G8/G9/G10（外部改写）、
@@ -253,7 +253,7 @@ G11 的**两个半边**（stdio 2026-09-18、HTTP 2026-09-22，登记册第 45 �
 | 路径与作用域同一性 | [01 §3.5/§8](./01-current-implementation.md) · [02 §5](./02-semantics-and-architecture.md) | 一条路径一个键（G18/G21/G22 同族） | `scopeSessionID`/`wsPath`、`sandbox.StoreScope` | `TestE2BLiveOnePathIsOneKey` |
 | 项目树不变式 | [10 §4](./10-harness-state-audit.md)（G17） | 一个项目一棵树、多容器、写广播 | `LiveProjectExecutors`、`syncStoreScope` | — |
 | MCP OAuth 安全条款 | [../mcp-oauth-design.md](../mcp-oauth-design.md) | state 一次性（`Take` 读即删）+ PKCE S256 + TTL + 绑定 userID | `usecase/complete`、`pending_store.go` | `internal/mcp/oauth/...` |
-| MCP 一致性（**协议合规族**，不属于 F1–F3） | [../issues/ext-skills-conformance-checklist.md](../issues/ext-skills-conformance-checklist.md) | 规范 MUST ↔ 出口实现；**声明即承诺** | `server/discover`、`skills/list` | 该清单的"现状"列；G15 仍开放（G11 的 HTTP 半边已于 2026-09-22 落地，第 45 行） |
+| MCP 一致性（**协议合规族**，不属于 F1–F3） | [../issues/ext-skills-conformance-checklist.md](../issues/ext-skills-conformance-checklist.md) | 规范 MUST ↔ 出口实现；**声明即承诺** | `server/discover`、`skills/list` | 该清单的"现状"列；G15 已于 2026-09-22 关闭（第 48 行）——握手现在会发 `initialized` 并读回协商版本（G11 的 HTTP 半边已于 2026-09-22 落地，第 45 行） |
 | **单一来源 / 表达式唯一** | [10 §4](./10-harness-state-audit.md)（G14/G16/G20/G23）· [08 §2.2.3](./08-state-observability-principle.md)（落点 2）· [08 §9.1](./08-state-observability-principle.md) | **一条事实只有一种表达式**：来源唯一（G14）· 守卫唯一（G16）· 规则唯一（G23）· 判据复用既有主（§2.2.3 落点 2）· 出口唯一（§9.1） | `agent/heartbeat.go` `loadHeartbeatTasks`、`setup/handlers.go` `mergeSkillEntry(s)`/`cloneSkillEntries`、`workspace/scope.go` `ScopeSegments`/`WriteScope` | `TestHeartbeatReadsWhatThePromptShows`、`TestMaskedGlobalSkillSecretKeepsTheStoredValue`、`TestScopeSegmentsIsTheLayoutTable`、`TestAWriterScopeIsTheScopeItsKeysLandIn` |
 
 > **备注（2026-09-20，单一来源族入场时发现）**：本节开头那条分界（"C 的行与 A **同问同形态**"）
@@ -297,7 +297,7 @@ G11 的**两个半边**（stdio 2026-09-18、HTTP 2026-09-22，登记册第 45 �
 > 重新打开的条件（任一）：① F1 的判据第一次**因为"读到的不是一份完整对象"而失效**（例如 LocalFS 上 hydrate 读到半份文件被实测到）；
 > ② 出现**第二次**静默覆盖（目前只有 09-18 一次）；③ 出现需要同一份公理的**第三个后端**。
 
-> 与 §6 的分工：§6 列的**是**三套系统内部的未完项（G15/G4 归属半边/G25 一族…）；本节 E 桶是**还没被任何一套覆盖**的东西。
+> 与 §6 的分工：§6 列的**是**三套系统内部的未完项（G4 归属半边/G25 一族…）；本节 E 桶是**还没被任何一套覆盖**的东西。
 > 用法：读一段代码前先问"它被哪一套约束"；写新机制前回答 §6 的清单；若答案是"哪一套都不是"，
 > 那要么它是 C（同一形态的新实例），要么我们在**提出第四套形式系统**——后者必须同时拿出新问题与新判断形态。
 

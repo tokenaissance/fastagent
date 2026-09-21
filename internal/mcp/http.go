@@ -35,6 +35,11 @@ type HTTPClient struct {
 	// every request after the handshake; without it tools/list returns
 	// HTTP 400 / -32600 Invalid Request.
 	sessionID string
+	// protocolVersion is the revision the server settled on in the initialize
+	// reply (initializeResult). It is echoed on later requests as
+	// MCP-Protocol-Version when the revision is one that defines that header —
+	// the Streamable-HTTP revisions. Empty until the handshake has been read.
+	protocolVersion string
 	// auth injects a Bearer token for OAuth-protected servers. Nil keeps
 	// the static-header path unchanged.
 	auth func(ctx context.Context) (string, error)
@@ -348,15 +353,36 @@ func (c *HTTPClient) answerServerRequest(id json.RawMessage, method string) {
 // Callers set Content-Type and Accept first, since those differ between a POST
 // of a request and a GET of the standing stream.
 func (c *HTTPClient) applyHeaders(req *http.Request, sessionID, authToken string) {
+	c.mu.Lock()
+	version := c.protocolVersion
+	c.mu.Unlock()
+	c.applyHeadersFor(req, sessionID, authToken, version)
+}
+
+// applyHeadersFor is applyHeaders with the version passed in, for the one caller
+// that reads it while already holding the lock — and so that a caller can pin
+// the version it just negotiated rather than race a later reassignment.
+func (c *HTTPClient) applyHeadersFor(req *http.Request, sessionID, authToken, version string) {
 	for k, v := range c.headers {
 		req.Header.Set(k, v)
 	}
 	if sessionID != "" {
 		req.Header.Set("Mcp-Session-Id", sessionID)
 	}
+	if version != "" && streamableHTTPRevision(version) {
+		req.Header.Set("MCP-Protocol-Version", version)
+	}
 	if authToken != "" {
 		req.Header.Set("Authorization", "Bearer "+authToken)
 	}
+}
+
+// streamableHTTPRevision reports whether a revision defines Streamable HTTP, and
+// therefore the MCP-Protocol-Version header. The revisions are dated
+// (YYYY-MM-DD), so the comparison is lexical, which is exact for this format.
+// Sending the header to a server that predates it would be noise at best.
+func streamableHTTPRevision(version string) bool {
+	return version >= "2025-03-26"
 }
 
 func expandHeaders(headers map[string]string) map[string]string {
@@ -561,13 +587,95 @@ func readSSELine(reader *bufio.Reader) (string, error) {
 	}
 }
 
-// Connect initializes the connection with the MCP server.
+// Connect initializes the connection with the MCP server, learns the revision it
+// settled on, and sends the `notifications/initialized` the spec requires next.
+//
+// G15 (docs 10 §3.4 boundary 2) used to read "today's servers do not require it,
+// so it is not fatal". Measured live on 2026-09-22 against the reference SDK
+// server (`npx @modelcontextprotocol/server-everything`, protocol 2024-11-05):
+// without the notification `tools/list` answers 12 tools, with it 13 — the
+// server registers `simulate-research-query` from its `oninitialized` hook, so a
+// client that skips the notification believes a smaller world than the server
+// offers, silently. Sending it is therefore not politeness; it is the difference
+// between reading the server's capabilities and reading part of them.
 func (c *HTTPClient) Connect() error {
-	_, err := c.sendRequest("initialize", initializeParams{
+	resp, err := c.sendRequest("initialize", initializeParams{
 		ProtocolVersion: "2024-11-05",
 		ClientInfo:      clientInfo{Name: "fastagent", Version: "0.1.0"},
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	c.recordProtocolVersion(resp)
+	return c.notify("notifications/initialized", nil)
+}
+
+// recordProtocolVersion keeps the version the server answered with. Nothing else
+// in the handshake is read: the capabilities object is the server's business
+// until a caller needs it.
+func (c *HTTPClient) recordProtocolVersion(resp *jsonRPCResponse) {
+	if resp == nil || len(resp.Result) == 0 {
+		return
+	}
+	var res initializeResult
+	if err := json.Unmarshal(resp.Result, &res); err != nil || res.ProtocolVersion == "" {
+		return
+	}
+	c.mu.Lock()
+	c.protocolVersion = res.ProtocolVersion
+	c.mu.Unlock()
+}
+
+// notify POSTs a JSON-RPC notification: a method and no id, so there is no reply
+// to wait for. The spec answers one with 202 and an empty body. A different
+// status is worth a warning and nothing more — a server that rejects
+// `initialized` is still a server this client can talk to (we keep the tools it
+// gave us), and retrying a notification is not something the transport defines.
+func (c *HTTPClient) notify(method string, params interface{}) error {
+	body, err := json.Marshal(jsonRPCNotification{JSONRPC: "2.0", Method: method, Params: params})
+	if err != nil {
+		return fmt.Errorf("marshal notification: %w", err)
+	}
+
+	c.mu.Lock()
+	auth := c.auth
+	sessionID := c.sessionID
+	version := c.protocolVersion
+	c.mu.Unlock()
+
+	authToken := ""
+	if auth != nil {
+		tok, err := auth(context.Background())
+		if err != nil {
+			return fmt.Errorf("mcp: oauth token unavailable: %w", err)
+		}
+		authToken = tok
+	}
+
+	httpReq, err := http.NewRequest("POST", c.url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("create notification: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", acceptHeader)
+	c.applyHeadersFor(httpReq, sessionID, authToken, version)
+
+	resp, err := c.client.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("send notification: %w", err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	if sid := resp.Header.Get("Mcp-Session-Id"); sid != "" {
+		c.mu.Lock()
+		c.sessionID = sid
+		c.mu.Unlock()
+	}
+	if resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusOK {
+		slog.Warn("mcp: the server did not accept a notification",
+			"url", c.url, "method", method, "status", resp.StatusCode)
+	}
+	return nil
 }
 
 // ListTools returns the list of tools available on the MCP server.
