@@ -2081,7 +2081,7 @@ The four as-built states are decided by facts the *view* happens to have
 
 | as-built state | what decides it | where |
 |---|---|---|
-| finished (awaiting the round’s results) | the call’s **exit fact** has arrived (`subagent_progress` with `phase:"done"` and its id) but not its result — a round’s tool results are emitted together, after the whole round returns | `message-list.tsx` (`tool_delegate_finished`; the ids come from cloud `use-stream-pipeline.ts` `subagentFinishedIds`) — landed 2026-09-22 |
+| finished (awaiting its own result) | the call’s **exit fact** has arrived (`subagent_progress` with `phase:"done"` and its id) but not its result — the exit and the result are two separate statements: the exit is emitted when the run returns, the result only when the `delegate_task` call itself returns | `message-list.tsx` (`tool_delegate_finished`; the ids come from cloud `use-stream-pipeline.ts` `subagentFinishedIds`) — landed 2026-09-22 |
 | queued | not the owner **and no exit fact** — the heartbeat names the live `delegate_task`, and with no id the first unresolved one is it | `message-list.tsx` (`tool_queued` in `toolProgressLabel`; the owner rule lives in `ToolCallGroup`) — quoted by name, since the line numbers this table used had drifted |
 | running | `active` + a heartbeat arrived | `message-list.tsx:51-61` |
 | running (no heartbeat yet) | `active`, no heartbeat yet | the fallback at `message-list.tsx:63` |

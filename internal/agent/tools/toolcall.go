@@ -15,9 +15,11 @@ import "context"
 // (`subagent_progress`) that the dashboard renders on one tool row. Without an
 // id the dashboard can only guess which call a heartbeat belongs to, and its
 // guess — "the first call with no result yet" — is wrong for a fan-out, because
-// every tool result in a round is emitted only after the whole round returns
+// a run's exit heartbeat carries no result and arrives before its call returns
 // (2026-09-21: three serial sub-agents, and all three heartbeats were drawn on
-// the first row).
+// the first row). Per-call results narrow that window but do not remove the
+// reason the id is needed: the exit fact and the call's own result are still two
+// separate statements.
 type toolCallIDKey struct{}
 
 // ToolCallIDInputKey is the reserved argument key the SDK bridge puts a call's

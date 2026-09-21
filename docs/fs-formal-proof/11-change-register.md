@@ -413,8 +413,8 @@ Apart from those six, §11.2's whole-file assignment and §11.3's function-level
 >
 > **Row 42 (2026-09-21)**: a fan-out's heartbeats named nothing, so the dashboard had to guess which tool row
 > they belonged to — and its guess ("the first `delegate_task` with no result yet") is wrong for every call
-> but the first, because a round's tool results are all emitted after the whole round returns. Every
-> heartbeat now names its call, and the client draws it only on the row it names.
+> but the first, because a run's exit heartbeat carries no result and arrives before its call returns.
+> Every heartbeat now names its call, and the client draws it only on the row it names.
 >
 > **Live-E2B re-run (2026-09-22)**: the whole `TestE2BLive*` set against real E2B
 > sandboxes with the cluster key (`FASTAGENT_E2B_LIVE=1`,
@@ -430,8 +430,8 @@ Apart from those six, §11.2's whole-file assignment and §11.3's function-level
 > **Row 42's other half (2026-09-22)**: naming the row was half of "one fact, one wire shape";
 > the client also threw the other half away. Every `subagent_progress` that reports the inner
 > run's exit already carries `phase:"done"` **and** the call's id, and the client dropped both
-> (`setSubagentProgress(null)`). A round's tool results are all emitted after the whole round
-> returns, so between a call's exit and its result the row had only two ways to speak, and both
+> (`setSubagentProgress(null)`). The exit fact and the call's own result are two separate
+> statements — the exit lands first — so between them the row had only two ways to speak, and both
 > were false: "Queued (waiting on prior sub-agent)" about a call nothing is waiting on, and — in
 > the gap between one exit and the next heartbeat, where the positional fallback took over —
 > "Executing…" about a call that had already exited. cloud now remembers the exited ids

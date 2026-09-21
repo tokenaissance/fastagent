@@ -93,10 +93,12 @@ func (a *Agent) subagentWallBudget(ctx context.Context, explicit time.Duration) 
 // The id is the tool_use id of the delegate_task call this run was spawned by
 // (tools.ToolCallID, stamped by the SDK bridge). Without it the dashboard can
 // only guess which row a heartbeat belongs to — it takes the first call with no
-// result yet, and since a round's tool results are all emitted after the whole
-// round returns, that guess is wrong for every call but the first in a fan-out
-// (2026-09-21). A run reached without an id (RunSubagent called directly) emits
-// the event without one; the dashboard falls back to its old rule then.
+// result yet, and because a run's exit (`phase:"done"`) is stated the moment the
+// run returns — before the delegate_task call itself returns its result — that
+// guess names a call that finished long ago for every call but the last in a
+// fan-out (2026-09-21). A run reached without an id (RunSubagent called
+// directly) emits the event without one; the dashboard falls back to its old
+// rule then.
 func subagentHeartbeat(ctx context.Context, data map[string]any) ChatEvent {
 	if id, ok := tools.ToolCallID(ctx); ok {
 		data["id"] = id
