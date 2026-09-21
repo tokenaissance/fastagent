@@ -18,7 +18,16 @@ import (
 // without it (HTTP 400 / -32600 Invalid Request).
 func TestHTTPClientReplaysSessionID(t *testing.T) {
 	var calls atomic.Int32
+	var notified bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var msg jsonRPCRequest
+		_ = json.Unmarshal(body, &msg)
+		if msg.Method == "notifications/initialized" {
+			notified = true
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
 		switch calls.Add(1) {
 		case 1: // initialize — server assigns a session
 			w.Header().Set("Mcp-Session-Id", "sess-123")
@@ -47,6 +56,103 @@ func TestHTTPClientReplaysSessionID(t *testing.T) {
 	}
 	if got := calls.Load(); got != 2 {
 		t.Fatalf("server calls = %d, want 2", got)
+	}
+	if !notified {
+		t.Fatalf("the handshake did not send notifications/initialized")
+	}
+}
+
+// G15, on the wire: after initialize the client MUST send
+// `notifications/initialized`. It is not politeness — measured live on
+// 2026-09-22, the reference SDK server registers a tool from its
+// `oninitialized` hook, so a client that skips this reads 12 tools where the
+// server offers 13 (TestLiveMCPHandshakeReadsTheWholeToolList).
+func TestHTTPClientSendsInitializedAfterTheHandshake(t *testing.T) {
+	var methods []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var msg struct {
+			ID     *int   `json:"id"`
+			Method string `json:"method"`
+		}
+		_ = json.Unmarshal(body, &msg)
+		methods = append(methods, msg.Method)
+		if msg.Method == "notifications/initialized" {
+			if msg.ID != nil {
+				t.Errorf("the initialized notification carries an id (%v): the spec gives it no reply", *msg.ID)
+			}
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		json.NewEncoder(w).Encode(jsonRPCResponse{
+			JSONRPC: "2.0", ID: 1,
+			Result: json.RawMessage(`{"protocolVersion":"2025-06-18","capabilities":{}}`),
+		})
+	}))
+	defer srv.Close()
+
+	c := NewHTTPClient(srv.URL, nil)
+	if err := c.Connect(); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	if len(methods) != 2 || methods[0] != "initialize" || methods[1] != "notifications/initialized" {
+		t.Fatalf("handshake sent %v; want initialize then notifications/initialized", methods)
+	}
+	if got := c.protocolVersion; got != "2025-06-18" {
+		t.Fatalf("recorded protocol version = %q; want the server's 2025-06-18 (not the one we asked for)", got)
+	}
+}
+
+// The version header belongs to the Streamable-HTTP revisions only. A server
+// that settled on the older revision must not be sent it: that is noise on a
+// transport that has no such header, and the client cannot know how it reacts.
+func TestHTTPClientEchoesTheNegotiatedVersionOnlyForStreamableRevisions(t *testing.T) {
+	cases := []struct {
+		negotiated string
+		wantHeader string
+	}{
+		{negotiated: "2025-06-18", wantHeader: "2025-06-18"},
+		{negotiated: "2024-11-05", wantHeader: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.negotiated, func(t *testing.T) {
+			var afterHandshake []string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+				var msg jsonRPCRequest
+				_ = json.Unmarshal(body, &msg)
+				switch msg.Method {
+				case "notifications/initialized":
+					w.WriteHeader(http.StatusAccepted)
+				case "initialize":
+					json.NewEncoder(w).Encode(jsonRPCResponse{
+						JSONRPC: "2.0", ID: msg.ID,
+						Result: json.RawMessage(`{"protocolVersion":"` + tc.negotiated + `","capabilities":{}}`),
+					})
+				default:
+					afterHandshake = append(afterHandshake, r.Header.Get("MCP-Protocol-Version"))
+					json.NewEncoder(w).Encode(jsonRPCResponse{
+						JSONRPC: "2.0", ID: msg.ID,
+						Result: json.RawMessage(`{"tools":[]}`),
+					})
+				}
+			}))
+			defer srv.Close()
+
+			c := NewHTTPClient(srv.URL, nil)
+			if err := c.Connect(); err != nil {
+				t.Fatalf("connect: %v", err)
+			}
+			if _, err := c.ListTools(); err != nil {
+				t.Fatalf("list tools: %v", err)
+			}
+			if len(afterHandshake) != 1 {
+				t.Fatalf("requests after the handshake = %d, want 1", len(afterHandshake))
+			}
+			if got := afterHandshake[0]; got != tc.wantHeader {
+				t.Fatalf("MCP-Protocol-Version after negotiating %s = %q; want %q", tc.negotiated, got, tc.wantHeader)
+			}
+		})
 	}
 }
 

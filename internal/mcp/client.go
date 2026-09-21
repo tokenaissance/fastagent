@@ -64,6 +64,22 @@ type initializeParams struct {
 	ClientInfo      clientInfo `json:"clientInfo"`
 }
 
+// initializeResult is the half of the initialize reply this client acts on: the
+// revision the SERVER settled on. It may be older than the one we asked for, and
+// every later request has to name it (Streamable HTTP: the MCP-Protocol-Version
+// header) — which is why it is read rather than assumed.
+type initializeResult struct {
+	ProtocolVersion string `json:"protocolVersion"`
+}
+
+// jsonRPCNotification is a JSON-RPC message with a method and NO id: the shape of
+// both `notifications/initialized` (ours) and a server's own pushes.
+type jsonRPCNotification struct {
+	JSONRPC string      `json:"jsonrpc"`
+	Method  string      `json:"method"`
+	Params  interface{} `json:"params,omitempty"`
+}
+
 type clientInfo struct {
 	Name    string `json:"name"`
 	Version string `json:"version"`
