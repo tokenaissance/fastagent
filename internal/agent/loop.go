@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/codeany-ai/open-agent-sdk-go/costtracker"
@@ -2822,7 +2823,44 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		// sizes its own work (delegate_task) has to know when the turn ends even
 		// though this context outlives it on purpose.
 		toolCtx = withTurnDeadline(toolCtx, ctx)
-		results := a.engine.executeToolsConcurrently(toolCtx, a.registry, executeCalls, a.workspacePath)
+		tcByID := make(map[string]provider.ToolCall, len(resp.ToolCalls))
+		for _, tc := range resp.ToolCalls {
+			tcByID[tc.ID] = tc
+		}
+
+		// Round-level failure detection: did EVERY result come back
+		// as a 4xx/5xx HTTP error or executor error? Tracked here so
+		// the next iteration can decide whether to drop tools.
+		roundAllFailed := true
+
+		// A round's `tool_result` events used to go out only after the whole
+		// batch returned, so a call that had already finished had no event yet
+		// and the panel read it as "queued behind the live sub-agent" — a claim
+		// about a call nothing was waiting on. They go out per call now, at the
+		// moment that call returns. Only the event's timing moves: the history
+		// is still assembled in the model's declared order below, which is what
+		// every provider requires.
+		//
+		// onResult runs on the executor's goroutines, so the map and the round's
+		// tally are written under a lock. The declared-order pass below runs
+		// after the executor returned, when no onResult can still fire.
+		var processedMu sync.Mutex
+		processed := make(map[string]provider.Message, len(resp.ToolCalls))
+		onResult := func(r toolCallResult) {
+			tc, ok := tcByID[r.toolCallID]
+			if !ok {
+				return
+			}
+			processedMu.Lock()
+			defer processedMu.Unlock()
+			m, produced := a.finishToolCall(ctx, msg, tc, r)
+			if produced {
+				roundAllFailed = false
+			}
+			processed[r.toolCallID] = m
+		}
+
+		results := a.engine.executeToolsConcurrently(toolCtx, a.registry, executeCalls, a.workspacePath, onResult)
 		endToolGrace()
 		// Append synthetic deferred results so every original tool_use
 		// id has a paired tool_result. The deferred message tells the
@@ -2865,105 +2903,24 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 			results = padded
 		}
 
-		// Round-level failure detection: did EVERY result come back
-		// as a 4xx/5xx HTTP error or executor error? Tracked here so
-		// the next iteration can decide whether to drop tools.
-		roundAllFailed := len(results) > 0
-		// Process results
+		// Append the round's tool messages in declared order — the order the
+		// assistant message listed its tool_calls. A call that already finished
+		// (its event went out at completion) is appended from the map; the
+		// deferred and back-filled ones are finished here, in place, so every
+		// call is appended exactly once and no round leaves an orphan tool_use.
 		for idx, r := range results {
 			totalToolCalls++
 			tc := resp.ToolCalls[idx]
-			resultContent, meta := extractToolMeta(r.result)
-			// Backstop for every tool, not just exec: a 70 MB result is what
-			// OOMKilled two prod pods on 2026-09-14 (see sandbox.ClipOutput). The
-			// producers clip first; this catches the ones that don't (read_file of
-			// a giant CSV, an MCP tool that returns a dump, …).
-			resultContent = sandbox.ClipAndLog(resultContent, "tool/"+r.toolName)
-
-			// Hook: AfterToolCall
-			a.hooks.Run(ctx, &HookContext{
-				AgentName:      a.name,
-				Point:          AfterToolCall,
-				ToolName:       r.toolName,
-				ToolResult:     resultContent,
-				Error:          r.err,
-				Channel:        msg.Channel,
-				AccountID:      msg.AccountID,
-				ChatID:         msg.ChatID,
-				UserID:         a.ownerUserID,
-				GoalSessionKey: a.registry.GoalSessionKey(),
-				IsPlanMode:     isPlanMode(msg.Params),
-				Source:         msg.Source,
-			})
-
-			if r.err != nil {
-				slog.Warn("tool execution error",
-					"agent", a.name,
-					"name", r.toolName,
-					"error", r.err,
-				)
-			}
-
-			// Classify the result: did this single call fail? Records
-			// it in the registry's per-turn failure map so a later
-			// retry of the same args can be short-circuited (see
-			// Registry.PriorFailure / web_fetch).
-			thisFailed := isFailedToolResult(r.err, resultContent)
-			if thisFailed {
-				summary := r.err.Error()
-				if summary == "" || summary == "<nil>" {
-					summary = firstNonEmptyLine(resultContent)
-				}
-				a.registry.RecordToolFailure(r.toolName, tc.Function.Arguments, summary)
-			} else {
-				// One call in this round produced a real result —
-				// the round as a whole isn't "all failed".
-				roundAllFailed = false
-			}
-
-			// Index in FTS if available
-			if a.ftsStore != nil {
-				_ = a.ftsStore.Index(a.name, msg.ChatID, "tool:"+r.toolName, resultContent, time.Now())
-			}
-
-			// Check for MEDIA: protocol in tool output
-			if mediaPaths := extractMediaPaths(resultContent); len(mediaPaths) > 0 {
-				a.sendMediaFiles(msg, mediaPaths)
-			}
-
-			toolMsg := provider.Message{
-				Role:       "tool",
-				Content:    resultContent,
-				ToolCallID: tc.ID,
-				Name:       r.toolName,
-				Metadata:   meta,
-			}
-			sess.Append(toolMsg)
-			messages = append(messages, toolMsg)
-
-			evt := map[string]any{
-				"id":     tc.ID,
-				"name":   r.toolName,
-				"result": resultContent,
-			}
-			if meta != nil {
-				evt["metadata"] = meta
-			}
-			// Fail loud for mcp mutations whose undo record cannot be
-			// persisted: the declaration change is committed, so we can't
-			// roll it back here — but the model must not silently believe
-			// an undo journal exists when it doesn't.
-			if seq, jerr := emitEventChecked(ctx, ChatEvent{Type: "tool_result", Data: evt}); seq < 0 || jerr != nil {
-				if updated, warned := applyUndoJournalWarning(r.toolName, resultContent, seq, jerr); warned {
-					resultContent = updated
-					toolMsg.Content = resultContent
-					if n := len(messages); n > 0 && messages[n-1].Role == "tool" {
-						messages[n-1] = toolMsg
-					}
-					slog.Warn("mcp undo journal missing after mutation",
-						"agent", a.name, "name", r.toolName, "persistErr", jerr)
+			m, done := processed[tc.ID]
+			if !done {
+				var produced bool
+				m, produced = a.finishToolCall(ctx, msg, tc, r)
+				if produced {
+					roundAllFailed = false
 				}
 			}
+			sess.Append(m)
+			messages = append(messages, m)
 		}
 		// Update consecutive-failed-rounds tally now that the whole
 		// round's results have been processed. A single non-failure
@@ -3221,6 +3178,101 @@ func (a *Agent) runPostTurn(ctx context.Context, msg bus.InboundMessage, message
 			}
 		}()
 	}
+}
+
+// finishToolCall is the per-call back half of a tool round: clip the result,
+// run the AfterToolCall hook, record a failure, index it, attach any media, and
+// emit this call's `tool_result` event. It returns the message the call
+// contributes to the history, and whether the call produced a real result (as
+// opposed to a failure the round should count as "nothing worked").
+//
+// It deliberately does NOT append to the session or the prompt. The caller
+// appends in the model's declared order. Splitting it out is the point: the
+// event can go out the moment the call finishes, while the history stays in the
+// order the assistant message listed its tool_calls — the order every provider
+// requires.
+func (a *Agent) finishToolCall(ctx context.Context, msg bus.InboundMessage, tc provider.ToolCall, r toolCallResult) (provider.Message, bool) {
+	resultContent, meta := extractToolMeta(r.result)
+	// Backstop for every tool, not just exec: a 70 MB result is what OOMKilled
+	// two prod pods on 2026-09-14 (see sandbox.ClipOutput). The producers clip
+	// first; this catches the ones that don't (read_file of a giant CSV, an MCP
+	// tool that returns a dump, …).
+	resultContent = sandbox.ClipAndLog(resultContent, "tool/"+r.toolName)
+
+	// Hook: AfterToolCall
+	a.hooks.Run(ctx, &HookContext{
+		AgentName:      a.name,
+		Point:          AfterToolCall,
+		ToolName:       r.toolName,
+		ToolResult:     resultContent,
+		Error:          r.err,
+		Channel:        msg.Channel,
+		AccountID:      msg.AccountID,
+		ChatID:         msg.ChatID,
+		UserID:         a.ownerUserID,
+		GoalSessionKey: a.registry.GoalSessionKey(),
+		IsPlanMode:     isPlanMode(msg.Params),
+		Source:         msg.Source,
+	})
+
+	if r.err != nil {
+		slog.Warn("tool execution error",
+			"agent", a.name,
+			"name", r.toolName,
+			"error", r.err,
+		)
+	}
+
+	// Classify the result: did this single call fail? Records it in the
+	// registry's per-turn failure map so a later retry of the same args can be
+	// short-circuited (see Registry.PriorFailure / web_fetch).
+	thisFailed := isFailedToolResult(r.err, resultContent)
+	if thisFailed && r.err != nil {
+		summary := r.err.Error()
+		if summary == "" || summary == "<nil>" {
+			summary = firstNonEmptyLine(resultContent)
+		}
+		a.registry.RecordToolFailure(r.toolName, tc.Function.Arguments, summary)
+	}
+
+	// Index in FTS if available
+	if a.ftsStore != nil {
+		_ = a.ftsStore.Index(a.name, msg.ChatID, "tool:"+r.toolName, resultContent, time.Now())
+	}
+
+	// Check for MEDIA: protocol in tool output
+	if mediaPaths := extractMediaPaths(resultContent); len(mediaPaths) > 0 {
+		a.sendMediaFiles(msg, mediaPaths)
+	}
+
+	toolMsg := provider.Message{
+		Role:       "tool",
+		Content:    resultContent,
+		ToolCallID: tc.ID,
+		Name:       r.toolName,
+		Metadata:   meta,
+	}
+
+	evt := map[string]any{
+		"id":     tc.ID,
+		"name":   r.toolName,
+		"result": resultContent,
+	}
+	if meta != nil {
+		evt["metadata"] = meta
+	}
+	// Fail loud for mcp mutations whose undo record cannot be persisted: the
+	// declaration change is committed, so we can't roll it back here — but the
+	// model must not silently believe an undo journal exists when it doesn't.
+	if seq, jerr := emitEventChecked(ctx, ChatEvent{Type: "tool_result", Data: evt}); seq < 0 || jerr != nil {
+		if updated, warned := applyUndoJournalWarning(r.toolName, resultContent, seq, jerr); warned {
+			toolMsg.Content = updated
+			slog.Warn("mcp undo journal missing after mutation",
+				"agent", a.name, "name", r.toolName, "persistErr", jerr)
+		}
+	}
+
+	return toolMsg, !thisFailed
 }
 
 // HandleMessageStream processes a message through the ReAct loop and returns
@@ -3549,7 +3601,10 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 		toolCtx, endToolGrace := toolGraceContext(ctx, a.graceWindow())
 		// See the note in HandleMessage: the turn's deadline travels as a value.
 		toolCtx = withTurnDeadline(toolCtx, ctx)
-		results := a.engine.executeToolsConcurrently(toolCtx, a.registry, resp.ToolCalls, a.workspacePath)
+		// The streaming endpoint emits no tool_call/tool_result events (its
+		// consumers read the stream, not the chat-event fan-out), so it passes
+		// no per-call callback — see executeToolsConcurrently.
+		results := a.engine.executeToolsConcurrently(toolCtx, a.registry, resp.ToolCalls, a.workspacePath, nil)
 		endToolGrace()
 		totalToolCalls += len(results)
 
