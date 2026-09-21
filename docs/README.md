@@ -23,7 +23,7 @@
 
 | 文档 | 类型 | 状态（原文摘） | 权威性 | 形式 | 代码引用 |
 |---|---|---|---|---|---|
-| [session-turn-integrity.md](./session-turn-integrity.md) | 设计 + 事故 | `Status: P0–P6 landed, plus Q4` | 会话轮次完整性（W/P/O/T）唯一来源；A1–A4 设计已采纳未实现 | F1（A1/A3）· F2（A2）· F3（A4） | **24** |
+| [session-turn-integrity.md](./session-turn-integrity.md) | 设计 + 事故 | `Status: P0–P6 landed, plus Q4` | 会话轮次完整性（W/P/O/T）唯一来源；**A1–A4 已落地（工作区，见 §A3.1 落地日志与各条的 landing log；改动册的状态格里仍是「待批准」）** | F1（A1/A3）· F2（A2）· F3（A4） | **24** |
 | [sandbox-scope-leak.md](./sandbox-scope-leak.md) | 事故排查 | `状态：事故记录，根因已修（G17 族）` | 该次容器作用域泄漏的唯一取证 | F1（作用域同一性） | 7 |
 | [configs-kv-scope-adaptation.md](./configs-kv-scope-adaptation.md) | 设计 + 实现对照 | `状态：fork 已落地` | configs 数据域的实现对照 | 子系统契约（scope） | 2 |
 | [configs-kv-scope-decision.md](./configs-kv-scope-decision.md) | 决策 | `状态：已决策（08-25 维持；09-13 保留并继续演进）` | **该数据域唯一决策来源** | 子系统契约（scope） | 0 |
