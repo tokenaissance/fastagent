@@ -442,16 +442,19 @@ rather than staying silent.
    those are still unmet — the version header, and G15 — and the version header follows from reading
    the handshake, so **the declaration cannot be corrected before G15 lands**: that is an order, not a
    preference.
-2. **nothing owns a long-lived resource.** `mcp.Manager.Close` closes every connected client, but no
-   production caller reaches it: `ag.mcpMgr` is assigned in `loop.go` and read by the tool closures, while
-   the paths that drop an agent — `userSpaceRegistry.invalidate`, `evictIdle`, `setSystemSandboxPool`
-   (all in `gateway/userspace.go`) — delete the map entry only. A drop therefore releases nothing:
-   today’s stdio children are left to the `os.File` finaliser on the stdin pipe (`os/file_unix.go` sets
-   it) — they exit later, and no code path kills them — while a standing HTTP stream would be
-   *permanently* unreleasable, because the goroutine reading it holds the body and the GC never sees it
-   as garbage. *Either* remedy for boundary 1 adds a resource to that hole. Note the shape: what
-   triggers a rebuild is a message the server sent, so a server can drive rebuilds; the gate bounds that
-   to one per 30s per server, not to a total.
+2. **nothing owns a long-lived resource** — *fixed 2026-09-22, row 44*. It used to be: `mcp.Manager.Close`
+   closed every connected client, but no production caller reached it, while the paths that drop an agent
+   — `userSpaceRegistry.invalidate`, `evictIdle`, `setSystemSandboxPool` — deleted the map entry only.
+   So a drop released nothing: a stdio child was left to the `os.File` finaliser on the stdin pipe
+   (`os/file_unix.go` sets it) and exited whenever the GC got to it, and a standing HTTP stream would have
+   been *permanently* unreleasable, because the goroutine reading it holds the body. Now a drop **retires**
+   the space and a sweep takes its clients back once it has been retired for `releaseGrace` (5m) *and* no
+   turn of it is running or waiting — a turn is the only thing that ever calls an MCP tool, so that is the
+   tightest cheap proof that nothing is using the clients, and it is what keeps a long turn from being cut
+   off mid-call. Two limits, recorded rather than hidden: the release runs on the evictor ticker, so it can
+   be up to a tick late; and a request that obtained the space *before* the drop can still start a turn
+   between the sweep’s check and its own `AcquireTurn`. Either remedy for boundary 1 now lands in a hole
+   that has an owner.
 3. **a server message that rides along on a request’s stream is traced, not acted on**
    (`parseResponseBody` logs it at debug and skips it). That is deliberate — acting on one is a standing
    channel’s job — but it means a server that uses the request stream as its only channel reaches nobody,

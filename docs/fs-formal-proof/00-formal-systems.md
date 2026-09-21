@@ -235,6 +235,12 @@ same section states how that obligation lands on `session_turns`, whose **A1 is 
 `internal/agent/sessionlease.go`, the adapter in `internal/gateway/sessionlease.go`, both admission
 points and the IfIdle verdict wired onto it, and the fence (`…Fenced` write statements).
 
+**One cell added on 2026-09-22 (not F1–F3 either)**: **register row 44** — the *ownership* of a dropped
+user space’s MCP clients. It was the piece that made G11’s HTTP half hard to close: both remedies (an SSE
+stream, a periodic re-list) create a resource that outlives the agent object, and nothing released one. A
+drop now retires the space and a sweep releases its clients once it has been retired for five minutes with
+no turn running or waiting (10 §3.4, item 2), so the standing channel can land in a hole that has an owner.
+
 > **What actually remains (2026-09-18, after the closing pass)**: in the formal sense, **only the HTTP
 > half of G11** (the MCP transport has no notification channel; it needs SSE or a periodic re-list).
 > G15 (`notifications/initialized`) belongs to the same MCP family and is out of this round's scope by

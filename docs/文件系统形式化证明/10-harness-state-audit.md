@@ -382,14 +382,15 @@ stdio 读循环识别 method 消息   →  StdioClient.SetNotificationHandler
    （每个请求带 `Accept`、两种应答形态、后续请求带 `MCP-Protocol-Version`、`notifications/initialized`）。
    其中两条仍未满足——版本头与 G15——而版本头是从握手里读出来的结果，所以**声明无法在 G15 落地之前修正**：
    这是一个顺序，不是偏好。
-2. **没有东西拥有"长生命周期资源"。** `mcp.Manager.Close` 会关掉每个已连接的 client，但没有任何生产调用点到达它：
-   `ag.mcpMgr` 在 `loop.go` 里赋值、被工具闭包读取，而丢下 agent 的那几条路——`userSpaceRegistry.invalidate`、
-   `evictIdle`、`setSystemSandboxPool`（都在 `gateway/userspace.go`）——只是删掉 map 里的那一项。
-   所以一次丢弃什么也没释放：今天 stdio 的子进程只是被交给 stdin 管道上那个 `os.File` 终结器
-   （`os/file_unix.go` 里设的）——它们会晚些退出，而没有任何代码路径去杀它——而一条站着的 HTTP 流会是
-   **永远无法释放**的：读它的那个 goroutine 一直握着 body，GC 不会把它当垃圾。所以边界 1 的**任何一种**
-   修法都是往同一个洞再加一份资源。注意这个形状：触发重建的是 server 发来的消息，也就是说 server 能驱动重建；
-   闸门把它限成"每 server 30s 一次"，不是限总量。
+2. **没有东西拥有"长生命周期资源"**——*2026-09-22 已修，登记册第 44 行*。原来的样子是：`mcp.Manager.Close`
+   会关掉每个已连接的 client，但没有任何生产调用点到达它，而丢下 agent 的那几条路——`userSpaceRegistry.invalidate`、
+   `evictIdle`、`setSystemSandboxPool`——只是删掉 map 里的那一项。所以一次丢弃什么都不释放：stdio 的子进程被交给
+   stdin 管道上那个 `os.File` 终结器（`os/file_unix.go` 里设的），GC 什么时候收它就什么时候退出；而一条站着的 HTTP 流
+   会是**永远无法释放**的，因为读它的 goroutine 一直握着 body。现在丢弃会把空间**退休**，扫尾在"退休满
+   `releaseGrace`（5 分钟）**且**该空间没有回合在跑、也没有回合在排队"时把它的 client 收回来——回合是唯一会调用
+   MCP 工具的东西，所以这是"此刻没人在用这些 client"最紧的廉价证明，也正是它保证长回合不会在调用中途被切断。
+   两条界限如实记下：释放跑在驱逐器的 ticker 上，因此可能晚一个 tick；而在丢弃**之前**就拿到该空间的请求，仍可能在
+   扫尾检查之后、它自己 `AcquireTurn` 之前启动一个回合。边界 1 的两种修法现在都落在一个有主人的洞里。
 3. **搭在请求流上的 server 消息被记录、不被执行**（`parseResponseBody` 用 debug 记一条然后跳过）。这是刻意的
    ——执行它是"站着的通道"的职责——但这意味着：把请求流当成唯一通道的 server 仍然到不了任何人，
    而且只有 debug 级别说了这件事。

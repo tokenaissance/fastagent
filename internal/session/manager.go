@@ -939,12 +939,43 @@ func (s *Session) TurnActive() bool {
 	return s.turnActive
 }
 
+// TurnInFlight reports whether a turn of this session is running (BeginTurn not
+// yet paired with EndTurn) or waiting for the slot. It is the signal the user
+// space release uses to decide that an MCP client may still be in use: the only
+// caller of an MCP tool is a turn (docs 10 §3.4).
+func (s *Session) TurnInFlight() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.turnDepth > 0 || s.turnActive || len(s.turnWaiters) > 0
+}
+
 // TurnWaiters reports how many turn-start callers are queued behind the
 // current holder. Used by metric/log surfaces and tests.
 func (s *Session) TurnWaiters() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.turnWaiters)
+}
+
+// AnyTurnInFlight reports whether any session this manager holds has a turn
+// running or waiting for the slot. Callers must be able to tolerate a turn
+// starting right after it returns false — it is a probe, not a lock.
+func (m *Manager) AnyTurnInFlight() bool {
+	if m == nil {
+		return false
+	}
+	m.mu.Lock()
+	sessions := make([]*Session, 0, len(m.sessions))
+	for _, s := range m.sessions {
+		sessions = append(sessions, s)
+	}
+	m.mu.Unlock()
+	for _, s := range sessions {
+		if s.TurnInFlight() {
+			return true
+		}
+	}
+	return false
 }
 
 // BeginTurn marks a HandleMessage turn as in-flight for this session.

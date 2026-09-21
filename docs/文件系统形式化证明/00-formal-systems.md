@@ -211,6 +211,11 @@ G11 是（传输层没有通道），G4 的归属半边是（缺持久清单）�
 [12 §3](./12-lease-formal-design.md) 的 **L4(c)（令牌必须逐次获取唯一）**，
 修法是一条款（抢占分支 `epoch = epoch + 1`）——**已修（2026-09-19，工作区）**，witness 是 `TestSandboxLeaseEpochNeverResetsAcrossTakeover`（反证已实跑）。同一节还给出该义务在 `session_turns` 上的落法，其中**A1 已全部落地（工作区）**：`internal/store` 的 `session_turns` 四方法、`internal/agent/sessionlease.go` 的端口、`internal/gateway/sessionlease.go` 的适配器、两个准入入口与 IfIdle 的接线、以及围栏（`…Fenced` 写语句）。
 
+**2026-09-22 又加了一格（同样不属于 F1–F3）**：**登记册第 44 行**——被丢弃 user space 的 MCP client 的**归属**。
+它正是让 G11 HTTP 半边难以收口的那一块：两种修法（SSE 流、定期 re-list）都会造出一个比 agent 对象活得更久的资源，
+而没有任何东西释放它。现在丢弃会把空间退休，扫尾在"退休满 5 分钟、且没有回合在跑或在排队"后收回它的 client
+（10 §3.4 第 2 条），那条站着的通道因此可以落进一个有主人的洞。
+
 > **当前净剩（2026-09-18 收尾）**：形式化意义上的**只有 G11 的 HTTP 半边**
 > （MCP 传输层没有通知通道，需要 SSE 或定期 re-list）。G15（`notifications/initialized`）
 > 与 MCP 同族，按决策不在本轮范围。**唯一非缺口但值得记一笔的**：决策 A 之前产生的
