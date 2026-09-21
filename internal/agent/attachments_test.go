@@ -3,10 +3,15 @@ package agent
 import (
 	"context"
 	"encoding/base64"
+	"strconv"
 	"strings"
 	"testing"
 	"unicode/utf8"
 )
+
+func base64Of(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+
+func itoa(n int) string { return strconv.Itoa(n) }
 
 func TestSanitizeAttachmentName(t *testing.T) {
 	cases := []struct {

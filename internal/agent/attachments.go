@@ -13,6 +13,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -92,9 +93,9 @@ func (a *Agent) WriteSessionAttachments(ctx context.Context, sessionID, projectI
 		token = token[len(token)-5:]
 	}
 	// Track names assigned in this batch so two attachments with the
-	// same caller-provided Name don't clobber each other. Cross-turn
-	// collisions are intentionally left to overwrite — re-uploading
-	// `notes.md` should replace, not accumulate `notes-1.md` forever.
+	// same caller-provided Name don't clobber each other. A cross-turn
+	// collision is not an overwrite either: the store's create-only rule
+	// (family B, L7) makes it a keep-both rename — see putAttachmentKeepBoth.
 	used := make(map[string]struct{}, len(atts))
 	for i, att := range atts {
 		data, ext, err := decodeAttachment(ctx, att.URL)
@@ -105,28 +106,39 @@ func (a *Agent) WriteSessionAttachments(ctx context.Context, sessionID, projectI
 		name := buildAttachmentName(att.Name, token, i, ext, used)
 		used[name] = struct{}{}
 
+		// 2. Durable store (covers E2B / multi-pod via hydrate-on-create) —
+		// FIRST, because it is the store, not this pod's disk, that decides
+		// which name the attachment lands under. The store write is create-only
+		// (family B, L7) and, when that name is already taken, the answer is
+		// "keep both": land the bytes under the next free spelling and hand the
+		// agent THAT name. Nothing can ask a channel user, and the two
+		// alternatives are both wrong — overwriting destroys an attachment
+		// somebody still believes is there, and refusing while still putting the
+		// old path into the "[Attached: …]" breadcrumb points the model at a
+		// different file's bytes. (The composer's upload answers the same
+		// question the same way; cloud
+		// `features/chat/attachment-conflicts.ts` is the other expression.)
+		if a.workspaceStore != nil {
+			landed, pErr := a.putAttachmentKeepBoth(ctx, projectID, sessionID, name, data, ext, used)
+			if pErr != nil {
+				slog.Warn("attachment store put failed", "agent", a.name, "session", sessionID, "path", name, "error", pErr)
+			}
+			if landed == "" {
+				// No name could be had. Claim nothing: a path the model cannot
+				// read is worse than an attachment it was not told about.
+				slog.Warn("attachment name still taken after retries; not attaching",
+					"agent", a.name, "session", sessionID, "path", name)
+				continue
+			}
+			name = landed
+		}
+
 		// 1. Host workspace dir (covers no-sandbox + docker via bind mount)
 		if a.workspacePath != "" {
 			full := filepath.Join(a.workspacePath, name)
 			if mkErr := os.MkdirAll(a.workspacePath, 0o755); mkErr == nil {
 				if wErr := os.WriteFile(full, data, 0o644); wErr != nil {
 					slog.Warn("attachment host write failed", "agent", a.name, "session", sessionID, "path", full, "error", wErr)
-				}
-			}
-		}
-
-		// 2. Durable store (covers E2B / multi-pod via hydrate-on-create)
-		if a.workspaceStore != nil {
-			// Create-only (family B, L7): an attachment name that already
-			// exists must not be silently replaced — whoever uploaded the first
-			// one still believes it is there. Refuse and say so.
-			if pErr := a.workspaceStore.PutIfVersion(ctx, a.agentID, projectID, sessionID, name,
-				strings.NewReader(string(data)), int64(len(data)), contentTypeFromExt(ext), workspace.VersionAbsent); pErr != nil {
-				if errors.Is(pErr, workspace.ErrVersionConflict) {
-					slog.Warn("attachment name already taken; refusing to replace it",
-						"agent", a.name, "session", sessionID, "path", name)
-				} else {
-					slog.Warn("attachment store put failed", "agent", a.name, "session", sessionID, "path", name, "error", pErr)
 				}
 			}
 		}
@@ -145,6 +157,46 @@ func (a *Agent) WriteSessionAttachments(ctx context.Context, sessionID, projectI
 		paths = append(paths, name)
 	}
 	return paths
+}
+
+// attachmentKeepBothCap bounds the " (n)" spellings tried before giving up. A
+// run of taken names this long means something systemic (a bot looping on one
+// attachment), and the honest answer then is to attach nothing.
+const attachmentKeepBothCap = 8
+
+// putAttachmentKeepBoth writes one attachment under a create-only precondition
+// (family B, L7) and returns the name it actually landed under. When the name
+// is taken it keeps both — the same answer the composer offers as "keep both",
+// and the only one of the three that is safe to give unattended.
+//
+// Returns "" when no free spelling was found within the cap; the caller must
+// then claim nothing at all, because the alternative is a breadcrumb pointing
+// the model at whatever else happens to hold that name.
+func (a *Agent) putAttachmentKeepBoth(ctx context.Context, projectID, sessionID, name string, data []byte, ext string, used map[string]struct{}) (string, error) {
+	candidate := name
+	for n := 0; ; n++ {
+		err := a.workspaceStore.PutIfVersion(ctx, a.agentID, projectID, sessionID, candidate,
+			strings.NewReader(string(data)), int64(len(data)), contentTypeFromExt(ext), workspace.VersionAbsent)
+		if err == nil {
+			used[candidate] = struct{}{}
+			return candidate, nil
+		}
+		if !errors.Is(err, workspace.ErrVersionConflict) {
+			return "", err
+		}
+		if n >= attachmentKeepBothCap {
+			return "", nil
+		}
+		// `<stem> (n)<ext>`, bumping a counter that is already in the name rather
+		// than nesting it ("photo (2).jpg", never "photo (1) (1).jpg") — the same
+		// rule as the composer's autoRename.
+		ext := path.Ext(name)
+		stem := strings.TrimSuffix(name, ext)
+		if m := attachmentCounterRe.FindStringSubmatch(stem); m != nil {
+			stem = m[1]
+		}
+		candidate = fmt.Sprintf("%s (%d)%s", stem, n+1, ext)
+	}
 }
 
 // decodeAttachment turns a data URL or HTTPS URL into raw bytes plus a
@@ -311,6 +363,10 @@ func buildAttachmentName(raw, token string, idx int, ext string, used map[string
 	// is collision-free within the batch.
 	return fmt.Sprintf("%s-%s-%d%s", stem, token, idx, tail)
 }
+
+// attachmentCounterRe matches a "keep both" suffix already in a name, so the
+// counter is bumped rather than nested.
+var attachmentCounterRe = regexp.MustCompile(`^(.*) \((\d+)\)$`)
 
 // sanitizeAttachmentName strips path separators, parent-dir tokens,
 // control characters, and leading dots from a caller-supplied filename.
