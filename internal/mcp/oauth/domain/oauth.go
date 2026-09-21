@@ -240,10 +240,28 @@ func TokenNeedsRefresh(t *OAuthTokens, now time.Time, buffer time.Duration) bool
 	return now.Add(buffer).After(t.ExpiresAt)
 }
 
+// credentialKeyRoot is the one place the credential key space is
+// spelled. Every key and every prefix a delete path sweeps derives from
+// it, so the shape cannot change under one caller's feet while another
+// keeps the old spelling.
+const credentialKeyRoot = "oauth/"
+
+// UserKeyPrefix is the key prefix every credential of one user shares,
+// across all their agents and servers. Delete-by-user sweeps it.
+func UserKeyPrefix(userID string) string {
+	return credentialKeyRoot + url.PathEscape(userID) + "/"
+}
+
+// AgentKeyPrefix is the key prefix every credential of one agent shares,
+// across all its servers. Delete-by-agent sweeps it.
+func AgentKeyPrefix(userID, agentID string) string {
+	return UserKeyPrefix(userID) + url.PathEscape(agentID) + "/"
+}
+
 // StoreKey derives the per-(user, agent, server) credential key. Escaping
 // keeps arbitrary IDs from walking the file tree.
 func StoreKey(userID, agentID, serverName string) string {
-	return "oauth/" + url.PathEscape(userID) + "/" + url.PathEscape(agentID) + "/" + url.PathEscape(serverName) + ".json"
+	return AgentKeyPrefix(userID, agentID) + url.PathEscape(serverName) + ".json"
 }
 
 // CallbackID derives a stable per-server callback path segment from the

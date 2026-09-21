@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -70,4 +71,27 @@ func (s *FileTokenStore) Delete(ctx context.Context, key string) error {
 		return port.ErrNotFound
 	}
 	return err
+}
+
+// DeleteByAgent removes the credential directory of one agent identity.
+func (s *FileTokenStore) DeleteByAgent(ctx context.Context, userID, agentID string) error {
+	// Unlike the SQL store, an empty ID here would *widen* the sweep: the
+	// agent directory is nested inside the user's, and filepath.Join
+	// drops the empty segment, so DeleteByAgent("u", "") would delete
+	// every credential the user has. Refuse rather than over-delete.
+	if userID == "" || agentID == "" {
+		return fmt.Errorf("oauth: DeleteByAgent needs userID and agentID (got %q, %q)", userID, agentID)
+	}
+	return os.RemoveAll(filepath.Join(s.Root, filepath.FromSlash(domain.AgentKeyPrefix(userID, agentID))))
+}
+
+// DeleteByUser removes the credential directory of one user.
+func (s *FileTokenStore) DeleteByUser(ctx context.Context, userID string) error {
+	// Same hazard one level up: with an empty userID the prefix is just
+	// the key root ("oauth//" -> filepath cleans it to "oauth"), so the
+	// sweep would take every user's credentials. Refuse.
+	if userID == "" {
+		return errors.New("oauth: DeleteByUser needs a userID")
+	}
+	return os.RemoveAll(filepath.Join(s.Root, filepath.FromSlash(domain.UserKeyPrefix(userID))))
 }

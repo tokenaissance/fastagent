@@ -66,6 +66,11 @@ func (toolTokens) Load(_ context.Context, _ string) (*domain.OAuthTokens, error)
 }
 func (toolTokens) Delete(_ context.Context, _ string) error { return nil }
 
+// Always-empty store: both sweeps are no-ops for the same reason Load
+// always says not-found.
+func (toolTokens) DeleteByAgent(_ context.Context, _, _ string) error { return nil }
+func (toolTokens) DeleteByUser(_ context.Context, _ string) error     { return nil }
+
 func testToolBootstrap() *oauth.Bootstrap {
 	start := &usecase.StartAuthorization{
 		Meta: toolMeta{}, Registrar: toolRegistrar{},

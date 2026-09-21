@@ -1,6 +1,7 @@
 package setup
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -333,5 +334,47 @@ func (s *Server) notifyUserChanged(userID string) {
 		if err := b.BroadcastAgentReload(userID); err != nil {
 			slog.Warn("broadcast agent reload after an agent config change", "user", userID, "error", err)
 		}
+	}
+}
+
+// forgetAgentCredentials drops the stored MCP OAuth credentials of an
+// agent that was just deleted. Called by every agent-delete path — the
+// dashboard's DELETE /api/agents/{id} and the operator CLI (agentcli
+// shares this rule through its own call) — because a credential whose
+// agent row is gone has no reader left: status, the servers list, the
+// token provider and refresh all resolve the agent first, so it would
+// answer 403 forever while the row stayed in the table.
+//
+// Best-effort by design, for two reasons that are both deliberate:
+//
+//   - The deletion already happened and is the thing the caller asked
+//     for; failing the response would report a failure that did not
+//     happen and invite a retry against an agent that no longer exists.
+//   - Nothing is reachable through the leftover row, so a warning is
+//     proportionate. What the sweep removes is a leak, not a hole.
+//
+// The provider-side grant is not touched — that needs a network round
+// trip to a third party and is irreversible (docs/mcp-oauth-design.md
+// §13.6), which is a decision, not an oversight.
+func (s *Server) forgetAgentCredentials(ctx context.Context, userID, agentID string) {
+	if s.mcpOAuth == nil {
+		return // MCP OAuth disabled in this deployment: nothing was stored.
+	}
+	if err := s.mcpOAuth.Forget.Agent(ctx, userID, agentID); err != nil {
+		slog.Warn("agent deleted but its stored MCP credentials remain", "user", userID, "agent", agentID, "error", err)
+	}
+}
+
+// forgetUserCredentials drops the stored MCP OAuth credentials of every
+// agent the just-deleted user owned. Same posture as
+// forgetAgentCredentials: the user deletion already happened, the
+// credentials are already unreachable (their agent rows went with the
+// user), and a failure is reported to the operator, not to the caller.
+func (s *Server) forgetUserCredentials(ctx context.Context, userID string) {
+	if s.mcpOAuth == nil {
+		return
+	}
+	if err := s.mcpOAuth.Forget.User(ctx, userID); err != nil {
+		slog.Warn("user deleted but their agents' stored MCP credentials remain", "user", userID, "error", err)
 	}
 }

@@ -100,7 +100,10 @@ func newOAuthProvider(t *testing.T) *oauthProvider {
 	return p
 }
 
-func newOAuthTestServer(t *testing.T, p *oauthProvider) (*Server, *store.DBStore) {
+// newOAuthTestServer builds a Server over a fresh temp SQLite store with
+// MCP OAuth wired — the delivery-point fixture: real handler, real store,
+// real OAuth bootstrap.
+func newOAuthTestServer(t *testing.T) (*Server, *store.DBStore) {
 	t.Helper()
 	dsn := filepath.Join(t.TempDir(), "oauth-handler.db")
 	st, err := store.New(&store.StorageConfig{Type: "sqlite", DSN: dsn, AutoMigrate: true}, t.TempDir())
@@ -164,7 +167,7 @@ func doJSON(t *testing.T, h http.HandlerFunc, ctx context.Context, body any) *ht
 
 func TestMcpOAuthStartOwnershipAndFullFlow(t *testing.T) {
 	p := newOAuthProvider(t)
-	srv, _ := newOAuthTestServer(t, p)
+	srv, _ := newOAuthTestServer(t)
 	owner, agentID := createUserAndAgent(t, srv.dataStore, "owner")
 	other, _ := createUserAndAgent(t, srv.dataStore, "other")
 
@@ -268,7 +271,7 @@ func TestMcpOAuthDisabled(t *testing.T) {
 // servers with oauthResource are listed, and each carries its status.
 func TestMcpOAuthServersList(t *testing.T) {
 	p := newOAuthProvider(t)
-	srv, _ := newOAuthTestServer(t, p)
+	srv, _ := newOAuthTestServer(t)
 	owner, agentID := createUserAndAgent(t, srv.dataStore, "owner")
 	other, _ := createUserAndAgent(t, srv.dataStore, "other")
 	ctx := context.Background()

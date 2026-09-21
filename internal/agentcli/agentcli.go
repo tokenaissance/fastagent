@@ -12,11 +12,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"sort"
 	"strings"
 
 	"github.com/fastclaw-ai/fastclaw/internal/config"
+	"github.com/fastclaw-ai/fastclaw/internal/mcp/oauth"
 	"github.com/fastclaw-ai/fastclaw/internal/scope"
 	"github.com/fastclaw-ai/fastclaw/internal/store"
 	"github.com/fastclaw-ai/fastclaw/internal/users"
@@ -390,6 +392,21 @@ func Remove(ctx context.Context, st store.Store, name string) (*store.AgentRecor
 	}
 	if err := st.DeleteAgent(ctx, rec.ID); err != nil {
 		return nil, err
+	}
+	// The agent row is gone, so its stored MCP credentials have no reader
+	// left (every call site resolves the agent first). Drop them here too —
+	// this is the second agent-delete path, and a sweep that lives only in
+	// the HTTP handler would leave `fastclaw agents rm` leaking silently.
+	//
+	// Best-effort, same posture as the dashboard's delete
+	// (setup.forgetAgentCredentials): the deletion is what the operator
+	// asked for and it succeeded, so a failure here is reported as a
+	// warning rather than turned into an error that would claim the
+	// removal failed. OAuth off (Global() nil) means nothing was stored.
+	if b := oauth.Global(); b != nil {
+		if err := b.Forget.Agent(ctx, rec.UserID, rec.ID); err != nil {
+			slog.Warn("agent removed but its stored MCP credentials remain", "agent", rec.ID, "user", rec.UserID, "error", err)
+		}
 	}
 	return rec, nil
 }

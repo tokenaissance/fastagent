@@ -785,6 +785,11 @@ func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 	// so foreign callers stop resolving the now-deleted agent through
 	// EnsureAgent's lazy-attach path.
 	s.invalidateAgent(rec.ID)
+	// Credentials are swept after the row, never before: if this fails
+	// the leftover is unreachable (see forgetAgentCredentials), whereas
+	// sweeping first and failing the delete would destroy a valid
+	// authorization for an agent that still exists.
+	s.forgetAgentCredentials(r.Context(), rec.UserID, rec.ID)
 	jsonResponse(w, http.StatusOK, map[string]any{"ok": true})
 }
 

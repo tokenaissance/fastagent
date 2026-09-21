@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/fastclaw-ai/fastclaw/internal/mcp/oauth/domain"
@@ -63,6 +64,41 @@ func (s *DBTokenStore) Load(ctx context.Context, key string) (*domain.OAuthToken
 func (s *DBTokenStore) Delete(ctx context.Context, key string) error {
 	_, err := s.DB.ExecContext(ctx, "DELETE FROM mcp_oauth_tokens WHERE token_key = "+ph(s.Dialect, 1), key)
 	return err
+}
+
+// DeleteByAgent removes every credential row of one agent identity.
+func (s *DBTokenStore) DeleteByAgent(ctx context.Context, userID, agentID string) error {
+	return s.deleteKeyPrefix(ctx, domain.AgentKeyPrefix(userID, agentID))
+}
+
+// DeleteByUser removes every credential row of one user, across all
+// their agents.
+func (s *DBTokenStore) DeleteByUser(ctx context.Context, userID string) error {
+	return s.deleteKeyPrefix(ctx, domain.UserKeyPrefix(userID))
+}
+
+// deleteKeyPrefix deletes every row whose key starts with prefix. The
+// prefix carries PathEscaped IDs, and PathEscape leaves "_" alone (it is
+// unreserved) — a LIKE wildcard — so the literal is escaped and the
+// query pins ESCAPE '\' exactly as internal/store's scope sweeps do.
+//
+// An empty userID or agentID is harmless here: PathEscape("") is "" so
+// the pattern is "oauth//%" / "oauth/<user>//%", which no real key
+// matches. (The file store cannot rely on that — see DeleteByAgent
+// there.)
+func (s *DBTokenStore) deleteKeyPrefix(ctx context.Context, prefix string) error {
+	q := "DELETE FROM mcp_oauth_tokens WHERE token_key LIKE " + ph(s.Dialect, 1) + ` ESCAPE '\'`
+	_, err := s.DB.ExecContext(ctx, q, escapeLike(prefix)+"%")
+	return err
+}
+
+// escapeLike makes s literal inside a LIKE pattern (pair with
+// ESCAPE '\'). Twin of internal/store's escapeLike (database.go:4505):
+// the two cannot share one implementation because that one is
+// unexported and this adapter must not import the store package. Both
+// supported dialects (PostgreSQL, SQLite) honour ESCAPE '\'.
+func escapeLike(s string) string {
+	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
 }
 
 // DBPendingStore persists one-shot pending authorizations in the shared
