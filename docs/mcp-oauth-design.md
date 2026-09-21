@@ -349,7 +349,7 @@ mcpMgr := mcp.NewManager(rc.MCPServers, mcpOpts...) // 内部对每台 http clie
 | `/api/mcp/oauth/start` | POST | auth（user session） | 返回 `{authURL, state}` |
 | `/oauth/quandora/callback` | GET | **公开**（无 session） | 转发 code+state 到 `/api/mcp/oauth/callback`（admin key）→ 302 回 SPA |
 | `/api/mcp/oauth/callback` | POST | super_admin | 完成授权，返回重定向目标 |
-| `/api/mcp/oauth/status` | GET | auth | 已授权/未授权/过期（供 UI） |
+| `/api/mcp/oauth/status` | GET | auth | 已授权/未授权/过期（供 UI；cloud 侧唯一客户端已存在但**未接**，2026-09-21 登记，见 §8 末条） |
 | `/api/mcp/oauth/revoke` | POST | auth | 吊销 |
 | `/api/mcp/oauth/refresh` | POST | super_admin | 手动刷新（运维用） |
 
@@ -658,7 +658,7 @@ runOnce(msg)
 - [ ] 多用户多 Agent 凭证隔离
 - [ ] 静态 header MCP server 完全兼容（零行为变化）
 - [ ] 测试：domain 纯函数单测 + usecase 集成（fake 适配器）+ e2e（mock token endpoint）
-- [ ] 观测：`/api/mcp/oauth/status` 聚合展示；日志无敏感信息
+- [ ] 观测：`/api/mcp/oauth/status` 聚合展示；日志无敏感信息。**2026-09-21 登记**：该端点（单 server 状态）的 cloud 客户端 `useQueryMcpOAuthStatus` 自 2026-09-05 起零调用点，审计后**保留并在钩子上写明理由**——不是漏接线：它覆盖 `servers` 列表答不了的两件事（server 已从配置删除但凭证仍在；单台查询失败被 `continue` 静默丢行），且是本端点的唯一客户端。云指南记有完整裁决与**可反驳的删除条件**（整链删除，并先把 `TestMcpOAuthStartOwnershipAndFullFlow` 的见证改指向）：[tokenaissance-cloud › docs/fastagent/guides/auth/mcp-oauth-authorization-flow.md](https://github.com/tokenaissance/tokenaissance-cloud/blob/develop/docs/fastagent/guides/auth/mcp-oauth-authorization-flow.md) §7。要删除本端点，本行就是那个产品决策的入口。
 
 ---
 
