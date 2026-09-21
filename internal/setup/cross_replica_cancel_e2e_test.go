@@ -76,11 +76,13 @@ func TestCancelOnAnotherReplicaStopsTheRunningTurnE2E(t *testing.T) {
 		t.Fatalf("the stream carries the stop σ %d times, want exactly 1; stream=%q", got, stream)
 	}
 	// Stopping is a σ about the user's action, not about a budget: a cancelled
-	// turn must not spend another model round, and must not tell the UI that the
-	// iteration cap was reached (the class of false badge this line of work
-	// removes).
-	if n := prov.rounds.Load(); n != 1 {
-		t.Fatalf("%d model rounds after the stop request, want 1 (the turn kept spending); stream=%q", n, stream)
+	// turn must not spend another model round — counted as *every* consultation
+	// (`calls`), because the fall-through this guards against asks for no tool
+	// and so leaves the tool-round counter untouched — and must not tell the UI
+	// that the iteration cap was reached (the class of false badge this line of
+	// work removes).
+	if n := prov.calls.Load(); n != 1 {
+		t.Fatalf("%d model calls after the stop request, want 1 (the turn kept spending); stream=%q", n, stream)
 	}
 	if strings.Contains(stream, "iterationCapReached") {
 		t.Fatalf("a cancelled turn reported the iteration cap as reached; stream=%q", stream)
