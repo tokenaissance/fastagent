@@ -2075,6 +2075,23 @@ case must render *unknown* rather than either claim. E2E: drop the SSE mid-turn,
 send a second message, assert the UI reads "still running / queued" and the row
 does not claim "never returned".
 
+**The composer half (landed 2026-09-21).** Same lesson, one layer out: the rule
+was right and its delivery point was not. "While a turn runs, Enter interjects"
+was delivered by a sentence chosen from the coarse `canStop` flag and rendered
+only in the empty/hero composer — absent in the one variant where a turn can be
+running — and the handler that performs it (`handleSteer`) bailed on this tab's
+own stream flag. So a peer-held turn printed "Enter interjects" while Enter did
+nothing at all, and the only control that worked was Send, which queues. Both
+halves now read the fact through one rule each (`turnIsRunning`,
+`composerHintKey`); steering itself is session-scoped on the server
+(`POST /api/chat/steer` → `SteerWeb` → `PushSteerIfActive`, 200 for any caller
+while a turn runs, 409 otherwise), which is why the client-side gate was the
+defect rather than the transport. Witnesses: cloud
+`chat-composer-fact-hint.test.tsx`, `steer-from-another-view.test.tsx`,
+`turn-state.test.ts`, and the browser spec
+`e2e/tests/fastagent/app-chat-turn-fact-composer.spec.ts` (peer-held fact ⇒ Stop
+shown, the "elsewhere" sentence rendered, Enter reaching `/chat/steer`).
+
 **Sequencing (all four, in order).** A1 is the root and the long pole. A2 and A4
 are wording-first changes that can ship independently and immediately, and they
 shrink the blast radius while A1 is being built. A3 lands last, and only if a
