@@ -45,6 +45,16 @@ type TokenStore interface {
 	Save(ctx context.Context, key string, t *domain.OAuthTokens) error
 	Load(ctx context.Context, key string) (*domain.OAuthTokens, error)
 	Delete(ctx context.Context, key string) error
+	// DeleteByAgent removes every credential of one agent identity —
+	// every server it was authorized for. Needed because deleting an
+	// agent row takes away the only reader its credentials had (every
+	// call site resolves the agent first), so without this the rows
+	// outlive any way to reach or name them.
+	DeleteByAgent(ctx context.Context, userID, agentID string) error
+	// DeleteByUser removes every credential of a user, across all their
+	// agents. Same rationale as DeleteByAgent, one scope wider: it is
+	// what a user deletion owes the agents it cascades to.
+	DeleteByUser(ctx context.Context, userID string) error
 }
 
 // PendingAuthStore holds one-shot pending authorizations; Take consumes

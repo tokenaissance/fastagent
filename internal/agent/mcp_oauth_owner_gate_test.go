@@ -45,6 +45,18 @@ func (g *gateTokens) Delete(_ context.Context, _ string) error {
 	return nil
 }
 
+// One slot, one identity: both sweeps empty it, matching what the real
+// stores do for the single credential this fake holds.
+func (g *gateTokens) DeleteByAgent(_ context.Context, _, _ string) error {
+	g.t = nil
+	return nil
+}
+
+func (g *gateTokens) DeleteByUser(_ context.Context, _ string) error {
+	g.t = nil
+	return nil
+}
+
 func TestMCPOAuthOwnerGateE2E(t *testing.T) {
 	var serverCalls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

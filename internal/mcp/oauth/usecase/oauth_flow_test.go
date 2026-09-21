@@ -3,6 +3,7 @@ package usecase
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -92,6 +93,28 @@ func (f *fakeTokens) Delete(_ context.Context, key string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	delete(f.m, key)
+	return nil
+}
+
+// The prefix deletes mirror the SQL/file adapters (same domain key
+// prefixes), so a use case that forgets an identity behaves here exactly
+// as it does against a real store.
+func (f *fakeTokens) DeleteByAgent(_ context.Context, userID, agentID string) error {
+	return f.deletePrefix(domain.AgentKeyPrefix(userID, agentID))
+}
+
+func (f *fakeTokens) DeleteByUser(_ context.Context, userID string) error {
+	return f.deletePrefix(domain.UserKeyPrefix(userID))
+}
+
+func (f *fakeTokens) deletePrefix(prefix string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for k := range f.m {
+		if strings.HasPrefix(k, prefix) {
+			delete(f.m, k)
+		}
+	}
 	return nil
 }
 

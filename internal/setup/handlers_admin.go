@@ -498,6 +498,11 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
+	// The store cascaded through the user's agents; their MCP
+	// credentials live in the OAuth-owned table, which the store
+	// deliberately does not know about, so the sweep happens here —
+	// after the delete, and best-effort (see forgetUserCredentials).
+	s.forgetUserCredentials(r.Context(), id)
 	jsonResponse(w, http.StatusOK, map[string]any{"ok": true})
 }
 

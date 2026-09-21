@@ -67,6 +67,7 @@ type Bootstrap struct {
 	Provider *usecase.TokenProvider
 	Revoke   *usecase.RevokeToken
 	Status   *usecase.Status
+	Forget   *usecase.ForgetIdentity
 }
 
 var (
@@ -130,6 +131,7 @@ func Init(secret string, opts Options) (*Bootstrap, error) {
 	b.Provider = &usecase.TokenProvider{Tokens: b.Tokens, Refresh: b.Refresh}
 	b.Revoke = &usecase.RevokeToken{Meta: b.Meta, Regs: b.Regs, Tokens: b.Tokens, Exchange: b.Exchange}
 	b.Status = &usecase.Status{Tokens: b.Tokens}
+	b.Forget = &usecase.ForgetIdentity{Tokens: b.Tokens}
 
 	globalMu.Lock()
 	global = b
