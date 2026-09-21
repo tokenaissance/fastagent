@@ -2,6 +2,7 @@ package skills
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 )
 
@@ -102,6 +103,8 @@ type DiscoveredSkill struct {
 	Files       []CatalogFile
 	// BaseDirFiles names the skill's files whose text carries the literal
 	// `{baseDir}`. Populated by the scan, which is the only place that has the bytes.
+	// It is a measurement, not a trigger: the warning below fires on the manifest
+	// carrying the token, and reports every carrier as evidence (see BuildCatalog).
 	BaseDirFiles []string
 }
 
@@ -174,12 +177,21 @@ func BuildCatalog(discovered []DiscoveredSkill) Catalog {
 		// Published, but part of its text will not mean what the author wrote: the
 		// runtime substitutes {baseDir} for the agent's own use, and this endpoint
 		// cannot (the digest covers the bytes as they are).
-		if len(skill.BaseDirFiles) > 0 {
+		//
+		// The trigger is the manifest, not "any file that carries the token". What this
+		// warning states is a difference between two readers, and that difference exists
+		// only where the substitution happens — the manifest (see skillManifestName): in a
+		// bundled script the agent reads the literal token too, so a warning there would
+		// assert a difference nobody can observe, on two surfaces at once (the dashboard
+		// and the MCP answer). The file list below is the measurement, not the trigger: it
+		// names every carrier, which is what keeps "in every file listed" checkable.
+		if slices.Contains(skill.BaseDirFiles, skillManifestName) {
 			catalog.Warnings = append(catalog.Warnings, CatalogWarning{
-				Path:   skill.Path,
-				Code:   CodeBaseDirToken,
-				Reason: "{baseDir} is replaced when this agent loads the skill, but not over MCP: a connected client sees the literal text",
-				Files:  append([]string(nil), skill.BaseDirFiles...),
+				Path: skill.Path,
+				Code: CodeBaseDirToken,
+				Reason: "{baseDir} is substituted only inside " + skillManifestName +
+					", and only for this agent: a client connected over MCP reads the literal token in every file listed",
+				Files: append([]string(nil), skill.BaseDirFiles...),
 			})
 		}
 
