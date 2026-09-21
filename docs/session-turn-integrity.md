@@ -2051,16 +2051,18 @@ already that fact, so expose it read-only:
 |---|---|---|
 | "Interrupted" assertion | **landed 2026-09-21** — the rule is `src/features/chat/turn-state.ts` (`toolPhase`, `toolRowLabelKey`), read by the row (`message-list.tsx:61`, `:120`, call site `:256-265`), the group header (`:217-219`) and the bundle (`:335-337`) | three states: **interrupted** only when the fact says nobody holds the session (or no fact + the bubble stopped); **unknown** when the fact is unusable; a peer-held turn says *running elsewhere*. The row previously re-derived this from `msg.streaming` alone and was never passed the fact — so the requirement was unmet while the old spec (which read only the *header*) stayed green; the anchors once cited here (`:182`/`:96`) are superseded |
 | progress binding | **landed 2026-09-21** — `message-list.tsx` (`heartbeatOwnerId` in `ToolCallGroup`; the row keeps `tool_queued` for non-owners) | the heartbeat names its call (`id`, `tools.ToolCallID` → register row 42) and the row it names owns it; with no id the old rule stands (the first unresolved call). A name matching no live row in the group draws nothing rather than a counter on another bubble's row |
-| Send while a turn runs | `src/features/chat/components/owner/chat-composer.tsx:158,162` (Send is enabled whenever local `streaming` is false) | enable/disable from `turnActive`, not from the local socket; a send during a live turn should say it will queue |
-| Stop | `src/features/chat/use-stream-pipeline.ts:137-140` (`handleStop` aborts the fetch only) | either call `POST /api/chat/cancel` and treat `already_started` as "detached, still running", or relabel the control to *detach* and say so |
-| strings | `src/config/locale/messages/en/fastagent/chat.json:137` `tool_interrupted`, `:138` `tool_queued` | reword the first, keep the second |
+| Send while a turn runs | **landed 2026-09-21, in a different shape than this cell planned** — `chat-composer.tsx` (the Send button reads the local flag), `turn-state.ts` (`composerHintKey`) | Send stays enabled while a peer holds the turn and the **sentence** carries the truth (`composer_steer_hint` / `composer_steer_hint_elsewhere`), because by then Send is the only control that does anything: it POSTs `chat/stream` and the server parks the turn (`queued`, `queued_chat_e2e_test.go`). Disabling Send from the fact was the plan; it would have removed the one working control in exactly the case the mechanism exists for |
+| Stop | **landed 2026-09-21** — `use-stream-pipeline.ts` (`handleStopTurn` = `handleStop` + `cancelRunningTurn(agentId, sessionId)`, no `turnId`), wired as `onStop` in `owner-view.tsx` | the first option shipped: the control really stops the turn server-side. The two entry points stay separate on purpose — `handleStop` alone is also used when switching sessions, and cancelling there would stop the **new** session turn. `already_started` is retired; the cancel contract reads its body (`{canceled, wasRunning, isRunning}`) |
+| strings | **no reword, on purpose** — `src/config/locale/messages/en/fastagent/chat.json` (`tool_interrupted`, `tool_queued`) | this cell planned to reword `tool_interrupted`; the fix that landed makes the **rule** right instead (`toolRowLabelKey` says *interrupted* only when the fact proves it), so the sentence is true wherever it prints now. `tool_queued` keeps its words and sharpens its meaning: "not the row the heartbeat named" (row 42) |
 
-The reference webui (`fastagent/web/src/components/chat-screen.tsx`) makes the
-same inference from its own `streaming` flag and has the same wording; it follows
-the same change, or the divergence gets written down as deliberate (the cloud
-client is the one the incident ran on).
+The reference webui (`fastagent/web/src/components/chat-screen.tsx`) still makes
+the same inference from its own `streaming` flag and has no hint of this kind
+(checked 2026-09-21: `composerHintKey` has no counterpart there). The cloud client
+is the one that landed the change; the webui did not follow, so this divergence is
+recorded as **open**, not as deliberate — it talks to the same backend, so it
+could take the same facts, and whether it does is a product call.
 
-#### A4.3 Documentation to update when this lands
+#### A4.3 The documentation that landed with it (cloud design 09)
 
 [tokenaissance-cloud › docs/fastagent/design/09-delegate-task-design.md](https://github.com/tokenaissance/tokenaissance-cloud/blob/develop/docs/fastagent/design/09-delegate-task-design.md) defines
 the panel's four states (queued / running / running-without-heartbeat /
