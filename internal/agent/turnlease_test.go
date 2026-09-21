@@ -348,3 +348,71 @@ func TestCancelledTurnStopsAndSignalsOnce(t *testing.T) {
 		t.Fatalf("provider rounds = %d, want 1: round 2 started after the cancel", rounds)
 	}
 }
+
+// The streaming endpoint is a second turn implementation with its own copy of
+// the boundary decision (HandleMessageStream, reached in production only from
+// the OpenAI-compatible /v1 mount — internal/api/openai.go). It must mirror the
+// non-streaming loop: the user's stop ends the turn there, says so exactly
+// once, and — because the streaming loop's own fall-through is the forced final
+// delivery — must NOT spend one more ChatStream and hand the caller a reply
+// stamped iterationCapReached.
+//
+// Falsification: disable the `lease.Cancelled(ctx)` check in the streaming loop
+// (`internal/agent/loop.go`, the copy inside HandleMessageStream) and this fails
+// at "streamed content = ... want \"\"": the turn falls into
+// streamFinalDeliveryAfterCap and returns the cap-sized reply. Disabling the
+// *non-streaming* guard (TestCancelledTurnStopsAndSignalsOnce's site) leaves
+// this green — that is how the two copies are told apart, and why each needs
+// its own witness.
+func TestCancelledTurnStreamsNothingAndSignalsOnce(t *testing.T) {
+	a, _ := newGateAgent(t)
+	lease := &fakeLease{}
+	a.sessionLease = lease
+	prov := &toolRoundProvider{toolName: "slow_tool"}
+	a.provider = prov
+	started, release := blockingTool(t, a, "slow_tool")
+
+	events := make(chan ChatEvent, 16)
+	ctx := ContextWithChatEvents(context.Background(), events)
+	msg := bus.InboundMessage{Channel: "web", UserID: "u_owner", ChatID: "chat-stream-cancel", Text: "hi"}
+
+	readerCh := make(chan *provider.StreamReader, 1)
+	go func() { readerCh <- a.HandleMessageStream(ctx, msg) }()
+
+	<-started             // round 1 is inside its tool
+	lease.setCancel(true) // what store.RequestSessionCancel stamps for a peer
+	release()
+	reader := <-readerCh
+
+	var content string
+	for {
+		chunk, ok := reader.Next()
+		if !ok {
+			break
+		}
+		content += chunk.Content
+	}
+	if content != "" {
+		t.Fatalf("streamed content = %q, want %q: the forced final delivery ran after the user's stop", content, "")
+	}
+
+	close(events)
+	var notices []string
+	for evt := range events {
+		if evt.Type != lostNoticeEvent {
+			continue
+		}
+		if m, _ := evt.Data["message"].(string); m != "" {
+			notices = append(notices, m)
+		}
+	}
+	if len(notices) != 1 {
+		t.Fatalf("notices = %v, want exactly one", notices)
+	}
+	if notices[0] != turnCancelledNotice {
+		t.Fatalf("notice = %q, want the cancelled wording", notices[0])
+	}
+	if rounds := prov.rounds.Load(); rounds != 1 {
+		t.Fatalf("provider rounds = %d, want 1: a round started after the cancel", rounds)
+	}
+}

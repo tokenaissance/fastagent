@@ -23,9 +23,16 @@ import (
 type toolScriptProvider struct {
 	toolName string
 	rounds   atomic.Int64
+	// calls counts *every* consultation, not just the rounds that ask for a
+	// tool. `rounds` alone cannot see "one more model call": the forced final
+	// delivery asks for no tool, so it leaves `rounds` where it was — which is
+	// what made the cancel test's "must not spend another round" check a belt
+	// no falsification could redden.
+	calls atomic.Int64
 }
 
 func (p *toolScriptProvider) response(msgs []provider.Message) *provider.Response {
+	p.calls.Add(1)
 	for _, m := range msgs {
 		if m.Role == "tool" {
 			return &provider.Response{Content: "done"}
