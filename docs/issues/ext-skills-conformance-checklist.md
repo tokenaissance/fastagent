@@ -44,9 +44,9 @@
 | # | 约定 | 出处 | 验收 |
 | :-- | :--- | :--- | :--- |
 | D1 | **诊断必须发声**：被拒发布的 skill（无名、超限、名字冲突）要出现在客户端能读到的应答里 | 出口设计 §6.2 的 O6 | 构造三类坏 fixture，确认有诊断 |
-| D1a | 诊断的承载位置：`ListSkillsResult` 按规范只有 `skills`，所以诊断走 `result._meta["com.tokenaissance/skills/unpublishable"]`（规范：附加信息用 `_meta` + 自己的反域名前缀） | 本轮实测修正（原方案放在顶层成员上） | ✅ 实测：`no-frontmatter` / `orphan-dir` 两条带原因出现在 `_meta` 里，顶层成员仍只有规范定义的那四个 |
+| D1a | 诊断的承载位置：`ListSkillsResult` 按规范只有 `skills`，所以诊断走 `result._meta["com.tokenaissance/skills/unpublishable"]`（规范：附加信息用 `_meta` + 自己的反域名前缀）；**每条拒绝连同稳定 `code` 一起送**（pod 的 `no_name` / `name_mismatch` / `no_files` / `shadowed_by_layer`，出口自己那几条 `egress_` 前缀），句子仍是主载荷 | 本轮实测修正（原方案放在顶层成员上） | ✅ 实测：`no-frontmatter` / `orphan-dir` 两条带原因出现在 `_meta` 里，顶层成员仍只有规范定义的那四个；2026-09-21 起 code 也随行（cloud 侧投递点见证 `skills-list-chain.test.ts`） |
 | D2 | **工具兜底层先于扩展**：`list_skills` / `read_skill` 对协商到 2025-xx 的客户端可用 | 决策 D10（实测两个客户端只调 `tools/list`） | Codex/Claude Code 真机调用 | ✅ 已实现并实测（`tools/list` 两个工具、`list_skills` 文本 + 拒绝原因、`read_skill` 字节与磁盘逐字节一致、未知工具 `-32602`） |
-| D3 | **只发原始字节**：不做 `{baseDir}` 替换；依赖它的 skill 进诊断 | 出口设计 §4 | 含 `{baseDir}` 的 fixture |
+| D3 | **只发原始字节**：不做 `{baseDir}` 替换；依赖它的 skill **照发**但必须进诊断，且两个消费面都要——dashboard 面板与 MCP 客户端的应答（`_meta["com.tokenaissance/skills/warnings"]` + `list_skills` 文本），因为读到字面量的那个读者看不见面板 | 出口设计 §4 | 含 `{baseDir}` 的 fixture；2026-09-21：客户端面此前整段缺失（cloud 适配器把 `warnings` 与 `code` 一起丢了），已修 + 反证 |
 | D4 | **平台公共 skill 默认包含**，`Gated` 照发（`requires` 随 frontmatter 透传） | 决策 D2 / D3 | listing 里能看到这两类 |
 
 ## E. 验收方式汇总

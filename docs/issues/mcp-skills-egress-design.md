@@ -117,7 +117,9 @@ Authorization: Bearer <该用户已有的 apikey>
 2. **`requires` 原样透传**：它本来就在 frontmatter 里，外部 host 会忽略不认识的键，不影响合规。
 3. **gating 不构成"发不出去"**：真正发不出去的是 frontmatter 非法、超限、名字冲突、名字与目录不一致 —— 这些必须进诊断（§6 的 O6）。
 
-**一个真实的兼容性坑（要写进文档）**：`loadSkillContent` 会做 `{baseDir}` 替换，而 MCP 出口必须发原始字节（digest 要能对上）。所以依赖 `{baseDir}` 的 skill 在外部 host 里会看到字面量 `{baseDir}`。建议在 dashboard 的"接入"区块把"含 `{baseDir}` 的 skill"列为诊断项，让作者改成相对路径。
+**一个真实的兼容性坑**：`loadSkillContent` 会做 `{baseDir}` 替换，而 MCP 出口必须发原始字节（digest 要能对上）。所以依赖 `{baseDir}` 的 skill 在外部 host 里会看到字面量 `{baseDir}`。
+
+**它现在在哪儿发声（2026-09-21）**：作为**警告**而不是拒绝——pod 的 `Catalog.Warnings`，码 `base_dir_token`，带上携带该 token 的文件名。拒绝会打断一直可用的一半（agent 自己加载这个 skill 时替换是生效的），所以正确的处置是"照发 + 说清楚"（D3）。两个消费面都拿到了它：dashboard 面板（按码本地化）与 MCP 客户端的应答（`_meta["com.tokenaissance/skills/warnings"]` + `list_skills` 文本）。**客户端那一面是必须的**：读到字面量的就是它，而面板它看不见——这一面此前整段缺失（cloud 的适配器把 `warnings` 连同拒绝的 `code` 一起丢了），已修。
 
 ## 5. D4：命名与 URI，按协议来
 
