@@ -105,3 +105,61 @@ func TestBuildCatalogIsStableAndSortsFiles(t *testing.T) {
 		t.Fatalf("same input produced different payloads:\n%s\n%s", a, b)
 	}
 }
+
+// The sorted-by-path promise covers every list, not only the two that arrived with
+// it. Warnings are built in scan order, and scan order is (layer, then lexical
+// within a layer): with more than one layer that is not path order, so two builds
+// over the same disk could hand a reader different orders.
+func TestBuildCatalogSortsWarningsLikeItsOtherLists(t *testing.T) {
+	catalog := BuildCatalog([]DiscoveredSkill{
+		{Path: "zeta", DirName: "zeta", Frontmatter: map[string]any{"name": "zeta"},
+			Files: []CatalogFile{file("SKILL.md", "z")}, BaseDirFiles: []string{"SKILL.md"}},
+		{Path: "alpha", DirName: "alpha", Frontmatter: map[string]any{"name": "alpha"},
+			Files: []CatalogFile{file("SKILL.md", "a")}, BaseDirFiles: []string{"SKILL.md"}},
+	})
+
+	if len(catalog.Warnings) != 2 {
+		t.Fatalf("warnings = %+v; want two", catalog.Warnings)
+	}
+	if catalog.Warnings[0].Path != "alpha" || catalog.Warnings[1].Path != "zeta" {
+		t.Fatalf("warning order = %v; want alpha,zeta - the promise the skills and refusals lists already keep",
+			[]string{catalog.Warnings[0].Path, catalog.Warnings[1].Path})
+	}
+}
+
+// A copy that lost the layer precedence is named by the path it would have been
+// served under: the same string the published entry carries. The leaf name is not
+// that string, and two nested skills may share one (`a/refunds`, `b/refunds`), so
+// the name alone cannot say which copy the reader is missing.
+func TestBuildCatalogReportsAShadowedNestedCopyByItsPath(t *testing.T) {
+	low := DiscoveredSkill{Layer: "managed", Path: "acme/refunds", DirName: "refunds",
+		Frontmatter: map[string]any{"name": "refunds"}, Files: []CatalogFile{file("SKILL.md", "old")}}
+	high := DiscoveredSkill{Layer: "agent", Path: "acme/refunds", DirName: "refunds",
+		Frontmatter: map[string]any{"name": "refunds"}, Files: []CatalogFile{file("SKILL.md", "new")}}
+
+	catalog := BuildCatalog([]DiscoveredSkill{low, high})
+	if len(catalog.Skills) != 1 || catalog.Skills[0].Path != "acme/refunds" {
+		t.Fatalf("skills = %+v; want the winner at acme/refunds", catalog.Skills)
+	}
+	if len(catalog.Unpublishable) != 1 {
+		t.Fatalf("unpublishable = %+v; want the shadowed copy reported", catalog.Unpublishable)
+	}
+	if got := catalog.Unpublishable[0].Path; got != "acme/refunds" {
+		t.Fatalf("shadowed copy reported as %q; want the path the entry would have been served under", got)
+	}
+}
+
+// The fallback exists so the diagnostic is never empty for a caller that built the
+// value by hand with no path: a blank path in a "why is my skill missing" message
+// is worse than the name.
+func TestBuildCatalogFallsBackToTheNameWhenNoPathWasSupplied(t *testing.T) {
+	low := DiscoveredSkill{Layer: "managed", Path: "", DirName: "refunds",
+		Frontmatter: map[string]any{"name": "refunds"}, Files: []CatalogFile{file("SKILL.md", "old")}}
+	high := DiscoveredSkill{Layer: "agent", Path: "refunds", DirName: "refunds",
+		Frontmatter: map[string]any{"name": "refunds"}, Files: []CatalogFile{file("SKILL.md", "new")}}
+
+	catalog := BuildCatalog([]DiscoveredSkill{low, high})
+	if len(catalog.Unpublishable) != 1 || catalog.Unpublishable[0].Path != "refunds" {
+		t.Fatalf("unpublishable = %+v; want the name as the fallback", catalog.Unpublishable)
+	}
+}

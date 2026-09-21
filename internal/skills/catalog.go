@@ -110,7 +110,10 @@ type DiscoveredSkill struct {
 // be served under either name without lying to the host.
 //
 // It sorts by path so two calls over the same disk produce byte-identical answers;
-// a host that sees the order shift may read it as a content change.
+// a host that sees the order shift may read it as a content change. That promise is
+// about all three lists, including the warnings: they are built in scan order, and
+// scan order is (layer, then lexical within a layer), which is not path order once
+// there is more than one layer.
 func BuildCatalog(discovered []DiscoveredSkill) Catalog {
 	catalog := Catalog{Skills: []CatalogSkill{}, Unpublishable: []CatalogProblem{}, Warnings: []CatalogWarning{}}
 
@@ -131,7 +134,12 @@ func BuildCatalog(discovered []DiscoveredSkill) Catalog {
 		name, _ := skill.Frontmatter["name"].(string)
 		if name != "" && name == skill.DirName && winner[name] != i {
 			catalog.Unpublishable = append(catalog.Unpublishable, CatalogProblem{
-				Path:   name,
+				// The path, not the name: it is the skill's identity from the layer to the
+				// wire, the same string the published entry carries — and for a nested skill
+				// the leaf name is not unique (`a/refunds` and `b/refunds` are two skills).
+				// The name remains the fallback for a caller that supplied no path, so the
+				// diagnostic is never empty.
+				Path:   shadowedPath(skill, name),
 				Reason: "overridden by a higher-precedence layer",
 				Code:   CodeShadowedByLayer,
 			})
@@ -189,5 +197,16 @@ func BuildCatalog(discovered []DiscoveredSkill) Catalog {
 
 	sort.Slice(catalog.Skills, func(i, j int) bool { return catalog.Skills[i].Path < catalog.Skills[j].Path })
 	sort.Slice(catalog.Unpublishable, func(i, j int) bool { return catalog.Unpublishable[i].Path < catalog.Unpublishable[j].Path })
+	sort.Slice(catalog.Warnings, func(i, j int) bool { return catalog.Warnings[i].Path < catalog.Warnings[j].Path })
 	return catalog
+}
+
+// shadowedPath names a copy that lost the layer precedence. The path is what the
+// entry would have been served under, so it is what a reader can look for in the
+// list; the declared name is only a fallback for input that carries no path.
+func shadowedPath(skill DiscoveredSkill, name string) string {
+	if skill.Path != "" {
+		return skill.Path
+	}
+	return name
 }
