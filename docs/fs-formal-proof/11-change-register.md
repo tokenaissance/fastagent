@@ -415,6 +415,17 @@ Apart from those six, §11.2's whole-file assignment and §11.3's function-level
 > they belonged to — and its guess ("the first `delegate_task` with no result yet") is wrong for every call
 > but the first, because a round's tool results are all emitted after the whole round returns. Every
 > heartbeat now names its call, and the client draws it only on the row it names.
+>
+> **Live-E2B re-run (2026-09-22)**: the whole `TestE2BLive*` set against real E2B
+> sandboxes with the cluster key (`FASTAGENT_E2B_LIVE=1`,
+> `FASTAGENT_E2B_TEMPLATE=fastclaw-sandbox`) — **12/12 PASS, nothing skipped**
+> (`./internal/sandbox` 295 s: repro, stamp, loose scope, refused sandbox edit,
+> write-through, the panel-delete pair *both* ways, sibling container, sync reads
+> no bodies, unhydrated handoff; `./internal/agent/tools` 95 s: the tool-path
+> delete, one-path-one-key, one tree per project session). The two halves of that
+> delete pair are the point: "only the store half ⇒ the delete is undone by the
+> next sync" and "store + live sandbox half ⇒ it sticks" are two tests, not one
+> claim with a footnote.
 
 | # | Change | Formal (duty) | Code anchor | Planned UT (with falsification) | Live e2e | Shipped |
 |---|--------|---------------|-------------|---------------------------------|----------|---------|
