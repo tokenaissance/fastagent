@@ -146,13 +146,18 @@ F3 投递（定义 08 §2.2）
 | **O3** 取走时机 | 无违反实例；**G13 是它的正面样本**（pull σ：判据可重算，消费侧下一次读取就是投递点） | `TestBashOutputTool_DrainsTailOnExit`、`TestSandboxJobOutputReturnsDeltaThenStatus` |
 | **O4** 不丢 | ~~G3~~、~~G9~~、~~G20~~ | `TestEvictSignalOutlivesThePoolThatProducedIt`（另一个 pool 实例投递）、`TestReplacedSandboxNoteRidesTheCallThatFoundIt`、`TestRunReceiptStampSurvivesAReload` |
 | **O5** 不扰 | —（迄今没有"无变化也说话"的实例） | `TestExecIsQuietWhenNothingChanged`、`TestWriteFileStaysQuietOnASharedBackend` |
+| **O7** 已投递但含义变了的事实 | 2026-09-21 出口审计（无 G 编号：记在 [11](./11-change-register.md) 第 38 行） | `skills-list-chain.test.ts`（投递点）+ `catalog.test.ts`、`skills-service.test.ts`、`policy.test.ts`、`tools-service.test.ts` |
 | **F1** 前置条件 / 零迁移 | ~~事故 D~~ | `TestSyncContract_StoreEditIsNotOverwritten`、`SecondReconcileWritesNothing`、`DomainUnchanged`、`TestE2BLive*` |
 | **F1** 边界（inside / outside） | **G4**（删除不可逆、无快照） | —（缺 witness，本身就是缺口的一部分） |
+
+> O6 与 D₃ 是在这张表写完之后才在 [08 §10.3 / §10.2](./08-state-observability-principle.md) 里
+> 升格为义务的，本表还没有它们的行；它们的见证在产生它们的 cloud 那几轮里。O7 是连行一起加的，
+> 免得这个索引继续漂移。
 
 ### 5.1 witness 有两半（2026-09-21，由 cloud 侧再审计带回）
 
 > **这一条只动上表的第三列：不加义务、不加缺口族、不产生任何设计工作。**它规定的是"什么才算钉住"
-> ——**验证侧**的规则，不是关于系统的陈述。F1–F3 与 O1–O6 没有任何一条改变含义。
+> ——**验证侧**的规则，不是关于系统的陈述。F1–F3 与 O1–O7 没有任何一条改变含义。
 
 那一列今天只能回答一个问题：**规则被测了吗？** 但"产生事实"和"取走事实"是两个不同的事件，
 一条义务通常有多条投递链（渲染、store、wire、另一个视图）。于是存在一种状态：一切都绿，
@@ -163,7 +168,7 @@ F3 投递（定义 08 §2.2）
 > **一条义务算落地 ⇔ 存在规则见证，且每一个投递点各有见证；反证必须能打红投递点那条测试**
 > ——只打红规则见证，对该投递点不构成任何证据。
 
-适用范围（否则它会退化成"多写测试"的口号）：只在**把事实送出去的义务**上要求（O1–O6、D₃ 族）。
+适用范围（否则它会退化成"多写测试"的口号）：只在**把事实送出去的义务**上要求（O1–O7、D₃ 族）。
 线上形状 / 字段拼写这类契约（C 族）没有独立的投递点——**规则见证就是投递点见证**。
 
 **已退役的失败形状（本轮实例）**：cloud 的 `src/features/chat/turn-state.ts:143` 的 `toolRowLabelKey`

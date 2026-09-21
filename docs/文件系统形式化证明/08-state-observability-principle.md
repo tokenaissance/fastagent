@@ -544,3 +544,33 @@ C2 的根治手段是**捕获式契约测试**（从活体服务端抓一次载�
 | 跨标签页的回合结束 | **非缺陷**——hub 按 (user, agent, session) 发布，且事件先落 `session_events` 供重连回放 | `internal/agent/events.go:72-86`（`AppendSessionEvent` → `hub.Publish(userID, agentID, sessionKey, …)`） |
 
 > 记录这条"非缺陷"的理由：**方法的价值不只在找错，也在于避免把非缺陷记成缺陷**——误报会把注意力从真问题上引开。
+
+### 10.7 O7 —— 事实留下了、但含义变了，也必须发声
+
+O6 说的是**消失**的事实要与出现的事实同等可见。O7 是它的兄弟，而 O6 并不覆盖它：这里什么都没
+消失。我们把 δ 交了出去、客户端也取走了，但它读到的不是作者写下的意思。"缺省不可见"不是这里的
+缺口，所以一条关于"缺省"的义务在这个情形上永远不会触发——这正是它一路静默、穿过一轮明明正对着
+它看的审计的原因。
+
+判据：
+
+> **当一个 δ 以与其作者所写不同的含义被投递时，这个差异必须在每一个"差异可见"的面上被说出来**
+> ——而不只是那个恰好叫 dashboard 的面上。
+
+实测实例（cloud 再审计，2026-09-21）：文本里带 `{baseDir}` 的 skill。运行时在**本 agent** 加载
+这个 skill 时会替换掉该 token（`internal/agent/skills.go:583`），而 MCP 出口做不到，因为 entry
+的 digest 覆盖的就是原始字节。于是这个 skill 被**照发**（有意为之——拒绝它会打断一直可用的那一
+半），连过来的客户端读到字面量。pod 把它作为 warning 报出来（`Catalog.Warnings`，码
+`base_dir_token`，带上携带该 token 的文件名），dashboard 面板也渲染了它。而 MCP 那一面——读者
+真正撞见字面量的那一面——把它连同拒绝的稳定 code 一起丢在了 cloud 的适配器里：两条事实到达后一
+帧就没了，而且是在任何消费者运行之前。
+
+这条义务给 §5.1 那条规则加的只有一个词：**每一个**。有多个消费者的事实，需要**按消费者**各有
+投递点见证——生产者那侧的见证、以及**另一个**消费者的见证，对这一个消费者的 wire 和渲染都不构成
+证据。这里退役的失败形状正是如此：pod 的测试证明它在发 `code` 与 `warnings`，面板的测试证明它会
+渲染，而在出口里 `grep warnings` 是**零命中**，整套测试全绿。
+
+见证：cloud `skills-list-chain.test.ts`（投递点：pod 应答 → 适配器 → 用例 → `skills/list` 结果的
+`_meta`），加上 `catalog.test.ts`、`skills-service.test.ts`、`policy.test.ts`、
+`tools-service.test.ts` 的规则见证。已真反证：还原适配器那段 `{path, reason}` 重建 → 2 条红；
+返回空 warnings → 2 条红；去掉 `_meta` 那个键 → 3 条红。

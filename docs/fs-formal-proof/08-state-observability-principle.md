@@ -606,3 +606,39 @@ C1's root fix is a **shared type** (two exits, one struct ⇒ shape drift fails 
 | a turn ending in another tab | **not a defect** — the hub publishes per (user, agent, session) and events land in `session_events` first for replay on reconnect | `internal/agent/events.go:72-86` (`AppendSessionEvent` → `hub.Publish(userID, agentID, sessionKey, …)`) |
 
 > Why record a non-defect: **the method's value is not only finding bugs but also refusing to book non-bugs as bugs** — a false positive pulls attention away from the real ones.
+
+### 10.7 O7 — a fact that survives but changes meaning must also speak
+
+O6 says a **disappearing** fact must be as visible as an arriving one. O7 is its sibling, and O6
+does not cover it: here nothing disappears. We hand the δ over, the client takes it, and what it
+reads is not what the author wrote. "Absence is invisible" is not the gap, so an obligation about
+absences never fires on this case — which is why the case sat there, silently, through a round that
+was looking straight at it.
+
+The criterion:
+
+> **When a δ is delivered in a form whose meaning differs from the one it was authored in, the
+> difference has to be stated on every surface where the difference is visible** — not only on the
+> surface that happens to be a dashboard.
+
+Measured instance (the cloud re-audit, 2026-09-21): a skill whose text carries `{baseDir}`. The
+runtime substitutes that token when *this* agent loads the skill (`internal/agent/skills.go:583`),
+and the MCP egress cannot, because the entry's digest covers the bytes as they are. So the skill is
+published — deliberately, since refusing it would break the half that always worked — and a
+connected client reads the literal token. The pod reports that as a warning
+(`Catalog.Warnings`, code `base_dir_token`, with the files that carry the token) and the dashboard
+panel renders it. The MCP surface — the one where a reader actually meets the literal token —
+dropped it, together with the refusal's stable code, inside the cloud adapter: two facts lost one
+frame after arrival, before any consumer ran.
+
+What this obligation adds to §5.1's rule is one word: **every**. A fact with two consumers needs a
+delivery-point witness **per consumer** — the producer's witness and the *other* consumer's witness
+are evidence about neither this consumer's wire nor its render. The retired failure shape here is
+exactly that: the pod's tests proved it sends `code` and `warnings`, the panel's tests proved it
+renders them, `grep warnings` inside the egress returned **zero hits**, and the suite was green.
+
+Witnesses: cloud `skills-list-chain.test.ts` (the delivery point: pod answer → adapter → use case →
+the `skills/list` result's `_meta`), plus the rule witnesses in `catalog.test.ts`,
+`skills-service.test.ts`, `policy.test.ts` and `tools-service.test.ts`. Falsified for real:
+restoring the adapter's `{path, reason}` rebuild reddens 2 tests, returning an empty warnings list
+reddens 2, and dropping the `_meta` key reddens 3.

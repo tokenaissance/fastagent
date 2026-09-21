@@ -175,7 +175,7 @@ skillName(dirName, frontmatter) -> (name string, err error)
 
 **一句话**：末段永远等于 frontmatter `name`；不一致在入口治理，出口只做忠实发布。更彻底的做法（另开一张单）是把 `SkillsLoader` 的键也统一到 frontmatter name，让"身份"在整个系统里只有一个定义 —— 这正是你们形式化文档里"映射没有单一源"的同族问题。
 
-## 6. 形式化：F1 / F2 / F3 与新增的 O6
+## 6. 形式化：F1 / F2 / F3 与新增的 O6 / O7
 
 ### 6.1 F1 —— 前置条件与零迁移
 
@@ -197,9 +197,12 @@ READ(scope, uri) 的前置条件:
 | :--- | :--- |
 | 某 skill 被安装 / 删除 / 改写 | 下一次 listing/get 里 entry 的 `digest` 变化（或消失） |
 | 某 skill 被我们**拒绝发布** | 诊断项：name + 原因（frontmatter 非法 / 超限 / 名字冲突 / 名字与目录不一致） |
+| 某 skill **被发布**了，但含义在出口处变了（`{baseDir}`） | 诊断项：skill 名 + 为什么（warning，码 `base_dir_token`，附上携带该 token 的文件名）——**两个消费面都要有**：dashboard 面板与 MCP 客户端的应答（`_meta` + `list_skills` 文本） |
 | 列表不完整（水合失败等） | 应答里的诊断（不得把不完整的目录当完整目录） |
 
 **O6（本系统新增的义务）：拒绝必须发声。** 规范侧的对应物是"空列表 ≠ 没有 skill"；服务端的对应物是"**我们没发出去的 skill，客户端有办法知道它存在但被拒**"。
+
+**O7（本系统新增的义务，定义在 fastagent `docs/fs-formal-proof/08-state-observability-principle.md` §10.7）：含义变了也必须发声。** O6 管的是"消失"（缺省不可见），O7 管的是"留下了、但读到的不是作者写下的"——这里什么都没少，所以 O6 永远不会在这里触发。判据里的关键词是**每一个**：有多个消费者的事实，投递点见证要**按消费者各有一份**——生产者那侧的见证、以及"另一个消费者"的见证，对这个消费者的 wire 和渲染都不构成证据。实测：客户端那一面（`_meta` + `list_skills`）此前整段缺失，cloud 的适配器把 `warnings` 连同拒绝的 `code` 一起丢了；已修，规则见证在 `catalog.test.ts` / `skills-service.test.ts` / `policy.test.ts` / `tools-service.test.ts`，投递点见证是 `skills-list-chain.test.ts`，登记在 11 第 38 行。
 
 ### 6.3 F3 —— 投递：produce / place / take
 
