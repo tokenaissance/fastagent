@@ -2588,6 +2588,14 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	rounds := a.maxToolIterations
 	segmentsUsed := 1
 	segProgress := false
+	// stopReason is set by the two boundary decisions below — the user's stop
+	// request, or a peer taking the session over — and is what keeps those ends
+	// out of the forced final delivery further down. That path exists for a turn
+	// that ran out of budget; taking it after a decision would spend one more
+	// model call on a turn the user has already stopped, and stamp the reply
+	// `iterationCapReached`, a false claim about why it ended. The σ naming the
+	// real reason was emitted at the boundary itself.
+	stopReason := ""
 	for i := 0; i < rounds; i++ {
 		// Superseded mid-turn? The lease moved to a peer (and every later write
 		// would be refused by the fence anyway): stop spending model and tool
@@ -2595,6 +2603,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		// emitted by the renewal loop, at the moment of the loss.
 		if lease.Lost() || sess.FenceLost() != nil {
 			slog.Warn("turn: superseded, stopping", "agent", a.name, "chat_id", msg.ChatID, "iteration", i+1)
+			stopReason = "superseded"
 			break
 		}
 		// The user's own stop request (design X1–X6): the request rode the lease
@@ -2604,6 +2613,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		if lease.Cancelled(ctx) {
 			slog.Info("turn: cancelled by request", "agent", a.name, "chat_id", msg.ChatID, "iteration", i+1)
 			emitEvent(ctx, ChatEvent{Type: lostNoticeEvent, Data: map[string]any{"message": turnCancelledNotice}})
+			stopReason = "cancelled"
 			break
 		}
 		slog.Info("agent loop iteration",
@@ -2979,6 +2989,11 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		}
 	}
 
+	if stopReason != "" {
+		slog.Info("turn ended by decision — no forced final delivery",
+			"agent", a.name, "chat_id", msg.ChatID, "reason", stopReason)
+		return ""
+	}
 	capBudget := segmentsUsed * a.maxToolIterations
 	slog.Warn("max tool iterations reached — forcing final delivery", "agent", a.name, "max", capBudget)
 	// Forced final delivery: one more LLM call with tools disabled and a
@@ -3350,11 +3365,17 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 	rounds := a.maxToolIterations
 	segmentsUsed := 1
 	segProgress := false
+	// Same role as the non-streaming loop's stopReason (see above): a turn that
+	// ends on a boundary decision must not fall through to the forced final
+	// delivery — one more model call, and `iterationCapReached` stamped on a
+	// reply whose real reason is the user's stop.
+	stopReason := ""
 	for i := 0; i < rounds; i++ {
 		// Same supersession check as the non-streaming loop: stop writing into
 		// a history another turn now owns.
 		if lease.Lost() || sess.FenceLost() != nil {
 			slog.Warn("turn: superseded, stopping", "agent", a.name, "chat_id", msg.ChatID, "iteration", i+1)
+			stopReason = "superseded"
 			break
 		}
 		// The user's own stop request (design X1–X6): the request rode the lease
@@ -3364,6 +3385,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 		if lease.Cancelled(ctx) {
 			slog.Info("turn: cancelled by request", "agent", a.name, "chat_id", msg.ChatID, "iteration", i+1)
 			emitEvent(ctx, ChatEvent{Type: lostNoticeEvent, Data: map[string]any{"message": turnCancelledNotice}})
+			stopReason = "cancelled"
 			break
 		}
 		hcBefore := &HookContext{AgentName: a.name, Point: BeforeModelCall, Messages: messages, Channel: msg.Channel, AccountID: msg.AccountID, ChatID: msg.ChatID, UserID: a.ownerUserID}
@@ -3560,6 +3582,11 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 		}
 	}
 
+	if stopReason != "" {
+		slog.Info("turn ended by decision — no forced final delivery",
+			"agent", a.name, "chat_id", msg.ChatID, "reason", stopReason)
+		return a.stringStream("")
+	}
 	capBudget := segmentsUsed * a.maxToolIterations
 	slog.Warn("max tool iterations reached — streaming forced final delivery", "agent", a.name, "max", capBudget)
 	return a.streamFinalDeliveryAfterCap(ctx, msg, messages, sess, totalToolCalls, chatterMem, capBudget)
