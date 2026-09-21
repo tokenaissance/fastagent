@@ -198,13 +198,17 @@ READ(scope, uri) 的前置条件:
 | δ（世界变化） | σ（客户端能读到的那句话） |
 | :--- | :--- |
 | 某 skill 被安装 / 删除 / 改写 | 下一次 listing/get 里 entry 的 `digest` 变化（或消失） |
-| 某 skill 被我们**拒绝发布** | 诊断项：name + 原因（frontmatter 非法 / 超限 / 名字冲突 / 名字与目录不一致） |
+| 某 skill 被我们**拒绝发布** | 诊断项：name + 原因（frontmatter 非法 / 超限 / 名字冲突 / 名字与目录不一致）——**两个消费面都要有**：dashboard 面板与 MCP 客户端的应答（`_meta` + `list_skills` 文本）。理由与 O7 那条相同（每个消费者各需一份见证），而且这里更容易漏：**超限这类拒绝依据的是扩展自己的限制，pod 不知道也不执行**，所以它只有 cloud 能说；面板此前读的是 pod 的目录，这一格是空的（2026-09-21 修，登记册第 40 行） |
 | 某 skill **被发布**了，但含义在出口处变了（`{baseDir}`，**且它出现在 manifest 里**——只有 manifest 会被替换，别处没有读者差异） | 诊断项：skill 名 + 为什么（warning，码 `base_dir_token`，附上携带该 token 的文件名）——**两个消费面都要有**：dashboard 面板与 MCP 客户端的应答（`_meta` + `list_skills` 文本） |
 | 列表不完整（水合失败等） | 应答里的诊断（不得把不完整的目录当完整目录） |
 
 **O6（本系统新增的义务）：拒绝必须发声。** 规范侧的对应物是"空列表 ≠ 没有 skill"；服务端的对应物是"**我们没发出去的 skill，客户端有办法知道它存在但被拒**"。
 
+**实测（2026-09-21）：这条义务有两个消费者，而只有一个收到了事实。** MCP 应答带着 `egress_*` 那几条拒绝；dashboard 面板读的是 pod 的目录（cloud 的原始透传），而 pod 不知道扩展的限制——于是"600 个文件的 skill"在面板上仍是已发布，任何客户端却装不下它，且没有任何地方说明原因。两边都有测试、都是绿的，因为**它们读的不是同一个生产者**（08 §10.5 的 D-5）。修法：面板那条路径改由与 `listSkills` 同一份分区的 `skillCatalogView` 作答（cloud `/api/fastagent/agent-skills/catalog` 不再是透传），四个 `egress_*` 码在面板侧有中英句子，句子里写的就是规则实际执行的限额。
+
 **O7（本系统新增的义务，定义在 fastagent `docs/fs-formal-proof/08-state-observability-principle.md` §10.7）：含义变了也必须发声。** O6 管的是"消失"（缺省不可见），O7 管的是"留下了、但读到的不是作者写下的"——这里什么都没少，所以 O6 永远不会在这里触发。判据里的关键词是**每一个**：有多个消费者的事实，投递点见证要**按消费者各有一份**——生产者那侧的见证、以及"另一个消费者"的见证，对这个消费者的 wire 和渲染都不构成证据。实测：客户端那一面（`_meta` + `list_skills`）此前整段缺失，cloud 的适配器把 `warnings` 连同拒绝的 `code` 一起丢了；已修，规则见证在 `catalog.test.ts` / `skills-service.test.ts` / `policy.test.ts` / `tools-service.test.ts`，投递点见证是 `skills-list-chain.test.ts`，登记在 11 第 38 行。
+
+**够得着吗（实测 2026-09-21）**：pod 上传侧的上限是"压缩包 64 MiB"（`internal/setup/skill_install.go` 的 `maxUploadSize`）——它只比较**压缩后**的大小，既不校验解压后有多大，也没有文件数上限；从注册表安装、git 克隆的两条路更是完全没有上限。所以一次合法上传就能越过这两条出口限额：这不是"假设 pod 违约"才存在的防御路径，而是用户正常操作就可能踩到的真实缺口——这也正是 O6 这条义务的第二面值得补的原因。
 
 ### 6.3 F3 —— 投递：produce / place / take
 
