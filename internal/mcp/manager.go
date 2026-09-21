@@ -107,9 +107,10 @@ func NewManager(servers map[string]config.MCPServerConfig, opts ...ManagerOption
 }
 
 // wireNotificationSink attaches the manager's notification handler to a client
-// that can receive server-initiated messages. Transports that cannot (HTTP: one
-// POST per request, no SSE stream) are left alone — the notification has no wire
-// there, rather than being dropped by us.
+// that can receive server-initiated messages. Both transports can: for stdio it
+// is the read loop over the server's stdout, for HTTP it is the standing GET
+// stream, which the client opens when — and only when — a handler is wired.
+// A client that is not a NotificationSink keeps no connection.
 func (m *Manager) wireNotificationSink(server string, client Client) {
 	sink, ok := client.(NotificationSink)
 	if !ok || m.onNotification == nil {

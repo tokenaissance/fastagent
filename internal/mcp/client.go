@@ -13,14 +13,16 @@ type Client interface {
 // NotificationSink is implemented by clients that can receive server-initiated
 // notifications — JSON-RPC messages carrying a method and no id.
 //
-// Only the stdio transport can: it owns a long-lived pipe whose reader sees
-// every line the server writes. The HTTP client speaks one POST per request and
-// never opens the SSE stream the Streamable-HTTP spec uses for server→client
-// messages, so on that transport a server has nowhere to push to — the
-// notification is not dropped by us, it has no wire (docs 10 §3.4, G11).
+// Both transports implement it, each with the wire its spec gives it: stdio
+// owns a long-lived pipe whose reader sees every line the server writes, and
+// the HTTP client opens the Streamable-HTTP GET stream. Wiring a handler is what
+// starts that stream, so a client with no handler holds no connection
+// (docs 10 §3.4, G11).
 //
-// The handler is called on the client's reader goroutine with the client's lock
-// held: it must not call back into the same client.
+// The handler runs on the client's reader goroutine and must not call back into
+// the same client. It is called without the client's lock held, so it may take
+// as long as it likes — but everything downstream of it is expensive, which is
+// what the manager's per-server gate is for.
 type NotificationSink interface {
 	SetNotificationHandler(func(method string))
 }
