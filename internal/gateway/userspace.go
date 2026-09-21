@@ -1280,8 +1280,18 @@ func providerKeyList(m map[string]config.ProviderConfig) []string {
 // `systemSandboxPool` is held as a borrowed reference and handed to
 // each UserSpace at load time. The gateway owns its lifecycle.
 type userSpaceRegistry struct {
-	mu                sync.RWMutex
-	spaces            map[string]*userSpaceEntry
+	mu     sync.RWMutex
+	spaces map[string]*userSpaceEntry
+	// retired holds dropped spaces that still owe a release. A drop is not
+	// proof that nobody is using them — the write that drops a space can come
+	// from inside a running turn (`mcp add` calls the reload notify from the
+	// tool itself), and the MCP change path can drop the space that just
+	// delivered the change — so release is deferred past releaseGrace and
+	// refused while a turn is in flight (docs 10 §3.4, row 44).
+	retired []retiredSpace
+	// now is the clock the release sweep and the idle cutoff read. A field so
+	// tests can age a space without sleeping.
+	now               func() time.Time
 	bus               *bus.MessageBus
 	store             store.Store
 	workspace         workspace.Store
@@ -1323,6 +1333,9 @@ func (r *userSpaceRegistry) setSystemSandboxPool(p sandbox.ExecutorPool) int {
 	defer r.mu.Unlock()
 	r.systemSandboxPool = p
 	evicted := len(r.spaces)
+	for uid, e := range r.spaces {
+		r.retireLocked(uid, e)
+	}
 	r.spaces = make(map[string]*userSpaceEntry)
 	return evicted
 }
@@ -1332,9 +1345,43 @@ type userSpaceEntry struct {
 	lastUsed time.Time
 }
 
+// releaseGrace is how long a dropped user space keeps its MCP clients before
+// the sweep takes them back. It exists to cover the two writes that drop a
+// space from inside a turn — `mcp add` / `mcp remove` and a server's
+// "my tool list changed" notification — because cutting a running turn's MCP
+// clients mid-call is a user-visible failure, while a stream that stops is not.
+const releaseGrace = 5 * time.Minute
+
+// retiredSpace is a dropped space waiting for its release.
+type retiredSpace struct {
+	space *UserSpace
+	at    time.Time
+}
+
+// Close releases the resources the space owns. The MCP clients are the ones
+// with a lifetime longer than the space itself: a stdio server is a subprocess
+// and a standing notification stream is a goroutine plus a connection, and
+// neither is handed back by dropping the Go object that points at it.
+func (sp *UserSpace) Close() {
+	if sp == nil || sp.Agents == nil {
+		return
+	}
+	sp.Agents.CloseMCPClients()
+}
+
+// AnyTurnInFlight reports whether any agent of this space has a turn running or
+// waiting for the slot — i.e. whether an MCP client of it may be in use.
+func (sp *UserSpace) AnyTurnInFlight() bool {
+	if sp == nil || sp.Agents == nil {
+		return false
+	}
+	return sp.Agents.AnyTurnInFlight()
+}
+
 func newUserSpaceRegistry(mb *bus.MessageBus, st store.Store, ws workspace.Store, meter usage.Meter, quotaStore usage.QuotaStore, systemSandboxPool sandbox.ExecutorPool, pluginMgr *plugin.Manager, notifyAgent func(userID, agentID string)) *userSpaceRegistry {
 	return &userSpaceRegistry{
 		spaces:            make(map[string]*userSpaceEntry),
+		now:               time.Now,
 		bus:               mb,
 		store:             st,
 		workspace:         ws,
@@ -1383,8 +1430,58 @@ func (r *userSpaceRegistry) getOrLoad(ctx context.Context, userID string) (*User
 // in-memory copy doesn't lag behind the DB.
 func (r *userSpaceRegistry) invalidate(userID string) {
 	r.mu.Lock()
-	delete(r.spaces, userID)
+	if e, ok := r.spaces[userID]; ok {
+		r.retireLocked(userID, e)
+	}
 	r.mu.Unlock()
+}
+
+// retireLocked takes an entry out of the map and hands its space to the release
+// list. Callers must hold r.mu.
+func (r *userSpaceRegistry) retireLocked(userID string, e *userSpaceEntry) {
+	if e == nil || e.space == nil {
+		return
+	}
+	delete(r.spaces, userID)
+	r.retired = append(r.retired, retiredSpace{space: e.space, at: r.clock()})
+}
+
+// clock reads the registry's clock, defaulting to the real one so a zero-value
+// registry (tests) cannot panic.
+func (r *userSpaceRegistry) clock() time.Time {
+	if r.now == nil {
+		return time.Now()
+	}
+	return r.now()
+}
+
+// releaseRetired closes the spaces that have been retired for at least
+// releaseGrace and have no turn in flight, and returns how many it closed. The
+// turn check is what makes the release safe for a long turn: a turn is the only
+// thing that can be calling an MCP tool, so while one runs the clients stay.
+func (r *userSpaceRegistry) releaseRetired() int {
+	r.mu.Lock()
+	now := r.clock()
+	keep := r.retired[:0]
+	var due []*UserSpace
+	for _, rs := range r.retired {
+		if now.Sub(rs.at) < releaseGrace || rs.space.AnyTurnInFlight() {
+			keep = append(keep, rs)
+			continue
+		}
+		due = append(due, rs.space)
+	}
+	r.retired = keep
+	r.mu.Unlock()
+
+	for _, sp := range due {
+		sp.Close()
+	}
+	if len(due) > 0 {
+		slog.Info("released the MCP clients of dropped user spaces",
+			"released", len(due), "stillWaiting", len(keep))
+	}
+	return len(due)
 }
 
 func (r *userSpaceRegistry) all() []*UserSpace {
@@ -1403,23 +1500,20 @@ func (r *userSpaceRegistry) evictIdle() int {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	cutoff := time.Now().Add(-r.idleTTL)
+	cutoff := r.clock().Add(-r.idleTTL)
 	evicted := 0
 	for uid, e := range r.spaces {
 		if e.lastUsed.Before(cutoff) {
-			delete(r.spaces, uid)
+			r.retireLocked(uid, e)
 			evicted++
 			slog.Info("evicted idle user space", "user", uid,
-				"idle", time.Since(e.lastUsed).Round(time.Second))
+				"idle", r.clock().Sub(e.lastUsed).Round(time.Second))
 		}
 	}
 	return evicted
 }
 
 func (r *userSpaceRegistry) startEvictor(ctx context.Context) {
-	if r.idleTTL <= 0 {
-		return
-	}
 	interval := r.idleTTL / 3
 	if interval < time.Minute {
 		interval = time.Minute
@@ -1434,6 +1528,9 @@ func (r *userSpaceRegistry) startEvictor(ctx context.Context) {
 			if n := r.evictIdle(); n > 0 {
 				slog.Info("user space eviction sweep", "evicted", n, "remaining", len(r.spaces))
 			}
+			// The release sweep runs even when the idle TTL is disabled: a
+			// space retired by a config write still owes its clients back.
+			r.releaseRetired()
 		}
 	}
 }

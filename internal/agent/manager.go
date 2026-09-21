@@ -393,6 +393,36 @@ func (m *Manager) All() []*Agent {
 	return result
 }
 
+// AnyTurnInFlight reports whether any of this manager's agents has a turn
+// running or waiting for the slot.
+func (m *Manager) AnyTurnInFlight() bool {
+	if m == nil {
+		return false
+	}
+	for _, ag := range m.All() {
+		if ag.TurnInFlight() {
+			return true
+		}
+	}
+	return false
+}
+
+// CloseMCPClients releases every agent's MCP clients: a stdio server is a
+// subprocess and a standing notification stream is a goroutine plus a
+// connection, so both outlive the agent object unless something hands them
+// back. Called when the owning user space is released, never per turn
+// (docs 10 §3.4).
+func (m *Manager) CloseMCPClients() {
+	if m == nil {
+		return
+	}
+	for _, ag := range m.All() {
+		if ag != nil && ag.mcpMgr != nil {
+			ag.mcpMgr.Close()
+		}
+	}
+}
+
 // Names returns all agent IDs.
 func (m *Manager) Names() []string {
 	names := make([]string, 0, len(m.agents))

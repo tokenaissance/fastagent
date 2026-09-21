@@ -1440,6 +1440,16 @@ func (a *Agent) Sessions() *session.Manager {
 	return a.sessions
 }
 
+// TurnInFlight reports whether any of this agent's sessions has a turn running
+// or waiting for the slot. Used when a dropped user space decides whether its
+// MCP clients may be released yet (docs 10 §3.4).
+func (a *Agent) TurnInFlight() bool {
+	if a == nil || a.sessions == nil {
+		return false
+	}
+	return a.sessions.AnyTurnInFlight()
+}
+
 // WebChatHistory returns chat history for a specific session — the
 // name is historical; it now serves any channel because the dashboard
 // surfaces all-channel chats in the sidebar.
