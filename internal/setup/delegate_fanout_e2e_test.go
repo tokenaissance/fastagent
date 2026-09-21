@@ -212,11 +212,12 @@ func sseEvents(t *testing.T, body string) []map[string]any {
 //
 // The dashboard draws a sub-agent's heartbeat on one tool row, and without an id
 // it could only guess: "the first call with no result yet". A round's tool
-// results are all emitted after the whole round returns, so during a fan-out
-// that guess names a call that finished long ago — three serial sub-agents, and
-// the user watches the first row's iteration counter climb while the third one
-// runs. This pins the fact that replaces the guess, and the ordering that makes
-// the guess wrong in the first place.
+// results now go out per call, but the exit heartbeat still arrives before its
+// own call returns, so during a fan-out the guess names a call that has already
+// exited — three serial sub-agents, and the user watches the first row's
+// iteration counter climb while the third one runs. This pins the fact that
+// replaces the guess, and the ordering that makes the guess wrong in the first
+// place.
 func TestSubagentHeartbeatsNameTheirOwnCallE2E(t *testing.T) {
 	const n = 3
 	prov := &fanOutE2EProvider{fanout: n}
