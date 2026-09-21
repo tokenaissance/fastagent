@@ -1381,8 +1381,25 @@ Accelerate → Automate, order invariant). Interfaces are named, not built here.
 > `/api/chat/history` carries the same fact as `turnActive`; silence means "no live
 > holder", which the client must render as its *unknown* branch rather than as a
 > death claim. The `queued` event already carries holder + ETA (A1-c).
-> **Not landed yet**: A4's client half (the five states, the composer reading
-> `turnActive`, Stop/detach) and A3.
+> **Known limit of the server half (2026-09-21)**: the fact is announced **once**,
+> when the subscription opens, and is **not re-announced** on lease renew or release
+> — `internal/agent/turnlease.go` emits only `queued` (while a waiter is parked) and
+> the superseded `notice` (on loss). So a view that outlives the lease TTL keeps the
+> last fact it saw and must self-correct; the client does this with its own O1′
+> expiry trigger (cloud `use-chat-session.ts` `useTurnFactNow`), which degrades an
+> expired fact to *unknown* rather than leaving it claiming a holder. A server-side
+> re-announce on renew/release would remove the client's dependence on the TTL, but
+> is not implemented; the client must not assume it.
+> **A4's client half — the *view* is landed, the *composer* is not (2026-09-21)**:
+> the panel derives its four states once, in cloud `src/features/chat/turn-state.ts`
+> (`selectTurnState` + `toolPhase` + `toolRowLabelKey`), and the tool row, the group
+> header and the rounds bundle all judge from it. That day's re-read found the row had
+> **never received the fact** — the `turnState` prop was not passed at the one call
+> site — so a peer-held turn still read *Interrupted*, and the row-level spec meant to
+> catch it read only the *header* (a different code path), so it stayed green. Fixed:
+> the row now calls `toolRowLabelKey({ turnState, turnOver })` and the spec expands the
+> group **and** the row. **Still not landed**: the composer reading `turnActive`
+> (C4/C5) and Stop/detach; and A3.
 >
 > **Added the same day, while checking every existing lease against A1's
 > requirements (12):** A1.2 is now a designed port (types, the fact-carrying
@@ -1985,7 +2002,7 @@ already that fact, so expose it read-only:
 
 | what | where | change |
 |---|---|---|
-| "Interrupted" assertion | `src/features/chat/components/session/message-list.tsx:182` (`interrupted = !allDone && msg.streaming !== true`) and the label at `:96` | three states: **interrupted** only when the server says the turn is gone; **unknown** ("no reply in this view yet; the turn may still be running") when `turnActive` is present or absent-with-no-fact; keep the current wording only for the confirmed-dead case |
+| "Interrupted" assertion | **landed 2026-09-21** — the rule is `src/features/chat/turn-state.ts` (`toolPhase`, `toolRowLabelKey`), read by the row (`message-list.tsx:61`, `:120`, call site `:256-265`), the group header (`:217-219`) and the bundle (`:335-337`) | three states: **interrupted** only when the fact says nobody holds the session (or no fact + the bubble stopped); **unknown** when the fact is unusable; a peer-held turn says *running elsewhere*. The row previously re-derived this from `msg.streaming` alone and was never passed the fact — so the requirement was unmet while the old spec (which read only the *header*) stayed green; the anchors once cited here (`:182`/`:96`) are superseded |
 | progress binding | `:184` `activeDelegateId = first unresolved delegate_task` and `:50` (`tool_queued`) | bind by the heartbeat's new `id`; keep "queued" for rows that are genuinely waiting |
 | Send while a turn runs | `src/features/chat/components/owner/chat-composer.tsx:158,162` (Send is enabled whenever local `streaming` is false) | enable/disable from `turnActive`, not from the local socket; a send during a live turn should say it will queue |
 | Stop | `src/features/chat/use-stream-pipeline.ts:137-140` (`handleStop` aborts the fetch only) | either call `POST /api/chat/cancel` and treat `already_started` as "detached, still running", or relabel the control to *detach* and say so |
@@ -2019,6 +2036,11 @@ The four as-built states are decided by facts the *view* happens to have
 | running | `active` + a heartbeat arrived | `message-list.tsx:51-61` |
 | running (no heartbeat yet) | `active`, no heartbeat yet | the fallback at `message-list.tsx:63` |
 | interrupted | `msg.streaming !== true` — **the bubble stopped streaming** | `message-list.tsx:49` (`turnOver`), passed as `:238`; message-level copies at `:96`, `:182`, `:289`; string `chat.json:137` |
+
+> **Anchor note (2026-09-21).** The `message-list.tsx` line numbers in this table are
+> the *pre-landing* revision; the four states are no longer re-derived in the
+> component. They now come from `turn-state.ts` (`toolPhase` + `toolRowLabelKey`), and
+> the header/bundle/row all read that one judgement — see the landed row in §A4.2.
 
 The fourth row is a **transport inference, not a world fact**: the client knows
 "my stream ended", and claims "this call never returned a result". On 09-18 the
