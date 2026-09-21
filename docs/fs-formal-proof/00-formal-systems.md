@@ -148,7 +148,7 @@ Covered by none of them → §7's bucket E (the F4 candidate: concurrency and vi
 
 | Obligation | The gaps that violated it | The tests that pin it |
 |------------|---------------------------|-----------------------|
-| **O1** true statements | ~~G5~~ (a false σ), ~~G6~~ (never rendered), ~~G8~~, ~~G10~~, ~~G11~~ (stdio half), ~~G4~~ (signal half), ~~G19~~; the `{baseDir}` diagnostic's trigger (register row 39) | `TestWriteFileSignalsUncheckedReplacement`, `TestEnvSignalCarriesIdentityFileChanges`, `TestCronFingerprintIgnoresRunBookkeeping`, `TestStdioClientHandsNotificationsToTheHandler`, `TestE2BLiveUnhydratedFactSurvivesPodHandoff`, `TestBaseDirTokenInABundledFileIsNotAReaderDifference`, `TestBaseDirWarningListsEveryCarrierNotOnlyTheManifest`, `TestCatalogHandlerCarriesTheCodesAndTheWarnings` |
+| **O1** true statements | ~~G5~~ (a false σ), ~~G6~~ (never rendered), ~~G8~~, ~~G10~~, ~~G11~~ (both halves), ~~G4~~ (signal half), ~~G19~~; the `{baseDir}` diagnostic's trigger (register row 39) | `TestWriteFileSignalsUncheckedReplacement`, `TestEnvSignalCarriesIdentityFileChanges`, `TestCronFingerprintIgnoresRunBookkeeping`, `TestStdioClientHandsNotificationsToTheHandler`, `TestServerNotificationArrivesOverTheStandingStream`, `TestE2BLiveUnhydratedFactSurvivesPodHandoff`, `TestBaseDirTokenInABundledFileIsNotAReaderDifference`, `TestBaseDirWarningListsEveryCarrierNotOnlyTheManifest`, `TestCatalogHandlerCarriesTheCodesAndTheWarnings` |
 | **O2** placement | ~~G12~~, G1/G2 | `TestDeferredTurnsAnnouncesADroppedScheduledTask`, `TestEvictionSignalReachesNextToolResult` |
 | **O3** the moment of taking | no violation; **G13 is its positive instance** (a pull σ: the criterion is recomputable, so the consumer's next read IS the delivery point) | `TestBashOutputTool_DrainsTailOnExit`, `TestSandboxJobOutputReturnsDeltaThenStatus` |
 | **O4** no loss | ~~G3~~, ~~G9~~, ~~G20~~ | `TestEvictSignalOutlivesThePoolThatProducedIt` (delivered by a different pool instance), `TestReplacedSandboxNoteRidesTheCallThatFoundIt`, `TestRunReceiptStampSurvivesAReload` |
@@ -203,7 +203,7 @@ mirror on the verification side.)
 
 | Item | Belongs to | Status |
 |------|-----------|--------|
-| **G11** the HTTP side of MCP notifications | F2 · O1 (the transport has no channel at all) | open (stdio half fixed; what HTTP lacks is a **standing** channel — the transport’s two reply-side MUSTs landed 2026-09-22, register row 43; closing it still needs the GET stream or a periodic re-list) |
+| ~~**G11** the HTTP side of MCP notifications~~ | F2 · O1 (the transport had no channel at all) | **fixed 2026-09-22 (register row 45)**: the client opens the spec’s standing GET stream, so on HTTP too a server’s unprompted change lands in the same sink → gate → rebuild path the stdio half uses. It could only land after row 44, which gave the stream an owner. **What is left of the same gap is not transport-specific**: a server that changes its list *without* announcing is invisible on both transports (10 §3.4 boundary 3) — seeing that needs a pull (re-list per turn), which is a decision, not a defect fix |
 | **G4** the *attribution* of a sandbox-side deletion | F2 · O1 (**fixed as far as "the fact is stated"**) + F1's boundary (an irreversible action with no snapshot) | **decided: no attribution (2026-09-18)** — the consequence is already delivered, and a manifest would buy only the cause at thousands of rows per hydrate; see the decision log in [05 §8](./05-remediation-plan.md) |
 | **G7b** uploads/deletes and the live sandbox | **not F1–F3**: write-path symmetry | **upload half: decided a (no write-through, "the panel is the file library")**; **delete half: decided d1 and fixed** (write through to the live sandbox, never creating one) |
 | ~~**G21**~~ the panel delete was a silent no-op (the path/scope convention applied twice) | **belongs to F1** ("one path, one key") | **fixed (2026-09-18)**: Fix 0 (delete uses the download endpoint's path convention) + d1 (also drop the live sandbox's copy), landed as a pair; both halves pinned on real E2B (without d1 it comes back; with d1 it does not) |
@@ -213,16 +213,19 @@ mirror on the verification side.)
 
 **Closed the same day (kept here so the index stays comparable; details in [10 §4](./10-harness-state-audit.md))**:
 G1–G3 (delivery point / durable carrier), the signal half of G4, G5/G6 (σ telling lies), G7a (the
-divergence is named), G8/G9/G10 (outside writers), the stdio half of G11, G12 (drops leave a trace),
+divergence is named), G8/G9/G10 (outside writers), **both halves of G11** (stdio 2026-09-18, HTTP
+2026-09-22, row 45), G12 (drops leave a trace),
 G14 (two sources), G16 (the mask written back), **G18** (01 §8 path resolution), **G19** (the unhydrated
 declaration lost on an instance hand-off), **G20** (the environment baseline moved into the turn receipt;
 `envTracker` deleted). Of these, **G13 was reclassified as "not a defect"**: it is a pull-shaped σ whose
 criterion is recomputable (place 1), not an F3 gap.
 
-That table is itself a classification result: **only some of what is still open is a defect in the formal
-sense** — G11 is (the transport has no channel) and G4's remaining half is (no durable manifest); the
-other three belong to different families (a product decision, a scope invariant, protocol compliance) and
-should not be booked as "observability left unfinished".
+That table is itself a classification result: **no row left in it is a defect in the formal sense** — the
+G11 half that was (a transport with no channel) is closed as of 2026-09-22, and G4's remaining half was a
+decision, not a hole; the rest belong to different families (a product decision, a scope invariant,
+protocol compliance) and should not be booked as "observability left unfinished". The one thing this pass
+moves *into* that class is not a numbered gap: a server that never announces a change is invisible on
+every transport (10 §3.4 boundary 3), and only a pull can see it.
 
 **One cell added on 2026-09-19 (F1's family, not F2/F3)**: **G25** — the sandbox lease's fencing token
 `epoch` resets to `1` on every takeover (`internal/store/sandbox_leases.go:72`/`:81`), so after the same
@@ -235,14 +238,18 @@ same section states how that obligation lands on `session_turns`, whose **A1 is 
 `internal/agent/sessionlease.go`, the adapter in `internal/gateway/sessionlease.go`, both admission
 points and the IfIdle verdict wired onto it, and the fence (`…Fenced` write statements).
 
-**One cell added on 2026-09-22 (not F1–F3 either)**: **register row 44** — the *ownership* of a dropped
+**Two cells added on 2026-09-22 (neither is F1–F3)**: **register row 44** — the *ownership* of a dropped
 user space’s MCP clients. It was the piece that made G11’s HTTP half hard to close: both remedies (an SSE
 stream, a periodic re-list) create a resource that outlives the agent object, and nothing released one. A
 drop now retires the space and a sweep releases its clients once it has been retired for five minutes with
 no turn running or waiting (10 §3.4, item 2), so the standing channel can land in a hole that has an owner.
+Then **register row 45** used that owner to land the channel itself: HTTP opens the standing GET stream and
+reads its frames live, which is why the G11 row above is struck through.
 
-> **What actually remains (2026-09-18, after the closing pass)**: in the formal sense, **only the HTTP
-> half of G11** (the MCP transport has no notification channel; it needs SSE or a periodic re-list).
+> **What actually remains (updated 2026-09-22)**: the HTTP half of G11 — the last item here that was a
+> defect in the formal sense — **is closed** (register row 45). What replaces it is not a transport
+> feature: a server that changes its list without announcing it cannot be seen by *any* push channel, so
+> only a per-turn re-list would catch it (10 §3.4 boundary 3) — recorded as an open **decision**.
 > G15 (`notifications/initialized`) belongs to the same MCP family and is out of this round's scope by
 > decision. **The one non-defect worth recording**: the duplicate copies under the chat subdirs that were
 > produced before decision A are still in the store (no longer refreshed, and nobody cleans them) — a
@@ -279,7 +286,7 @@ no turn running or waiting (10 §3.4, item 2), so the standing channel can land 
 | path and scope identity | [01 §3.5/§8](./01-current-implementation.md) · [02 §5](./02-semantics-and-architecture.md) | one path, one key (the G18/G21/G22 family) | `scopeSessionID`/`wsPath`, `sandbox.StoreScope` | `TestE2BLiveOnePathIsOneKey` |
 | project tree invariant | [10 §4](./10-harness-state-audit.md) (G17) | one project, one tree, many containers, writes broadcast | `LiveProjectExecutors`, `syncStoreScope` | — |
 | MCP OAuth security clauses | [../mcp-oauth-design.md](../mcp-oauth-design.md) | state is one-shot (`Take` reads-and-deletes) + PKCE S256 + TTL + bound to userID | `usecase/complete`, `pending_store.go` | `internal/mcp/oauth/...` |
-| MCP conformance (**protocol-compliance family**, not F1–F3) | [../issues/ext-skills-conformance-checklist.md](../issues/ext-skills-conformance-checklist.md) | the spec's MUSTs ↔ the egress implementation; **declaring is promising** | `server/discover`, `skills/list` | that checklist's "status" column; G11's HTTP half and G15 are still open |
+| MCP conformance (**protocol-compliance family**, not F1–F3) | [../issues/ext-skills-conformance-checklist.md](../issues/ext-skills-conformance-checklist.md) | the spec's MUSTs ↔ the egress implementation; **declaring is promising** | `server/discover`, `skills/list` | that checklist's "status" column; G15 is still open (G11’s HTTP half landed 2026-09-22, row 45) |
 | **single source / one expression** | [10 §4](./10-harness-state-audit.md) (G14/G16/G20/G23) · [08 §2.2.3](./08-state-observability-principle.md) (landing 2) · [08 §9.1](./08-state-observability-principle.md) | **one fact has exactly one expression**: one source (G14) · one guard (G16) · one rule (G23) · a judgement reuses its existing owner (§2.2.3 landing 2) · one exit (§9.1) | `agent/heartbeat.go` `loadHeartbeatTasks`, `setup/handlers.go` `mergeSkillEntry(s)`/`cloneSkillEntries`, `workspace/scope.go` `ScopeSegments`/`WriteScope` | `TestHeartbeatReadsWhatThePromptShows`, `TestMaskedGlobalSkillSecretKeepsTheStoredValue`, `TestScopeSegmentsIsTheLayoutTable`, `TestAWriterScopeIsTheScopeItsKeysLandIn` |
 
 > **Note (2026-09-20, surfaced when the single-source family entered).** The dividing line stated at the top
@@ -332,7 +339,7 @@ no turn running or waiting (10 §3.4, item 2), so the standing channel can land 
 > object** (e.g. hydrate reading half a file on LocalFS, measured); ② a **second** silent overwrite
 > (today there is exactly one, 09-18); ③ a **third backend** needing the same axioms.
 
-> Division of labour with §6: §6 lists what is unfinished **inside** the three systems (G11/G15/G4's
+> Division of labour with §6: §6 lists what is unfinished **inside** the three systems (G15/G4's
 > attribution half…); this section's E bucket is what **no system covers yet**. How to use it: before
 > reading a piece of code, ask "which system constrains it"; before writing a mechanism, answer §6's
 > checklist; and if the answer is "none of them", then either it is a C (a new instance of the same

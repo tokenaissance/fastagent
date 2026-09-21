@@ -109,7 +109,7 @@ it left through (the three exits of 08 §9.1).
 | an outside writer edits identity/system files (panel, another session, another pod) | the next turn's system prompt differs | **none** (the per-turn sample covers skills/tools/memory only) | — | ❌ **G8** |
 | an outside writer edits agent config (model, prompt mode, skill switches…) | the runtime looks different | **none** (unless it happens to change a tool or skill name) | — | ❌ **G9** |
 | an outside writer deletes/edits a cron job or `HEARTBEAT.md` | "I will be woken at X" becomes false | **none** | — | ❌ **G10** |
-| an MCP server changes its tool list (`notifications/tools/list_changed` etc.) | the server's capabilities changed | **none** (no notification handling at all) | — | ❌ **G11** |
+| an MCP server changes its tool list (`notifications/tools/list_changed` etc.) | the server's capabilities changed | the next turn rebuilds the userspace and the tool set is re-listed; the per-turn signal names what appeared or disappeared | the per-turn environment signal | ✅ 2026-09-18 (stdio) / 2026-09-22 (HTTP) — G11 |
 | an automatic turn is deferred because the session is busy / dropped on timeout | a turn that should have run did not (the scheduler does **not** re-deliver: it advances the next run as it fires) | one slog line per drop (agent / chat / source / how long / first line of the text) + **a note in that chat for cron** | the session's channel | ✅ 2026-09-18 (was ❌ G12) |
 | context compaction / tool-result clipping / an interrupted turn | history was replaced | the summary and the clip placeholder both state what happened | turn input | ✅ 08 §5 |
 | provider-account fallback (`providerForAgent` falls back to the shared provider on three of its four paths, 【code】`provider_fallback_log_test.go:3-10`) | the request goes out on a different upstream account (the model name is unchanged) | a slog warning only | — | ⚠️ an operations-side fact: not part of the agent's world model, but it illustrates the same lesson — "something was swapped quietly and only the log knows" |
@@ -386,7 +386,7 @@ so it is ✅ — not because it was designed better, but because **the sampling 
 it**. Every sibling outside that surface is unsignalled. This is the second kind of hole beyond item 4
 of the 08 §6 checklist ("when is the signal delivered"): **the sampling surface itself needs a criterion**.
 
-### 3.4 Changes on the MCP server side (G11; the **stdio half was fixed 2026-09-18**)
+### 3.4 Changes on the MCP server side (G11; **both halves fixed** — stdio 2026-09-18, HTTP 2026-09-22)
 
 MCP tools are registered **once, when the agent is constructed** (【code】 `loop.go:472-484`:
 `mcp.NewManager` → `ToolDefs()` → register the closures), so a server-side change can only become real
@@ -397,14 +397,16 @@ in one of two ways: rebuild the agent, or let the registry add and remove tools 
 | Transport | Can it arrive? | Evidence |
 |-----------|----------------|----------|
 | **stdio** | **yes, and it was thrown away** | `stdio.go`'s read loop scans stdout line by line and returns only on `resp.ID == requestID`; everything else is `continue`d. A server's `notifications/tools/list_changed` (a method, no id) **is parsed and then dropped**. Request ids start at 1 (`NewStdioClient` sets `nextID: 1`), so a notification's id=0 can never be mistaken for a request id |
-| **HTTP** | **no standing wire** (a *reply* channel since 2026-09-22) | `HTTPClient.sendRequest` is one POST per request. It used to parse the body as a single JSON-RPC object and nothing else; since 2026-09-22 it advertises both content types and also reads a reply that arrives as an SSE stream (the transport requires the client to support both shapes). That is a reply channel only: a server can put a message there while answering *our* request, and nowhere else. Nothing opens the spec’s GET stream, so an unprompted change still has nowhere to arrive — it is not "we drop it", it is "it cannot arrive" |
+| **HTTP** | **yes, since 2026-09-22** | `HTTPClient.SetNotificationHandler` opens the transport’s **standing GET stream** (`Accept: text/event-stream`) and reads its frames as they arrive. Before that, HTTP had only a *reply* channel — one POST per request, and no way for a server to speak first. `405 Method Not Allowed` is the spec’s "this endpoint has no stream", and it is taken at its word: one GET, no retry. Messages are read off the live stream, never buffered to its end |
 
 **Landing (2026-09-18, the stdio half)**: capture → manager → gate → **the rebuild path `mcp add`
 already uses**:
 
 ```
-the stdio read loop recognises a method message   →  StdioClient.SetNotificationHandler
-    →  Manager.wireNotificationSink (HTTP is not wired — no pretending)
+the read reactor of a client recognises a method message, whichever wire it came off:
+    stdio: the loop over the server's stdout   →  StdioClient.SetNotificationHandler
+    HTTP:  the frames of the standing GET stream →  HTTPClient.SetNotificationHandler
+        →  Manager.wireNotificationSink (both transports — one sink type, one gate)
         →  notificationGate: at most one handled notification per server per 30s
             →  agent layer: method == notifications/tools/list_changed
                  →  ag.mcpConfigNotify(owner, agent)   ← the same path mcp add/remove uses
@@ -420,18 +422,23 @@ The gate is not optional: behind it sits "rebuild one user's whole userspace". A
 changes in a loop (or has a bug) must not be able to turn that into a loop — throttling logs a warning
 rather than staying silent.
 
-**Two boundaries, recorded honestly**:
-1. **the HTTP half is not fixed**: what is missing is a *standing* channel. Two MUSTs of the transport
-   landed 2026-09-22 (row 43) — `Accept: application/json, text/event-stream`, and reading a reply that
-   arrives as an SSE stream — but both live inside one request’s lifetime. An unprompted change still
-   needs the spec’s SSE stream (a real feature) or a periodic re-list (one network round trip per turn),
-   so for a server that announces a change by itself, HTTP behaves exactly as it did before the research:
-   the change waits for the next reload;
+**Three boundaries, recorded honestly**:
+1. ~~the HTTP half is not fixed~~ — **closed 2026-09-22 (row 45)**: the client opens the spec's GET
+   stream and hands every server message to the same sink the stdio half uses. Row 43's two MUSTs (the
+   `Accept` header, reading a reply that arrives as SSE) lived inside one request’s lifetime; this is the
+   *standing* half. It could only land after row 44, because a stream is a goroutine plus a connection,
+   and before that nothing owned either;
 2. **neither transport sends `notifications/initialized`** (searching the repo for `initialized` finds
    nothing): the MCP spec requires the client to send it after initialize. Today's servers
    (QC / Quandora) do not require it, so it is not fatal — but it may be the precondition for some
    servers to start pushing notifications at all. Recorded as **G15 (open)**: not changed here, because
    it alters the handshake with real servers and needs a live check first.
+3. **a server that never announces stays invisible.** Announcing is optional in the spec, so a server
+   whose tool list changes without a `notifications/tools/list_changed` is missed on **both** transports
+   — the stdio reader and the SSE stream are equally blind to a change nobody mentions. Seeing that one
+   needs a *pull*: re-list per turn and rebuild on a difference. That is a different mechanism (a
+   comparison, not a push), so it is a decision to take rather than a defect to fix — recorded here
+   rather than assumed away.
 
 **Noticed while landing row 43 — recorded as facts, not decided** (no new gap numbers):
 
@@ -536,7 +543,7 @@ warning instead of stalling the drain loop — a remedy for observability must n
 | ~~**G19**~~ (found 2026-09-18) | O1 | the Policy C unhydrated judgement (`workspaceUnhydrated`) lived only in the **creating process**: `adoptFromLease` deliberately does not replay hydration ("the creating pod hydrated the same scope"), so an adopting replica's flag is always false ⇒ **the declaration disappears**, and the agent reads the empty `/workspace` as "my files are gone" | the sandbox-lifecycle family | P1 **fixed (2026-09-18)**: the bit rides the **instance** in `sandbox_leases.unhydrated` (`SetSandboxLeaseUnhydrated`, CAS on owner + sandbox id; cleared by Acquire/Replace so it can never be pinned onto a successor); adoption reads it back with `ex.setWorkspaceUnhydrated(rec.Unhydrated)`, and the create/replace publish points write it via `publishUnhydrated` | live E2E: pod A creates with a broken store (listing fails) → pod B adopts the same instance → still reports unhydrated; falsification (removing the adoption read) turns that E2E red | not provided |
 | ~~**G10**~~ | O1 | ~~cron jobs / `HEARTBEAT.md` edited or deleted from outside, unsignalled~~ | the user | **P2 fixed (2026-09-18)**: the scheduled-job list joined the turn-level sample (`scheduled jobs added / changed / no longer exist: <name>`); a change to `HEARTBEAT.md`'s content was already covered by G8's identity fingerprints; an unreadable list is stated as unreadable and **never reported as a deletion** | — | not provided |
 | ~~G14~~ | — (two sources for one thing, not a delivery duty) | ~~`HEARTBEAT.md` has **two sources**: the prompt reads the store, the trigger reads only `<home>/HEARTBEAT.md`~~ (`heartbeat.go`) | the user / an operator | **P2 fixed (2026-09-18)**: `loadHeartbeatTasks` now goes through the **same resolver the prompt uses** (`ctxBuilder.loadFileForUser("HEARTBEAT.md", ownerUserID)` — store row first, disk fallback). The owner is exactly what `chatterUserID` resolves a `SourceHeartbeat` turn to, so "what the agent sees" and "what fires" are the same bytes by construction. Shapes with no context builder (embedded/CLI) keep reading the disk copy | — | — |
-| ~~**G11**~~ | O1 | ~~MCP server-side notifications are dropped~~ | an external server | **the stdio half was fixed (2026-09-18)**: capture → gate (30s per server) → reuse `mcpConfigNotify` to rebuild → the per-turn tool-set signal reports it; **HTTP still has no notification channel** (see §3.4's two boundaries — closing it needs SSE or a periodic re-list) | — | not provided |
+| ~~**G11**~~ | O1 | ~~MCP server-side notifications are dropped~~ | an external server | **both halves fixed**: stdio 2026-09-18, HTTP 2026-09-22 (row 45) — capture → gate (30s per server) → reuse `mcpConfigNotify` to rebuild → the per-turn tool-set signal reports it. The HTTP half is the spec's GET stream, opened by the client when a sink is wired and released by row 44's owner; a 405 is taken as "no stream here" rather than retried. The remaining boundary is **not transport-specific**: a server that changes its list *without* announcing is invisible on both (§3.4 boundary 3) | — | not provided |
 | **G15** | — (protocol compliance, not a delivery duty) | `notifications/initialized` is never sent (neither transport) | — | P3: the spec requires it after initialize; today's servers do not require it, but it may be the precondition for a server to start pushing notifications at all | send it, but only after verifying the handshake against real servers (QC / Quandora) | not provided |
 | ~~G16~~ | — (a masked secret written back through the setup API, not a delivery duty) | ~~a skill secret is overwritten by its own mask~~ (found by the 2026-09-18 dead-code scan) | the admin dashboard | **P1 fixed (2026-09-18)**: the rule now has **one home** — `mergeSkillEntry` (per entry) + `mergeSkillEntries` (per patch) — shared by **both** write paths: the global `skills.entries` sweep (merged against the stored value before it is written) and the per-agent override row (loaded with `scope.SettingInto`, then merged). The existing inline guards for providers/channels are **left alone** (different request shapes; revisit once a third variant proves the seam). Wiring it exposed a real trap: Go's JSON decoder **reuses** maps rather than replacing them, so the pre-overlay snapshot must be a **deep copy** (`cloneSkillEntries`) — otherwise the comparison runs against the very map that was mutated in place, which is how the first attempt silently kept the mask | — | — |
 | ~~**G12**~~ | O2 | ~~a deferred/dropped automatic turn leaves only a slog line~~ | the harness | **P2 fixed (2026-09-18)**: each drop carries the specifics (it used to be just `count=N`); a cron drop — the user's own task — also sends a note into that chat (bounded send, no turn started); the harness's own sources are logged without bothering the user | — | wrong timing / order |
@@ -768,7 +775,7 @@ warning instead of stalling the drain loop — a remedy for observability must n
 | G21 + the G7b delete half (fixed) | `go test ./internal/setup/ -run TestHandleAgentFileDelete` (the panel's path shape: `sessions/<sid>/f` + `?sessionId=` really removes the store object; a project-root path takes its chat from the request; the older unprefixed shape still works; a failed sandbox removal reports `sandboxRemoved:false`) + `go test ./internal/sandbox/ -run 'TestSandboxPathForStorePath|TestStorePathScope|TestE2BPoolLiveExecutorDoesNotCreate|TestDockerPoolLiveExecutorDoesNotCreate'` (the mapping, and "live instances only") + `go test ./internal/gateway/ -run TestRemoveWorkspaceFile` (no pool / single-copy backend is a no-op; otherwise the executor is asked). Live: `FASTAGENT_E2B_LIVE=1 E2B_API_KEY=… go test ./internal/sandbox/ -run TestE2BLivePanelDeleteSticks -v` — **both halves**: without d1 the delete is resurrected by the next sync (reproducible), with d1 it sticks. **Falsification**: revert the handler's path convention and `TestHandleAgentFileDelete_UsesThePathThePanelClicked` goes red immediately ("the panel's delete left the file in the store") |
 | G10 (fixed) | `go test ./internal/agent/ -run 'TestEnvSignalCarriesScheduledJobChanges|TestCronFingerprintIgnoresRunBookkeeping|TestEnvSignalStatesUnreadableJobList'` (deletion/reschedule/addition are named; bookkeeping does not fire it; an unreadable list says so) |
 | G14 (fixed) | `go test ./internal/agent/ -run 'TestHeartbeatReadsWhatThePromptShows|TestHeartbeatFallsBackToTheDiskCopy|TestHeartbeatWithNoFileSendsNothing'` (store and disk deliberately differ → tick and prompt must agree; no store → the disk copy; neither → no turn fired) |
-| G11 (stdio fixed) | `go test ./internal/mcp/ -run 'TestStdioClientHandsNotificationsToTheHandler|TestManagerWiresNotificationsThroughTheGate|TestManagerDoesNotWireATransportWithoutNotifications'`; for the HTTP half, read `internal/mcp/http.go` and confirm there is no SSE stream |
+| G11 (both halves fixed) | `go test ./internal/mcp/ -run 'TestStdioClientHandsNotificationsToTheHandler|TestManagerWiresNotificationsThroughTheGate|TestManagerLeavesANonSinkTransportAlone'` (stdio, the gate, and a transport that really has no wire) + `go test ./internal/mcp/ -run 'TestServerNotificationArrivesOverTheStandingStream|TestManagerHearsAnHTTPNotificationOverTheStandingStream'` (the HTTP half: the GET stream is opened, carries `Accept: text/event-stream`, and an unprompted change reaches the manager) + `-run 'TestTheStandingStreamIsNotOpenedWithoutAHandler|TestAnEndpointWithoutAStreamIsNotAskedTwice|TestAServerRequestOnTheStreamIsAnswered|TestClosingTheClientEndsTheStandingStream|TestAReconnectResumesWithTheLastEventID|TestMessagesOnAReplyStreamGoThroughTheSameDoor'`. **Falsifications, all run for real**: open no stream ⇒ 2 red; read the stream to its end instead of live ⇒ 2 red; treat 405 as retryable ⇒ 1 red; ignore a server request ⇒ 1 red; `Close` that does not end the stream ⇒ the package times out at `streamWg.Wait()`; skip the reply stream's server message ⇒ 1 red |
 | G15 | — (protocol compliance, not a delivery duty) | `rg 'initialized' internal/mcp/` finds nothing (neither transport sends it) |
 | G12 (fixed) | `go test ./internal/gateway/ -run 'TestDeferredTurnsAnnouncesADroppedScheduledTask|TestDeferredTurnsDropsMessagesPastBudget|TestDroppedCronNoteWithoutAJobName'` (only cron speaks; the job is named; a trigger without a name never renders a dangling quote) |
 | G18 (fixed) | `go test ./internal/agent/tools/ -run 'TestApplyPatchUsesTheSameStoreKeyAsWriteFile|TestApplyPatchDeleteUsesTheSameStoreKey|TestApplyPatchKeyInANonCodingSession|TestWriteThroughMirrorsOneKeyAndOnePath'`; live: `FASTAGENT_E2B_LIVE=1 E2B_API_KEY=… go test ./internal/agent/tools/ -run TestE2BLiveOnePathIsOneKey -v` (command in the file header). **Falsification**: revert the key in `writeForPatch` / `writeForPatchSandbox` to `r.sessionID, path` and the first three go red immediately (`keys = [app/notes.md sessions/<sid>/notes.md]`) |

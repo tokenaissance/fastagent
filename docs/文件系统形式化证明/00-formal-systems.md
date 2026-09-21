@@ -141,7 +141,7 @@ F3 投递（定义 08 §2.2）
 
 | 义务 | 违反它的缺口 | 钉住它的测试 |
 |------|-------------|-------------|
-| **O1** 产生真话 | ~~G5~~（假 σ）、~~G6~~（缺渲染）、~~G8~~、~~G10~~、~~G11~~（stdio 半边）、~~G4~~（信号半边）、~~G19~~；`{baseDir}` 诊断的触发条件（登记册第 39 行） | `TestWriteFileSignalsUncheckedReplacement`、`TestEnvSignalCarriesIdentityFileChanges`、`TestCronFingerprintIgnoresRunBookkeeping`、`TestStdioClientHandsNotificationsToTheHandler`、`TestE2BLiveUnhydratedFactSurvivesPodHandoff`、`TestBaseDirTokenInABundledFileIsNotAReaderDifference`、`TestBaseDirWarningListsEveryCarrierNotOnlyTheManifest`、`TestCatalogHandlerCarriesTheCodesAndTheWarnings` |
+| **O1** 产生真话 | ~~G5~~（假 σ）、~~G6~~（缺渲染）、~~G8~~、~~G10~~、~~G11~~（两个半边）、~~G4~~（信号半边）、~~G19~~；`{baseDir}` 诊断的触发条件（登记册第 39 行） | `TestWriteFileSignalsUncheckedReplacement`、`TestEnvSignalCarriesIdentityFileChanges`、`TestCronFingerprintIgnoresRunBookkeeping`、`TestStdioClientHandsNotificationsToTheHandler`、`TestServerNotificationArrivesOverTheStandingStream`、`TestE2BLiveUnhydratedFactSurvivesPodHandoff`、`TestBaseDirTokenInABundledFileIsNotAReaderDifference`、`TestBaseDirWarningListsEveryCarrierNotOnlyTheManifest`、`TestCatalogHandlerCarriesTheCodesAndTheWarnings` |
 | **O2** 投递 | ~~G12~~、G1/G2 | `TestDeferredTurnsAnnouncesADroppedScheduledTask`、`TestEvictionSignalReachesNextToolResult` |
 | **O3** 取走时机 | 无违反实例；**G13 是它的正面样本**（pull σ：判据可重算，消费侧下一次读取就是投递点） | `TestBashOutputTool_DrainsTailOnExit`、`TestSandboxJobOutputReturnsDeltaThenStatus` |
 | **O4** 不丢 | ~~G3~~、~~G9~~、~~G20~~ | `TestEvictSignalOutlivesThePoolThatProducedIt`（另一个 pool 实例投递）、`TestReplacedSandboxNoteRidesTheCallThatFoundIt`、`TestRunReceiptStampSurvivesAReload` |
@@ -187,7 +187,7 @@ F3 投递（定义 08 §2.2）
 
 | 项 | 属于 | 状态 |
 |----|------|------|
-| **G11** HTTP 侧通知 | F2 · O1（传输层根本没有通道） | 开放（stdio 侧已修；HTTP 缺的是**站着**的通道——传输层那两条"应答侧"MUST 已于 2026-09-22 落地，见登记册第 43 行；要关掉仍需 GET 流或定期 re-list） |
+| ~~**G11** HTTP 侧通知~~ | F2 · O1（传输层最初根本没有通道） | **已修（2026-09-22，登记册第 45 行）**：client 打开规范里那条站着的 GET 流，于是 HTTP 上"server 无人请求而发来的变化"也落进与 stdio 侧同一个 sink → 闸门 → 重建路径。它只能排在第 44 行之后落地，因为那条流需要一个主人。**同一个缺口剩下的部分与传输无关**：一个**不宣告**就改掉自己列表的 server，两个传输都看不见（10 §3.4 边界 3）——要看它得靠拉（每回合 re-list），那是一个决策，不是一个缺陷修复 |
 | **G4** 沙箱内删除的**归属** | F2 · O1（**已修到"事实已声明"**）+ F1 边界（不可逆操作缺快照） | **已决策：不做归属（2026-09-18）** —— 后果已送达，清单只买因果而代价是每次 hydrate 上千行；见 [05 §8](./05-remediation-plan.md) 决策记录 |
 | **G7b** 上传/删除写进活沙箱 | **不属于 F1–F3**：写路径对称性 | **上传半边：已决策 a（不穿透，"面板＝文件库"）**；**删除半边：已决策 d1 并已修**（穿透到活沙箱，绝不建实例） |
 | ~~**G21**~~ 面板删除静默无效（路径/作用域双重前缀） | **属于 F1**（"同一路径一个键"） | **已修（2026-09-18）**：Fix 0（删除与下载同一路径约定）+ d1（同时删掉活沙箱那份），两者成对落地；真机两半都钉住（不加 d1 会复活、加了不复活） |
@@ -197,13 +197,15 @@ F3 投递（定义 08 §2.2）
 
 **已关闭（同日，供索引对照；细节见 [10 §4](./10-harness-state-audit.md)）**：
 G1–G3（投递点/耐久载体）、G4 的信号半边、G5/G6（σ 说假话）、G7a（分歧可见）、G8/G9/G10（外部改写）、
-G11 的 stdio 半边、G12（丢弃有痕迹）、G14（单一来源）、G16（遮罩写回）、**G18**（01 §8 路径解析）、
+G11 的**两个半边**（stdio 2026-09-18、HTTP 2026-09-22，登记册第 45 行）、G12（丢弃有痕迹）、G14（单一来源）、G16（遮罩写回）、**G18**（01 §8 路径解析）、
 **G19**（未水合声明随实例换手丢失）、**G20**（环境采样基线进回合收据，`envTracker` 删除）。
 其中 **G13 被改判为"非缺口"**：它是 pull 形态的 σ（判据可重算 ⇒ 落点 1），不是 F3 的缺口。
 
-这张表本身就是一次分类结论：**"还开着的事"里只有一部分是形式化意义上的缺陷**——
-G11 是（传输层没有通道），G4 的归属半边是（缺持久清单），
-其余三件是别的族（产品决策 / 作用域不变式 / 协议合规），不该被记成"可观测性没做完"。
+这张表本身就是一次分类结论：**表里剩下的已经没有形式化意义上的缺陷**——
+两个 G11 半边（"传输层没有通道"）截至 2026-09-22 都已关闭，G4 的归属半边是一个决策而不是洞，
+其余几件是别的族（产品决策 / 作用域不变式 / 协议合规），不该被记成"可观测性没做完"。
+这一轮**新进入这一类**的不是一个编号缺口：从不宣告的 server 在任何传输上都不可见
+（10 §3.4 边界 3），只有"拉"才看得见它。
 
 **2026-09-19 追加一格（F1 族，不是 F2/F3）**：**G25** —— 沙箱租约的围栏令牌 `epoch`
 每次接管归 `1`（`internal/store/sandbox_leases.go:72`/`:81`），因此"同一个 `owner` 换代后，
@@ -211,13 +213,17 @@ G11 是（传输层没有通道），G4 的归属半边是（缺持久清单）�
 [12 §3](./12-lease-formal-design.md) 的 **L4(c)（令牌必须逐次获取唯一）**，
 修法是一条款（抢占分支 `epoch = epoch + 1`）——**已修（2026-09-19，工作区）**，witness 是 `TestSandboxLeaseEpochNeverResetsAcrossTakeover`（反证已实跑）。同一节还给出该义务在 `session_turns` 上的落法，其中**A1 已全部落地（工作区）**：`internal/store` 的 `session_turns` 四方法、`internal/agent/sessionlease.go` 的端口、`internal/gateway/sessionlease.go` 的适配器、两个准入入口与 IfIdle 的接线、以及围栏（`…Fenced` 写语句）。
 
-**2026-09-22 又加了一格（同样不属于 F1–F3）**：**登记册第 44 行**——被丢弃 user space 的 MCP client 的**归属**。
+**2026-09-22 加了两格（同样不属于 F1–F3）**：**登记册第 44 行**——被丢弃 user space 的 MCP client 的**归属**。
 它正是让 G11 HTTP 半边难以收口的那一块：两种修法（SSE 流、定期 re-list）都会造出一个比 agent 对象活得更久的资源，
 而没有任何东西释放它。现在丢弃会把空间退休，扫尾在"退休满 5 分钟、且没有回合在跑或在排队"后收回它的 client
 （10 §3.4 第 2 条），那条站着的通道因此可以落进一个有主人的洞。
+随后**登记册第 45 行**用上了这个主人，把那条通道本身落了地：HTTP 打开站着的 GET 流并实时读它的帧——
+上面 G11 那一行因此被划掉。
 
-> **当前净剩（2026-09-18 收尾）**：形式化意义上的**只有 G11 的 HTTP 半边**
-> （MCP 传输层没有通知通道，需要 SSE 或定期 re-list）。G15（`notifications/initialized`）
+> **当前净剩（2026-09-22 更新）**：这里最后一处形式化意义上的缺陷——G11 的 HTTP 半边——
+> **已关闭**（登记册第 45 行）。取而代之的不是一个传输层功能：一个改了列表却不宣告的 server
+> 任何推送通道都看不见，只有每回合 re-list 能抓到它（10 §3.4 边界 3）——记为一条待裁决的**开放决策**。
+> G15（`notifications/initialized`）
 > 与 MCP 同族，按决策不在本轮范围。**唯一非缺口但值得记一笔的**：决策 A 之前产生的
 > "chat 子目录重复副本"仍在库里（不再刷新、也无人清理）——一次性清理脚本：`fastagent/scripts/workspace_project_chat_duplicate_cleanup.py`（`--selftest` 自检；只在「同样字节在项目根另有存活」时才列入删除；**先上线 A 再跑**，否则会清了又长）。，见下面的"已关闭"清单与 [10 §4](./10-harness-state-audit.md)。
 
@@ -247,7 +253,7 @@ G11 是（传输层没有通道），G4 的归属半边是（缺持久清单）�
 | 路径与作用域同一性 | [01 §3.5/§8](./01-current-implementation.md) · [02 §5](./02-semantics-and-architecture.md) | 一条路径一个键（G18/G21/G22 同族） | `scopeSessionID`/`wsPath`、`sandbox.StoreScope` | `TestE2BLiveOnePathIsOneKey` |
 | 项目树不变式 | [10 §4](./10-harness-state-audit.md)（G17） | 一个项目一棵树、多容器、写广播 | `LiveProjectExecutors`、`syncStoreScope` | — |
 | MCP OAuth 安全条款 | [../mcp-oauth-design.md](../mcp-oauth-design.md) | state 一次性（`Take` 读即删）+ PKCE S256 + TTL + 绑定 userID | `usecase/complete`、`pending_store.go` | `internal/mcp/oauth/...` |
-| MCP 一致性（**协议合规族**，不属于 F1–F3） | [../issues/ext-skills-conformance-checklist.md](../issues/ext-skills-conformance-checklist.md) | 规范 MUST ↔ 出口实现；**声明即承诺** | `server/discover`、`skills/list` | 该清单的"现状"列；G11 HTTP 半边、G15 仍开放 |
+| MCP 一致性（**协议合规族**，不属于 F1–F3） | [../issues/ext-skills-conformance-checklist.md](../issues/ext-skills-conformance-checklist.md) | 规范 MUST ↔ 出口实现；**声明即承诺** | `server/discover`、`skills/list` | 该清单的"现状"列；G15 仍开放（G11 的 HTTP 半边已于 2026-09-22 落地，第 45 行） |
 | **单一来源 / 表达式唯一** | [10 §4](./10-harness-state-audit.md)（G14/G16/G20/G23）· [08 §2.2.3](./08-state-observability-principle.md)（落点 2）· [08 §9.1](./08-state-observability-principle.md) | **一条事实只有一种表达式**：来源唯一（G14）· 守卫唯一（G16）· 规则唯一（G23）· 判据复用既有主（§2.2.3 落点 2）· 出口唯一（§9.1） | `agent/heartbeat.go` `loadHeartbeatTasks`、`setup/handlers.go` `mergeSkillEntry(s)`/`cloneSkillEntries`、`workspace/scope.go` `ScopeSegments`/`WriteScope` | `TestHeartbeatReadsWhatThePromptShows`、`TestMaskedGlobalSkillSecretKeepsTheStoredValue`、`TestScopeSegmentsIsTheLayoutTable`、`TestAWriterScopeIsTheScopeItsKeysLandIn` |
 
 > **备注（2026-09-20，单一来源族入场时发现）**：本节开头那条分界（"C 的行与 A **同问同形态**"）
@@ -291,7 +297,7 @@ G11 是（传输层没有通道），G4 的归属半边是（缺持久清单）�
 > 重新打开的条件（任一）：① F1 的判据第一次**因为"读到的不是一份完整对象"而失效**（例如 LocalFS 上 hydrate 读到半份文件被实测到）；
 > ② 出现**第二次**静默覆盖（目前只有 09-18 一次）；③ 出现需要同一份公理的**第三个后端**。
 
-> 与 §6 的分工：§6 列的**是**三套系统内部的未完项（G11/G15/G4 归属半边…）；本节 E 桶是**还没被任何一套覆盖**的东西。
+> 与 §6 的分工：§6 列的**是**三套系统内部的未完项（G15/G4 归属半边/G25 一族…）；本节 E 桶是**还没被任何一套覆盖**的东西。
 > 用法：读一段代码前先问"它被哪一套约束"；写新机制前回答 §6 的清单；若答案是"哪一套都不是"，
 > 那要么它是 C（同一形态的新实例），要么我们在**提出第四套形式系统**——后者必须同时拿出新问题与新判断形态。
 

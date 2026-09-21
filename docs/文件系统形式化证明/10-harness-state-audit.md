@@ -97,7 +97,7 @@
 | 外部改写身份/系统文件（面板、另一个会话、另一个 pod） | 下一轮系统提示词不同 | **无**（回合级采样只覆盖 skills/tools/memory） | — | ❌ **G8** |
 | 外部改写 agent 配置（模型、prompt mode、技能开关…） | 运行期外观不同 | **无**（除非恰好改变了工具名/技能名） | — | ❌ **G9** |
 | 外部删除/改写 cron job、`HEARTBEAT.md` | "我将在 X 被唤醒"变成假 | **无** | — | ❌ **G10** |
-| MCP server 侧工具列表变化（`notifications/tools/list_changed` 等） | server 能力变了 | **无**（没有任何 notification 处理） | — | ❌ **G11** |
+| MCP server 侧工具列表变化（`notifications/tools/list_changed` 等） | server 能力变了 | 下一回合重建 userspace 并重新 tools/list；回合级信号说出多了/少了什么 | 回合级环境信号 | ✅ 2026-09-18（stdio）/ 2026-09-22（HTTP）——G11 |
 | 自动回合因会话忙被推迟 / 超时丢弃 | 该跑的一轮没跑（调度器**不会补投**：它在触发时就推进了下一次） | 逐条 slog（含 agent/会话/来源/等了多久/文本首行）+ **cron 会在该会话发一条注记** | 该会话的 channel | ✅ 2026-09-18（原 ❌ G12） |
 | 上下文压缩 / 工具结果裁剪 / 回合被中断 | 历史被替换 | 摘要与裁剪占位符都明说发生了什么 | 回合输入 | ✅ 08 §5 |
 | provider 账号回退（`providerForAgent` 的三条路径落到 shared provider，【码】`provider_fallback_log_test.go:3-10`） | 请求改由另一个上游账号发出（模型名不变） | 只有 slog warn | — | ⚠️ 运营侧事实：不属于 agent 的世界模型，但它印证同一课——"悄悄换了一个东西，只有日志知道" |
@@ -336,7 +336,7 @@ if a script needs one, read it and write it again (read_file + write_file copies
 这不是设计得更好，而是**采样面碰巧覆盖了它**。采样面之外的同类变化全都没有信号，
 这正是 08 §6 清单第 4 条（"信号何时送达"）之外的第二类漏洞：**采样面本身要有判据**。
 
-### 3.4 MCP server 侧的变化（G11；**stdio 侧 2026-09-18 已修**）
+### 3.4 MCP server 侧的变化（G11；**两侧都已修**——stdio 2026-09-18，HTTP 2026-09-22）
 
 MCP 工具在**构造 agent 时一次性注册**（【码】`loop.go:472-484`：`mcp.NewManager` → `ToolDefs()`
 → 注册闭包），所以 server 侧的变化只有两条路能让它变成真的：重建 agent，或让 registry 支持运行时增删工具。
@@ -346,13 +346,15 @@ MCP 工具在**构造 agent 时一次性注册**（【码】`loop.go:472-484`：
 | 传输 | 通知能到吗 | 证据 |
 |------|-----------|------|
 | **stdio** | **能，但被丢掉** | `stdio.go` 的读循环逐行扫 stdout，只认 `resp.ID == 请求id` 就返回，其余一律 `continue`——server 发来的 `notifications/tools/list_changed`（有 method、无 id）**被解析出来后直接丢弃**。请求 id 从 1 起（`NewStdioClient` 里 `nextID: 1`），所以通知的 id=0 不会与任何请求撞号 |
-| **HTTP** | **没有站着的线**（2026-09-22 起有一个*应答内*的通道） | `HTTPClient.sendRequest` 仍是"一请求一 POST"。它此前只把响应体当单个 JSON-RPC 对象解析；2026-09-22 起它同时声明两种内容类型，也能读"以 SSE 流形态回来的应答"（规范要求 client 两种形态都支持）。但那只是**应答**内的窗口：server 只能在我们请求它的时候往里放消息，别的时候没有地方放。规范里那条 GET 流仍然没有任何东西去开，所以"server 自己宣告的变化"依旧没有地方到达——这不是"我们丢了它"，是"它没地方来" |
+| **HTTP** | **能，2026-09-22 起** | `HTTPClient.SetNotificationHandler` 打开传输层的**站着的 GET 流**（`Accept: text/event-stream`）并逐帧实时读取。在那之前 HTTP 只有*应答*通道——一请求一 POST，server 没有办法先说话。`405 Method Not Allowed` 是规范里的"这个端点没有流"，它被照字面接受：只 GET 一次，不重试。消息从活着的流上读，绝不缓冲到流结束 |
 
 **落点（2026-09-18，stdio 侧）**：捕获 → 交给 manager → 闸门 → **复用 `mcp add` 已经在用的重建路径**：
 
 ```
-stdio 读循环识别 method 消息   →  StdioClient.SetNotificationHandler
-    →  Manager.wireNotificationSink（HTTP 不接线，不假装有）
+client 的读反应堆识别 method 消息，不论它从哪条线来：
+    stdio：跑在 server stdout 上的读循环        →  StdioClient.SetNotificationHandler
+    HTTP： 站着的 GET 流的帧                   →  HTTPClient.SetNotificationHandler
+        →  Manager.wireNotificationSink（两个传输——同一个 sink 类型、同一个闸门）
         →  notificationGate：每 server 30s 内最多处理一次
             →  agent 层：method == notifications/tools/list_changed
                  →  ag.mcpConfigNotify(owner, agent)  ← mcp add/remove 用的同一条路
@@ -366,14 +368,17 @@ stdio 读循环识别 method 消息   →  StdioClient.SetNotificationHandler
 闸门是必要的：闸门后面是"重建一个用户的整个 userspace"。一个反复宣告变化（或有 bug）的 server
 不该能把这件事变成循环——被限流时记一条 warn，而不是静默。
 
-**如实记下的两个边界**：
-1. **HTTP 那半边没修**：缺的是**站着**的通道。传输层的两条 MUST 已在 2026-09-22 落地（登记册第 43 行）——
-   每个请求都带 `Accept: application/json, text/event-stream`，以及"以 SSE 流形态回来的应答也能读"——
-   但两者都活在一次请求的生命周期里。要让"server 自己宣告的变化"到达，仍然得实现规范里的 SSE 流（真功能），
-   或者定期 re-list（每回合一次网络往返）；因此对这种 server，HTTP 侧的行为与调研前完全一致：变化等下一次 reload；
+**如实记下的三个边界**：
+1. ~~HTTP 那半边没修~~ —— **2026-09-22 关闭（登记册第 45 行）**：client 打开规范里的 GET 流，把 server 发来的每条消息
+   交给 stdio 侧同一条 sink。第 43 行的两条 MUST（`Accept` 头、读"以 SSE 流形态回来的应答"）活在一次请求的生命周期里；
+   这一条是**站着**的那半。它只能排在 44 之后落地，因为一条流 = 一个 goroutine + 一条连接，而在此之前没有东西拥有它们；
 2. **`notifications/initialized` 两个传输都没发**（全仓搜 `initialized` 无命中）：MCP 规范要求 client 在
    initialize 之后发这条通知。现有 server（QC/Quandora）不要求它，所以今天不致命——但它可能是某些 server
    开始推送通知的前提。记为 **G15（开放）**：先不动，因为它会改变与真实 server 的握手行为，需要真机验证。
+3. **从不宣告的 server 仍然不可见。** 规范里"宣告"是可选的，因此一个工具列表变了却**不发**
+   `notifications/tools/list_changed` 的 server，在**两个传输上都**会被漏掉——stdio 读循环和 SSE 流对"没人提起的变化"
+   一样看不见。要看见它需要**拉**：每回合重新 tools/list，有差异就重建。那是另一种机制（比较，而不是推送），
+   所以它是一个待裁决的决定，而不是一个待修的缺陷——记在这里，而不是假装不存在。
 
 **落地第 43 行时看到的三件事——只作事实记录，未裁决**（不新增 gap 编号）：
 
@@ -391,9 +396,9 @@ stdio 读循环识别 method 消息   →  StdioClient.SetNotificationHandler
    MCP 工具的东西，所以这是"此刻没人在用这些 client"最紧的廉价证明，也正是它保证长回合不会在调用中途被切断。
    两条界限如实记下：释放跑在驱逐器的 ticker 上，因此可能晚一个 tick；而在丢弃**之前**就拿到该空间的请求，仍可能在
    扫尾检查之后、它自己 `AcquireTurn` 之前启动一个回合。边界 1 的两种修法现在都落在一个有主人的洞里。
-3. **搭在请求流上的 server 消息被记录、不被执行**（`parseResponseBody` 用 debug 记一条然后跳过）。这是刻意的
-   ——执行它是"站着的通道"的职责——但这意味着：把请求流当成唯一通道的 server 仍然到不了任何人，
-   而且只有 debug 级别说了这件事。
+3. ~~**搭在请求流上的 server 消息被记录、不被执行**~~：第 45 行之后它走 `handleServerMessage`——与站着的流同一扇门。
+   两个来源现在不会漂移：一条通知落在哪条流上，处理方式都一样。对"服务端请求"（有 method 也有 id）也给了应答
+   （`ping` ⇒ `{}`，其余 ⇒ `-32601`），因为 JSON-RPC 要求应答，而静默忽略正是这条链一路在杀的东西。
 
 ### 3.5 自动回合被推迟/丢弃（G12；**2026-09-18 已修**）
 
@@ -459,7 +464,7 @@ stdio 读循环识别 method 消息   →  StdioClient.SetNotificationHandler
 | ~~**G19**~~（2026-09-18 新发现） | O1 | 未水合声明（Policy C）的判据 `workspaceUnhydrated` 只在**创建它的那个进程**里：`adoptFromLease` 明确不重放 hydrate（"the creating pod hydrated the same scope"），于是换手后的副本 flag 恒为 false ⇒ **声明消失**，agent 把空 `/workspace` 读成"文件没了" | 沙箱生命周期族 | P1 **已修（2026-09-18）**：该位随**实例**落进 `sandbox_leases.unhydrated`（`SetSandboxLeaseUnhydrated`，owner+sandbox_id CAS，Acquire/Replace 时归零 ⇒ 不会钉到继任实例上）；采纳时 `ex.setWorkspaceUnhydrated(rec.Unhydrated)` 读回，创建/替换发布实例时 `publishUnhydrated` 写入 | 真机 E2E：pod A 用坏 store 建实例（列表失败）→ pod B 采纳同一实例 → 仍报未水合；反证（去掉采纳读取）该 E2E 变红 | 不提供 |
 | ~~**G10**~~ | O1 | ~~cron job / HEARTBEAT.md 被外部改删无信号~~ | 用户 | **P2 已修（2026-09-18）**：定时任务清单进回合级采样（`scheduled jobs added / changed / no longer exist: <name>`）；`HEARTBEAT.md` 的内容变化本就被 G8 的身份文件指纹覆盖；读不到清单时声明"读不到"，**不谎报删除** | — | 不提供 |
 | ~~G14~~ | —（单一来源，不是投递义务） | ~~`HEARTBEAT.md` 有**两个来源**：提示词读 store（`loadFileForUser`），heartbeat 触发却只读 `<home>/HEARTBEAT.md`~~（`heartbeat.go`） | 用户 / 运维 | **P2 已修（2026-09-18）**：`loadHeartbeatTasks` 改走与提示词**同一个解析器**（`ctxBuilder.loadFileForUser("HEARTBEAT.md", ownerUserID)`，store 优先、磁盘回落）；owner 正是该回合 `chatterUserID` 对 `SourceHeartbeat` 的解析结果，所以"看到的"与"触发的"必然同一份。没有 ctxBuilder 的形态（嵌入式/CLI）保持原有磁盘读法 | — | — |
-| ~~**G11**~~ | O1 | ~~MCP server 侧通知被丢弃~~ | 外部 server | **stdio 侧 P2 已修（2026-09-18）**：捕获 → 闸门（每 server 30s）→ 复用 `mcpConfigNotify` 重建 → 回合级工具集信号自动报出；**HTTP 侧仍无通知通道**（见 §3.4 的两个边界，需要 SSE 或定期 re-list 才能补） | — | 不提供 |
+| ~~**G11**~~ | O1 | ~~MCP server 侧通知被丢弃~~ | 外部 server | **两侧都已修**：stdio 2026-09-18，HTTP 2026-09-22（登记册第 45 行）——捕获 → 闸门（每 server 30s）→ 复用 `mcpConfigNotify` 重建 → 回合级工具集信号自动报出。HTTP 那半就是规范里的 GET 流：client 在 sink 接线的同时打开它，由第 44 行的主人负责收回；405 被当作"此处没有流"，不重试。剩下的边界**与传输无关**：一个**不宣告**就改掉自己工具列表的 server，两个传输都看不见（§3.4 边界 3） | — | 不提供 |
 | **G15** | —（协议合规，不是投递义务） | `notifications/initialized` 从未发送（stdio 与 HTTP 都没有） | — | P3：规范要求 initialize 之后发；现有 server 不要求，可能是某些 server 开始推送通知的前提 | 补发这条通知，但必须先在真机（QC / Quandora）上验证握手不受影响 | 不提供 |
 | ~~G16~~ | —（setup API 的遮罩写回，非投递义务） | ~~技能密钥被自己的遮罩覆盖~~（2026-09-18 死码扫描发现） | 运维面板 | **P1 已修（2026-09-18）**：规则收成**一个家** —— `mergeSkillEntry`（条目级）+ `mergeSkillEntries`（补丁级），被**两条**写入路径共用：全局 `skills.entries`（namespace 扫描前先与库中现值合并）与 per-agent 覆盖行（`scope.SettingInto` 取现值再合并）；providers/channels 既有的内联守卫**保持不动**（请求形状不同，等第三个变体证明同一缝再抽）。实现中撞到一个真坑：JSON 解码器**复用**（不替换）map，所以"覆盖前快照"必须**深拷贝**（`cloneSkillEntries`），否则比值比的是被就地改写的自己——第一次接线正是这样悄悄保留了遮罩 | — | — |
 | ~~**G12**~~ | O2 | ~~自动回合被推迟/丢弃只有 slog~~ | harness | **P2 已修（2026-09-18）**：丢弃逐条带全信息（原来只有 `count=N`）；用户创建的 cron 额外在该会话发一条注记（有界发送，不启动回合）；harness 自己的来源只记录，不打扰用户 | — | 顺序 |
@@ -654,7 +659,7 @@ stdio 读循环识别 method 消息   →  StdioClient.SetNotificationHandler
 | G21 + G7b 删除半边（已修） | `go test ./internal/setup/ -run TestHandleAgentFileDelete`（面板形状的路径：`sessions/<sid>/f` + `?sessionId=` 真的把 store 里那份删掉；项目根路径把 chat 从请求里取；旧的无前缀形状仍可用；沙箱删除失败会回报 `sandboxRemoved:false`）+ `go test ./internal/sandbox/ -run 'TestSandboxPathForStorePath|TestStorePathScope|TestE2BPoolLiveExecutorDoesNotCreate|TestDockerPoolLiveExecutorDoesNotCreate'`（映射与"只找活实例"）+ `go test ./internal/gateway/ -run TestRemoveWorkspaceFile`（没池/单副本后端是 no-op，有副本时交给执行器）。真机：`FASTAGENT_E2B_LIVE=1 E2B_API_KEY=… go test ./internal/sandbox/ -run TestE2BLivePanelDeleteSticks -v` —— **两半**：不加 d1 时"删除被下一次同步复活"（可复现），加了 d1 后删除钉住。**反证**：把 handler 的路径约定改回旧行为 → `TestHandleAgentFileDelete_UsesThePathThePanelClicked` 立刻红（"the panel's delete left the file in the store"） |
 | G10（已修） | `go test ./internal/agent/ -run 'TestEnvSignalCarriesScheduledJobChanges|TestCronFingerprintIgnoresRunBookkeeping|TestEnvSignalStatesUnreadableJobList'`（删除/改期/新增都点名；记账字段不触发；读不到就说读不到） |
 | G14（已修） | `go test ./internal/agent/ -run 'TestHeartbeatReadsWhatThePromptShows|TestHeartbeatFallsBackToTheDiskCopy|TestHeartbeatWithNoFileSendsNothing'`（store 与磁盘内容故意不同 → tick 与提示词必须同源；无 store 回落磁盘；都没有则不发回合） |
-| G11（stdio 已修） | `go test ./internal/mcp/ -run 'TestStdioClientHandsNotificationsToTheHandler|TestManagerWiresNotificationsThroughTheGate|TestManagerDoesNotWireATransportWithoutNotifications'`；HTTP 侧可读 `internal/mcp/http.go` 确认没有 SSE 流 |
+| G11（两侧都已修） | `go test ./internal/mcp/ -run 'TestStdioClientHandsNotificationsToTheHandler|TestManagerWiresNotificationsThroughTheGate|TestManagerLeavesANonSinkTransportAlone'`（stdio、闸门，以及一条真的没有线的传输）+ `go test ./internal/mcp/ -run 'TestServerNotificationArrivesOverTheStandingStream|TestManagerHearsAnHTTPNotificationOverTheStandingStream'`（HTTP 那半：GET 流被打开、带 `Accept: text/event-stream`、无人请求的变化到达 manager）+ `-run 'TestTheStandingStreamIsNotOpenedWithoutAHandler|TestAnEndpointWithoutAStreamIsNotAskedTwice|TestAServerRequestOnTheStreamIsAnswered|TestClosingTheClientEndsTheStandingStream|TestAReconnectResumesWithTheLastEventID|TestMessagesOnAReplyStreamGoThroughTheSameDoor'`。**反证，全部真跑**：不开流 ⇒ 2 红；把流缓冲到结束再读 ⇒ 2 红；把 405 当可重试 ⇒ 1 红；忽略服务端请求 ⇒ 1 红；`Close` 不结束流 ⇒ 包在 `streamWg.Wait()` 上超时；跳过应答流上的 server 消息 ⇒ 1 红 |
 | G15 | —（协议合规，不是投递义务） | `rg 'initialized' internal/mcp/` 无命中（两个传输都没发这条通知） |
 | G12（已修） | `go test ./internal/gateway/ -run 'TestDeferredTurnsAnnouncesADroppedScheduledTask|TestDeferredTurnsDropsMessagesPastBudget|TestDroppedCronNoteWithoutAJobName'`（cron 才发声、点名任务、没有任务名也不留悬空引号） |
 | G18（已修） | `go test ./internal/agent/tools/ -run 'TestApplyPatchUsesTheSameStoreKeyAsWriteFile|TestApplyPatchDeleteUsesTheSameStoreKey|TestApplyPatchKeyInANonCodingSession|TestWriteThroughMirrorsOneKeyAndOnePath'`；真机 `FASTAGENT_E2B_LIVE=1 E2B_API_KEY=… go test ./internal/agent/tools/ -run TestE2BLiveOnePathIsOneKey -v`（命令在文件头）。**反证**：把 `writeForPatch` / `writeForPatchSandbox` 里的键改回 `r.sessionID, path`，前三条立刻变红（`keys = [app/notes.md sessions/<sid>/notes.md]`） |
