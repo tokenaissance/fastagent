@@ -1925,20 +1925,62 @@ is told. Falsify: drop the etag check ⇒ the overwrite reappears.
 > `TestFileUpload_NameCollisionOffersTheCurrentVersionThenReplaces` (create → 409 with the current
 > version → replace with it → content is the new one), falsification run for real. The cloud panel's
 > three answers (keep both / replace / cancel) and the auto-rename half ride the cloud work.
+>
+> **Landing log, second pass (2026-09-21, working tree).** The first pass proved the *rule*; this one
+> proves the *delivery point* — the call site that actually carries the fact to the store. Rule-level
+> green was the state that hid the tool-row defect (A4 §A4.2), so the same standard is applied here.
+> **B7–B9 now have delivery-point witnesses**: `internal/agent/tools/write_guarded_peer_test.go` drives
+> `write_file` (overwrite and create), `edit_file` and `apply_patch` through a real `workspace.LocalFS`
+> whose `Stat` answers the read-time version and *then* lets a peer's bytes land (longer body, so
+> `size:mtime_ns` cannot match by accident). Each asserts the refusal text (`another writer changed`,
+> `nothing was overwritten`, `read it again`) *and* that the peer's bytes survived. **Falsifications run
+> for real, each verified by `grep` before trusting the red, each reverted**: a plain `Put` at
+> `file.go:592` ⇒ 2 red, at `file.go:702` ⇒ 1 red, at `apply_patch.go:549` ⇒ 1 red.
+> **B3 now has the witness its backend was missing** — `internal/workspace/s3_version_test.go` runs a
+> hand-rolled minimal S3 over `httptest` (location, HEAD → ETag, PUT honouring `If-None-Match: *` /
+> `If-Match` → 412). It asserts that `Stat`'s version *is* the ETag, that the conditional PUT carries
+> exactly that `If-Match`, that a stale write is refused with the object untouched, and that a
+> create-only PUT sends `If-None-Match: *` (falsification: delete the `SetMatchETag*` branch ⇒ both
+> red). Sequential ETags (`etag-1`, `etag-2`) mean the test reads the version rather than re-deriving
+> it — the point of B3 is that the *store* owns the token.
+> **B10 changed posture after its witness found a silent wrong answer.** `attachments.go` used to
+> `Put` first and, on `ErrVersionConflict`, log a warning *while still appending the old name to
+> `paths`* — so the `[Attached: …]` breadcrumb named a file whose bytes were somebody else's. The
+> store write now happens **first** (it is the store that decides the name): create-only
+> `PutIfVersion(VersionAbsent)`, and on conflict it **keeps both** under `<stem> (n)<ext>`, bumping an
+> existing counter instead of nesting, returning the name that actually landed — and `""` when nothing
+> could be had, in which case the caller claims nothing rather than naming an unwritten file.
+> Witness `internal/agent/attachments_store_posture_test.go` (a fake store whose `Put` is a genuine
+> blind overwrite, so a regression to `Put` is visible) covers create-only, counter bump, and
+> all-spellings-taken. Falsifications run for real: `PutIfVersion` → `Put` ⇒ 3 red; drop the keep-both
+> loop ⇒ 2 red. **A skills publish is the opposite posture and stays read-modify-write** — it is an
+> intentional re-publish — witness `internal/skills/objectstore_posture_test.go` (expectation recorded
+> per write: `v0` then `v1`; falsification: force `VersionAbsent` ⇒ the re-publish case red).
+> That contrast is the reason B10's two halves are documented together: a shared helper between them
+> would erase exactly the difference that matters.
+> **B11's cloud panel half landed** (cloud `develop`, working tree): the panel uploads one file per
+> request through `uploadAttachments` (`src/features/chat/upload-attachments.ts`), which turns a 409
+> into a `NameConflict` and asks the user; the three answers live in
+> `src/features/chat/attachment-conflicts.ts` (pure) and `src/features/chat/components/owner/upload-conflict-dialog.tsx`
+> (per-file rows, replace offered only when the store named a version). The delivery point is asserted
+> end-to-end in `src/__tests__/fastagent/attachment-conflict-flow.test.tsx` (attach → dialog →
+> Continue/Replace ⇒ the nth `uploadAgentFile` call carries `{name, expectedVersion}` and the turn
+> still leaves). Falsifications run for real: no asker ⇒ 2 red; drop `expectedVersion` ⇒ 1 red; drop
+> the pending re-merge ⇒ 4 red; short-circuit `autoRename` ⇒ 7 red.
 
 | # | change | anchor | cost | verification |
 |---|--------|--------|------|--------------|
 | **B1** | `ObjectInfo` gains `Version string` — an **opaque** token owned by `internal/workspace` (never `minio.ETag` / `syscall.Stat_t`); supplied by `Stat`/`List` | `internal/workspace/workspace.go:76` | 0 | DTO test: every implementation fills it |
 | **B2** | the port gains `PutIfVersion(ctx, …, expected Version) error` + `ErrVersionConflict`; `Put` keeps its meaning (blind overwrite) | `workspace.go:48-72` | 0 | interface doc + the two error strings |
-| **B3** | S3: conditional PUT via `PutObjectOptions.SetMatchETag` (minio-go v7.3.0 has it; verified); `Stat` returns the ETag as `Version` | `internal/workspace/s3.go:91/118` | 0 extra requests | fake/emulator test: stale ETag ⇒ conflict |
+| **B3** | S3: conditional PUT via `PutObjectOptions.SetMatchETag` (minio-go v7.3.0 has it; verified); `Stat` returns the ETag as `Version` | `internal/workspace/s3.go:108-122` | 0 extra requests | ✅ `s3_version_test.go` (minimal S3 over `httptest`): `Stat`'s version *is* the ETag, the PUT carries that `If-Match`, stale ⇒ 412/conflict with the object untouched, create-only sends `If-None-Match: *`; falsification (drop the `SetMatchETag*` branch) ⇒ red |
 | **B4** | LocalFS: `Version = size:mtime_ns`; `PutIfVersion` compares before writing. **Declared as best-effort** (read-then-write, no kernel CAS) — honest, because multi-replica installs must use S3/PG anyway | `internal/workspace/localfs.go:88/119` | 0 extra requests | test: stale version ⇒ conflict; doc states the strength |
 | **B5** | `Metered` passes both through (no cost, no behavior) | `internal/workspace/metering.go:48` | 0 | existing decorator test |
 | **B6** | per-backend **strength table** written down (exact: S3/PG; best-effort: LocalFS) and the port doc states "callers may rely on the declared strength only" | `01 §2` + the port's L3 header | 0 | doc |
-| **B7** | `write_file` writes with `PutIfVersion` (version read right before; `VersionAbsent` when the object must not exist) | `internal/agent/tools/file.go:1172` | +1 HEAD (0 bytes) | UT: peer wrote between read and write ⇒ refusal + σ |
-| **B8** | `edit_file` uses the version from its own read (it already `Get`s the object) | `internal/agent/tools/file.go:501/688` | 0 extra | UT: same |
-| **B9** | `apply_patch` uses the version captured by `plannedWrite` (today it carries content; carry the version instead) | `internal/agent/tools/apply_patch.go:505/616/547` | 0 extra | UT: same |
-| **B10** | attachments (`attachments.go:118`) and skills publish (`skills/objectstore.go:105`) declare their posture explicitly: attachments = must-not-exist (`VersionAbsent`), skills = **decided later** (they are intentional republish) | as listed | 0 | UT per posture |
-| **B11** | panel upload / delete (`setup/handlers_agents.go:1445/1512`): condition on the version the panel last listed (owner-visible UI), refuse + report on conflict | as listed | +1 HEAD per upload | UT + a panel-shaped E2E |
+| **B7** | `write_file` writes with `PutIfVersion` (version read right before; `VersionAbsent` when the object must not exist) | call site `internal/agent/tools/file.go:592`; the guarded write itself `file.go:891-915` | +1 HEAD (0 bytes) | ✅ delivery point: `write_guarded_peer_test.go` (overwrite + create); falsification (plain `Put` at the call site) ⇒ 2 red |
+| **B8** | `edit_file` uses the version from its own read (it already `Get`s the object) | call sites `internal/agent/tools/file.go:702`, `:1394` | 0 extra | ✅ delivery point: same file (peer lands after the read); falsification ⇒ 1 red |
+| **B9** | `apply_patch` uses the version captured by its own write path | call site `internal/agent/tools/apply_patch.go:549` | 0 extra | ✅ delivery point: same file (peer lands between the plan and the write); falsification ⇒ 1 red |
+| **B10** | the two postures, declared separately and **kept** separate: attachments (`agent/attachments.go`) = must-not-exist, and on a taken name **keep both** under `<stem> (n)<ext>` (the store names the file); skills publish (`skills/objectstore.go:105-115`) = read-modify-write, because it is an intentional re-publish | as listed | 0 | ✅ `attachments_store_posture_test.go` (create-only / counter bump / all taken ⇒ claim nothing) + `skills/objectstore_posture_test.go` (expectation follows `v0` → `v1`); falsifications ⇒ 3 red, 2 red, and 1 red respectively |
+| **B11** | panel upload / delete (`setup/handlers_agents.go:1445/1512`): condition on the version the panel last listed (owner-visible UI), refuse + report on conflict | server: as listed; cloud panel: `src/features/chat/{upload-attachments,attachment-conflicts}.ts` + `components/owner/upload-conflict-dialog.tsx` | +1 HEAD per upload | ✅ server (`TestFileUpload_NameCollisionOffersTheCurrentVersionThenReplaces`) + ✅ panel delivery point (`attachment-conflict-flow.test.tsx`: attach → dialog → Continue/Replace ⇒ the request carries `{name, expectedVersion}` and the turn still leaves); 4 falsifications run for real |
 
 **Not in this list, on purpose**: the sandbox→store reconcile (T1) and the
 sandbox mirror's "observe once, then report" — see the boundary note above.

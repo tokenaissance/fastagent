@@ -83,9 +83,9 @@ type Store interface {
 | 写者 | 前置条件 | 状态 |
 |---|---|---|
 | `write_file` / `edit_file` / `apply_patch` | 写前 `Stat` 取版本 ⇒ `PutIfVersion` | ✅ 已接（B7–B9） |
-| 附件 | `VersionAbsent`（必须不存在） | ✅ 已接（B10）—— `internal/agent/attachments.go:123` 传 `workspace.VersionAbsent`；S3 上即 `If-None-Match: *`，LocalFS 上是 stat-比较（best effort，见上表） |
+| 附件 | `VersionAbsent`（必须不存在）；名字被占则**改名保留两份** | ✅ 已接（B10）—— `internal/agent/attachments.go:178` 传 `workspace.VersionAbsent`；S3 上即 `If-None-Match: *`，LocalFS 上是 stat-比较（best effort，见上表）。**09-21 改了姿态**：旧写法先 `Put`、冲突时只 `slog.Warn` 却仍把**旧名字**写进 `[Attached: …]` 面包屑 —— 那是一个静默错答（面包屑指向别人的字节）。现在**先写 store**（名字由 store 决定），冲突就在 `<stem> (n)<ext>` 上保留两份（已存在的计数递增，不嵌套），返回**真正落地的名字**；连一个空位都拿不到时返回 `""`，调用方**什么也不声明**。见证 `internal/agent/attachments_store_posture_test.go`，反证实跑（`PutIfVersion`→`Put` ⇒ 3 红；去掉保留两份的循环 ⇒ 2 红） |
 | 技能发布 | 读当前版本再条件写 | ✅ 已接（B10）—— `internal/skills/objectstore.go:113` 读版本后 `PutIfVersion`，并映射 `ErrVersionConflict` |
-| 面板上传/删除 | 面板最后列出的版本 | ✅ 已接（B11）—— 上传读可选 `expectedVersion` 字段、冲突时 409 + `current{version,size,modified_at}`（`internal/setup/handlers_agents.go:1492-1531`）；删除本身没有覆盖语义，它的第二半是 d1 镜像删除（`sandbox.LiveWorkspaceFileRemover`：面板 2026-09-18、工具路径 2026-09-20，见 [10 §4](./10-harness-state-audit.md) G7b） |
+| 面板上传/删除 | 面板最后列出的版本 | ✅ 两侧均已接（B11）—— 服务端：上传读可选 `expectedVersion` 字段、冲突时 409 + `current{version,size,modified_at}`（`internal/setup/handlers_agents.go:1492-1531`）；cloud 面板：改为**一次请求一个文件**，把 409 变成具名冲突并给出**三答案**（保留两份＝按服务端命名自动改名 / 替换＝带 `expectedVersion` 重发 / 取消），落点见证 cloud `src/__tests__/fastagent/attachment-conflict-flow.test.tsx`。删除本身没有覆盖语义，它的第二半是 d1 镜像删除（`sandbox.LiveWorkspaceFileRemover`：面板 2026-09-18、工具路径 2026-09-20，见 [10 §4](./10-harness-state-audit.md) G7b） |
 | 沙箱↔store（穿透/回写） | **不用条件写**：见证只 in-band 存在于副本的 mtime 戳里（L7 §3.1 的论证） | 保持 A 族 |
 
 > **可核查的读数（2026-09-21 加；《认知哲学的数学原理》19-5 §19.5.8.8「拒绝的代价」的结构分量）**
