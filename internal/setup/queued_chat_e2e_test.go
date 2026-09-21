@@ -103,13 +103,22 @@ func newQueuedChatHarness(t *testing.T) (*Server, *agent.Agent, *e2eProvider) {
 // is 1 for the plain reply flows and higher when a turn has to run a tool.
 func newChatHarness(t *testing.T, prov provider.Provider, maxToolIterations int) (*Server, *agent.Agent) {
 	t.Helper()
+	return newChatHarnessWith(t, prov, maxToolIterations)
+}
+
+// newChatHarnessWith is newChatHarness with manager options: the cross-replica
+// tests need the one option that decides whether a harness is a replica or just
+// a server — the store-backed turn lease.
+func newChatHarnessWith(t *testing.T, prov provider.Provider, maxToolIterations int, opts ...agent.ManagerOption) (*Server, *agent.Agent) {
+	t.Helper()
 	home := t.TempDir()
 	rc := config.ResolvedAgent{
 		ID: "agt_e2e", UserID: "u_1", Home: home,
 		Workspace: filepath.Join(home, "workspace"), Model: "fake-model",
 		MaxTokens: 128, Temperature: 0.7, MaxToolIterations: maxToolIterations,
 	}
-	mgr, err := agent.NewManager([]config.ResolvedAgent{rc}, prov, bus.New(), agent.WithUserID("u_1"))
+	opts = append([]agent.ManagerOption{agent.WithUserID("u_1")}, opts...)
+	mgr, err := agent.NewManager([]config.ResolvedAgent{rc}, prov, bus.New(), opts...)
 	if err != nil {
 		t.Fatalf("agent manager: %v", err)
 	}

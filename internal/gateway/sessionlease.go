@@ -17,6 +17,17 @@ import (
 // premise (obligation L4(c)), so a caller must not be able to pass one in.
 type storeSessionLease struct{ st store.Store }
 
+// NewStoreSessionLease is the one way to build the adapter from outside this
+// package. The composition root uses it (gateway/userspace.go); so does the
+// two-replica test harness in internal/setup, which has to build the production
+// shape — two Servers that share one store — or it would only be testing two
+// unrelated servers (docs/fs-formal-proof/11-change-register.md row 32, the one
+// item that note held open).
+//
+// The struct stays unexported on purpose: the holder is minted inside Acquire,
+// and a caller that could name the type could name a holder too.
+func NewStoreSessionLease(st store.Store) agent.SessionLease { return storeSessionLease{st: st} }
+
 func (s storeSessionLease) Acquire(ctx context.Context, key agent.SessionKey, ttl time.Duration) (*agent.Turn, error) {
 	holder := agent.NewTurnHolder()
 	epoch, ok, err := s.st.AcquireSessionLease(ctx, key.UserID, key.AgentID, key.SessionKey, holder, ttl)
