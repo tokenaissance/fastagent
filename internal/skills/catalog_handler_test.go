@@ -52,6 +52,11 @@ func TestCatalogHandlerRefusesNonGet(t *testing.T) {
 // The second half is the empty list. A reader whose `warnings` member is required must
 // get `[]`; a missing initialisation sends `null`, which decodes into the same empty
 // slice here and into a different value in a typed client.
+//
+// The empty half carries a skill whose `{baseDir}` sits in a bundled script rather than
+// in the manifest: that is where the warning must NOT fire, because no reader resolves
+// the token there, so the narrowing has a witness on the wire too — not only inside
+// BuildCatalog, which is where a narrowed trigger is easiest to get wrong in silence.
 func TestCatalogHandlerCarriesTheCodesAndTheWarnings(t *testing.T) {
 	layer := t.TempDir()
 	writeCatalogSkill(t, layer, "refunds", "---\nname: refunds\n---\nbody\n", nil)
@@ -82,9 +87,11 @@ func TestCatalogHandlerCarriesTheCodesAndTheWarnings(t *testing.T) {
 
 	plain := t.TempDir()
 	writeCatalogSkill(t, plain, "refunds", "---\nname: refunds\n---\nbody\n", nil)
+	writeCatalogSkill(t, plain, "scripted", "---\nname: scripted\n---\n\nRun the bundled script.\n",
+		map[string]string{"scripts/run.sh": "echo {baseDir}/go.sh\n"})
 	recorder = httptest.NewRecorder()
 	CatalogHandler([]string{plain}).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
 	if body := recorder.Body.String(); !strings.Contains(body, `"warnings":[]`) {
-		t.Fatalf("body = %s; want an empty warnings array rather than null or an absent member", body)
+		t.Fatalf("body = %s; want an empty warnings array rather than null, an absent member, or a warning for a token only a script carries", body)
 	}
 }

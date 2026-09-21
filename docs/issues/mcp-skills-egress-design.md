@@ -119,6 +119,8 @@ Authorization: Bearer <该用户已有的 apikey>
 
 **一个真实的兼容性坑**：`loadSkillContent` 会做 `{baseDir}` 替换，而 MCP 出口必须发原始字节（digest 要能对上）。所以依赖 `{baseDir}` 的 skill 在外部 host 里会看到字面量 `{baseDir}`。
 
+**触发条件是 manifest，不是"任何带 token 的文件"（2026-09-21）**：运行时只替换 `SKILL.md` 里的 token（`internal/agent/skills.go` 的 `loadSkillContent` 与 `load_skill` 工具都只读这一个文件）。随包脚本或资源文件里的 token 没有任何人替换——agent 自己读到的同样是字面量。因此"客户端读到的不一样"这句话只对 manifest 成立：诊断在 **`SKILL.md` 带 token** 时触发，而 `files` 仍然列出每一个携带者（那是**测量**，不是触发条件，也正是"句子里的每个文件都是字面量"可核对的地方）。只有随包文件带 token 的那一类**不报**：它没有任何读者差异，属于创作期问题，要报得先给它一条义务（登记册第 39 行）。
+
 **它现在在哪儿发声（2026-09-21）**：作为**警告**而不是拒绝——pod 的 `Catalog.Warnings`，码 `base_dir_token`，带上携带该 token 的文件名。拒绝会打断一直可用的一半（agent 自己加载这个 skill 时替换是生效的），所以正确的处置是"照发 + 说清楚"（D3）。两个消费面都拿到了它：dashboard 面板（按码本地化）与 MCP 客户端的应答（`_meta["com.tokenaissance/skills/warnings"]` + `list_skills` 文本）。**客户端那一面是必须的**：读到字面量的就是它，而面板它看不见——这一面此前整段缺失（cloud 的适配器把 `warnings` 连同拒绝的 `code` 一起丢了），已修。
 
 ## 5. D4：命名与 URI，按协议来
@@ -197,7 +199,7 @@ READ(scope, uri) 的前置条件:
 | :--- | :--- |
 | 某 skill 被安装 / 删除 / 改写 | 下一次 listing/get 里 entry 的 `digest` 变化（或消失） |
 | 某 skill 被我们**拒绝发布** | 诊断项：name + 原因（frontmatter 非法 / 超限 / 名字冲突 / 名字与目录不一致） |
-| 某 skill **被发布**了，但含义在出口处变了（`{baseDir}`） | 诊断项：skill 名 + 为什么（warning，码 `base_dir_token`，附上携带该 token 的文件名）——**两个消费面都要有**：dashboard 面板与 MCP 客户端的应答（`_meta` + `list_skills` 文本） |
+| 某 skill **被发布**了，但含义在出口处变了（`{baseDir}`，**且它出现在 manifest 里**——只有 manifest 会被替换，别处没有读者差异） | 诊断项：skill 名 + 为什么（warning，码 `base_dir_token`，附上携带该 token 的文件名）——**两个消费面都要有**：dashboard 面板与 MCP 客户端的应答（`_meta` + `list_skills` 文本） |
 | 列表不完整（水合失败等） | 应答里的诊断（不得把不完整的目录当完整目录） |
 
 **O6（本系统新增的义务）：拒绝必须发声。** 规范侧的对应物是"空列表 ≠ 没有 skill"；服务端的对应物是"**我们没发出去的 skill，客户端有办法知道它存在但被拒**"。

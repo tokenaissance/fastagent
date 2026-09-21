@@ -400,6 +400,9 @@ When adding any mechanism that changes harness state, answer each line:
       point, and require the falsification to redden **that** test. Worked example: the tool row — the
       rule was green and the call site untested, so a peer-held turn rendered "interrupted" for as long
       as nobody expanded the row.
+      **And when the delivery just widened, re-read the sentence itself** (§10.5 D-4): a σ that was
+      true for the cases the first consumer could carry can be false for the cases the new one
+      carries, and the transport test will stay green either way.
 
 Reference implementations (inside this directory):
 `TestExecObservesSandboxChanges`, `TestExecIsQuietWhenNothingChanged`,
@@ -597,6 +600,7 @@ C1's root fix is a **shared type** (two exits, one struct ⇒ shape drift fails 
 | **D-1** | **never guess a location; read first, then anchor narrowly** | two consecutive failures in one wiring task: the first regex hit the field inside the **result type** (not the result object), the second missed because `queuedTurn` and `handleQueuedTurnAction` sit on the same line. Both were "guessing structure from shape" — the same root as **C2 (witnesses from real payloads)** |
 | **D-2** | **a new field in an implementation must land in its return type too** | added `setQueuedTurn` to `useStreamPipeline`'s result object but not to `UseStreamPipelineResult` ⇒ `TS2339/TS2561`; earlier the same shape happened with `turnState` vs `UseChatSessionResult`. The type face is the machine-checkable half of the contract; the two must move together |
 | **D-3** | **close the value domain in the type** | `QueuedTurn.turnId` is a required `string` while the queue σ may omit it ⇒ `TS2322`. If "no id" is a legitimate case, say so in the type (`string \| undefined` or an explicit unknown branch) instead of papering over it with `?? ''` at the call site |
+| **D-4** | **when a fact gains a consumer, re-read the sentence — not only the wire** | O7's round moved the pod's `{baseDir}` warning from "the dashboard sees it" to "the dashboard *and* the MCP answer see it". Widening a delivery widens the blast radius of a sentence that was never true for every payload: after that round, a claim about substitution ("replaced when this agent loads the skill") that does not hold for a token sitting in a bundled script was being read on both surfaces. A transport witness cannot catch this: it asks *did the fact arrive*, never *is this sentence true for the cases the new consumer carries* |
 
 ### 10.6 Iteration 2's conclusions (two, one of them a **non-defect**)
 
@@ -621,11 +625,12 @@ The criterion:
 > difference has to be stated on every surface where the difference is visible** — not only on the
 > surface that happens to be a dashboard.
 
-Measured instance (the cloud re-audit, 2026-09-21): a skill whose text carries `{baseDir}`. The
-runtime substitutes that token when *this* agent loads the skill (`internal/agent/skills.go:583`),
-and the MCP egress cannot, because the entry's digest covers the bytes as they are. So the skill is
-published — deliberately, since refusing it would break the half that always worked — and a
-connected client reads the literal token. The pod reports that as a warning
+Measured instance (the cloud re-audit, 2026-09-21): a skill whose `SKILL.md` carries `{baseDir}`. The
+runtime substitutes that token when *this* agent loads the skill (`internal/agent/skills.go`
+`loadSkillContent`, and the `load_skill` tool — named by function, not by line: that anchor has
+already drifted once), and the MCP egress cannot, because the entry's digest covers the bytes as
+they are. So the skill is published — deliberately, since refusing it would break the half that
+always worked — and a connected client reads the literal token. The pod reports that as a warning
 (`Catalog.Warnings`, code `base_dir_token`, with the files that carry the token) and the dashboard
 panel renders it. The MCP surface — the one where a reader actually meets the literal token —
 dropped it, together with the refusal's stable code, inside the cloud adapter: two facts lost one
@@ -642,3 +647,25 @@ the `skills/list` result's `_meta`), plus the rule witnesses in `catalog.test.ts
 `skills-service.test.ts`, `policy.test.ts` and `tools-service.test.ts`. Falsified for real:
 restoring the adapter's `{path, reason}` rebuild reddens 2 tests, returning an empty warnings list
 reddens 2, and dropping the `_meta` key reddens 3.
+
+**Narrowed the next day (2026-09-21, same audit)**: the warning's *trigger* was wrong in a way no
+transport test could see. It fired on "any file of the skill carries `{baseDir}`", while the
+sentence it carries states a difference between two readers — and that difference exists only in
+the file the runtime substitutes, `SKILL.md` (`internal/agent/skills.go` `loadSkillContent`, and the
+`load_skill` tool: both read exactly that file). A token in a bundled script is substituted by
+nobody: the agent reads the literal too. So for that payload the pod was announcing a difference no
+reader can observe, on the two surfaces O7 had just connected — a false σ (O1) whose delivery this
+round had *widened*. The fix narrows the trigger to the manifest and keeps `Files` as the
+measurement (every carrier), which is what makes the remaining sentence — "in every file listed" —
+checkable; the sentence itself now names where the substitution happens.
+
+Witnesses: `TestBaseDirTokenInABundledFileIsNotAReaderDifference` (the rule: a script-only token is
+not a reader difference, and the scan still reports the carrier),
+`TestBaseDirWarningListsEveryCarrierNotOnlyTheManifest` (the list is the measurement, not the
+trigger), `TestCatalogHandlerCarriesTheCodesAndTheWarnings` (the wire — the narrowed trigger is
+witnessed at the delivery point too), and `TestScanAndCatalogReportTheBaseDirTokenAsAWarning`
+(the sentence names `SKILL.md`). Falsified for real: the trigger back to "any carrier" reddens 2
+(the rule witness and the wire), and the sentence back to "replaced when this agent loads the
+skill" reddens 1. The case that is now *not* reported — a token only a bundled file carries — is
+recorded as a decision, not dropped in silence: nobody resolves it, so it is an authoring lint and
+not an egress fact, and it would need its own obligation before it gets a code.

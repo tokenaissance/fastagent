@@ -22,7 +22,7 @@
 | :-- | :--- | :--- |
 | **D1** | **目录粒度 = agent；凭据 = 用户已有 apikey** | URL 里指定 agent（`/mcp/agents/<id>`），token 用用户自己的凭证。agent 是代码里唯一已存在、已有优先级定义的所有权范围；用户级视图今天只能靠并集拼出来。内部跳复用 cloud 现有每用户凭证（`getFastagentCredentials` / `resolveUserCredentials`） |
 | **D2** | **平台公共 skill 默认包含** | 不额外过滤 `managed` 层——它本来就是 agent 视图的一层；被 `disabled` / `entries` 关掉的仍过滤 |
-| **D3** | **`Gated` 的 skill 照发** | gating 是我们运行时的环境属性，不是内容属性。规范不允许往 frontmatter 注入标记；`requires` 原样透传。依赖 `{baseDir}` 替换的 skill 会露出字面量，列为诊断项 |
+| **D3** | **`Gated` 的 skill 照发** | gating 是我们运行时的环境属性，不是内容属性。规范不允许往 frontmatter 注入标记；`requires` 原样透传。依赖 `{baseDir}` 替换的 skill 会露出字面量，列为诊断项（2026-09-21 补充：触发条件是 **manifest** 带 token——只有 `SKILL.md` 会被替换；随包文件里的 token 没有任何解析它，agent 读到的同样是字面量，所以那不是读者差异） |
 | **D4** | **发布身份 = frontmatter `name`，不一致在入口治理** | 安装/上传/水合时校验 `name == 目录名`，不一致按 frontmatter 改名（`FinalizeInstallDir`，已在 worktree 实现）。规范要求 URI 末段等于 frontmatter name；Agent Skills 要求 name 等于父目录名 |
 | **D5** | **`resource` 冻结 = `https://<cloud-host>/mcp/agents/<id>`** | canonical：https、小写主机、无尾斜杠、无默认端口；RS 精确比对、不归一化。一旦签发就绑死，改形态要双 audience 过渡 |
 | **D6** | **RS 在边缘（cloud），不在 fastagent** | 边缘 = RS，cloud = AS，两者**同源**；fastagent 是被断言身份的内部后端。理由：`resource`/audience 必须等于客户端实际打的 URL；RFC 9728 元数据必须挂在 RS 的 URL 上；401 挑战必须来自客户端打到的那层 |

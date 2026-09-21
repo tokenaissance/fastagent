@@ -141,13 +141,13 @@ F3 投递（定义 08 §2.2）
 
 | 义务 | 违反它的缺口 | 钉住它的测试 |
 |------|-------------|-------------|
-| **O1** 产生真话 | ~~G5~~（假 σ）、~~G6~~（缺渲染）、~~G8~~、~~G10~~、~~G11~~（stdio 半边）、~~G4~~（信号半边）、~~G19~~ | `TestWriteFileSignalsUncheckedReplacement`、`TestEnvSignalCarriesIdentityFileChanges`、`TestCronFingerprintIgnoresRunBookkeeping`、`TestStdioClientHandsNotificationsToTheHandler`、`TestE2BLiveUnhydratedFactSurvivesPodHandoff` |
+| **O1** 产生真话 | ~~G5~~（假 σ）、~~G6~~（缺渲染）、~~G8~~、~~G10~~、~~G11~~（stdio 半边）、~~G4~~（信号半边）、~~G19~~；`{baseDir}` 诊断的触发条件（登记册第 39 行） | `TestWriteFileSignalsUncheckedReplacement`、`TestEnvSignalCarriesIdentityFileChanges`、`TestCronFingerprintIgnoresRunBookkeeping`、`TestStdioClientHandsNotificationsToTheHandler`、`TestE2BLiveUnhydratedFactSurvivesPodHandoff`、`TestBaseDirTokenInABundledFileIsNotAReaderDifference`、`TestBaseDirWarningListsEveryCarrierNotOnlyTheManifest`、`TestCatalogHandlerCarriesTheCodesAndTheWarnings` |
 | **O2** 投递 | ~~G12~~、G1/G2 | `TestDeferredTurnsAnnouncesADroppedScheduledTask`、`TestEvictionSignalReachesNextToolResult` |
 | **O3** 取走时机 | 无违反实例；**G13 是它的正面样本**（pull σ：判据可重算，消费侧下一次读取就是投递点） | `TestBashOutputTool_DrainsTailOnExit`、`TestSandboxJobOutputReturnsDeltaThenStatus` |
 | **O4** 不丢 | ~~G3~~、~~G9~~、~~G20~~ | `TestEvictSignalOutlivesThePoolThatProducedIt`（另一个 pool 实例投递）、`TestReplacedSandboxNoteRidesTheCallThatFoundIt`、`TestRunReceiptStampSurvivesAReload` |
 | **O5** 不扰 | —（迄今没有"无变化也说话"的实例） | `TestExecIsQuietWhenNothingChanged`、`TestWriteFileStaysQuietOnASharedBackend` |
 | **O7** 已投递但含义变了的事实 | 2026-09-21 出口审计（无 G 编号：记在 [11](./11-change-register.md) 第 38 行） | `skills-list-chain.test.ts`（投递点）+ `catalog.test.ts`、`skills-service.test.ts`、`policy.test.ts`、`tools-service.test.ts` |
-| **F1** 前置条件 / 零迁移 | ~~事故 D~~ | `TestSyncContract_StoreEditIsNotOverwritten`、`SecondReconcileWritesNothing`、`DomainUnchanged`、`TestE2BLive*` |
+| **F1** 前置条件 / 零迁移 | ~~事故 D~~ | `TestSyncContract_StoreEditIsNotOverwritten`、`TestSyncContract_SecondReconcileWritesNothing`、`TestSyncContract_DomainUnchanged`、`TestE2BLive*` |
 | **F1** 边界（inside / outside） | **G4**（删除不可逆、无快照） | —（缺 witness，本身就是缺口的一部分） |
 
 > O6 与 D₃ 是在这张表写完之后才在 [08 §10.3 / §10.2](./08-state-observability-principle.md) 里

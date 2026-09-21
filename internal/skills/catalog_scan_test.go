@@ -104,6 +104,14 @@ func TestScanAndCatalogReportTheBaseDirTokenAsAWarning(t *testing.T) {
 	if len(warning.Files) != 1 || warning.Files[0] != "SKILL.md" {
 		t.Fatalf("warning files = %v; want SKILL.md", warning.Files)
 	}
+	// The sentence that travels with the code has to name where the substitution
+	// happens: it is localized by code on the cloud side and read verbatim by anyone
+	// without that table, and it is the only part of this warning a reader of the MCP
+	// answer sees beside "a client sees something else". A sentence that says the
+	// substitution covers the whole skill is the false half of this fact.
+	if !strings.Contains(warning.Reason, "SKILL.md") {
+		t.Fatalf("reason = %q; it must say the substitution happens in SKILL.md, not across the skill", warning.Reason)
+	}
 
 	// The bytes stay raw, and the digest still describes them: the warning is the
 	// only thing that changes.
@@ -123,6 +131,68 @@ func TestScanAndCatalogReportTheBaseDirTokenAsAWarning(t *testing.T) {
 				t.Fatalf("digest = %q; the scan must hash the raw bytes it hands out", f.Digest)
 			}
 		}
+	}
+}
+
+// The warning states a difference between two readers, so it fires on the file where
+// that difference exists. `{baseDir}` in a bundled script is substituted by nobody —
+// this agent reads the literal token there too — so announcing "a client reads
+// something else" for it would be a statement no reader can act on, delivered to both
+// consumers (the dashboard panel and the MCP answer). Refusing to say it is not the
+// same as not knowing it: the scan still reports the carrier, which is what the file
+// list of a manifest warning is for.
+func TestBaseDirTokenInABundledFileIsNotAReaderDifference(t *testing.T) {
+	layer := t.TempDir()
+	writeCatalogSkill(t, layer, "runner", "---\nname: runner\n---\n\nRun the bundled script.\n",
+		map[string]string{"scripts/run.sh": "set -e\necho {baseDir}/go.sh\n"})
+
+	found, err := ScanSkillDirs([]string{layer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog := BuildCatalog(found)
+
+	if len(catalog.Skills) != 1 || catalog.Skills[0].Path != "runner" {
+		t.Fatalf("catalog = %+v; the skill is published — the token is not a refusal either", catalog)
+	}
+	if len(catalog.Warnings) != 0 {
+		t.Fatalf("warnings = %+v; a token only a script carries is solved by no reader, so there is no difference to announce",
+			catalog.Warnings)
+	}
+	for _, skill := range found {
+		if skill.Path != "runner" {
+			continue
+		}
+		if len(skill.BaseDirFiles) != 1 || skill.BaseDirFiles[0] != "scripts/run.sh" {
+			t.Fatalf("BaseDirFiles = %v; the scan must still measure every carrier", skill.BaseDirFiles)
+		}
+	}
+}
+
+// A manifest warning lists every carrier, not only the manifest, and it does so in the
+// same answer: the sentence "in every file listed" is only checkable if the list is the
+// measurement rather than the trigger.
+func TestBaseDirWarningListsEveryCarrierNotOnlyTheManifest(t *testing.T) {
+	layer := t.TempDir()
+	writeCatalogSkill(t, layer, "runner", "---\nname: runner\n---\n\nRun {baseDir}/scripts/go.sh\n",
+		map[string]string{"scripts/go.sh": "echo {baseDir}/helper.sh\n"})
+
+	found, err := ScanSkillDirs([]string{layer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog := BuildCatalog(found)
+	if len(catalog.Warnings) != 1 {
+		t.Fatalf("warnings = %+v; want one", catalog.Warnings)
+	}
+	files := catalog.Warnings[0].Files
+	var sawManifest, sawScript bool
+	for _, f := range files {
+		sawManifest = sawManifest || f == "SKILL.md"
+		sawScript = sawScript || f == "scripts/go.sh"
+	}
+	if !sawManifest || !sawScript {
+		t.Fatalf("warning files = %v; want both carriers", files)
 	}
 }
 

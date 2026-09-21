@@ -50,7 +50,7 @@ func ScanSkillDirs(dirs []string) ([]DiscoveredSkill, error) {
 			if !entry.IsDir() {
 				return nil
 			}
-			manifest, readErr := os.ReadFile(filepath.Join(path, "SKILL.md"))
+			manifest, readErr := os.ReadFile(filepath.Join(path, skillManifestName))
 			if readErr != nil {
 				// Not a skill directory. Keep walking: a skill may be nested deeper,
 				// and this directory may be the organizational prefix on the way to it.
@@ -89,14 +89,24 @@ func ScanSkillDirs(dirs []string) ([]DiscoveredSkill, error) {
 // internal/agent, which is why it is a named constant on this side.
 const baseDirToken = "{baseDir}"
 
-// readSkillFiles returns each file's metadata and, alongside it, the files whose
+// The one file the runtime substitutes that token in: `loadSkillContent` and the
+// `load_skill` tool both read exactly this file (internal/agent/skills.go,
+// internal/agent/tools/load_skill.go), and nothing substitutes a bundled script or
+// an asset. So this name is also the trigger for the diagnostic that says "the agent
+// resolves it, a client does not": in any other file the token is literal for every
+// reader, and a warning claiming a difference there would be false (see BuildCatalog).
+// Named once, read by the scan and by that trigger.
+const skillManifestName = "SKILL.md"
+
+// readSkillFiles returns each file's metadata and, alongside it, every file whose
 // content carries the literal `{baseDir}`.
 //
-// The runtime substitutes that token when it loads a skill for the agent's own use
-// (internal/agent/skills.go), but this endpoint must serve raw bytes — substituting
-// here would break every digest. So a skill that depends on the token is publishable
-// and quietly wrong on the other side of MCP, which is exactly what a diagnostic has
-// to say out loud. The scan rides the read that was already happening for the hash.
+// This endpoint must serve raw bytes — substituting here would break every digest —
+// and it does: the runtime substitutes the token when it loads a skill for the agent's
+// own use, and a client connected over MCP reads the literal text. Which files that
+// difference is *stated* for is decided by BuildCatalog (only the manifest is
+// substituted); what the scan owes it is the measurement — which files carry the token
+// — and the scan rides the read that was already happening for the hash.
 func readSkillFiles(skillDir string) ([]CatalogFile, []string, error) {
 	var files []CatalogFile
 	var baseDirHits []string

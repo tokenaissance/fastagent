@@ -362,6 +362,8 @@ Removed items are gone, not hidden: if your plan depended on one, re-check with 
       "事实到了"。对把事实送出去的义务，先数它的投递点（`grep` 该事实的消费点：渲染 / store / wire
       每个落点各算一个），再要求每个点一条断言，且**反证要能打红那一条**。实例：工具行——规则绿、
       调用点没人测，于是"对端持有回合"一直渲染成"已中断"，只要没人展开那一行就永远看不见。
+      **而如果这次投递刚被扩大过，还要重读那句话本身**（§10.5 D-4）：对第一个消费者能承载的
+      情形成立的 σ，可能对新的那个消费者承载的情形不成立——transport 测试两种情况都会是绿的。
 
 参考实现（本目录内）：
 `TestExecObservesSandboxChanges`、`TestExecIsQuietWhenNothingChanged`、
@@ -535,6 +537,7 @@ C2 的根治手段是**捕获式契约测试**（从活体服务端抓一次载�
 | **D-1** | **定位不可猜，先读后用窄锚点** | 在同一次接线里连着失败两次：第一次正则命中了**返回类型**里的字段（不是返回对象），第二次因 `queuedTurn` 与 `handleQueuedTurnAction` 写在同一行而匹配不到。两次都是"用形态去猜结构"——与 **C2（witness 取自真实载荷）** 同源 |
 | **D-2** | **实现新增字段，返回类型必须同步** | 给 `useStreamPipeline` 的返回对象加了 `setQueuedTurn`、却忘了 `UseStreamPipelineResult` ⇒ `TS2339/TS2561`；此前给 `useChatSession` 加 `turnState` 时忘了 `UseChatSessionResult` ⇒ 同一个错误形状。类型面是"契约的机器可检查部分"，加字段必须成对 |
 | **D-3** | **值域要在类型上闭合** | `QueuedTurn.turnId` 是必填 `string`，而队列 σ 的载荷里 `turnId` 可能缺失 ⇒ `TS2322`。若"缺 id"是合法情形，就应在类型里表达（`string \| undefined` 或一个显式的 `unknown` 分支），而不是在调用点用 `?? ''` 掩盖 |
+| **D-4** | **一条事实获得新消费者时，要重读那句 σ，而不只是 wire** | O7 那一轮把 pod 的 `{baseDir}` warning 从"只有面板看得见"扩到"面板**与** MCP 应答都看得见"。扩投递会同时放大一句本来就对某些载荷不成立的话：那一轮之后，"这个 Agent 加载技能时会替换"这句对"token 在随包脚本里"不成立的陈述，开始被两个面读到。transport 见证抓不到它：它只问**事实到了没有**，从不问**这句话对新消费者承载的情形是否成立** |
 
 ### 10.6 迭代 2 的结论（两条，其中一条为**非缺陷**）
 
@@ -558,7 +561,8 @@ O6 说的是**消失**的事实要与出现的事实同等可见。O7 是它的�
 > ——而不只是那个恰好叫 dashboard 的面上。
 
 实测实例（cloud 再审计，2026-09-21）：文本里带 `{baseDir}` 的 skill。运行时在**本 agent** 加载
-这个 skill 时会替换掉该 token（`internal/agent/skills.go:583`），而 MCP 出口做不到，因为 entry
+这个 skill 时会替换掉该 token（`internal/agent/skills.go` 的 `loadSkillContent`，以及 `load_skill`
+工具——按函数名而不是行号：锚点已经漂过一次），而 MCP 出口做不到，因为 entry
 的 digest 覆盖的就是原始字节。于是这个 skill 被**照发**（有意为之——拒绝它会打断一直可用的那一
 半），连过来的客户端读到字面量。pod 把它作为 warning 报出来（`Catalog.Warnings`，码
 `base_dir_token`，带上携带该 token 的文件名），dashboard 面板也渲染了它。而 MCP 那一面——读者
@@ -574,3 +578,20 @@ O6 说的是**消失**的事实要与出现的事实同等可见。O7 是它的�
 `_meta`），加上 `catalog.test.ts`、`skills-service.test.ts`、`policy.test.ts`、
 `tools-service.test.ts` 的规则见证。已真反证：还原适配器那段 `{path, reason}` 重建 → 2 条红；
 返回空 warnings → 2 条红；去掉 `_meta` 那个键 → 3 条红。
+
+**次日收窄（2026-09-21，同一次审计）**：这条 warning 的**触发条件**错在没有任何 transport 测试
+看得见的地方。它原来只要"技能里任何一个文件带 `{baseDir}`"就触发，而它携带的句子说的是**两个读者
+之间的差异**——而那个差异只存在于运行时真正替换的那一个文件里，即 `SKILL.md`
+（`internal/agent/skills.go` 的 `loadSkillContent` 与 `load_skill` 工具都只读这一个文件）。随包
+脚本里的 token 没有任何人替换：agent 读到的同样是字面量。所以对这类载荷，pod 正在两个面上（正是
+O7 刚接通的那两个面）宣告一个没有读者能观察到的差异——一条**假 σ（O1）**，而这一轮刚刚把它的投递
+面**扩大**过。修法是：触发条件收窄到 manifest，`Files` 仍是**测量**（列出每个携带者）——这才让
+剩下那句"in every file listed"可核对；句子本身也改成点名替换发生在哪里。
+
+见证：`TestBaseDirTokenInABundledFileIsNotAReaderDifference`（规则：只有脚本带 token 不构成读者
+差异，而扫描仍报出携带者）、`TestBaseDirWarningListsEveryCarrierNotOnlyTheManifest`（文件列表是
+测量而非触发条件）、`TestCatalogHandlerCarriesTheCodesAndTheWarnings`（wire——收窄后的触发条件在
+投递点也有见证）、`TestScanAndCatalogReportTheBaseDirTokenAsAWarning`（句子点名 `SKILL.md`）。已
+真反证：触发条件改回"任何携带者" → 2 条红（规则见证与 wire）；句子改回"replaced when this agent
+loads the skill" → 1 条红。现在**不再报**的那一类——只有随包文件携带 token——记为一条决策而非静默
+丢弃：没有任何解析它，所以那是创作期 lint，不是出口事实；要报它得先给它一条义务。

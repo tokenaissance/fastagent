@@ -148,13 +148,13 @@ Covered by none of them → §7's bucket E (the F4 candidate: concurrency and vi
 
 | Obligation | The gaps that violated it | The tests that pin it |
 |------------|---------------------------|-----------------------|
-| **O1** true statements | ~~G5~~ (a false σ), ~~G6~~ (never rendered), ~~G8~~, ~~G10~~, ~~G11~~ (stdio half), ~~G4~~ (signal half), ~~G19~~ | `TestWriteFileSignalsUncheckedReplacement`, `TestEnvSignalCarriesIdentityFileChanges`, `TestCronFingerprintIgnoresRunBookkeeping`, `TestStdioClientHandsNotificationsToTheHandler`, `TestE2BLiveUnhydratedFactSurvivesPodHandoff` |
+| **O1** true statements | ~~G5~~ (a false σ), ~~G6~~ (never rendered), ~~G8~~, ~~G10~~, ~~G11~~ (stdio half), ~~G4~~ (signal half), ~~G19~~; the `{baseDir}` diagnostic's trigger (register row 39) | `TestWriteFileSignalsUncheckedReplacement`, `TestEnvSignalCarriesIdentityFileChanges`, `TestCronFingerprintIgnoresRunBookkeeping`, `TestStdioClientHandsNotificationsToTheHandler`, `TestE2BLiveUnhydratedFactSurvivesPodHandoff`, `TestBaseDirTokenInABundledFileIsNotAReaderDifference`, `TestBaseDirWarningListsEveryCarrierNotOnlyTheManifest`, `TestCatalogHandlerCarriesTheCodesAndTheWarnings` |
 | **O2** placement | ~~G12~~, G1/G2 | `TestDeferredTurnsAnnouncesADroppedScheduledTask`, `TestEvictionSignalReachesNextToolResult` |
 | **O3** the moment of taking | no violation; **G13 is its positive instance** (a pull σ: the criterion is recomputable, so the consumer's next read IS the delivery point) | `TestBashOutputTool_DrainsTailOnExit`, `TestSandboxJobOutputReturnsDeltaThenStatus` |
 | **O4** no loss | ~~G3~~, ~~G9~~, ~~G20~~ | `TestEvictSignalOutlivesThePoolThatProducedIt` (delivered by a different pool instance), `TestReplacedSandboxNoteRidesTheCallThatFoundIt`, `TestRunReceiptStampSurvivesAReload` |
 | **O5** no noise | — (no "spoke without a change" instance yet) | `TestExecIsQuietWhenNothingChanged`, `TestWriteFileStaysQuietOnASharedBackend` |
 | **O7** a delivered fact whose meaning changed | the 2026-09-21 egress audit (no G number: recorded as [11](./11-change-register.md) row 38) | `skills-list-chain.test.ts` (the delivery point) + `catalog.test.ts`, `skills-service.test.ts`, `policy.test.ts`, `tools-service.test.ts` |
-| **F1** preconditions / zero migration | ~~the incident, D~~ | `TestSyncContract_StoreEditIsNotOverwritten`, `SecondReconcileWritesNothing`, `DomainUnchanged`, `TestE2BLive*` |
+| **F1** preconditions / zero migration | ~~the incident, D~~ | `TestSyncContract_StoreEditIsNotOverwritten`, `TestSyncContract_SecondReconcileWritesNothing`, `TestSyncContract_DomainUnchanged`, `TestE2BLive*` |
 | **F1** boundary (inside / outside) | **G4** (a deletion is irreversible; no snapshot) | — (a missing witness is itself part of that gap) |
 
 > O6 and D₃ were promoted in [08 §10.3 / §10.2](./08-state-observability-principle.md) after this
