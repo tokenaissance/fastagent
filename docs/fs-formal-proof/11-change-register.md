@@ -426,6 +426,22 @@ Apart from those six, §11.2's whole-file assignment and §11.3's function-level
 > delete pair are the point: "only the store half ⇒ the delete is undone by the
 > next sync" and "store + live sandbox half ⇒ it sticks" are two tests, not one
 > claim with a footnote.
+>
+> **Row 42's other half (2026-09-22)**: naming the row was half of "one fact, one wire shape";
+> the client also threw the other half away. Every `subagent_progress` that reports the inner
+> run's exit already carries `phase:"done"` **and** the call's id, and the client dropped both
+> (`setSubagentProgress(null)`). A round's tool results are all emitted after the whole round
+> returns, so between a call's exit and its result the row had only two ways to speak, and both
+> were false: "Queued (waiting on prior sub-agent)" about a call nothing is waiting on, and — in
+> the gap between one exit and the next heartbeat, where the positional fallback took over —
+> "Executing…" about a call that had already exited. cloud now remembers the exited ids
+> (`subagentFinishedIds`, cleared at the turn's end) and the row reads "Sub-agent finished — the
+> result arrives with the round". **No new wire shape**: the fact was already being sent, and the
+> take side had been discarding it. Witnesses: cloud `subagent-finished-ids.test.tsx` (4, the
+> recording), `message-list-tool-status.test.tsx` (+3, the row's wording), and
+> `chat-streaming-parity.test.tsx` (+1, the fact through the real page). Falsifications run for
+> real: stop recording the id ⇒ 3 red; ignore the finish in the row ⇒ 2 red; let the positional
+> fallback keep a finished call ⇒ 1 red; stop threading it through the page ⇒ 1 red.
 
 | # | Change | Formal (duty) | Code anchor | Planned UT (with falsification) | Live e2e | Shipped |
 |---|--------|---------------|-------------|---------------------------------|----------|---------|
