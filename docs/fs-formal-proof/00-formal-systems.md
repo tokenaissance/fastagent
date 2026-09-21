@@ -154,12 +154,14 @@ Covered by none of them → §7's bucket E (the F4 candidate: concurrency and vi
 | **O4** no loss | ~~G3~~, ~~G9~~, ~~G20~~ | `TestEvictSignalOutlivesThePoolThatProducedIt` (delivered by a different pool instance), `TestReplacedSandboxNoteRidesTheCallThatFoundIt`, `TestRunReceiptStampSurvivesAReload` |
 | **O5** no noise | — (no "spoke without a change" instance yet) | `TestExecIsQuietWhenNothingChanged`, `TestWriteFileStaysQuietOnASharedBackend` |
 | **O7** a delivered fact whose meaning changed | the 2026-09-21 egress audit (no G number: recorded as [11](./11-change-register.md) row 38) | `skills-list-chain.test.ts` (the delivery point) + `catalog.test.ts`, `skills-service.test.ts`, `policy.test.ts`, `tools-service.test.ts` |
+| **O6** an absence must speak (promoted [08 §10.3](./08-state-observability-principle.md)) | the 2026-09-21 egress audit: two consumers of one fact, and only one could see it — they read different producers (no G number: [11](./11-change-register.md) row 40) | `skills-list-chain.test.ts` (MCP) + cloud `fastagent-proxy-route.test.ts` (**the panel's delivery point**) + `skills-service.test.ts` (one partition, two projections) |
 | **F1** preconditions / zero migration | ~~the incident, D~~ | `TestSyncContract_StoreEditIsNotOverwritten`, `TestSyncContract_SecondReconcileWritesNothing`, `TestSyncContract_DomainUnchanged`, `TestE2BLive*` |
 | **F1** boundary (inside / outside) | **G4** (a deletion is irreversible; no snapshot) | — (a missing witness is itself part of that gap) |
 
-> O6 and D₃ were promoted in [08 §10.3 / §10.2](./08-state-observability-principle.md) after this
-> table was written and have no row here yet; their witnesses live with the cloud rounds that
-> produced them. O7 was added with its row, so the index does not drift further.
+> D₃ was promoted in [08 §10.2](./08-state-observability-principle.md) after this table was written
+> and has no row here yet. O6 was promoted the same way and **got its row on 2026-09-21**, when the
+> egress audit produced its second consumer and a witness for it; O7 was added with its row. So the
+> index does not drift further.
 
 ### 5.1 The witness column has two halves (2026-09-21, brought back from the cloud re-audit)
 

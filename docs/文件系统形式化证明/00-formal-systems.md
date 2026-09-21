@@ -147,12 +147,13 @@ F3 投递（定义 08 §2.2）
 | **O4** 不丢 | ~~G3~~、~~G9~~、~~G20~~ | `TestEvictSignalOutlivesThePoolThatProducedIt`（另一个 pool 实例投递）、`TestReplacedSandboxNoteRidesTheCallThatFoundIt`、`TestRunReceiptStampSurvivesAReload` |
 | **O5** 不扰 | —（迄今没有"无变化也说话"的实例） | `TestExecIsQuietWhenNothingChanged`、`TestWriteFileStaysQuietOnASharedBackend` |
 | **O7** 已投递但含义变了的事实 | 2026-09-21 出口审计（无 G 编号：记在 [11](./11-change-register.md) 第 38 行） | `skills-list-chain.test.ts`（投递点）+ `catalog.test.ts`、`skills-service.test.ts`、`policy.test.ts`、`tools-service.test.ts` |
+| **O6** 缺席也必须发声（升格于 [08 §10.3](./08-state-observability-principle.md)） | 2026-09-21 出口审计：同一条事实有两个消费者，只有一个看得见——因为它们读的不是同一个生产者（无 G 编号：[11](./11-change-register.md) 第 40 行） | `skills-list-chain.test.ts`（MCP 侧）+ cloud `fastagent-proxy-route.test.ts`（**面板的投递点**）+ `skills-service.test.ts`（一份分区、两个投影） |
 | **F1** 前置条件 / 零迁移 | ~~事故 D~~ | `TestSyncContract_StoreEditIsNotOverwritten`、`TestSyncContract_SecondReconcileWritesNothing`、`TestSyncContract_DomainUnchanged`、`TestE2BLive*` |
 | **F1** 边界（inside / outside） | **G4**（删除不可逆、无快照） | —（缺 witness，本身就是缺口的一部分） |
 
-> O6 与 D₃ 是在这张表写完之后才在 [08 §10.3 / §10.2](./08-state-observability-principle.md) 里
-> 升格为义务的，本表还没有它们的行；它们的见证在产生它们的 cloud 那几轮里。O7 是连行一起加的，
-> 免得这个索引继续漂移。
+> D₃ 是在这张表写完之后才在 [08 §10.2](./08-state-observability-principle.md) 里升格为义务的，
+> 本表还没有它的行。O6 同样迟升格，但 **2026-09-21 补上了它的行**——出口审计发现它有第二个消费者，
+> 并为它产出了见证；O7 是连行一起加的。免得这个索引继续漂移。
 
 ### 5.1 witness 有两半（2026-09-21，由 cloud 侧再审计带回）
 

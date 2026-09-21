@@ -400,6 +400,11 @@ When adding any mechanism that changes harness state, answer each line:
       point, and require the falsification to redden **that** test. Worked example: the tool row — the
       rule was green and the call site untested, so a peer-held turn rendered "interrupted" for as long
       as nobody expanded the row.
+      **And check that the consumers read the same producer** (§10.5 D-5): counting the points is not
+      enough if one of them answers the question itself. A surface that reads the *upstream* answer
+      instead of this system's one expression of the fact answers a different question — and its own
+      tests stay green, because they test that reader. Worked example: the skills panel, which read the
+      pod's catalog directly and therefore could not report a refusal only the egress is able to make.
       **And when the delivery just widened, re-read the sentence itself** (§10.5 D-4): a σ that was
       true for the cases the first consumer could carry can be false for the cases the new one
       carries, and the transport test will stay green either way.
@@ -583,6 +588,16 @@ Measured counterexample: the server pushes nothing when a turn ends, so a discon
 "running elsewhere" until expiry or a reload. The fix is to **declare the absence** (`done ⇒ turnActive = null`)
 rather than hoping the next read notices.
 
+**Second instance (2026-09-21, found by the same audit one round later):** the absence here has two
+consumers, and only one of them could see it. A skill the *egress* refuses — no `SKILL.md`, more than 512
+files, over 16 MiB, a digest that is not sha256 — is refused by a rule the pod does not have (it does not
+know the extension's limits), so that refusal exists only inside the cloud service. The MCP answer carried
+it; the dashboard panel read the pod's catalog through a raw passthrough and therefore could not: a skill no
+client can ever load was listed there as published, with nothing anywhere saying why. Both surfaces had
+tests, both were green, and the fact still differed between them — because they were not reading the same
+producer (D-5). Fixed in cloud by answering the panel's path from `skillCatalogView`, the second projection
+of the same partition `listSkills` uses; registered as row 40.
+
 ### 10.4 Two C-family contracts (orthogonal to F1–F3; they belong to port vocabulary)
 
 | # | contract | criterion | counterexample (measured) |
@@ -593,7 +608,7 @@ rather than hoping the next read notices.
 C1's root fix is a **shared type** (two exits, one struct ⇒ shape drift fails at compile time); C2's is a
 **capture-style contract test** (grab one live payload once and keep it as the fixture).
 
-### 10.5 Three disciplines the landing process forced (measured on the cloud side)
+### 10.5 The disciplines the landing process forced (measured on the cloud side)
 
 | # | discipline | what forced it |
 |---|---|---|
@@ -601,6 +616,7 @@ C1's root fix is a **shared type** (two exits, one struct ⇒ shape drift fails 
 | **D-2** | **a new field in an implementation must land in its return type too** | added `setQueuedTurn` to `useStreamPipeline`'s result object but not to `UseStreamPipelineResult` ⇒ `TS2339/TS2561`; earlier the same shape happened with `turnState` vs `UseChatSessionResult`. The type face is the machine-checkable half of the contract; the two must move together |
 | **D-3** | **close the value domain in the type** | `QueuedTurn.turnId` is a required `string` while the queue σ may omit it ⇒ `TS2322`. If "no id" is a legitimate case, say so in the type (`string \| undefined` or an explicit unknown branch) instead of papering over it with `?? ''` at the call site |
 | **D-4** | **when a fact gains a consumer, re-read the sentence — not only the wire** | O7's round moved the pod's `{baseDir}` warning from "the dashboard sees it" to "the dashboard *and* the MCP answer see it". Widening a delivery widens the blast radius of a sentence that was never true for every payload: after that round, a claim about substitution ("replaced when this agent loads the skill") that does not hold for a token sitting in a bundled script was being read on both surfaces. A transport witness cannot catch this: it asks *did the fact arrive*, never *is this sentence true for the cases the new consumer carries* |
+| **D-5** | **count the consumers, then check that they read one producer** | the panel and the MCP answer both report which of a user's skills reach a client, and both had witnesses — but the panel read the *pod's* catalog directly, while the MCP answer read this system's partition of it. So the cell that mattered (a refusal only the egress can make × the panel) was empty, and no suite could have caught it on either side: each tested its own reader. Counting "how many surfaces say this fact" counts readers; the invariant is about expressions |
 
 ### 10.6 Iteration 2's conclusions (two, one of them a **non-defect**)
 
