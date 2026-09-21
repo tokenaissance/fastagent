@@ -1,6 +1,7 @@
 package skills
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -59,16 +60,17 @@ func ScanSkillDirs(dirs []string) ([]DiscoveredSkill, error) {
 			if relErr != nil {
 				return relErr
 			}
-			files, filesErr := readSkillFiles(path)
+			files, baseDirHits, filesErr := readSkillFiles(path)
 			if filesErr != nil {
 				unreadable = append(unreadable, path)
 				return nil
 			}
 			found = append(found, DiscoveredSkill{
-				Path:        filepath.ToSlash(rel),
-				DirName:     entry.Name(),
-				Frontmatter: parseFrontmatterMap(manifest),
-				Files:       files,
+				Path:         filepath.ToSlash(rel),
+				DirName:      entry.Name(),
+				Frontmatter:  parseFrontmatterMap(manifest),
+				Files:        files,
+				BaseDirFiles: baseDirHits,
 			})
 			return nil
 		})
@@ -83,8 +85,21 @@ func ScanSkillDirs(dirs []string) ([]DiscoveredSkill, error) {
 	return found, nil
 }
 
-func readSkillFiles(skillDir string) ([]CatalogFile, error) {
+// The token the runtime replaces at load time. Spelled once here and once in
+// internal/agent, which is why it is a named constant on this side.
+const baseDirToken = "{baseDir}"
+
+// readSkillFiles returns each file's metadata and, alongside it, the files whose
+// content carries the literal `{baseDir}`.
+//
+// The runtime substitutes that token when it loads a skill for the agent's own use
+// (internal/agent/skills.go), but this endpoint must serve raw bytes — substituting
+// here would break every digest. So a skill that depends on the token is publishable
+// and quietly wrong on the other side of MCP, which is exactly what a diagnostic has
+// to say out loud. The scan rides the read that was already happening for the hash.
+func readSkillFiles(skillDir string) ([]CatalogFile, []string, error) {
 	var files []CatalogFile
+	var baseDirHits []string
 	err := filepath.WalkDir(skillDir, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -104,17 +119,21 @@ func readSkillFiles(skillDir string) ([]CatalogFile, error) {
 		// read, so computing it anywhere downstream would mean sending the bytes to
 		// be able to compute it.
 		sum := sha256.Sum256(content)
+		relSlash := filepath.ToSlash(rel)
 		files = append(files, CatalogFile{
-			Path:   filepath.ToSlash(rel),
+			Path:   relSlash,
 			Digest: "sha256:" + hex.EncodeToString(sum[:]),
 			Size:   len(content),
 		})
+		if bytes.Contains(content, []byte(baseDirToken)) {
+			baseDirHits = append(baseDirHits, relSlash)
+		}
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return files, nil
+	return files, baseDirHits, nil
 }
 
 // parseFrontmatterMap returns the SKILL.md frontmatter as the map the contract
