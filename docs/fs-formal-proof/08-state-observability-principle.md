@@ -393,6 +393,13 @@ When adding any mechanism that changes harness state, answer each line:
       mechanism exists for — the fact being true *somewhere else* (another tab, another replica).
       Worked example: the composer's Stop button was driven by local `streaming` while `turnState` was
       already in the same tree, so a turn held elsewhere had no stop affordance at all.
+- [ ] **Does the witness reach every delivery point?** ([00 §5.1](./00-formal-systems.md) — a
+      verification-side rule: no design work, no runtime behaviour.) A rule witness proves the *rule*;
+      it cannot prove the *fact arrived*. For an obligation that sends a fact out, count the fact's
+      consumers (`grep` it — each render / store / wire site is a delivery point), require one test per
+      point, and require the falsification to redden **that** test. Worked example: the tool row — the
+      rule was green and the call site untested, so a peer-held turn rendered "interrupted" for as long
+      as nobody expanded the row.
 
 Reference implementations (inside this directory):
 `TestExecObservesSandboxChanges`, `TestExecIsQuietWhenNothingChanged`,

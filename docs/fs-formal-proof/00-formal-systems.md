@@ -156,6 +156,42 @@ Covered by none of them → §7's bucket E (the F4 candidate: concurrency and vi
 | **F1** preconditions / zero migration | ~~the incident, D~~ | `TestSyncContract_StoreEditIsNotOverwritten`, `SecondReconcileWritesNothing`, `DomainUnchanged`, `TestE2BLive*` |
 | **F1** boundary (inside / outside) | **G4** (a deletion is irreversible; no snapshot) | — (a missing witness is itself part of that gap) |
 
+### 5.1 The witness column has two halves (2026-09-21, brought back from the cloud re-audit)
+
+> **This changes only the third column above. It adds no obligation, no gap family, and no design
+> work.** It is a rule about *what counts as pinned* — a **verification-side** rule, not a statement
+> about the systems. Nothing in F1–F3 or O1–O6 changes meaning.
+
+That column can answer exactly one question today: **was the rule tested?** But *producing* a fact and
+*taking* it are two different events, and one obligation usually has several delivery chains (a
+render, a store, the wire, another view). That leaves a state where everything is green and the user
+still sees nothing: the rule is tested, the copy is in place, and the one **call site** that carries
+the fact to its destination has never been touched by a test.
+
+The criterion:
+
+> **An obligation has landed ⇔ there is a rule witness, *and* every delivery point has one; and the
+> falsification must be able to redden the delivery point's test** — reddening only the rule witness
+> is no evidence about that point at all.
+
+Where it applies (otherwise it degenerates into "write more tests"): only to obligations that **send a
+fact out** (O1–O6 and D₃'s family). Wire-shape and field-spelling contracts (the C family) have no
+separate delivery point — **the rule witness *is* the delivery-point witness**.
+
+**The retired failure shape (this round's instance)**: `toolRowLabelKey` (cloud
+`src/features/chat/turn-state.ts:143`) is the rule witness, and its delivery point is the call site at
+cloud `message-list.tsx:61`. That call site used to pass only the local `turnOver`, so the render layer
+had **zero hits** for `grep tool_running_elsewhere` and the row always read "interrupted", while the
+group header — an independent derivation — was right. The tests asserted the header, so the suite was
+green. The same `grep` still returns zero hits today, with the opposite meaning: the call site
+now hands the fact down, and `describe('the live-turn fact reaches the tool ROW')` has four cases
+(including "an unusable fact says unknown in the row AND does not let the header say stopped"). One
+grep fact, two opposite meanings — the difference is only whether the fact reached the point.
+
+(This is the other side of [08 §6.1](./08-state-observability-principle.md): that section states
+"a signal that is *produced* is not a signal that *arrives*" from the producing side, and this is its
+mirror on the verification side.)
+
 ## 6. What is still open, sorted by formal system
 
 | Item | Belongs to | Status |

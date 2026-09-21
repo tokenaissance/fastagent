@@ -357,6 +357,11 @@ Removed items are gone, not hidden: if your plan depended on one, re-check with 
       的流还开着"）。本地代理量只在事实缺席时是对的，而这个机制存在的理由恰恰是**事实在别处为真**
       （另一个标签页、另一个副本）那一格。实例：输入框的停止按钮由本地 `streaming` 决定，而同一棵树里
       的 `turnState` 已经拿着事实——于是"回合由别处持有"时用户根本看不到停止入口。
+- [ ] **这条事实的每个投递点，各有一条断言它的测试吗？**（[00 §5.1](./00-formal-systems.md)——
+      **验证侧**规则：不产生设计工作、不改变运行时行为。）规则见证证明的是"规则对"，证明不了
+      "事实到了"。对把事实送出去的义务，先数它的投递点（`grep` 该事实的消费点：渲染 / store / wire
+      每个落点各算一个），再要求每个点一条断言，且**反证要能打红那一条**。实例：工具行——规则绿、
+      调用点没人测，于是"对端持有回合"一直渲染成"已中断"，只要没人展开那一行就永远看不见。
 
 参考实现（本目录内）：
 `TestExecObservesSandboxChanges`、`TestExecIsQuietWhenNothingChanged`、
