@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/codeany-ai/open-agent-sdk-go/costtracker"
@@ -139,8 +140,15 @@ type toolCallResult struct {
 	err        error
 }
 
-// executeToolsConcurrently runs tool calls using the SDK's concurrent executor.
-func (e *sdkEngine) executeToolsConcurrently(ctx context.Context, fcRegistry *tools.Registry, toolCalls []provider.ToolCall, workspace string) []toolCallResult {
+// executeToolsConcurrently runs tool calls using the SDK's executor.
+//
+// Each call is launched on its own instead of handing the executor one batch, so
+// the caller learns about a result the moment THAT call returns: onResult fires
+// per call, while the returned slice stays in declared order — the shape the
+// conversation history needs. Which calls overlap does not change; the
+// partition below is the executor's own rule (concurrency-safe tools run in
+// parallel, the rest strictly one at a time).
+func (e *sdkEngine) executeToolsConcurrently(ctx context.Context, fcRegistry *tools.Registry, toolCalls []provider.ToolCall, workspace string, onResult func(toolCallResult)) []toolCallResult {
 	sdkReg := buildSDKRegistry(fcRegistry)
 	executor := sdktools.NewExecutor(sdkReg, nil, &sdktypes.ToolUseContext{
 		WorkingDir: workspace,
@@ -166,17 +174,46 @@ func (e *sdkEngine) executeToolsConcurrently(ctx context.Context, fcRegistry *to
 	}
 
 	start := time.Now()
-	responses := executor.RunTools(ctx, calls)
+	results := make([]toolCallResult, len(toolCalls))
+	run := func(i int) {
+		r := convertToolResponses(toolCalls[i:i+1], executor.RunTools(ctx, calls[i:i+1]))[0]
+		results[i] = r
+		if onResult != nil {
+			onResult(r)
+		}
+	}
+
+	// Same partition the executor applies internally: concurrency-safe calls run
+	// in parallel, the rest one at a time in declared order. Driving the launches
+	// here — rather than letting the executor run the whole batch — is what lets
+	// a finished call be reported without waiting for the round's join.
+	var parallel, serial []int
+	for i := range calls {
+		if tool := sdkReg.Get(calls[i].ToolName); tool != nil && tool.IsConcurrencySafe(calls[i].Input) {
+			parallel = append(parallel, i)
+		} else {
+			serial = append(serial, i)
+		}
+	}
+	var wg sync.WaitGroup
+	for _, i := range parallel {
+		wg.Add(1)
+		go func(idx int) { defer wg.Done(); run(idx) }(i)
+	}
+	wg.Wait()
+	for _, i := range serial {
+		run(i)
+	}
 	e.costTracker.AddToolDuration(time.Since(start))
 
-	// Anthropic (and OpenAI) require a tool_result for every tool_use the
-	// model just emitted — orphaned tool_use IDs make the next API call
-	// return 400 invalid_request_error. The SDK can short-circuit and
-	// return fewer responses than requested (context cancel, executor
-	// poisoned by a sandbox-creation failure, etc.), so build the result
-	// slice keyed on toolCalls and look up by ToolUseID instead of zipping
-	// position-by-position. Missing entries become explicit failure
-	// tool_results so the conversation history stays well-formed.
+	return results
+}
+
+// convertToolResponses maps the executor's responses onto the calls, keyed by
+// tool_use id. A call the executor did not answer (context cancel, an executor
+// poisoned by a sandbox-creation failure) still gets a paired failure result:
+// an orphaned tool_use id makes the next API call 400 invalid_request_error.
+func convertToolResponses(toolCalls []provider.ToolCall, responses []sdktools.ToolCallResponse) []toolCallResult {
 	byID := make(map[string]sdktools.ToolCallResponse, len(responses))
 	for _, resp := range responses {
 		byID[resp.ToolUseID] = resp
@@ -202,7 +239,7 @@ func (e *sdkEngine) executeToolsConcurrently(ctx context.Context, fcRegistry *to
 				}
 				results[i] = toolCallResult{
 					toolCallID: resp.ToolUseID,
-					toolName:   toolCalls[i].Function.Name,
+					toolName:   tc.Function.Name,
 					result:     resultText + "\n[Analyze the error above and try a different approach.]",
 					err:        fmt.Errorf("%s", resultText),
 				}
@@ -220,14 +257,14 @@ func (e *sdkEngine) executeToolsConcurrently(ctx context.Context, fcRegistry *to
 		if resp.Error != nil {
 			results[i] = toolCallResult{
 				toolCallID: resp.ToolUseID,
-				toolName:   toolCalls[i].Function.Name,
+				toolName:   tc.Function.Name,
 				result:     resultText,
 				err:        resp.Error,
 			}
 		} else {
 			results[i] = toolCallResult{
 				toolCallID: resp.ToolUseID,
-				toolName:   toolCalls[i].Function.Name,
+				toolName:   tc.Function.Name,
 				result:     resultText,
 			}
 		}

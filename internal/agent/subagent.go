@@ -327,7 +327,10 @@ func (a *Agent) runSubagentLoop(ctx context.Context, req tools.SubagentRequest) 
 		// without this the tool path was the one place the budget cut work off
 		// with nothing to show for it.
 		toolCtx, endToolGrace := toolGraceContext(ctx, a.graceWindow())
-		results := a.engine.executeToolsConcurrently(toolCtx, a.registry, resp.ToolCalls, a.workspacePath)
+		// No per-call callback: a sub-agent's tool results are not surfaced as
+		// chat events of their own (the parent turn's row reports the whole
+		// delegate_task call).
+		results := a.engine.executeToolsConcurrently(toolCtx, a.registry, resp.ToolCalls, a.workspacePath, nil)
 		endToolGrace()
 		roundAllFailed := true
 		for idx, r := range results {

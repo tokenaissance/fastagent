@@ -44,7 +44,7 @@ func TestToolCallIDReachesTheToolAndNotItsArguments(t *testing.T) {
 			Name:      "probe",
 			Arguments: `{"task":"x"}`,
 		},
-	}}, t.TempDir())
+	}}, t.TempDir(), nil)
 
 	if len(res) != 1 || res[0].err != nil {
 		t.Fatalf("tool run = %+v, want one clean result", res)

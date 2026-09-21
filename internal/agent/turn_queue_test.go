@@ -217,3 +217,125 @@ func equalStrings(got, want []string) bool {
 	}
 	return true
 }
+
+// twoCallProvider asks for two tool calls in one round, then answers in text.
+// The two ids are fixed so a test can name them in the events.
+type twoCallProvider struct {
+	firstID, firstName   string
+	secondID, secondName string
+}
+
+func (p *twoCallProvider) response(msgs []provider.Message) *provider.Response {
+	for _, m := range msgs {
+		if m.Role == "tool" {
+			return &provider.Response{Content: "done"}
+		}
+	}
+	mk := func(id, name string) provider.ToolCall {
+		return provider.ToolCall{ID: id, Type: "function", Function: provider.FunctionCall{Name: name, Arguments: "{}"}}
+	}
+	return &provider.Response{ToolCalls: []provider.ToolCall{mk(p.firstID, p.firstName), mk(p.secondID, p.secondName)}}
+}
+
+func (p *twoCallProvider) Chat(_ context.Context, msgs []provider.Message, _ []provider.Tool, _ string, _ int, _ float64) (*provider.Response, error) {
+	return p.response(msgs), nil
+}
+
+func (p *twoCallProvider) ChatStream(_ context.Context, msgs []provider.Message, _ []provider.Tool, _ string, _ int, _ float64) (*provider.StreamReader, error) {
+	resp := p.response(msgs)
+	ch := make(chan provider.StreamChunk, 1)
+	ch <- provider.StreamChunk{Content: resp.Content, ToolCalls: resp.ToolCalls, Done: true}
+	close(ch)
+	return provider.NewStreamReader(ch), nil
+}
+
+// A round's tool_result events used to go out only after the whole batch
+// returned, so a call that had already finished sat with no event of its own
+// until its slowest sibling was done — the panel read it as "queued behind the
+// live sub-agent", a claim about a call nothing was waiting on. Each call now
+// emits its [tool_result] the moment it returns.
+//
+// This asserts the timing directly: the first call answers at once, the second
+// parks inside a tool, and the first call's result must already be on the wire
+// while the second is still blocked — before the round's join, before the
+// blocking sibling returns.
+//
+// Falsification: hand the round's batch to the executor again (pass a nil
+// callback and emit from the declared-order pass, the pre-change shape) and
+// this fails at "never arrived before its blocked sibling": no event for the
+// finished call comes out until the blocked one is released.
+func TestARoundEmitsEachToolResultWhenItsCallFinishes(t *testing.T) {
+	a, _ := newGateAgent(t)
+	a.maxToolIterations = 4
+	a.provider = &twoCallProvider{firstID: "call_fast_1", firstName: "fast_probe", secondID: "call_slow_2", secondName: "slow_probe"}
+	a.registry.Register("fast_probe", "answers at once", nil,
+		func(context.Context, json.RawMessage) (string, error) { return "fast result", nil })
+	started, release := blockingTool(t, a, "slow_probe")
+
+	events := make(chan ChatEvent, 32)
+	ctx := ContextWithChatEvents(context.Background(), events)
+	msg := bus.InboundMessage{Channel: "web", UserID: "u_owner", ChatID: "chat-tool-timing", Text: "hi"}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		a.HandleMessage(ctx, msg)
+	}()
+
+	<-started // the second call is inside its tool and has not returned
+
+	// While the second call is blocked, the first call's result must already be
+	// out. Read events (non-blocking on every other type) until it shows up.
+	fastResult := ""
+	deadline := time.After(2 * time.Second)
+	for fastResult == "" {
+		select {
+		case evt := <-events:
+			if evt.Type != "tool_result" {
+				continue
+			}
+			if id, _ := evt.Data["id"].(string); id == "call_fast_1" {
+				fastResult, _ = evt.Data["result"].(string)
+			}
+		case <-deadline:
+			t.Fatal("the finished call's tool_result never arrived before its blocked sibling (emitted at the round's join, not at the call's completion)")
+		}
+	}
+	if fastResult != "fast result" {
+		t.Fatalf("the finished call's result = %q, want %q", fastResult, "fast result")
+	}
+
+	release()
+	<-done
+	close(events)
+
+	// The second call's result arrives too (the round did not stall on the
+	// reordering) …
+	slowSeen := false
+	for evt := range events {
+		if evt.Type == "tool_result" {
+			if id, _ := evt.Data["id"].(string); id == "call_slow_2" {
+				slowSeen = true
+			}
+		}
+	}
+	if !slowSeen {
+		t.Fatal("the blocking call's own tool_result never arrived after it was released")
+	}
+
+	// … and the HISTORY still holds them in the order the model declared its
+	// tool_calls, even though the events came out in completion order. That is
+	// the invariant the change had to preserve (providers require it), so it is
+	// asserted rather than assumed.
+	sess := a.sessions.Get(sessionTriple(msg, msg.ProjectID))
+	var history []string
+	for _, m := range sess.GetMessages() {
+		if m.Role == "tool" {
+			history = append(history, m.ToolCallID)
+		}
+	}
+	want := []string{"call_fast_1", "call_slow_2"}
+	if len(history) != len(want) || history[0] != want[0] || history[1] != want[1] {
+		t.Fatalf("history tool messages = %v, want the declared order %v", history, want)
+	}
+}
