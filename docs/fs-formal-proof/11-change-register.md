@@ -386,9 +386,25 @@ Apart from those six, §11.2's whole-file assignment and §11.3's function-level
 > end-to-end test (`TestCancelledTurnStopsAndSignalsOnce` — whose peer stamp is simulated at the lease
 > port, so it is not the two-replica run) and the cloud half (X7: the Stop affordance reads the fact and
 > calls the server) all landed on 2026-09-19/20, each with its witness and, where stated, a falsification
-> run. What is genuinely still open, and therefore the row that keeps this section honest: **the E2B live
-> proof for the tool-path delete** (10 §4, G7b) and the **chat e2e** for the client half — neither is
-> runnable without credentials/a dev server, and neither is claimed.
+> run. **Both of the two proofs this note used to hold open were closed on 2026-09-21, and the reason given
+> for holding them open was wrong.** ① The **E2B live proof for the tool-path delete** (10 §4, G7b) needed no
+> stored key: the key is read from the cluster Secret `fastagent-secrets` for the duration of one command
+> (10 §7), and the test passes that way (23 s), with the mirror call removed going red again (31 s). It was
+> never "runnable only with a key we do not have". ② The **chat e2e** for the client half ran green against a
+> dev server serving the *current* checkout at :3000 with the fixture account: `e2e/tests/fastagent`, **130
+> tests — 125 passed / 0 failed / 5 skipped** (7.0 min; the skips are declared: `app-shell-ssr-seed.spec.ts:22`
+> wants `E2E_VERIFY_EMAIL/PASSWORD`, and `app-uiux-sweep.spec.ts:649`/`:686` are docked-sidebar shapes that
+> only exist on mobile). The earlier **31-red** run of the same suite was environmental and must not be read
+> as product state: it had no credentials (an empty storage state makes every authenticated spec read the app
+> as anonymous) and its dev server was on :3100 while `.env.local` pins `NEXT_PUBLIC_APP_URL`/`AUTH_URL` to
+> :3000, so the browser's auth calls went cross-origin and the "renders cleanly" assertions counted the
+> resulting CORS console error. A stale dev server whose cwd is a **deleted** worktree (so `/` and `/app`
+> answer 404) is the other half of that trap: it looks like the app lost its controls.
+>
+> **The one item this note still holds open** is the **two-replica** run behind row 32 (two gateway
+> replicas, two `chat/stream` POSTs ⇒ the second queues): the harness exists (`newReplicaPair`,
+> `internal/setup/chat_event_delivery_e2e_test.go`) and the gap is wiring the store-backed lease onto the
+> agent under test (`storeSessionLease` is unexported in `internal/gateway`) — see row 32's live cell.
 
 | # | Change | Formal (duty) | Code anchor | Planned UT (with falsification) | Live e2e | Shipped |
 |---|--------|---------------|-------------|---------------------------------|----------|---------|

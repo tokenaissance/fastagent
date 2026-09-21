@@ -353,9 +353,20 @@ agent/tools 42.9s 全绿。**当时的**线上是 `16a7532`。（2026-09-19 实�
 > 取消契约（`chat/cancel` 返回 `{canceled, wasRunning, isRunning}`，`409 already_started` 已退役）、
 > 取消路径的端到端测试（`TestCancelledTurnStopsAndSignalsOnce` —— 对端的印章是在租约端口上**模拟**的，
 > 不是双副本那一跑），以及 cloud 那一半（X7：停止入口读事实并调服务端）
-> 都在 2026-09-19/20 落地，各自带见证。**真正还没做完、因而让本节保持诚实的**：工具路径删除的
-> **E2B 真机证明**（[10 §4](./10-harness-state-audit.md) G7b）、客户端那半的 **chat e2e**、
-> 以及**双副本**那一跑（见 #32 的真机 e2e 格）—— 三者都需要凭据 / 开发服务器，这里一个也不声称。
+> 都在 2026-09-19/20 落地，各自带见证。**其中两项已在 2026-09-21 关闭，而且当初"做不了"的理由本身是错的**：
+> ① 工具路径删除的 **E2B 真机证明**（[10 §4](./10-harness-state-audit.md) G7b）**不需要任何存下来的密钥**——
+> 密钥按运行现场从集群 Secret `fastagent-secrets` 取出、只存在于那一次命令的环境里（[10 §7](./10-harness-state-audit.md)）：
+> 通过 23 s、去掉镜像调用 31 s 变红（2026-09-21 复现，姊妹对照 `TestE2BLivePanelDeleteSticks` 65 s 绿）；
+> ② 客户端那半的 **chat e2e**：:3000 上跑**当前检出** + fixture 账号，`e2e/tests/fastagent` 全量 130 例
+> **125 通过 / 0 红 / 5 skipped**（7.0 分钟；5 个 skip 都有声明理由：`app-shell-ssr-seed.spec.ts:22` 要
+> `E2E_VERIFY_EMAIL/PASSWORD`，`app-uiux-sweep.spec.ts:649`/`:686` 是只在移动端存在的抽屉形态）。
+> 此前同一套的 **31 红是环境造的**，不能读成产品状态：没有凭据（空 storageState 让每个需要登录的用例都读到
+> 匿名视图），且开发服务器在 :3100 而 `.env.local` 把 `NEXT_PUBLIC_APP_URL`/`AUTH_URL` 钉在 :3000（浏览器端
+> auth 请求跨域 ⇒ CORS 报错被"renders cleanly"记成红）；另有一个 cwd 指向**已删除**工作树的旧 dev server
+> （`/` 与 `/app` 都 404），它会被误读成"应用丢了很多控件"。
+> **因此本节仍然保持诚实、真正还没做完的只剩一件**：**双副本**那一跑（见 #32 的真机 e2e 格）——两个 gateway
+> 副本、两次 `chat/stream` POST，第二次排队；骨架 `newReplicaPair`（`internal/setup/chat_event_delivery_e2e_test.go`）
+> 已在，差的是把 store 支撑的租约接到被测 agent 上（`storeSessionLease` 在 `internal/gateway` 里未导出）。
 
 | # | 改动点 | 形式（义务） | 代码锚点 | 计划 UT（含反证） | 真机 e2e | 上线 |
 |---|--------|-------------|---------|------------------|---------|------|

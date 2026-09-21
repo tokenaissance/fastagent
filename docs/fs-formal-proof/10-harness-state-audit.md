@@ -790,6 +790,17 @@ copy exists, only that it did not compare this time".
 > (`apply_patch_live_scope_e2e_test.go:50`), and the template comes from `FASTAGENT_E2B_TEMPLATE` (prod: `fastclaw-sandbox`).
 > A shell where `E2B_API_KEY` is unset does **not** mean the key is unavailable — it can be taken from the cluster secret for a
 > local run, which is how the proof above was produced.
+>
+> **The way it is actually done, and the one used from 2026-09-21 on (recorded because "there is no key on this
+> machine" was read as "the live proof cannot be run"):** the key is never stored — not in a shell profile, not in
+> `.env*`, not in `~/.fastagent`. The run is prefixed with a one-shot read of the cluster Secret, and the value lives
+> only in that command's environment:
+> `K=$(kubectl -n production get secret fastagent-secrets -o jsonpath='{.data.E2B_API_KEY}' | base64 -d) && FASTAGENT_E2B_LIVE=1 E2B_API_KEY="$K" FASTAGENT_E2B_TEMPLATE=fastclaw-sandbox go test ./internal/agent/tools/ -run TestE2BLiveApplyPatchDeleteSticks -v`.
+> Reproduced that way on 2026-09-21: **pass in 23 s** (sandbox `itzcnc5sxkry7s6276x16`); with the mirror call removed,
+> **red in 31 s** at *"the sandbox copy survived the tool delete: yes"*; the panel control `TestE2BLivePanelDeleteSticks`
+> passed in the same session (65 s, both subtests). The consequence for this document: "the environment I can see has
+> no key" is not evidence that a live proof is out of reach — **it is one `kubectl` read away**, and that is the
+> command §4 G7b's live proof (and its 2026-09-21 reproduction) was produced with.
 
 ## 8. Not verified (honestly recorded)
 
