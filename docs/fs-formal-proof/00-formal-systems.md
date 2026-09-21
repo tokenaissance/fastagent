@@ -203,7 +203,7 @@ mirror on the verification side.)
 
 | Item | Belongs to | Status |
 |------|-----------|--------|
-| **G11** the HTTP side of MCP notifications | F2 · O1 (the transport has no channel at all) | open (stdio half fixed; HTTP needs SSE or a periodic re-list) |
+| **G11** the HTTP side of MCP notifications | F2 · O1 (the transport has no channel at all) | open (stdio half fixed; what HTTP lacks is a **standing** channel — the transport’s two reply-side MUSTs landed 2026-09-22, register row 43; closing it still needs the GET stream or a periodic re-list) |
 | **G4** the *attribution* of a sandbox-side deletion | F2 · O1 (**fixed as far as "the fact is stated"**) + F1's boundary (an irreversible action with no snapshot) | **decided: no attribution (2026-09-18)** — the consequence is already delivered, and a manifest would buy only the cause at thousands of rows per hydrate; see the decision log in [05 §8](./05-remediation-plan.md) |
 | **G7b** uploads/deletes and the live sandbox | **not F1–F3**: write-path symmetry | **upload half: decided a (no write-through, "the panel is the file library")**; **delete half: decided d1 and fixed** (write through to the live sandbox, never creating one) |
 | ~~**G21**~~ the panel delete was a silent no-op (the path/scope convention applied twice) | **belongs to F1** ("one path, one key") | **fixed (2026-09-18)**: Fix 0 (delete uses the download endpoint's path convention) + d1 (also drop the live sandbox's copy), landed as a pair; both halves pinned on real E2B (without d1 it comes back; with d1 it does not) |

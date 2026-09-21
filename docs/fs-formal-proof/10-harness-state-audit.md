@@ -397,7 +397,7 @@ in one of two ways: rebuild the agent, or let the registry add and remove tools 
 | Transport | Can it arrive? | Evidence |
 |-----------|----------------|----------|
 | **stdio** | **yes, and it was thrown away** | `stdio.go`'s read loop scans stdout line by line and returns only on `resp.ID == requestID`; everything else is `continue`d. A server's `notifications/tools/list_changed` (a method, no id) **is parsed and then dropped**. Request ids start at 1 (`NewStdioClient` sets `nextID: 1`), so a notification's id=0 can never be mistaken for a request id |
-| **HTTP** | **no — there is no wire** | `HTTPClient.sendRequest` is one POST per request and parses the body as a single JSON-RPC response; it neither consumes Streamable HTTP's SSE stream nor sends `Accept: text/event-stream`. A server has nowhere to push on this transport: it is not "we drop it", it is "it cannot arrive" |
+| **HTTP** | **no standing wire** (a *reply* channel since 2026-09-22) | `HTTPClient.sendRequest` is one POST per request. It used to parse the body as a single JSON-RPC object and nothing else; since 2026-09-22 it advertises both content types and also reads a reply that arrives as an SSE stream (the transport requires the client to support both shapes). That is a reply channel only: a server can put a message there while answering *our* request, and nowhere else. Nothing opens the spec’s GET stream, so an unprompted change still has nowhere to arrive — it is not "we drop it", it is "it cannot arrive" |
 
 **Landing (2026-09-18, the stdio half)**: capture → manager → gate → **the rebuild path `mcp add`
 already uses**:
@@ -421,14 +421,41 @@ changes in a loop (or has a bug) must not be able to turn that into a loop — t
 rather than staying silent.
 
 **Two boundaries, recorded honestly**:
-1. **the HTTP half is not fixed**: receiving there needs an SSE stream (a real feature) or a periodic
-   re-list (one network round trip per turn). HTTP behaves exactly as it did before the research —
-   changes wait for the next reload;
+1. **the HTTP half is not fixed**: what is missing is a *standing* channel. Two MUSTs of the transport
+   landed 2026-09-22 (row 43) — `Accept: application/json, text/event-stream`, and reading a reply that
+   arrives as an SSE stream — but both live inside one request’s lifetime. An unprompted change still
+   needs the spec’s SSE stream (a real feature) or a periodic re-list (one network round trip per turn),
+   so for a server that announces a change by itself, HTTP behaves exactly as it did before the research:
+   the change waits for the next reload;
 2. **neither transport sends `notifications/initialized`** (searching the repo for `initialized` finds
    nothing): the MCP spec requires the client to send it after initialize. Today's servers
    (QC / Quandora) do not require it, so it is not fatal — but it may be the precondition for some
    servers to start pushing notifications at all. Recorded as **G15 (open)**: not changed here, because
    it alters the handshake with real servers and needs a live check first.
+
+**Noticed while landing row 43 — recorded as facts, not decided** (no new gap numbers):
+
+1. **the negotiated protocol version is never read.** `Connect` asks for `2024-11-05` and the client
+   ignores the version the server answers with, so it cannot tell which revision it is really speaking
+   to. The MUSTs this pass implemented come from the Streamable-HTTP revision (`Accept` on every request,
+   both reply shapes, `MCP-Protocol-Version` on later requests, `notifications/initialized`). Two of
+   those are still unmet — the version header, and G15 — and the version header follows from reading
+   the handshake, so **the declaration cannot be corrected before G15 lands**: that is an order, not a
+   preference.
+2. **nothing owns a long-lived resource.** `mcp.Manager.Close` closes every connected client, but no
+   production caller reaches it: `ag.mcpMgr` is assigned in `loop.go` and read by the tool closures, while
+   the paths that drop an agent — `userSpaceRegistry.invalidate`, `evictIdle`, `setSystemSandboxPool`
+   (all in `gateway/userspace.go`) — delete the map entry only. A drop therefore releases nothing:
+   today’s stdio children are left to the `os.File` finaliser on the stdin pipe (`os/file_unix.go` sets
+   it) — they exit later, and no code path kills them — while a standing HTTP stream would be
+   *permanently* unreleasable, because the goroutine reading it holds the body and the GC never sees it
+   as garbage. *Either* remedy for boundary 1 adds a resource to that hole. Note the shape: what
+   triggers a rebuild is a message the server sent, so a server can drive rebuilds; the gate bounds that
+   to one per 30s per server, not to a total.
+3. **a server message that rides along on a request’s stream is traced, not acted on**
+   (`parseResponseBody` logs it at debug and skips it). That is deliberate — acting on one is a standing
+   channel’s job — but it means a server that uses the request stream as its only channel reaches nobody,
+   and only the debug level says so.
 
 ### 3.5 Automatic turns deferred or dropped (G12; **fixed 2026-09-18**)
 

@@ -6,11 +6,19 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
+	"mime"
 	"net/http"
 	"os"
 	"strings"
 	"sync"
 )
+
+// acceptHeader is what this client advertises on every request. The
+// Streamable-HTTP transport requires both content types, and the second one is
+// a promise rather than decoration: parseResponseBody reads an SSE reply too,
+// because a server may answer a request with a stream instead of one object.
+const acceptHeader = "application/json, text/event-stream"
 
 // HTTPClient implements the MCP client for HTTP (Streamable HTTP) servers.
 type HTTPClient struct {
@@ -88,6 +96,7 @@ func (c *HTTPClient) sendRequest(method string, params interface{}) (*jsonRPCRes
 		}
 
 		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set("Accept", acceptHeader)
 		for k, v := range c.headers {
 			httpReq.Header.Set(k, v)
 		}
@@ -133,17 +142,92 @@ func (c *HTTPClient) sendRequest(method string, params interface{}) (*jsonRPCRes
 			return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
 		}
 
-		var rpcResp jsonRPCResponse
-		if err := json.Unmarshal(respBody, &rpcResp); err != nil {
-			return nil, fmt.Errorf("parse response: %w", err)
+		rpcResp, err := parseResponseBody(resp.Header.Get("Content-Type"), respBody, id)
+		if err != nil {
+			return nil, err
 		}
 
 		if rpcResp.Error != nil {
 			return nil, fmt.Errorf("RPC error %d: %s", rpcResp.Error.Code, rpcResp.Error.Message)
 		}
 
+		return rpcResp, nil
+	}
+}
+
+// parseResponseBody reads one JSON-RPC response out of a POST reply. The
+// transport lets a server answer either with a single JSON object or with an
+// SSE stream carrying the same object as a `data:` frame, and the client is
+// required to support both cases. Reading only the JSON case meant a server
+// that chose the stream broke us: tools/list came back as `invalid character
+// 'e' looking for beginning of value`, and the server was dropped.
+//
+// A server-initiated message that rides along on such a stream is traced and
+// skipped. Acting on one belongs to a standing channel, and standing channels
+// are the open half of G11 (docs 10 §3.4) — this function does not open one.
+func parseResponseBody(contentType string, body []byte, id int) (*jsonRPCResponse, error) {
+	if !isEventStream(contentType) {
+		var rpcResp jsonRPCResponse
+		if err := json.Unmarshal(body, &rpcResp); err != nil {
+			return nil, fmt.Errorf("parse response: %w", err)
+		}
 		return &rpcResp, nil
 	}
+
+	for _, payload := range sseDataFrames(body) {
+		var msg jsonRPCResponse
+		if err := json.Unmarshal([]byte(payload), &msg); err != nil {
+			continue // a keep-alive or a comment: not our answer
+		}
+		if msg.Method != "" {
+			slog.Debug("mcp server message rode along on a request's stream",
+				"method", msg.Method, "id", msg.ID)
+			continue
+		}
+		if msg.ID == id {
+			return &msg, nil
+		}
+	}
+	return nil, fmt.Errorf("parse response: the event stream carried no JSON-RPC response with id %d", id)
+}
+
+func isEventStream(contentType string) bool {
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return false
+	}
+	return mediaType == "text/event-stream"
+}
+
+// sseDataFrames returns the data payload of every event in an SSE body: `:`
+// lines are comments (keep-alives), `field: value` lines carry the fields, and
+// a blank line dispatches the accumulated `data:` lines as one event. Unknown
+// fields (event:, id:) are not needed to find the reply.
+func sseDataFrames(body []byte) []string {
+	var frames []string
+	var data []string
+	for _, raw := range strings.Split(string(body), "\n") {
+		line := strings.TrimSuffix(raw, "\r")
+		if line == "" {
+			if len(data) > 0 {
+				frames = append(frames, strings.Join(data, "\n"))
+				data = data[:0]
+			}
+			continue
+		}
+		if strings.HasPrefix(line, ":") {
+			continue
+		}
+		field, value, ok := strings.Cut(line, ":")
+		if !ok || field != "data" {
+			continue
+		}
+		data = append(data, strings.TrimPrefix(value, " "))
+	}
+	if len(data) > 0 {
+		frames = append(frames, strings.Join(data, "\n"))
+	}
+	return frames
 }
 
 // Connect initializes the connection with the MCP server.

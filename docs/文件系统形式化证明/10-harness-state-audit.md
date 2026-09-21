@@ -346,7 +346,7 @@ MCP 工具在**构造 agent 时一次性注册**（【码】`loop.go:472-484`：
 | 传输 | 通知能到吗 | 证据 |
 |------|-----------|------|
 | **stdio** | **能，但被丢掉** | `stdio.go` 的读循环逐行扫 stdout，只认 `resp.ID == 请求id` 就返回，其余一律 `continue`——server 发来的 `notifications/tools/list_changed`（有 method、无 id）**被解析出来后直接丢弃**。请求 id 从 1 起（`NewStdioClient` 里 `nextID: 1`），所以通知的 id=0 不会与任何请求撞号 |
-| **HTTP** | **不能，压根没有线** | `HTTPClient.sendRequest` 是"一请求一 POST"，只把响应体当单个 JSON-RPC 响应解析；既不消费 Streamable HTTP 的 SSE 流，也不发 `Accept: text/event-stream`。所以 server 在 HTTP 上没有推送的地方——这不是"我们丢了它"，是"它没地方来" |
+| **HTTP** | **没有站着的线**（2026-09-22 起有一个*应答内*的通道） | `HTTPClient.sendRequest` 仍是"一请求一 POST"。它此前只把响应体当单个 JSON-RPC 对象解析；2026-09-22 起它同时声明两种内容类型，也能读"以 SSE 流形态回来的应答"（规范要求 client 两种形态都支持）。但那只是**应答**内的窗口：server 只能在我们请求它的时候往里放消息，别的时候没有地方放。规范里那条 GET 流仍然没有任何东西去开，所以"server 自己宣告的变化"依旧没有地方到达——这不是"我们丢了它"，是"它没地方来" |
 
 **落点（2026-09-18，stdio 侧）**：捕获 → 交给 manager → 闸门 → **复用 `mcp add` 已经在用的重建路径**：
 
@@ -367,11 +367,32 @@ stdio 读循环识别 method 消息   →  StdioClient.SetNotificationHandler
 不该能把这件事变成循环——被限流时记一条 warn，而不是静默。
 
 **如实记下的两个边界**：
-1. **HTTP 那半边没修**：要让 HTTP 侧也能收到，得实现 SSE 流（真功能），或者定期 re-list（每回合一次网络往返）。
-   现在 HTTP 侧的行为是"变化要等下一次 reload"，与调研前一致，没有变坏；
+1. **HTTP 那半边没修**：缺的是**站着**的通道。传输层的两条 MUST 已在 2026-09-22 落地（登记册第 43 行）——
+   每个请求都带 `Accept: application/json, text/event-stream`，以及"以 SSE 流形态回来的应答也能读"——
+   但两者都活在一次请求的生命周期里。要让"server 自己宣告的变化"到达，仍然得实现规范里的 SSE 流（真功能），
+   或者定期 re-list（每回合一次网络往返）；因此对这种 server，HTTP 侧的行为与调研前完全一致：变化等下一次 reload；
 2. **`notifications/initialized` 两个传输都没发**（全仓搜 `initialized` 无命中）：MCP 规范要求 client 在
    initialize 之后发这条通知。现有 server（QC/Quandora）不要求它，所以今天不致命——但它可能是某些 server
    开始推送通知的前提。记为 **G15（开放）**：先不动，因为它会改变与真实 server 的握手行为，需要真机验证。
+
+**落地第 43 行时看到的三件事——只作事实记录，未裁决**（不新增 gap 编号）：
+
+1. **协商出来的协议版本从来没被读过。** `Connect` 请求的是 `2024-11-05`，而 client 忽略 server 在应答里给出的
+   版本，于是它无法知道自己到底在对哪个修订说话。本轮实现的那几条 MUST 来自 Streamable HTTP 那一版
+   （每个请求带 `Accept`、两种应答形态、后续请求带 `MCP-Protocol-Version`、`notifications/initialized`）。
+   其中两条仍未满足——版本头与 G15——而版本头是从握手里读出来的结果，所以**声明无法在 G15 落地之前修正**：
+   这是一个顺序，不是偏好。
+2. **没有东西拥有"长生命周期资源"。** `mcp.Manager.Close` 会关掉每个已连接的 client，但没有任何生产调用点到达它：
+   `ag.mcpMgr` 在 `loop.go` 里赋值、被工具闭包读取，而丢下 agent 的那几条路——`userSpaceRegistry.invalidate`、
+   `evictIdle`、`setSystemSandboxPool`（都在 `gateway/userspace.go`）——只是删掉 map 里的那一项。
+   所以一次丢弃什么也没释放：今天 stdio 的子进程只是被交给 stdin 管道上那个 `os.File` 终结器
+   （`os/file_unix.go` 里设的）——它们会晚些退出，而没有任何代码路径去杀它——而一条站着的 HTTP 流会是
+   **永远无法释放**的：读它的那个 goroutine 一直握着 body，GC 不会把它当垃圾。所以边界 1 的**任何一种**
+   修法都是往同一个洞再加一份资源。注意这个形状：触发重建的是 server 发来的消息，也就是说 server 能驱动重建；
+   闸门把它限成"每 server 30s 一次"，不是限总量。
+3. **搭在请求流上的 server 消息被记录、不被执行**（`parseResponseBody` 用 debug 记一条然后跳过）。这是刻意的
+   ——执行它是"站着的通道"的职责——但这意味着：把请求流当成唯一通道的 server 仍然到不了任何人，
+   而且只有 debug 级别说了这件事。
 
 ### 3.5 自动回合被推迟/丢弃（G12；**2026-09-18 已修**）
 
