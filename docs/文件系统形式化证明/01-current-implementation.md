@@ -74,7 +74,7 @@ type Store interface {
 
 | 后端 | `Version` 是什么 | `PutIfVersion` 的强度 | 依赖它的后果 |
 |---|---|---|---|
-| **S3 / Spaces（多副本生产）** | 对象 ETag | **精确**：`If-Match`（或 `If-None-Match: *` 表"必须不存在"）与写在同一请求内，412 ⇒ `ErrVersionConflict` | 可以据此**拒绝**覆盖 |
+| **S3 / Spaces（多副本生产）** | 对象 ETag | **在桶会计算 `If-Match` 时精确**（AWS S3、MinIO）：条件 PUT 与写在同一请求内，412 ⇒ `ErrVersionConflict`。Ceph RGW——本部署实际用的 DigitalOcean Spaces 就是它——只实现了 create-only 形式，对**每一个** `If-Match` 都回 412，哪怕 ETag 就是客户端刚读到的那个（2026-09-22 对 nyc3 Spaces 实测），所以那里的覆盖写是**比对后写**：`Stat` 对象，只有当它仍携带 `expected` 时才无条件落盘 | 桶精确时可以据此**拒绝**覆盖；在 Spaces 上只能"检测并拒绝已过期的期望"，而 create-only（`If-None-Match: *`）两种情形下都保持精确 |
 | **LocalFS（单机/开发）** | `size:mtime_ns` | **尽力而为**：stat → 比对 → 写，其间无内核 CAS | 只能"检测并拒绝已过期的期望"，不能承诺并发安全；多副本必须用 S3/PG |
 | **Metered** | 透传 | 与内层相同 | — |
 
