@@ -1948,7 +1948,6 @@ type E2BExecutorPool struct {
 	newAdoptedExecutor func(apiKey, sandboxID, accessToken, template string, timeout time.Duration) *E2BExecutor
 	hydrateSandbox     func(ctx context.Context, ex *E2BExecutor) error
 	verifySandbox      func(ctx context.Context, ex *E2BExecutor) error
-	warmupSandbox      func(ctx context.Context, ex *E2BExecutor)
 }
 
 // E2BLeaseOptions configures cross-pod sandbox sharing for the E2B pool.
@@ -2014,7 +2013,7 @@ func newAdoptedE2BExecutor(apiKey, sandboxID, accessToken, template string, time
 //
 // Locking: p.mu guards only the executor/epoch maps — every critical section
 // on it is a map lookup or assignment. Provisioning work (lease reads and
-// writes, create, hydrate, verify, warmup) runs under the per-scope lock
+// writes, create, hydrate, verify) runs under the per-scope lock
 // returned by scopeLock, so a slow or cold start for one scope cannot stall
 // sandbox binding for every other agent in the process.
 func NewE2BExecutorPool(apiKey, template, home string, timeout time.Duration, opts ...func(*E2BExecutorPool)) *E2BExecutorPool {
@@ -2031,7 +2030,6 @@ func NewE2BExecutorPool(apiKey, template, home string, timeout time.Duration, op
 			return ex.Hydrate(ctx)
 		},
 		verifySandbox: verifyWorkspaceWritable,
-		warmupSandbox: warmupCamoufoxDaemon,
 	}
 	for _, opt := range opts {
 		opt(p)
@@ -2168,11 +2166,11 @@ func (p *E2BExecutorPool) Get(ctx context.Context, agentID, projectID, sessionID
 	key := poolKey(agentID, projectID, sessionID)
 
 	// Serialize per scope, not process-wide. Everything below can do network
-	// I/O — lease reads/writes, create, hydrate, verify, warmup (bounded at
-	// 120s) — and a process-wide lock across that delays sandbox binding for
-	// every other agent behind one cold scope. Same-scope callers still queue
-	// here, so "one sandbox per scope" keeps the guarantee the global lock
-	// used to provide as a side effect.
+	// I/O — lease reads/writes, create, hydrate, verify — and a process-wide
+	// lock across that delays sandbox binding for every other agent behind one
+	// cold scope. Same-scope callers still queue here, so "one sandbox per
+	// scope" keeps the guarantee the global lock used to provide as a side
+	// effect.
 	scope := p.scopeLock(key)
 	scope.Lock()
 	defer scope.Unlock()
@@ -2223,7 +2221,10 @@ func (p *E2BExecutorPool) Get(ctx context.Context, agentID, projectID, sessionID
 		_ = ex.Close()
 		return nil, fmt.Errorf("e2b sandbox unusable: %w", err)
 	}
-	p.warmupSandbox(ctx, ex)
+	// No browser warm-up here (removed 2026-09-22, was ~24s of a ~26s cold
+	// start). The daemon's cold-start race is absorbed by the shim in the
+	// sandbox image — deploy/docker/sandbox/camoufox-cli-shim.sh — which
+	// covers every launch path, including the rebuilds this never did.
 	if p.leaseStore != nil {
 		created := ex.identSnapshot()
 		rec, acquired, lerr := p.leaseStore.AcquireSandboxLease(
@@ -2567,37 +2568,6 @@ func (p *E2BExecutorPool) reconcileLocalLease(
 	slog.Warn("e2b adoption of current lease failed; keeping stale local executor",
 		"scopeKey", key, "owner", p.ownerID)
 	return ex, nil
-}
-
-// warmupCamoufoxDaemon spawns the camoufox-cli background daemon as part
-// of sandbox provisioning so the agent's first `camoufox-cli open` call
-// attaches to a live daemon instead of racing to spawn one. Without this,
-// the CLI's auto-spawn path waits only 5 seconds for the daemon socket
-// — empirically too short in a fresh e2b sandbox (Python startup +
-// Firefox handshake routinely take longer), and concurrent execs inside
-// the same sandbox can both try to spawn, surfacing as the user-visible
-// "Daemon did not start within 5 seconds" failure.
-//
-// Best-effort: any error is logged at WARN and sandbox creation still
-// succeeds — agents that never touch the browser shouldn't fail because
-// camoufox couldn't come up, and the original (slow) cold-start path
-// remains intact as a fallback. Bounded to 120s so a wedged camoufox
-// install can't pin sandbox creation indefinitely.
-func warmupCamoufoxDaemon(ctx context.Context, ex *E2BExecutor) {
-	warmCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
-	defer cancel()
-	// `open about:blank` is the cheapest invocation that starts the
-	// daemon: no network, no GeoIP lookup, no real page load. The proxy
-	// shim in the Dockerfile still applies — if HTTPS_PROXY is set the
-	// browser launches with --proxy, matching what the agent's later
-	// calls will see, so the warmed daemon is configured identically.
-	out, err := ex.execOnce(warmCtx, "cd /workspace && camoufox-cli open about:blank", 120*time.Second)
-	if err != nil {
-		slog.Warn("e2b camoufox warmup failed (first browser call will pay cold-start)",
-			"sandboxID", ex.identSnapshot().id, "error", err, "out", strings.TrimSpace(out))
-		return
-	}
-	slog.Info("e2b camoufox daemon warmed", "sandboxID", ex.identSnapshot().id)
 }
 
 func (p *E2BExecutorPool) Release(agentID, projectID, sessionID string) error {
