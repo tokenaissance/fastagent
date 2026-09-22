@@ -211,6 +211,63 @@ func TestSupersededTurnStopsAndSignals(t *testing.T) {
 	sess.ClearTurnFence()
 }
 
+// Stop is the turn's last statement (`defer lease.Stop()` in both loop entry
+// points), so a caller that closes its event channel once the turn returns is
+// entitled to assume the guard has stopped emitting. It has not: the loss
+// notice is emitted from the renewal goroutine, and Stop returned while that
+// send was still in flight. That is the shape of the -race report on
+// TestSupersededTurnStopsAndSignals — the test's close of `events` against
+// emitEventChecked's chansend1 from renewLoop — and behind it is a plain
+// "send on a closed channel" waiting for the right interleaving.
+//
+// Falsification: red on the shipped Stop (it returns immediately, so the
+// first select below takes the fatal branch); make Stop join the renewer and
+// it passes.
+func TestStopWaitsForTheNoticeItStarted(t *testing.T) {
+	a, _ := newGateAgent(t)
+	lease := &fakeLease{}
+	lease.renewErr = &SessionTurnBusy{Holder: "pod-b/2", ExpiresAt: time.Now().Add(time.Minute)}
+	a.sessionLease = lease
+	a.turnLeaseTTLOverride = 60 * time.Millisecond // renew tick = 20 ms
+
+	msg := bus.InboundMessage{Channel: "web", UserID: "u_owner", ChatID: "chat-lease-stop", Text: "hi"}
+	sess := a.sessions.Get(sessionTriple(msg, msg.ProjectID))
+
+	inEmit := make(chan struct{})
+	letGo := make(chan struct{})
+	emit := func(evt ChatEvent) {
+		if evt.Type != lostNoticeEvent {
+			return
+		}
+		close(inEmit)
+		<-letGo
+	}
+	g, ok := a.beginTurnLease(context.Background(), sess, emit)
+	if !ok {
+		t.Fatal("beginTurnLease refused on a fresh session")
+	}
+	<-inEmit // the renewal goroutine is inside its notice
+
+	stopped := make(chan struct{})
+	go func() {
+		g.Stop()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+		t.Fatal("Stop returned while the guard was still emitting: a caller that closes its channel here races the send")
+	case <-time.After(200 * time.Millisecond):
+		// The notice is in flight, so Stop is still waiting. That is the contract.
+	}
+	close(letGo)
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop never returned after the notice was delivered")
+	}
+	sess.ClearTurnFence()
+}
+
 // openCallAnswer is the whole of A2 step 2: the sentence the projection may
 // use for a tool call stored history left open follows the lease, and nothing
 // else. Falsification: return StoppedToolResult unconditionally (the old
