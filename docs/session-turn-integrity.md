@@ -1936,6 +1936,12 @@ is told. Falsify: drop the etag check ⇒ the overwrite reappears.
 > `nothing was overwritten`, `read it again`) *and* that the peer's bytes survived. **Falsifications run
 > for real, each verified by `grep` before trusting the red, each reverted**: a plain `Put` at
 > `file.go:592` ⇒ 2 red, at `file.go:702` ⇒ 1 red, at `apply_patch.go:549` ⇒ 1 red.
+> **B3's fake was faithful and therefore blind**: it emulates `If-Match` the way AWS does, so nothing
+> in it could show that the bucket this deployment runs on (Ceph RGW / DO Spaces) answers 412 to
+> every `If-Match` — which made every overwrite of an existing path report "another writer changed
+> it" (09-22 dev session `MImz6pYfMoZLJabEHJRI4p`). `s3_live_test.go`
+> (`TestS3LiveOverwriteOfAnExistingPath`, gated by `FASTAGENT_S3_LIVE=1`) is the witness that closes
+> that gap against a real bucket.
 > **B3 now has the witness its backend was missing** — `internal/workspace/s3_version_test.go` runs a
 > hand-rolled minimal S3 over `httptest` (location, HEAD → ETag, PUT honouring `If-None-Match: *` /
 > `If-Match` → 412). It asserts that `Stat`'s version *is* the ETag, that the conditional PUT carries
@@ -1972,7 +1978,7 @@ is told. Falsify: drop the etag check ⇒ the overwrite reappears.
 |---|--------|--------|------|--------------|
 | **B1** | `ObjectInfo` gains `Version string` — an **opaque** token owned by `internal/workspace` (never `minio.ETag` / `syscall.Stat_t`); supplied by `Stat`/`List` | `internal/workspace/workspace.go:76` | 0 | DTO test: every implementation fills it |
 | **B2** | the port gains `PutIfVersion(ctx, …, expected Version) error` + `ErrVersionConflict`; `Put` keeps its meaning (blind overwrite) | `workspace.go:48-72` | 0 | interface doc + the two error strings |
-| **B3** | S3: conditional PUT via `PutObjectOptions.SetMatchETag` (minio-go v7.3.0 has it; verified); `Stat` returns the ETag as `Version` | `internal/workspace/s3.go:108-122` | 0 extra requests | ✅ `s3_version_test.go` (minimal S3 over `httptest`): `Stat`'s version *is* the ETag, the PUT carries that `If-Match`, stale ⇒ 412/conflict with the object untouched, create-only sends `If-None-Match: *`; falsification (drop the `SetMatchETag*` branch) ⇒ red |
+| **B3** | S3: conditional PUT via `PutObjectOptions.SetMatchETag` (minio-go v7.3.0 has it); `Stat` returns the ETag as `Version`. **Where the bucket answers 412 to every `If-Match`** (Ceph RGW / DO Spaces; measured 2026-09-22), a refused precondition is re-checked against the object and landed unconditionally when it still carries `expected` — compare-then-write, the strength LocalFS has | `internal/workspace/s3.go:130-191` | 0 extra requests where the bucket is exact; on Spaces one HEAD + one retry PUT | ✅ `s3_version_test.go` (minimal S3 over `httptest`, incl. the `ifMatchUnsupported` backend): `Stat`'s version *is* the ETag, the PUT carries that `If-Match`, stale ⇒ 412/conflict with the object untouched, create-only sends `If-None-Match: *`, and on a bucket that refuses every `If-Match` the overwrite still lands while a superseded expectation is still refused; ✅ live `s3_live_test.go::TestS3LiveOverwriteOfAnExistingPath`; falsification (make a refused precondition an immediate conflict) ⇒ the overwrite case red |
 | **B4** | LocalFS: `Version = size:mtime_ns`; `PutIfVersion` compares before writing. **Declared as best-effort** (read-then-write, no kernel CAS) — honest, because multi-replica installs must use S3/PG anyway | `internal/workspace/localfs.go:88/119` | 0 extra requests | test: stale version ⇒ conflict; doc states the strength |
 | **B5** | `Metered` passes both through (no cost, no behavior) | `internal/workspace/metering.go:48` | 0 | existing decorator test |
 | **B6** | per-backend **strength table** written down (exact: S3/PG; best-effort: LocalFS) and the port doc states "callers may rely on the declared strength only" | `01 §2` + the port's L3 header | 0 | doc |
