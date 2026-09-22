@@ -1611,7 +1611,16 @@ turn was superseded by a newer one" rather than just "refused".
   exactly that shape.
 * **Fencing**: the epoch is checked before each append. `session.Append` is the
   only writer of `session_messages`, so that is the one place to check. A lost
-  lease stops the turn and emits a σ; it never keeps writing. (A store failover
+  lease stops the turn and emits a σ; it never keeps writing. **The notice is
+  emitted from the renewal goroutine, so `Stop` joins it** — emitting a σ is
+  writing too, and "stops" has to be true of it as well. `Stop` is the turn's
+  last statement (`defer lease.Stop()`); it closes the stop channel and then
+  waits for the renewer to return before clearing the fence or releasing the
+  lease. Without the wait a caller that closes its event channel once the turn
+  returns is racing a send, which is the one `-race` failure this package
+  shipped (`TestSupersededTurnStopsAndSignals`). The wait is bounded (2 s, one
+  WARN): the emit respects the turn's context, so a reader that stopped reading
+  is ended by that context rather than by patience. (A store failover
   or a TTL race can produce two *holders*; only the fence stops two *successful
   writers*, which is why it is part of A1 rather than a later nicety.)
   **Where the check executes matters, and it is not the caller.** A guard of the
