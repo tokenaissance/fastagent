@@ -30,6 +30,14 @@ const (
 	// defaultTurnLeaseTTL is used when the caller's context carries no
 	// deadline: the platform's turn budget (45 m) plus the grace window.
 	defaultTurnLeaseTTL = 45*time.Minute + turnLeaseGrace
+	// turnLeaseStopJoin bounds how long Stop waits for the renewal goroutine
+	// to finish what it is doing. The wait is a join, not a courtesy: Stop is
+	// the turn's last statement and callers close their event channel after
+	// it, so a notice emitted past that point is a send on a closed channel.
+	// The bound exists only so a reader that stopped reading cannot hang the
+	// turn's return — the emit respects the turn's context, so it ends on its
+	// own once that context does.
+	turnLeaseStopJoin = 2 * time.Second
 )
 
 // turnLeaseGuard owns one possession: it renews on a timer, records a loss,
@@ -46,6 +54,9 @@ type turnLeaseGuard struct {
 	turn *Turn
 	lost bool
 	stop chan struct{}
+	// done is closed by renewLoop when it returns, which is the instant the
+	// guard can no longer emit. Stop waits on it.
+	done chan struct{}
 }
 
 // turnSupersededNotice is what the user sees when this turn lost the session to
@@ -101,9 +112,12 @@ func (g *turnLeaseGuard) Lost() bool {
 	return g.lost
 }
 
-// Stop cancels the renewer and frees the lease. The release runs on a
-// background context on purpose: a cancelled turn must not leave its peers
-// waiting for the TTL.
+// Stop cancels the renewer, waits for it to leave, and frees the lease. The
+// wait is part of the contract rather than a politeness: the loss notice is
+// emitted from the renewer, Stop is the turn's last statement, and callers
+// close their event channel once the turn returns — so an emit that outlives
+// Stop is a send on a closed channel. The release runs on a background context
+// on purpose: a cancelled turn must not leave its peers waiting for the TTL.
 //
 // The fence is cleared ONLY when this turn still owns the session. After a
 // loss the stale fence stays on the session on purpose: that is what makes
@@ -112,6 +126,12 @@ func (g *turnLeaseGuard) Lost() bool {
 // notices the loss. The next turn overwrites it at admission.
 func (g *turnLeaseGuard) Stop() {
 	close(g.stop)
+	select {
+	case <-g.done:
+	case <-time.After(turnLeaseStopJoin):
+		slog.Warn("turn lease: the renewer is still busy after Stop; it stops when the turn's context ends",
+			"agent", g.key.AgentID, "session", g.key.SessionKey)
+	}
 	if g.Lost() {
 		return
 	}
@@ -140,7 +160,7 @@ func (a *Agent) beginTurnLease(ctx context.Context, sess *session.Session, emit 
 		turn, err := a.lease().Acquire(ctx, key, ttl)
 		if err == nil {
 			sess.SetTurnFence(turn.Holder, turn.Epoch)
-			g := &turnLeaseGuard{lease: a.lease(), key: key, ttl: ttl, sess: sess, turn: turn, emit: emit, stop: make(chan struct{})}
+			g := &turnLeaseGuard{lease: a.lease(), key: key, ttl: ttl, sess: sess, turn: turn, emit: emit, stop: make(chan struct{}), done: make(chan struct{})}
 			go g.renewLoop()
 			return g, true
 		}
@@ -183,6 +203,7 @@ func (a *Agent) beginTurnLease(ctx context.Context, sess *session.Session, emit 
 // TTL/3 so two consecutive failures still leave a window before the row goes
 // stale — the same cadence channels.Leaser uses.
 func (g *turnLeaseGuard) renewLoop() {
+	defer close(g.done)
 	ticker := time.NewTicker(g.ttl / 3)
 	defer ticker.Stop()
 	for {
