@@ -552,3 +552,11 @@ Apart from those six, §11.2's whole-file assignment and §11.3's function-level
 > this pass), and none is deployed, so the ❌ above keeps its one meaning. Row 45 is the third cell
 > of the same kind, one pass newer — its hash is deliberately not written down here, because a cell
 > that names the commit it is part of cannot be right.
+
+> **Status-column correction (2026-09-22, second pass)**: the same correction now applies to rows
+> **46, 48, 50, 51, 52 and 53** — each "landed in the working tree" was true when written and is now
+> an under-statement. All six are **committed on branch `fastagent`** (`af3b65c` row 46, `756814c`
+> row 48, `798b380` row 50, `17f3a3f` row 51, `4ecadc7` row 52, `86c38b9` row 53); none is deployed, so
+> the ❌ above keeps its one meaning — on the branch, not released. Rows 47 and 49 were corrected
+> in-cell when they landed and are not repeated here. This pass was written after re-reading the cells
+> against `git log -S` for each row's own symbol, which is why it can name six hashes and not a guess.
