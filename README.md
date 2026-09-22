@@ -415,28 +415,29 @@ nothing below works out of order:
 1. Build and push the base image, which is what the template's `fromImage` names
    (`deploy/docker/sandbox/template.ts`):
    ```bash
-   deploy/docker/sandbox/build.sh --push      # -> thinkany/fastclaw-sandbox:latest
+   deploy/docker/sandbox/build.sh --push      # -> registry.digitalocean.com/tokenaissance/fastagent-sandbox:latest
    ```
 2. Register the E2B template from its SDK definition — a TS script, not the TOML the
    retired Build System 1.0 read:
    ```bash
-   E2B_API_KEY=... npx tsx deploy/docker/sandbox/build.prod.ts   # -> fastclaw-sandbox
-   E2B_API_KEY=... npx tsx deploy/docker/sandbox/build.dev.ts    # -> fastclaw-sandbox-dev
+   E2B_API_KEY=... bun deploy/docker/sandbox/build.prod.ts   # -> fastclaw-sandbox
+   E2B_API_KEY=... bun deploy/docker/sandbox/build.dev.ts    # -> fastagent-sandbox
    ```
-   Both import the `e2b` SDK, so install it first (`npm i e2b tsx` in a scratch directory);
-   this repo has no root `package.json`. `e2b.toml.old` / `e2b.Dockerfile.old` are kept for
-   reference only — `e2b template build --config e2b.toml` matches nothing in this tree.
+   Both import the `e2b` SDK. `bun` runs these TS files directly (no `tsx` step); this repo has
+   no root `package.json`, so the SDK has to resolve from a parent directory or a scratch
+   install. `e2b.toml.old` / `e2b.Dockerfile.old` are kept for reference only —
+   `e2b template build --config e2b.toml` matches nothing in this tree.
 3. Roll the gateway out **after** the template. A gateway whose image and registered template
    disagree is the one combination nothing guards: `TestE2BLiveBrowserColdStart` fails with
    that sentence rather than letting a stale template pass.
 4. Get your E2B API key from [e2b.dev/dashboard](https://e2b.dev/dashboard).
 
-> The value must be a **template name or id** (`fastclaw-sandbox`, `fastclaw-sandbox-dev`), never a
+> The value must be a **template name or id** (`fastclaw-sandbox`, `fastagent-sandbox`), never a
 > Docker image reference, and two places can carry it — the per-backend field wins: the dashboard at
 > Settings -> Runtime -> Sandbox -> **E2B Template** (writes `sandbox.e2bTemplate`), and `sandbox.image`
 > above, which lands in the legacy shared slot (`FASTAGENT_SANDBOX_IMAGE`) and is read only when
 > `e2bTemplate` is empty. The chart default is a Docker reference (`values.yaml`:
-> `image: thinkany/fastclaw-sandbox:latest`) and `base` is the last fallback, so override one of them
+> `image: registry.digitalocean.com/tokenaissance/fastagent-sandbox:latest`) and `base` is the last fallback, so override one of them
 > or the gateway asks E2B for a template by that literal name.
 
 #### Raw manifests
