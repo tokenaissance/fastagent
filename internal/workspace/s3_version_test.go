@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -296,6 +297,59 @@ func TestS3OverwriteLandsOnABackendWithoutIfMatch(t *testing.T) {
 	if string(got.body) != "v3" {
 		t.Fatalf("object body after the refused write = %q; want v3 (the stale write must not land)", got.body)
 	}
+}
+
+// The degradation notice is not an incident report. The store this deployment
+// runs on answers 412 to every If-Match as a property of the store, so an
+// operator reading that line has to be told which store it is normal on — the
+// alternative is somebody chasing a bucket that is behaving as designed.
+//
+// Falsification: drop the "normal on DigitalOcean Spaces … not an incident"
+// attribute from the WARN in S3.PutIfVersion and the first assertion fails. The
+// line count is pinned in the same breath: the notice belongs to the bucket, so
+// the second degraded write must not add another.
+func TestS3NoIfMatchWarningSaysItIsNormalOnSpaces(t *testing.T) {
+	logs := captureWorkspaceWarnings(t)
+	ctx := context.Background()
+	store, fake := newFakeS3Store(t)
+	fake.ifMatchUnsupported = true
+
+	// Two degraded overwrites: one to produce the notice, one to prove it is
+	// not repeated.
+	for i, seed := range []string{"v1", "v2"} {
+		if err := store.Put(ctx, "agt", "", "", "notes.md", strings.NewReader(seed), 2, "text/markdown"); err != nil {
+			t.Fatalf("seed %d: %v", i, err)
+		}
+		info, err := store.Stat(ctx, "agt", "", "", "notes.md")
+		if err != nil {
+			t.Fatalf("stat %d: %v", i, err)
+		}
+		if err := store.PutIfVersion(ctx, "agt", "", "", "notes.md", strings.NewReader("v9"), 2, "text/markdown", info.Version); err != nil {
+			t.Fatalf("degraded overwrite %d: %v", i, err)
+		}
+	}
+
+	notice := logs.String()
+	if !strings.Contains(notice, "normal on DigitalOcean Spaces") {
+		t.Fatalf("the degradation notice does not say where it is normal:\n%s", notice)
+	}
+	if !strings.Contains(notice, "not an incident") {
+		t.Fatalf("the degradation notice does not separate a designed store from a broken one:\n%s", notice)
+	}
+	if extra := strings.Count(strings.TrimRight(notice, "\n"), "\n"); extra != 0 {
+		t.Fatalf("the notice fired %d times; want one line per process:\n%s", extra+1, notice)
+	}
+}
+
+// captureWorkspaceWarnings redirects slog to a buffer for the duration of one
+// test — the same shape internal/agent uses for its own notices.
+func captureWorkspaceWarnings(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
 }
 
 func TestS3CreateOnlyUsesIfNoneMatch(t *testing.T) {
