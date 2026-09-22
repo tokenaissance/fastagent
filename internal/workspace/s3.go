@@ -31,7 +31,9 @@ type S3 struct {
 	prefix string // prepended to every key; can be "" for bucket root
 	// warnedNoIfMatch keeps the degradation notice to one line per process —
 	// "this bucket answers 412 to If-Match" is a property of the backend, not of
-	// the individual write that discovered it.
+	// the individual write that discovered it — and the notice says which
+	// backend that property is normal on, so the one line cannot be read as an
+	// incident report.
 	warnedNoIfMatch atomic.Bool
 }
 
@@ -161,8 +163,23 @@ func (s *S3) PutIfVersion(ctx context.Context, agentID, projectID, sessionID, p 
 			return fmt.Errorf("workspace put: rewind for the unconditional retry: %w", err)
 		}
 		if s.warnedNoIfMatch.CompareAndSwap(false, true) {
+			// Why this line exists at all: the write below lands unconditionally,
+			// so from here on this bucket no longer has the exactness the port
+			// promises (obligation L4(a)/L7) — an operator has to be able to see
+			// that from a log, because nothing else reports it.
+			//
+			// Why it says "normal … not an incident": on the store this
+			// deployment runs on, the 412 is the design, not a fault. Ceph RGW
+			// (DO Spaces) implements only the create-only form and answers 412 to
+			// every If-Match — measured 2026-09-22 against nyc3 Spaces, where the
+			// header carried the ETag just read from the object. Read as a fault
+			// report, this same line sent three edits of an existing file down a
+			// retry path and cost the turn its tools (09-22 dev session
+			// MImz6pYfMoZLJabEHJRI4p); the note is what keeps the next reader
+			// from repeating that diagnosis.
 			slog.Warn("this bucket answers 412 to If-Match; overwrites of existing paths degrade to compare-then-write",
-				"bucket", s.bucket, "prefix", s.prefix)
+				"bucket", s.bucket, "prefix", s.prefix,
+				"note", "normal on DigitalOcean Spaces (Ceph RGW), which implements only the create-only form — not an incident")
 		}
 		if _, err := s.client.PutObject(ctx, s.bucket, key, r, size, minio.PutObjectOptions{ContentType: contentType}); err != nil {
 			return mapS3Err(err)
