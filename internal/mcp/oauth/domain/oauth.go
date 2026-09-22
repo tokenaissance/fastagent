@@ -93,6 +93,17 @@ var (
 	ErrMissingCode    = errors.New("oauth: missing authorization code")
 	ErrIssuerMismatch = errors.New("oauth: issuer mismatch")
 	ErrInvalidURL     = errors.New("oauth: invalid server url")
+	// ErrReauthRequired reports a credential no local work can renew: the
+	// provider issued no refresh token, so once the access token is spent
+	// the only remedy is a fresh authorization by the owner. It is
+	// deliberately not the same error as "the refresh call failed" — one
+	// is fixed by retrying, the other only by a human at a browser.
+	//
+	// Not every provider does this. QuantConnect's authorization server
+	// grants only `authorization_code` and issues a two-hour access token
+	// with no refresh token (RFC 8414 metadata, 2026-09-22), which makes
+	// its credential one-shot by construction.
+	ErrReauthRequired = errors.New("oauth: re-authorization required")
 )
 
 const (
