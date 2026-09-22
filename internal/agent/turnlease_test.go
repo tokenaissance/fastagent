@@ -184,6 +184,12 @@ func TestSupersededTurnStopsAndSignals(t *testing.T) {
 	if !g.Lost() {
 		t.Fatal("the guard never noticed the takeover")
 	}
+	// The channel has one owner at a time: the guard's renewer is a producer
+	// on it (the loss notice), so the producer is stopped before the consumer
+	// closes. This is the ordering the loop has — `defer lease.Stop()` runs
+	// before the caller's channel is closed — and closing first is the -race
+	// report this test shipped with: the close raced the notice's send.
+	g.Stop()
 	close(events)
 	var notices []string
 	for evt := range events {
@@ -204,7 +210,6 @@ func TestSupersededTurnStopsAndSignals(t *testing.T) {
 	if sess.Fence() == nil {
 		t.Fatal("the fence was cleared on loss; later writes would land unfenced")
 	}
-	g.Stop()
 	if lease.releases != 0 {
 		t.Fatal("a superseded guard released the peer's lease")
 	}
