@@ -265,13 +265,12 @@ func (a *Agent) bindSession(ctx context.Context, channel, accountID, sessionID, 
 
 // NewAgent creates a new Agent from a resolved config.
 func NewAgent(rc config.ResolvedAgent, prov provider.Provider, mb *bus.MessageBus, homeDir string) *Agent {
-	return newAgentWithActor(rc, prov, mb, homeDir, config.SkillsCfg{}, rc.UserID, config.PrivacyCfg{})
+	return newAgentWithActor(rc, prov, mb, homeDir, config.SkillsCfg{}, rc.UserID, config.PrivacyCfg{}, config.MemoryCfg{})
 }
 
 // NewAgentWithFullCfg creates a new Agent with full config support (memory, privacy, skills learner).
 func NewAgentWithFullCfg(rc config.ResolvedAgent, prov provider.Provider, mb *bus.MessageBus, homeDir string, fullCfg *config.Config) *Agent {
-	ag := newAgentWithActor(rc, prov, mb, homeDir, fullCfg.Skills, rc.UserID, fullCfg.Privacy)
-	ag.memoryCfg = fullCfg.Memory
+	ag := newAgentWithActor(rc, prov, mb, homeDir, fullCfg.Skills, rc.UserID, fullCfg.Privacy, fullCfg.Memory)
 	// splitReplies is plumbed inside NewAgentWithSkillsCfg so foreign-
 	// attached agents also pick up the toggle; don't re-stamp here.
 
@@ -297,17 +296,12 @@ func NewAgentWithFullCfg(rc config.ResolvedAgent, prov provider.Provider, mb *bu
 	// skills namespace's single writer too instead of writing SKILL.md itself.
 	ag.enableSkillsLearner(fullCfg.SkillsLearner)
 
-	// Set memory auto-persist defaults
-	if ag.memoryCfg.AutoPersist.EveryNTurns == 0 {
-		ag.memoryCfg.AutoPersist.EveryNTurns = 5
-	}
-
 	return ag
 }
 
 // NewAgentWithSkillsCfg creates a new Agent with global skills config for env injection.
 func NewAgentWithSkillsCfg(rc config.ResolvedAgent, prov provider.Provider, mb *bus.MessageBus, homeDir string, globalSkillsCfg config.SkillsCfg) *Agent {
-	return newAgentWithActor(rc, prov, mb, homeDir, globalSkillsCfg, rc.UserID, config.PrivacyCfg{})
+	return newAgentWithActor(rc, prov, mb, homeDir, globalSkillsCfg, rc.UserID, config.PrivacyCfg{}, config.MemoryCfg{})
 }
 
 // setProvider installs the provider the agent's model calls go through. It is
@@ -381,7 +375,12 @@ func (a *Agent) enableSkillsLearner(cfg config.SkillsLearnerCfg) {
 // layer's job — and it is threaded through *this* constructor rather than
 // applied by each caller so there is one place an agent can learn the switch,
 // the same way it learns skillsCfg.
-func newAgentWithActor(rc config.ResolvedAgent, prov provider.Provider, mb *bus.MessageBus, homeDir string, globalSkillsCfg config.SkillsCfg, actorUserID string, privacyCfg config.PrivacyCfg) *Agent {
+// memoryCfg is the resolved `memory` namespace (system ← user scope) — the
+// DEFAULT layer for auto-persist, which the per-agent rc.AutoPersist override
+// stamps over below. Threaded here for the same reason as privacyCfg: when the
+// only reader lived inside NewAgentWithFullCfg the row was writable, readable
+// back, and read by nobody on the production path.
+func newAgentWithActor(rc config.ResolvedAgent, prov provider.Provider, mb *bus.MessageBus, homeDir string, globalSkillsCfg config.SkillsCfg, actorUserID string, privacyCfg config.PrivacyCfg, memoryCfg config.MemoryCfg) *Agent {
 	workspace := rc.Workspace
 	if workspace == "" {
 		// Fallback for callers (tests, legacy configs) that don't populate
@@ -468,6 +467,12 @@ func newAgentWithActor(rc config.ResolvedAgent, prov provider.Provider, mb *bus.
 		// The provider enters through setProvider, so the piiScrubbing
 		// switch is applied here — once, on the way in (see setProvider).
 		piiScrub: privacyCfg.PIIScrubbing.Enabled,
+		// The `memory` namespace (system ← user scope) is the default layer;
+		// the per-agent override below stamps over it. Passing it through this
+		// constructor is the same rule privacyCfg follows: there is one place an
+		// agent can learn the switch, and every caller hands it in instead of
+		// each call site deciding.
+		memoryCfg: memoryCfg,
 	}
 	ag.setProvider(prov)
 
@@ -492,14 +497,13 @@ func newAgentWithActor(rc config.ResolvedAgent, prov provider.Provider, mb *bus.
 	// scratch) can re-apply it instead of losing the value.
 	ag.displayName = rc.DisplayName
 	ag.ctxBuilder.SetDisplayName(rc.DisplayName)
-	// Auto-persist memory toggle — per-agent override. The manager
-	// today only ever calls NewAgentWithSkillsCfg (not the unused
-	// NewAgentWithFullCfg), which means the system/user `memory`
-	// configs row is effectively dead in production — per-agent
-	// agents.defaults.autoPersist is the only working path. Set
-	// EveryNTurns default here too so the modulo check at the
-	// runPostTurn site doesn't panic when an operator enables
-	// AutoPersist without specifying a cadence.
+	// Auto-persist memory toggle — per-agent override on top of the `memory`
+	// namespace handed in above (wired by the Manager from the system ← user
+	// scope row). nil = inherit; non-nil = authoritative for this agent,
+	// including `false` as a veto against a system-level on. The EveryNTurns
+	// default is stamped AFTER the override so the modulo check at the
+	// runPostTurn site can never divide by zero when an operator enables
+	// AutoPersist without naming a cadence.
 	if rc.AutoPersist != nil {
 		ag.memoryCfg.AutoPersist.Enabled = *rc.AutoPersist
 	}

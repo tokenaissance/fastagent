@@ -88,6 +88,12 @@ type managerOpts struct {
 	// its only reader used to live in NewAgentWithFullCfg, a constructor with
 	// no callers.
 	skillsLearnerCfg config.SkillsLearnerCfg
+	// memoryCfg is the resolved `memory` namespace (system ← user scope). It is
+	// the default layer for auto-persist: the per-agent rc.AutoPersist override
+	// is stamped over it at construction, and `everyNTurns` / `model` have no
+	// per-agent counterpart at all, so this is the only way an operator can set
+	// the distill cadence or give it its own model.
+	memoryCfg config.MemoryCfg
 	// privacyCfg is the resolved privacy settings (privacy.piiScrubbing.enabled)
 	// for the user space this Manager builds agents for. Every agent it builds —
 	// and every agent whose provider it swaps in on hot-reload — gets the
@@ -170,6 +176,17 @@ func WithPrivacy(cfg config.PrivacyCfg) ManagerOption {
 // which needs the per-user bucket and the workspace store to be wired first.
 func WithSkillsLearner(cfg config.SkillsLearnerCfg) ManagerOption {
 	return func(o *managerOpts) { o.skillsLearnerCfg = cfg }
+}
+
+// WithMemory threads the user space's resolved `memory` settings into every
+// agent the Manager builds — the system ← user scope default for auto-persist,
+// which the per-agent `agents.defaults.autoPersist` override then stamps over
+// (nil = inherit, false = veto). Without it that row had the same defect the
+// privacy row had before row 49 and the skillsLearner row before row 51: it was
+// writable and readable but read by nobody, because its only reader lived in
+// NewAgentWithFullCfg, a constructor no production path calls.
+func WithMemory(cfg config.MemoryCfg) ManagerOption {
+	return func(o *managerOpts) { o.memoryCfg = cfg }
 }
 
 // WithSessionLease installs the cross-replica turn lease on every agent the
@@ -255,7 +272,7 @@ func (m *Manager) buildAgent(rc config.ResolvedAgent, prov provider.Provider, mb
 	// an agent attached into a foreign UserSpace carries the visitor as
 	// actor while rc.UserID stays the agent owner, so the token provider
 	// refuses the visitor before reading the owner's credential.
-	ag := newAgentWithActor(rc, providerForAgent(rc, prov), mb, homeDir, m.opts.globalSkillsCfg, m.uid, m.opts.privacyCfg)
+	ag := newAgentWithActor(rc, providerForAgent(rc, prov), mb, homeDir, m.opts.globalSkillsCfg, m.uid, m.opts.privacyCfg, m.opts.memoryCfg)
 	ag.SetOwnerUserID(m.uid)
 	// Per-user skills bucket: chat-time `skills/...` writes route to
 	// ~/.fastagent/users/<uid>/, where SkillsLoader's "personal" layer
