@@ -34,12 +34,36 @@ func Scrub(text string) string {
 	return text
 }
 
-// ScrubMessages redacts PII from message content fields.
+// ScrubMessages redacts PII from every text field of a message that leaves for
+// the provider. The list is the wire's, not the struct's — provider/openai.go's
+// toAPIMessages is what decides what actually travels:
+//
+//   - Content            -> the message body
+//   - ContentParts[].Text -> the multimodal text parts (marshalled as content)
+//   - ToolCalls[].Arguments -> the assistant's own tool-call arguments; these are
+//     replayed on every later request of the session
+//   - Thinking           -> sent as `reasoning_content`
+//
+// ToolCall.Function.Name is deliberately untouched: it names a tool, and
+// rewriting it would make the replayed call unresolvable. RawAssistant is not
+// touched either — it is the byte-identical replay the prompt cache and
+// DeepSeek thinking mode require (see ScrubbingProvider's comment).
+//
+// The input slice is not modified: the session keeps the user's own words.
 func ScrubMessages(messages []provider.Message) []provider.Message {
 	out := make([]provider.Message, len(messages))
 	for i, m := range messages {
 		out[i] = m
 		out[i].Content = Scrub(m.Content)
+		out[i].Thinking = Scrub(m.Thinking)
+		if len(m.ToolCalls) > 0 {
+			calls := make([]provider.ToolCall, len(m.ToolCalls))
+			copy(calls, m.ToolCalls)
+			for j, tc := range calls {
+				calls[j].Function.Arguments = Scrub(tc.Function.Arguments)
+			}
+			out[i].ToolCalls = calls
+		}
 		if len(m.ContentParts) > 0 {
 			parts := make([]provider.ContentPart, len(m.ContentParts))
 			copy(parts, m.ContentParts)

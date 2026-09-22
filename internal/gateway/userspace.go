@@ -938,6 +938,36 @@ func (sp *UserSpace) EnsureAgent(ctx context.Context, st store.Store, mb *bus.Me
 	return nil
 }
 
+// managerOptions assembles the Manager options a user space's agents are built
+// with — every rule that reaches an agent from here rather than from its own
+// row. Named rather than inline in loadUserSpace for the same reason
+// resolveModel is: a wiring line that exists only inside a 300-line loader has
+// no witness, so nobody notices when it goes away. The piiScrubbing entry is
+// the case that made this a function: it was missing entirely (the switch's
+// only reader lived in agent.NewAgentWithFullCfg, a constructor with no
+// callers), which made privacy.piiScrubbing.enabled a row an operator could
+// turn on that did nothing at all. See
+// internal/gateway/pii_scrub_cloudpath_e2e_test.go.
+func managerOptions(cfg *config.Config, userID string, st store.Store, ws workspace.Store, meter usage.Meter, quotaStore usage.QuotaStore, notifyAgent func(userID, agentID string)) []agent.ManagerOption {
+	opts := []agent.ManagerOption{
+		agent.WithUserID(userID),
+		agent.WithGlobalSkillsCfg(cfg.Skills),
+		// cfg.Privacy is what assembleConfig read back from the "privacy"
+		// namespace (system ← user ← agent scope). The Manager is what builds
+		// — and hot-reloads — the agents, so it is the only layer that can
+		// install the redaction on every provider an agent ends up holding.
+		agent.WithPrivacy(cfg.Privacy),
+		agent.WithSessionStore(session.NewStoreAdapter(st, userID)),
+		agent.WithMemoryStore(agent.NewMemoryStoreAdapter(st)),
+		agent.WithDataStore(st),
+		// The cross-replica turn lease (docs/session-turn-integrity.md A1): admission
+		// for every turn, so two replicas cannot run one session's history.
+		agent.WithSessionLease(storeSessionLease{st: st}),
+		agent.WithMCPConfigNotify(notifyAgent),
+	}
+	return opts
+}
+
 // loadUserSpace builds a UserSpace by:
 //  1. snapshotting the system config (system_settings + system providers/
 //     channels)
@@ -1092,17 +1122,7 @@ func loadUserSpace(ctx context.Context, userID string, mb *bus.MessageBus, st st
 		}
 	}
 
-	managerOpts := []agent.ManagerOption{
-		agent.WithUserID(userID),
-		agent.WithGlobalSkillsCfg(cfg.Skills),
-		agent.WithSessionStore(session.NewStoreAdapter(st, userID)),
-		agent.WithMemoryStore(agent.NewMemoryStoreAdapter(st)),
-		agent.WithDataStore(st),
-		// The cross-replica turn lease (docs/session-turn-integrity.md A1): admission
-		// for every turn, so two replicas cannot run one session's history.
-		agent.WithSessionLease(storeSessionLease{st: st}),
-		agent.WithMCPConfigNotify(notifyAgent),
-	}
+	managerOpts := managerOptions(cfg, userID, st, ws, meter, quotaStore, notifyAgent)
 	if ws != nil {
 		managerOpts = append(managerOpts, agent.WithWorkspaceStore(ws))
 	}
