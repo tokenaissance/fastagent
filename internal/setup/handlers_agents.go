@@ -179,9 +179,13 @@ func (s *Server) agentScopePlugins(r *http.Request, agentID string) map[string]b
 
 // agentScopeAutoPersist reads the per-agent autoPersist override.
 // Returns nil when absent — same convention as agentScopeSplitReplies.
-// Drives the runPostTurn AutoPersistMemory pass (LLM-distilled writes to
-// USER.md / MEMORY.md) which is the only chatter-memory persistence
-// path in chatbot mode.
+// This is the OVERRIDE, not the effective value: the runPostTurn gate reads
+// the resolved `memory` namespace with this stamped on top (nil = inherit,
+// false = veto — register row 52), so a nil here does not mean off. That
+// gate is what can fire the AutoPersistMemory pass (LLM-distilled writes to
+// USER.md / MEMORY.md), the only chatter-memory persistence path in chatbot
+// mode. Callers that render a control from this value are rendering the
+// override; the effective state needs the row as well.
 func (s *Server) agentScopeAutoPersist(r *http.Request, agentID string) *bool {
 	v, ok := s.agentScopeDefaultsRow(r, agentID)["autoPersist"].(bool)
 	if !ok {
@@ -532,9 +536,11 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 		// the override and fall back to system default.
 		SplitReplies      *bool `json:"splitReplies,omitempty"`
 		SplitRepliesReset bool  `json:"splitRepliesReset,omitempty"`
-		// AutoPersist per-agent override — same semantics as SplitReplies.
-		// `autoPersistReset:true` clears the override and falls back to
-		// system default (currently effectively disabled).
+		// AutoPersist per-agent override. `autoPersistReset:true` clears it,
+		// and the agent then inherits the system ← user `memory` row
+		// (memory.autoPersist.enabled) — which can be on. The "currently
+		// effectively disabled" that used to sit at this spot was true while
+		// that row had no reader; register row 52 gave it one on 2026-09-22.
 		AutoPersist      *bool `json:"autoPersist,omitempty"`
 		AutoPersistReset bool  `json:"autoPersistReset,omitempty"`
 		// SharedIdentity toggles cross-channel session/memory sharing.
