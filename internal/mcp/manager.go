@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/fastclaw-ai/fastclaw/internal/config"
+	"github.com/fastclaw-ai/fastclaw/internal/mcp/oauth/domain"
 )
 
 // Manager manages connections to multiple MCP servers.
@@ -75,6 +77,17 @@ func NewManager(servers map[string]config.MCPServerConfig, opts ...ManagerOption
 		}
 
 		if err := client.Connect(); err != nil {
+			if errors.Is(err, domain.ErrReauthRequired) {
+				// The one skip a human can undo, and the only one that never
+				// heals by itself: no retry, no restart, no upstream recovery
+				// brings this server back — only a new authorization. Naming
+				// the remedy here is what keeps it from reading like a
+				// transport failure (see manager_reauth_log_test.go).
+				slog.Warn("MCP server needs re-authorization, skipping",
+					"server", name, "error", err,
+					"remedy", "authorize it again — agent MCP settings, or `mcp login "+name+"` on the CLI")
+				continue
+			}
 			slog.Warn("failed to connect to MCP server, skipping", "server", name, "error", err)
 			continue
 		}
