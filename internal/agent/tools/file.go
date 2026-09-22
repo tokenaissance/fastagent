@@ -63,6 +63,36 @@ var editSchema = map[string]interface{}{
 	"required": []string{"path", "old_string", "new_string"},
 }
 
+// writeFileDescription is the description advertised for write_file, shared by
+// registerFile and registerSandboxedFile for the same reason editSchema is.
+//
+// The second sentence is load-bearing: one write_file call carries the whole
+// document as arguments, and arguments count against the model's output limit.
+// On 2026-09-22 two calls hit that limit with a ~17 KB document, arrived as a
+// JSON prefix, and each cost the model a full re-emission of the document.
+const writeFileDescription = "Write content to a file (creates directories as needed). For a long document this is one call and one set of arguments, and those arguments cannot exceed your output limit — write the first section, then append the rest with edit_file."
+
+// writeFileSchema is the JSON schema advertised for write_file. It is a function
+// rather than a var because the path hint differs between the two registration
+// paths — the sandbox one also accepts identity files — and sharing the rest is
+// what keeps them from drifting.
+func writeFileSchema(pathDescription string) map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"path": map[string]interface{}{
+				"type":        "string",
+				"description": pathDescription,
+			},
+			"content": map[string]interface{}{
+				"type":        "string",
+				"description": "Content to write",
+			},
+		},
+		"required": []string{"path", "content"},
+	}
+}
+
 const editDescription = "Edit a file by replacing an exact substring. Prefer this over write_file when changing only part of a file (especially identity files like SOUL.md / MEMORY.md): it's cheaper, can't drop unrelated content, and validates the replacement was applied. old_string must match a unique substring unless replace_all is true; new_string must differ from old_string. Read the file first if you're unsure of the exact text."
 
 // validateFileTargetPath rejects path arguments to write-like ops that
@@ -75,7 +105,13 @@ const editDescription = "Edit a file by replacing an exact substring. Prefer thi
 // instead.
 func validateFileTargetPath(path string) error {
 	if strings.TrimSpace(path) == "" {
-		return fmt.Errorf("path is required and must include a filename")
+		// Naming the rule alone is what a caller already believes it did:
+		// on 2026-09-22 two write_file calls came back with this message while
+		// their arguments were a JSON prefix that *did* carry a path — the key
+		// was simply past where the call was cut off. Show a path that
+		// satisfies the rule instead, and name no op: write_file and edit_file
+		// share this function.
+		return fmt.Errorf(`path is required and must include a filename, e.g. "notes.md" or "reports/q3.md" — a relative path lands in your workspace`)
 	}
 	if strings.HasSuffix(path, "/") || strings.HasSuffix(path, string(filepath.Separator)) {
 		return fmt.Errorf("path %q ends in a separator; include a filename at the end", path)
@@ -385,20 +421,8 @@ func registerFile(r *Registry) {
 		"required": []string{"path"},
 	}, makeReadFile(r))
 
-	r.Register("write_file", "Write content to a file (creates directories as needed)", map[string]interface{}{
-		"type": "object",
-		"properties": map[string]interface{}{
-			"path": map[string]interface{}{
-				"type":        "string",
-				"description": "File path (relative to your working directory or absolute)",
-			},
-			"content": map[string]interface{}{
-				"type":        "string",
-				"description": "Content to write",
-			},
-		},
-		"required": []string{"path", "content"},
-	}, makeWriteFile(r))
+	r.Register("write_file", writeFileDescription,
+		writeFileSchema("File path (relative to your working directory or absolute)"), makeWriteFile(r))
 
 	r.Register("list_dir", "List files and directories in a path", map[string]interface{}{
 		"type": "object",
@@ -1183,20 +1207,9 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 		}
 	})
 
-	r.Register("write_file", "Write content to a file (creates directories as needed)", map[string]interface{}{
-		"type": "object",
-		"properties": map[string]interface{}{
-			"path": map[string]interface{}{
-				"type":        "string",
-				"description": "File path (identity file, workspace-relative, or absolute inside the sandbox)",
-			},
-			"content": map[string]interface{}{
-				"type":        "string",
-				"description": "Content to write",
-			},
-		},
-		"required": []string{"path", "content"},
-	}, func(ctx context.Context, rawArgs json.RawMessage) (string, error) {
+	// One line on purpose: wrapping the argument list would re-indent the closure
+	// below and bury the change this makes in a hundred lines of whitespace.
+	r.Register("write_file", writeFileDescription, writeFileSchema("File path (identity file, workspace-relative, or absolute inside the sandbox)"), func(ctx context.Context, rawArgs json.RawMessage) (string, error) {
 		var args writeFileArgs
 		if err := json.Unmarshal(rawArgs, &args); err != nil {
 			return "", fmt.Errorf("parse args: %w", err)
