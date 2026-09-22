@@ -696,11 +696,46 @@ func (r *Registry) deleteForPatchSandbox(ctx context.Context, ex sandbox.Executo
 // Tool registration
 // -----------------------------------------------------------------------------
 
+// applyPatchRefusal is the pre-flight gate for the two path namespaces a patch
+// must not touch. It runs over the PARSED ops before any op is planned, so a
+// patch that mixes a legal file with an illegal one leaves no partial state —
+// the same all-or-nothing posture runApplyPatch already keeps for a bad hunk.
+//
+// Two rules, both of which the other file tools (read_file / write_file /
+// edit_file) already enforce at their entry, and which apply_patch — keeping its
+// own ladder instead of dispatching through routeFor — did not:
+//
+// A parse error is left to the engine (runApplyPatch reports it with the
+// offending line); this gate only speaks about the two namespaces.
+func (r *Registry) applyPatchRefusal(input string) (string, bool) {
+	p, err := parsePatch(input)
+	if err != nil {
+		return "", false
+	}
+	for _, op := range p.Ops {
+		for _, path := range []string{op.Path, op.MoveTo} {
+			if path == "" {
+				continue
+			}
+			if r.isSkillPath(path) {
+				return SkillNamespaceRefusal, true
+			}
+			if r.skillManifestBlocked(path) {
+				return SkillManifestRefusal, true
+			}
+		}
+	}
+	return "", false
+}
+
 func registerApplyPatch(r *Registry) {
 	r.Register("apply_patch", applyPatchDescription, applyPatchSchema, func(ctx context.Context, raw json.RawMessage) (string, error) {
 		var args applyPatchArgs
 		if err := json.Unmarshal(raw, &args); err != nil {
 			return "", fmt.Errorf("apply_patch: parse args: %w", err)
+		}
+		if refusal, refused := r.applyPatchRefusal(args.Input); refused {
+			return refusal, nil
 		}
 		return runApplyPatch(ctx, args.Input,
 			func(ctx context.Context, p string) (string, error) { return r.readForPatch(ctx, p) },
@@ -715,6 +750,9 @@ func registerSandboxedApplyPatch(r *Registry, ex sandbox.Executor) {
 		var args applyPatchArgs
 		if err := json.Unmarshal(raw, &args); err != nil {
 			return "", fmt.Errorf("apply_patch: parse args: %w", err)
+		}
+		if refusal, refused := r.applyPatchRefusal(args.Input); refused {
+			return refusal, nil
 		}
 		// Write-through, per file: runApplyPatch hands this closure one path at
 		// a time, so a mirror refusal lands on exactly the file whose copy
@@ -844,3 +882,19 @@ func runApplyPatch(
 	}
 	return sb.String(), nil
 }
+
+//   - the chat-time `skills/<name>/...` namespace. write_file owns it (host
+//     bucket + store mirror, file.go RouteSkillStore); apply_patch has neither
+//     half, so accepting it would drop the file where SkillsLoader never scans
+//     (the sandbox /workspace, or the agent home) and leave no way to withdraw
+//     the store mirror on Delete. Refuse and name the tool that works.
+//   - a bundled SKILL.md (registry.skillManifestBlocked). apply_patch leaked the
+//     manifest's TEXT through the read half of Update, not just its bytes: an
+//     Update + `*** Move to:` copies the file body to a workspace path the
+//     chatter can then read with read_file, which is exactly the `cat
+//     /skills/foo/SKILL.md > /workspace/...` exfil the gate exists to close. The
+//     gate must fire before the read, not after the move.
+//
+// The namespace check comes first so a relative `skills/<name>/SKILL.md` gets the
+// message that names write_file; skillManifestBlocked then covers the absolute
+// mount path /skills/<name>/SKILL.md, which isSkillPath rejects as absolute.
