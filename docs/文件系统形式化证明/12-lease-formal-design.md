@@ -285,13 +285,17 @@ Web（事故路径）的键 == `chatID`，是确定性的，所以不在本轮�
 | 断言 | 证据 |
 |---|---|
 | 渠道租约无令牌、释放受 holder 保护 | `internal/store/database.go:4975-5055`；探针输出 `channel_leases columns: [channel account_id holder_id expires_at]` |
-| Redis 渠道租约 = `SETNX` + Lua | `internal/rediscoord/lease.go:28-97` |
-| `RedisRefreshLocker` 的释放是无条件 DEL | `internal/mcp/oauth/adapter/redis_locker.go:38-45` |
+| Redis 渠道租约 = `SETNX` + Lua | `internal/rediscoord/lease.go:28-82` |
+| `RedisRefreshLocker` 的释放是无条件 DEL | `internal/mcp/oauth/adapter/redis_locker.go:29-36` |
 | 沙箱令牌每代归 1、迟到释放能删活行 | 探针 `TestProbeSandboxLeaseEpochOnTakeover` / `TestProbeSandboxLeaseEpochResetFenceCollision`（2026-09-19 实跑，输出见 §5；探针文件跑完已删）。**修法与 witness**：`internal/store/sandbox_leases.go` 抢占分支 `epoch = epoch + 1` + `TestSandboxLeaseEpochNeverResetsAcrossTakeover`（反证已实跑） |
 | 沙箱文档自相矛盾 | `docs/sandbox-pool-leases.md:87-89` vs `:237-240` |
 | 回合租约的取值 | [../session-turn-integrity.md](../session-turn-integrity.md) A1.1–A1.5 |
 | **租约存储不可用时是放行还是收手（§3.2 / G31）** | `internal/sandbox/e2b_executor.go:2182`（acquire 失败保留本地沙箱）、`:2434-2435`（Get 失败，注释原话 `fail open`）、`:2445`（reclaim 失败）、`:2489`（重建未上账）、`:2609`（release 失败保留存活——**方向相反，是对的**）；测试 `internal/sandbox/lease_pool_test.go:415` `TestE2BPoolFreshGetLeaseErrorsFailOpen`（**2026-09-21 取证**） |
 | **epoch 未记录时释放被静默丢弃（§3.2 边界 4 / G32；缝登记 #5 的 P-WAD 第 1 行实测）** | 载体 `internal/sandbox/e2b_executor.go:1868` `leaseEpochs`（写点 `:2040`、读点 `:2111`、用点 `:2607`）、**丢弃点 `:2615`**（`!deleted` ⇒ `return nil`，无错、无日志）、发放期的 fail-open 注释 `:2215-2216`、SQL 判据 `internal/store/sandbox_leases.go:237`；受控实验 `internal/sandbox/lease_epoch_gap_test.go` `TestPWAD1_ReleaseWithNoRecordedEpochIsSilent`（**2026-09-21 取证**：`err=nil` / 销毁 0 / 日志 0，且与"被围栏挡下"那一格**逐项相同**；把 σ 探针放回去即变红——实测过） |
+
+> **锚点在 2026-09-22 重新核对**：这一行原写 `:38-45`，超过了一个 36 行文件的末尾。释放确实是无条件
+> `Del`（`Release`，`:33-36`），也就是 §5 依赖的那条断言；漂移的只是引用。这里写成 `:29-36` 以与上文正文
+> 一致。
 
 **witness 现状**：
 - **已落地**：L1 并发唯一赢家（`TestSessionLeaseConcurrentAcquireHasOneWinner`）、L4(c) 令牌不复位（`TestSandboxLeaseEpochNeverResetsAcrossTakeover`，沙箱侧；回合侧随 A1 落地）、L5 迟到释放被拒（`TestSessionLeaseAcquireRenewReleaseAndTakeover`）——都在 `internal/store`。

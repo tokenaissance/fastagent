@@ -90,10 +90,19 @@ translation.
 | Formal symbol | Meaning | Code identifier |
 |---------------|---------|-----------------|
 | `World(t)` / `Belief(t)` | the world's real state / the agent's belief about it | `envSnapshot` (the per-turn sample, i.e. the `World` the harness believes in); `delta` (the world change one sync observed) |
-| `δ` (delta) | **one fact that the world changed**, structured and accumulable | `sandbox.delta{moved, blocked, problem}` (`lifecycle.go:615`), `sandbox.WriteThroughOutcome` (`lifecycle.go:1244`) |
-| `σ(δ)` (signal) | δ turned into **one sentence the agent can read** | `signalsFor(delta)` (`lifecycle.go:1015`), `Registry.writeThroughSignal` (`file.go:894`), `envTracker.signal` (`env_changes.go:69`) |
-| exit | the single delivery point for σ inside one category | the result of `lazyExecutor.Exec` (appended), `Registry.workspaceSignalExit` (`registry.go:1094`, append/prefix), `ContextBuilder.SetEnvironmentSignal` (`context.go:89`, appended to the end of the system prompt) |
+| `δ` (delta) | **one fact that the world changed**, structured and accumulable | `sandbox.delta{moved, blocked, storeOnly, problem}` (`lifecycle.go:650`), `sandbox.WriteThroughOutcome` (`lifecycle.go:1477`) |
+| `σ(δ)` (signal) | δ turned into **one sentence the agent can read** | `signalsFor(delta)` (`lifecycle.go:1114`), `Registry.writeThroughSignal` (`file.go:997`), `renderEnvDelta` / `Agent.signalEnvironmentChanges` (`env_changes.go:96`, `:460`) |
+| exit | the single delivery point for σ inside one category | the result of `lazyExecutor.Exec` (appended), `Registry.workspaceSignalExit` (`tools/registry.go:1078`, append/prefix), `ContextBuilder.SetEnvironmentSignal` (`context.go:89`, appended to the end of the system prompt) |
 | queue | δ happened but there is no delivery point right now | **no in-process queue any more**: the `sandbox.SignalStore` port with `parkSignal` / `takeSignals`, implemented by `gateway.sandboxSignalStore` (a scope-keyed `configs_kv` row: across processes and replicas, deleted as it is delivered). It carries only the facts that **cannot be recomputed** (paths an eviction sync wrote into the store); refusals and failures are not queued |
+
+> **Anchors re-checked 2026-09-22.** Every `*.go:NNN` anchor in this edition was driven back against the
+> tree for existence and range; this table's row is the one that had rotted on content too: `delta` had gained a field
+> (`storeOnly`) and moved to `lifecycle.go:650`, `WriteThroughOutcome` to `:1477`, `signalsFor` to
+> `:1114`, `writeThroughSignal` to `file.go:997`, `workspaceSignalExit` to `tools/registry.go:1078`, and the
+> env signal's name was never `envTracker.signal` — it is `renderEnvDelta` (`env_changes.go:96`) behind
+> `Agent.signalEnvironmentChanges` (`:460`). Only `context.go:89` still pointed where it said. The
+> lesson is the one the register already states: a name survives a refactor, a line number does not, so
+> an anchor table is a claim that has to be re-run, not a citation that stays true.
 
 Discipline: **a mechanism only produces δ (the fact); wording and placement (σ) belong to that
 category's single exit**. Nothing outside the exit may build its own string (`addSignal` warns

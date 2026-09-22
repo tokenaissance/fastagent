@@ -312,13 +312,17 @@ repeatedly-reimplemented mechanism of F1.
 | Claim | Evidence |
 |---|---|
 | the channel lease has no token; its release is holder-guarded | `internal/store/database.go:4975-5055`; probe output `channel_leases columns: [channel account_id holder_id expires_at]` |
-| the Redis channel lease = `SETNX` + Lua | `internal/rediscoord/lease.go:28-97` |
-| `RedisRefreshLocker`'s release is an unconditional DEL | `internal/mcp/oauth/adapter/redis_locker.go:38-45` |
+| the Redis channel lease = `SETNX` + Lua | `internal/rediscoord/lease.go:28-82` |
+| `RedisRefreshLocker`'s release is an unconditional DEL | `internal/mcp/oauth/adapter/redis_locker.go:29-36` |
 | the sandbox token resets each generation; a late release deletes a live row | probes `TestProbeSandboxLeaseEpochOnTakeover` / `TestProbeSandboxLeaseEpochResetFenceCollision` (run for real on 2026-09-19, output in §5; the probe file was deleted afterwards). **The fix and its witness**: `internal/store/sandbox_leases.go`'s claim branch + `TestSandboxLeaseEpochNeverResetsAcrossTakeover` (falsification run for real) |
 | the sandbox doc contradicts itself | `docs/sandbox-pool-leases.md:87-89` vs `:237-240` |
 | the turn lease's values | [../session-turn-integrity.md](../session-turn-integrity.md) A1.1–A1.5 |
 | **when the lease store is unavailable: let through, or hold back (§3.2 / G31)** | `internal/sandbox/e2b_executor.go:2182` (an acquire error keeps the local sandbox), `:2434-2435` (a get error; comment verbatim `fail open`), `:2445` (reclaim error), `:2489` (rebuild never published), `:2609` (release error keeps it alive — **the opposite direction, and correct**); test `internal/sandbox/lease_pool_test.go:415` `TestE2BPoolFreshGetLeaseErrorsFailOpen` (**evidence taken 2026-09-21**) |
 | **a release with no recorded epoch is silently dropped (§3.2 boundary 4 / G32; the measured P-WAD row #1 of gap-register #5)** | carrier `internal/sandbox/e2b_executor.go:1868` `leaseEpochs` (write `:2040`, read `:2111`, use `:2607`), **the drop point `:2615`** (`!deleted` ⇒ `return nil`, no error, no log), the issuance-time fail-open comment `:2215-2216`, the SQL predicate `internal/store/sandbox_leases.go:237`; controlled experiment `internal/sandbox/lease_epoch_gap_test.go` `TestPWAD1_ReleaseWithNoRecordedEpochIsSilent` (**evidence taken 2026-09-21**: `err=nil` / destroys 0 / logs 0, item-by-item identical to a correctly fenced-out release; putting the σ probe back turns it red — measured) |
+
+> **Anchor re-checked 2026-09-22**: this row used to say `:38-45`, past the end of a 36-line file.
+> The release really is an unconditional `Del` (`Release`, `:33-36`), which is the claim §5 relies on;
+> only the citation had drifted. Written as `:29-36` here to match the body text above.
 
 **Witness status**:
 - **landed**: L1 one winner under concurrency (`TestSessionLeaseConcurrentAcquireHasOneWinner`), L4(c) the

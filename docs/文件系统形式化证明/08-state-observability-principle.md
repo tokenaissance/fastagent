@@ -75,10 +75,18 @@ harness 的动作会改变 `World`。原则要求：
 | 形式符号 | 含义 | 代码标识符 |
 |---------|------|-----------|
 | `World(t)` / `Belief(t)` | 世界真实状态 / agent 对它的信念 | `envSnapshot`（回合级采样，代表 harness 认为的 `World`）；`delta`（一次同步观测到的世界变化） |
-| `δ`（delta） | **一次世界变化的事实**，结构化、可累积 | `sandbox.delta{moved, blocked, deleted, problem}`（`lifecycle.go:615`）、`sandbox.WriteThroughOutcome`（`lifecycle.go:1244`） |
-| `σ(δ)`（signal） | 把 δ 变成 **agent 可读的一句话** | `signalsFor(delta)`（`lifecycle.go:1015`）、`Registry.writeThroughSignal`（`file.go:894`）、`envTracker.signal`（`env_changes.go:69`） |
-| 出口（exit） | 每个类别里 σ 唯一的投递点 | `lazyExecutor.Exec` 的结果（追加）、`Registry.workspaceSignalExit`（`registry.go:1094`，追加/前缀）、`ContextBuilder.SetEnvironmentSignal`（`context.go:89`，拼进提示词末尾） |
+| `δ`（delta） | **一次世界变化的事实**，结构化、可累积 | `sandbox.delta{moved, blocked, storeOnly, problem}`（`lifecycle.go:650`）、`sandbox.WriteThroughOutcome`（`lifecycle.go:1477`） |
+| `σ(δ)`（signal） | 把 δ 变成 **agent 可读的一句话** | `signalsFor(delta)`（`lifecycle.go:1114`）、`Registry.writeThroughSignal`（`file.go:997`）、`renderEnvDelta` / `Agent.signalEnvironmentChanges`（`env_changes.go:96`、`:460`） |
+| 出口（exit） | 每个类别里 σ 唯一的投递点 | `lazyExecutor.Exec` 的结果（追加）、`Registry.workspaceSignalExit`（`tools/registry.go:1078`，追加/前缀）、`ContextBuilder.SetEnvironmentSignal`（`context.go:89`，拼进提示词末尾） |
 | 排队 | δ 发生了但没有投递点时先存下 | **不再有进程内队列**：`sandbox.SignalStore` 端口 + `parkSignal` / `takeSignals`，实现是 `gateway.sandboxSignalStore`（scope 级的 `configs_kv` 行：跨进程、跨副本，投递后删除）。只承载**无法重算**的那一类事实（驱逐时被写进 store 的路径）；可重算的拒绝/失败不排队 |
+
+> **锚点在 2026-09-22 重新核对过。** 本版每一处 `*.go:NNN` 锚点都在代码树里核了存在性与行数范围；内容也对不上的是
+> 这张表这一行：`delta` 多了一个字段（`storeOnly`）且移到 `lifecycle.go:650`，`WriteThroughOutcome` 移到
+> `:1477`，`signalsFor` 移到 `:1114`，`writeThroughSignal` 移到 `file.go:997`，`workspaceSignalExit` 移到
+> `tools/registry.go:1078`，而环境信号从来就不叫 `envTracker.signal`——它是 `env_changes.go:96` 的
+> `renderEnvDelta`，外加 `:460` 的 `Agent.signalEnvironmentChanges`。只有 `context.go:89` 还指着它自己说的
+> 地方。教训正是登记册已经写过的那条：名字能扛住重构，行号不能，所以一张锚点表是一条需要重跑的断言，
+> 不是一条永远为真的引用。
 
 纪律：**机制只产出 δ（事实），措辞与放置由该类别唯一的出口决定**，
 出口之外不允许自己拼字符串（`addSignal` 拿不到出口时会 warn，而不是静默丢弃）。
