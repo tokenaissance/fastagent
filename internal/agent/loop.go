@@ -2815,18 +2815,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		}
 
 		// Fire BeforeToolCall hooks
-		for _, tc := range resp.ToolCalls {
-			a.hooks.Run(ctx, &HookContext{
-				AgentName: a.name,
-				Point:     BeforeToolCall,
-				ToolName:  tc.Function.Name,
-				ToolArgs:  tc.Function.Arguments,
-				Channel:   msg.Channel,
-				AccountID: msg.AccountID,
-				ChatID:    msg.ChatID,
-				UserID:    a.ownerUserID,
-			})
-		}
+		toolStarts := a.fireBeforeToolCalls(ctx, msg, resp.ToolCalls)
 
 		// Apply per-round parallel cap. The LLM decides how many
 		// tool calls to emit; we cap how many run concurrently this
@@ -2894,7 +2883,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 			}
 			processedMu.Lock()
 			defer processedMu.Unlock()
-			m, produced := a.finishToolCall(ctx, msg, tc, r)
+			m, produced := a.finishToolCall(ctx, msg, tc, r, toolStarts[tc.ID])
 			if produced {
 				roundAllFailed = false
 			}
@@ -2955,7 +2944,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 			m, done := processed[tc.ID]
 			if !done {
 				var produced bool
-				m, produced = a.finishToolCall(ctx, msg, tc, r)
+				m, produced = a.finishToolCall(ctx, msg, tc, r, toolStarts[tc.ID])
 				if produced {
 					roundAllFailed = false
 				}
@@ -3204,6 +3193,40 @@ func (a *Agent) runPostTurn(ctx context.Context, msg bus.InboundMessage, message
 	}
 }
 
+// fireBeforeToolCalls fires the BeforeToolCall hooks for one round and returns
+// the instant each call started at, keyed by tool-call id — the clock the After
+// half needs.
+//
+// The pair has to carry it: LoggingHook takes the reading ON the context it is
+// handed at BeforeToolCall and reads it back at AfterToolCall (hooks.go), while
+// the after halves here run after the whole batch — finishToolCall for
+// HandleMessage, the inline hook for HandleMessageStream. Handing those a fresh
+// context is why "hook: after tool call" reported time.Since(time.Time{}) —
+// 2562047h47m16.854775807s — for all 33 tool calls of the 09-22 dev session, so
+// no tool had a measurable duration and the session's own diagnosis had to be
+// reconstructed from timestamps.
+func (a *Agent) fireBeforeToolCalls(ctx context.Context, msg bus.InboundMessage, calls []provider.ToolCall) map[string]time.Time {
+	starts := make(map[string]time.Time, len(calls))
+	for _, tc := range calls {
+		hc := &HookContext{
+			AgentName: a.name,
+			Point:     BeforeToolCall,
+			ToolName:  tc.Function.Name,
+			ToolArgs:  tc.Function.Arguments,
+			// Set here, not only by the logging hook: a registry without one (a
+			// test, a trimmed install) must not leave the after half a zero clock.
+			StartTime: time.Now(),
+			Channel:   msg.Channel,
+			AccountID: msg.AccountID,
+			ChatID:    msg.ChatID,
+			UserID:    a.ownerUserID,
+		}
+		a.hooks.Run(ctx, hc)
+		starts[tc.ID] = hc.StartTime
+	}
+	return starts
+}
+
 // finishToolCall is the per-call back half of a tool round: clip the result,
 // run the AfterToolCall hook, record a failure, index it, attach any media, and
 // emit this call's `tool_result` event. It returns the message the call
@@ -3215,7 +3238,7 @@ func (a *Agent) runPostTurn(ctx context.Context, msg bus.InboundMessage, message
 // event can go out the moment the call finishes, while the history stays in the
 // order the assistant message listed its tool_calls — the order every provider
 // requires.
-func (a *Agent) finishToolCall(ctx context.Context, msg bus.InboundMessage, tc provider.ToolCall, r toolCallResult) (provider.Message, bool) {
+func (a *Agent) finishToolCall(ctx context.Context, msg bus.InboundMessage, tc provider.ToolCall, r toolCallResult, startedAt time.Time) (provider.Message, bool) {
 	resultContent, meta := extractToolMeta(r.result)
 	// Backstop for every tool, not just exec: a 70 MB result is what OOMKilled
 	// two prod pods on 2026-09-14 (see sandbox.ClipOutput). The producers clip
@@ -3227,6 +3250,7 @@ func (a *Agent) finishToolCall(ctx context.Context, msg bus.InboundMessage, tc p
 	a.hooks.Run(ctx, &HookContext{
 		AgentName:      a.name,
 		Point:          AfterToolCall,
+		StartTime:      startedAt,
 		ToolName:       r.toolName,
 		ToolResult:     resultContent,
 		Error:          r.err,
@@ -3612,9 +3636,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 		}
 
 		// Fire BeforeToolCall hooks
-		for _, tc := range resp.ToolCalls {
-			a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: BeforeToolCall, ToolName: tc.Function.Name, ToolArgs: tc.Function.Arguments, Channel: msg.Channel, AccountID: msg.AccountID, ChatID: msg.ChatID, UserID: a.ownerUserID})
-		}
+		toolStarts := a.fireBeforeToolCalls(ctx, msg, resp.ToolCalls)
 
 		// Execute tools concurrently via SDK engine
 		toolCtx, endToolGrace := toolGraceContext(ctx, a.graceWindow())
@@ -3635,7 +3657,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 			// producers clip first; this catches the ones that don't (read_file of
 			// a giant CSV, an MCP tool that returns a dump, …).
 			resultContent = sandbox.ClipAndLog(resultContent, "tool/"+r.toolName)
-			a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: AfterToolCall, ToolName: r.toolName, ToolResult: resultContent, Error: r.err, Channel: msg.Channel, AccountID: msg.AccountID, ChatID: msg.ChatID, UserID: a.ownerUserID, GoalSessionKey: a.registry.GoalSessionKey(), IsPlanMode: isPlanMode(msg.Params), Source: msg.Source})
+			a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: AfterToolCall, StartTime: toolStarts[resp.ToolCalls[idx].ID], ToolName: r.toolName, ToolResult: resultContent, Error: r.err, Channel: msg.Channel, AccountID: msg.AccountID, ChatID: msg.ChatID, UserID: a.ownerUserID, GoalSessionKey: a.registry.GoalSessionKey(), IsPlanMode: isPlanMode(msg.Params), Source: msg.Source})
 
 			if r.err != nil {
 				slog.Warn("tool execution error", "agent", a.name, "name", r.toolName, "error", r.err)
