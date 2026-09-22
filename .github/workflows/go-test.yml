@@ -38,14 +38,15 @@ jobs:
         # executor, so the interesting bugs are races. The rebuild tests drive
         # that concurrency deliberately, and the test doubles had to grow locks
         # of their own the first time this ran.
-        # The live e2b tests (TestE2BPool…, TestSandboxBackgroundE2BLive) are owned
-        # by the credentials job below; they FAIL — by design, so a green run can't
-        # be mistaken for verified — when the secrets are absent, and this job has
-        # no secrets. Skipping them by name keeps that rule intact for the job that
-        # owns them instead of weakening it here.
+        # The live e2b tests (TestE2BPool…, TestSandboxBackgroundE2BLive,
+        # TestE2BLiveBrowserColdStart) are owned by the credentials job below;
+        # they FAIL — by design, so a green run can't be mistaken for verified —
+        # when the secrets are absent, and this job has no secrets. Skipping them
+        # by name keeps that rule intact for the job that owns them instead of
+        # weakening it here.
         run: >
           go test ./internal/sandbox/ ./internal/store/ ./internal/gateway/
-          -skip '^TestE2BPoolCrossPodAdoption$|^TestE2BPoolCrossPodRebuild$|^TestSandboxBackgroundE2BLive$'
+          -skip '^TestE2BPoolCrossPodAdoption$|^TestE2BPoolCrossPodRebuild$|^TestSandboxBackgroundE2BLive$|^TestE2BLiveBrowserColdStart$'
           -count=1 -race
 
   sandbox-leases-e2b:
@@ -70,13 +71,16 @@ jobs:
         # offline tests cannot make: that a detached job survives the exec
         # request on the real hosted backend. If envd ever starts reaping
         # detached sessions, this is where it shows up first.
+        # TestE2BLiveBrowserColdStart is the other one: the sandbox image no
+        # longer has a pre-warmed browser daemon waiting, so a fresh scope's
+        # first browser call is what proves the shim in the image carries it.
         run: |
           if [ -z "$E2B_API_KEY" ] || [ -z "$E2B_TEMPLATE" ]; then
             echo "no E2B credentials in this repository — skipping the live e2e"
             exit 0
           fi
           go test ./internal/sandbox/ ./internal/agent/tools/ \
-            -run '^TestE2BPoolCrossPodAdoption$|^TestSandboxBackgroundE2BLive$' \
+            -run '^TestE2BPoolCrossPodAdoption$|^TestSandboxBackgroundE2BLive$|^TestE2BLiveBrowserColdStart$' \
             -count=1 -v
 
   sandbox-background:
