@@ -387,7 +387,6 @@ func TestE2BPoolCreateLostRaceAdoptsWinner(t *testing.T) {
 	}
 	pool.hydrateSandbox = func(context.Context, *E2BExecutor) error { return nil }
 	pool.verifySandbox = func(context.Context, *E2BExecutor) error { return nil }
-	pool.warmupSandbox = func(context.Context, *E2BExecutor) {}
 
 	got, err := pool.Get(ctx, "agt_1", "", "chat_1")
 	if err != nil {
@@ -427,7 +426,6 @@ func TestE2BPoolFreshGetLeaseErrorsFailOpen(t *testing.T) {
 		}
 		pool.hydrateSandbox = func(context.Context, *E2BExecutor) error { return nil }
 		pool.verifySandbox = func(context.Context, *E2BExecutor) error { return nil }
-		pool.warmupSandbox = func(context.Context, *E2BExecutor) {}
 
 		ex, err := pool.Get(ctx, "agt_1", "", "chat_1")
 		if err != nil {
@@ -454,7 +452,6 @@ func TestE2BPoolFreshGetLeaseErrorsFailOpen(t *testing.T) {
 		}
 		pool.hydrateSandbox = func(context.Context, *E2BExecutor) error { return nil }
 		pool.verifySandbox = func(context.Context, *E2BExecutor) error { return nil }
-		pool.warmupSandbox = func(context.Context, *E2BExecutor) {}
 
 		ex, err := pool.Get(ctx, "agt_1", "", "chat_1")
 		if err != nil {
@@ -566,7 +563,6 @@ func TestE2BPoolCreateLostRaceAdoptMissKeepsLocalUnregistered(t *testing.T) {
 	}
 	pool.hydrateSandbox = func(context.Context, *E2BExecutor) error { return nil }
 	pool.verifySandbox = func(context.Context, *E2BExecutor) error { return nil }
-	pool.warmupSandbox = func(context.Context, *E2BExecutor) {}
 
 	ex, err := pool.Get(ctx, "agt_1", "", "chat_1")
 	if err != nil {
@@ -687,7 +683,6 @@ func TestE2BPoolAdoptedExecutorCarriesAPIKey(t *testing.T) {
 		}
 		pool.hydrateSandbox = func(context.Context, *E2BExecutor) error { return nil }
 		pool.verifySandbox = func(context.Context, *E2BExecutor) error { return nil }
-		pool.warmupSandbox = func(context.Context, *E2BExecutor) {}
 
 		got, err := pool.Get(ctx, "agt_1", "", "chat_1")
 		if err != nil {
@@ -762,7 +757,6 @@ func TestE2BPoolPublishesTheUnhydratedFactOnCreate(t *testing.T) {
 		return nil
 	}
 	pool.verifySandbox = func(context.Context, *E2BExecutor) error { return nil }
-	pool.warmupSandbox = func(context.Context, *E2BExecutor) {}
 
 	if _, err := pool.Get(ctx, "agt_1", "", "chat_1"); err != nil {
 		t.Fatalf("Get: %v", err)

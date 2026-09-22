@@ -3,7 +3,7 @@ package sandbox
 // The pool's locking discipline, pinned as behavior.
 //
 // Get used to hold one process-wide mutex across its network calls — lease
-// reads, create, hydrate, verify and warmup (bounded at 120s) — so a cold start
+// reads, create, hydrate and verify — so a cold start
 // for a single scope delayed sandbox binding for every other agent in the
 // process. The slow work now runs under a per-scope lock.
 //
@@ -52,8 +52,6 @@ func TestE2BPoolProvisionsScopesConcurrently(t *testing.T) {
 		return nil
 	}
 	pool.verifySandbox = func(context.Context, *E2BExecutor) error { return nil }
-	pool.warmupSandbox = func(context.Context, *E2BExecutor) {}
-
 	var wg sync.WaitGroup
 	errs := make([]error, scopes)
 	for i := 0; i < scopes; i++ {

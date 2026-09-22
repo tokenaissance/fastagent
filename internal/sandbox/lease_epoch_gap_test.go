@@ -243,7 +243,6 @@ func newEpochGapPool(t *testing.T, store *leaseRowStore, owner string, rec *leas
 	}
 	pool.hydrateSandbox = func(context.Context, *E2BExecutor) error { return nil }
 	pool.verifySandbox = func(context.Context, *E2BExecutor) error { return nil }
-	pool.warmupSandbox = func(context.Context, *E2BExecutor) {}
 	return pool
 }
 
