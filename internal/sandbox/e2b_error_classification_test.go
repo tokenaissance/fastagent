@@ -1,6 +1,6 @@
 package sandbox
 
-// Two failure classifications that used to be guesses.
+// Three failure classifications that used to be guesses.
 //
 // 1. "The sandbox is gone" was decided by matching message text, so any error
 //    that merely mentioned the codes — a 500 whose body quotes "HTTP 404" —
@@ -8,6 +8,9 @@ package sandbox
 // 2. Destroying a sandbox assumed success and never read the answer, so a
 //    rejected DELETE left a live instance that no lease row pointed at any
 //    more and nothing would ever close.
+// 3. The file endpoints spell a missing PATH with the same 404 the edge uses
+//    for a missing instance, so every read of a file that was not there
+//    rebuilt the sandbox it was read from.
 
 import (
 	"context"
@@ -50,6 +53,72 @@ func TestE2BExecDoesNotRebuildOnNonGoneFailures(t *testing.T) {
 				t.Fatalf("identity = %q, want the sandbox kept as-is", got)
 			}
 		})
+	}
+}
+
+// envd answers a missing path with a 404 of its own. Reading it must not cost
+// the sandbox: the instance is alive and the file is simply not there.
+//
+// Production, 09-22 07:29:40Z: two read_file calls for paths that did not exist
+// rebuilt the sandbox (1.6 s, 79 skill files, 1.13 MB tar), the retry read the
+// replacement whose workspace really did not have them, and the turn carried on
+// against a fresh instance three times in 21 minutes.
+//
+// Falsification: classify the file endpoints with sandboxGone() and the create
+// counter below is 1 instead of 0.
+func TestE2BReadOfAMissingPathKeepsTheSandbox(t *testing.T) {
+	envd := &fakeEnvdTransport{missingPaths: []string{"/home/user/CURRENT.md"}}
+	ex := testExecutor(&leaseCloseRecorder{}, "sb-live", "tok-live")
+	ex.client = &http.Client{Transport: envd}
+	var creates int32
+	ex.createFn = func(context.Context, string, string, time.Duration) (*E2BExecutor, error) {
+		atomic.AddInt32(&creates, 1)
+		return newAdoptedE2BExecutor("api-key", "sb-new", "tok-new", "tpl", time.Minute), nil
+	}
+
+	_, err := ex.ReadFile(context.Background(), "/home/user/CURRENT.md")
+	if err == nil {
+		t.Fatal("a missing file is still an error — the caller has to hear about it")
+	}
+	// The verdict survives, path and all: the model is the one who has to stop
+	// looking for that file.
+	if !strings.Contains(err.Error(), "CURRENT.md") {
+		t.Fatalf("the error must name the path it refused, got %q", err)
+	}
+	if got := atomic.LoadInt32(&creates); got != 0 {
+		t.Fatalf("a missing path cost %d sandbox rebuild(s); want 0", got)
+	}
+	if got := ex.identSnapshot().id; got != "sb-live" {
+		t.Fatalf("identity = %q, want the sandbox kept as-is", got)
+	}
+}
+
+// The other half: a 404 that is NOT a verdict about a path is still the edge
+// saying the instance is gone, and the repair path must stay open. Without
+// this, the fix above would be indistinguishable from "never rebuild on 404".
+func TestE2BReadOfAGoneInstanceStillRebuilds(t *testing.T) {
+	envd := &fakeEnvdTransport{
+		brokenSandboxIDs: []string{"sb-live"},
+		brokenStatus:     http.StatusNotFound,
+		brokenBody:       `{"code":404,"message":"sandbox not found"}`,
+	}
+	ex := testExecutor(&leaseCloseRecorder{}, "sb-live", "tok-live")
+	ex.client = &http.Client{Transport: envd}
+	var creates int32
+	ex.createFn = func(context.Context, string, string, time.Duration) (*E2BExecutor, error) {
+		atomic.AddInt32(&creates, 1)
+		replacement := newAdoptedE2BExecutor("api-key", "sb-new", "tok-new", "tpl", time.Minute)
+		return replacement, nil
+	}
+
+	if _, err := ex.ReadFile(context.Background(), "/home/user/CURRENT.md"); err != nil {
+		t.Fatalf("read against a replaced sandbox: %v", err)
+	}
+	if got := atomic.LoadInt32(&creates); got != 1 {
+		t.Fatalf("created %d sandboxes for a gone instance; want exactly 1", got)
+	}
+	if got := ex.identSnapshot().id; got != "sb-new" {
+		t.Fatalf("identity = %q, want the replacement", got)
 	}
 }
 
