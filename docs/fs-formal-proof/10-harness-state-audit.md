@@ -227,7 +227,9 @@ it did not ask for**. Perceivability rests on two things: ① the turn itself is
 session's history (readable the next time history is read); ② the input carries a source marker
 (`[Cron Job: …]`, `[Heartbeat — …]`).
 【code】 `internal/agent/admission.go:45` lists these four sources, and `bus.SourceGoalContext` at
-`loop.go:1292` decides that it is treated as a synthetic audit prompt rather than indexed into FTS.
+`loop.go:1292` decides that it is treated as a synthetic audit prompt, which `WebChatHistory` then
+hides from the user's view (`loop.go:1520`) — the one consumer left after the unwired FTS index was
+removed (register #53).
 
 ### 3.2 User/API writes straight to the store: the one write path that does **not** write through (G7; its signal half **landed 2026-09-18**)
 

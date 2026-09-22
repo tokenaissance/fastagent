@@ -100,7 +100,6 @@ type Agent struct {
 	globalSkillsCfg config.SkillsCfg
 	messageBus      *bus.MessageBus
 	subAgentSpawner tools.SubAgentSpawner
-	ftsStore        *store.FTSStore
 	// piiScrub records the piiScrubbing setting for this agent. It is not
 	// read by the loops: it decides whether every provider that enters the
 	// agent goes through setProvider's redaction wrapper, so the rule lives
@@ -273,24 +272,6 @@ func NewAgentWithFullCfg(rc config.ResolvedAgent, prov provider.Provider, mb *bu
 	ag := newAgentWithActor(rc, prov, mb, homeDir, fullCfg.Skills, rc.UserID, fullCfg.Privacy, fullCfg.Memory)
 	// splitReplies is plumbed inside NewAgentWithSkillsCfg so foreign-
 	// attached agents also pick up the toggle; don't re-stamp here.
-
-	// Set up FTS store if configured
-	if fullCfg.Memory.FTS.Enabled {
-		dbPath := fullCfg.Memory.FTS.DBPath
-		if dbPath == "" {
-			dbPath = rc.Home + "/memory/fts.db"
-		}
-		if fts, err := store.NewFTSStore(dbPath); err == nil {
-			if err := fts.Init(); err == nil {
-				ag.ftsStore = fts
-				slog.Info("FTS5 search enabled", "agent", rc.ID, "db", dbPath)
-			} else {
-				slog.Warn("FTS5 init failed, falling back to file scan", "error", err)
-			}
-		} else {
-			slog.Warn("FTS5 store open failed, falling back to file scan", "error", err)
-		}
-	}
 
 	// Skills learner: through the shared helper, so this path installs the
 	// skills namespace's single writer too instead of writing SKILL.md itself.
@@ -1426,7 +1407,7 @@ func (a *Agent) sessionHasActiveGoal(ctx context.Context, msg bus.InboundMessage
 // buildUserMessage flattens an inbound message into the user-role
 // provider.Message that lands in session history. Tags Origin so
 // goal-context continuations get recognized by the compaction /
-// WebChatHistory / FTS filters (which check Origin != OriginUser),
+// WebChatHistory filters (which check Origin != OriginUser),
 // and merges PhotoURL (legacy IM single) + PhotoURLs (web multi)
 // into one ContentParts slice. Image-only sends skip a leading
 // empty text part — some upstreams reject content-less wire messages.
@@ -3149,20 +3130,6 @@ func (a *Agent) runPostTurn(ctx context.Context, msg bus.InboundMessage, message
 	}
 	a.turnCount++
 
-	// Index user/assistant messages in FTS. Skip runtime-injected
-	// messages (e.g. goal_context continuations) — they're synthetic
-	// audit prompts, not searchable conversation content.
-	if a.ftsStore != nil {
-		for _, m := range messages {
-			if m.Origin != provider.OriginUser {
-				continue
-			}
-			if m.Role == "user" || m.Role == "assistant" {
-				_ = a.ftsStore.Index(a.name, "", m.Role, m.Content, time.Now())
-			}
-		}
-	}
-
 	// Fire PostTurn hooks
 	a.hooks.Run(ctx, &HookContext{
 		AgentName:      a.name,
@@ -3290,11 +3257,6 @@ func (a *Agent) finishToolCall(ctx context.Context, msg bus.InboundMessage, tc p
 			summary = firstNonEmptyLine(resultContent)
 		}
 		a.registry.RecordToolFailure(r.toolName, tc.Function.Arguments, summary)
-	}
-
-	// Index in FTS if available
-	if a.ftsStore != nil {
-		_ = a.ftsStore.Index(a.name, msg.ChatID, "tool:"+r.toolName, resultContent, time.Now())
 	}
 
 	// Check for MEDIA: protocol in tool output

@@ -200,7 +200,9 @@ cron / heartbeat / goal continuation / subagent 的共同点是：**它们让 ag
 时刻醒来**。可感知性由两条保证：①回合本身写进该会话历史（下一次读历史时能看到）；
 ②输入带来源标注（`[Cron Job: …]`、`[Heartbeat — …]`）。
 【码】`internal/agent/admission.go:45` 列出这四个 source，`loop.go:1292` 的
-`bus.SourceGoalContext` 决定它是否被当作"合成审计提示"而不进 FTS 索引。
+`bus.SourceGoalContext` 决定它是否被当作"合成审计提示"——随后由 `WebChatHistory`
+（`loop.go:1520`）把它对用户隐藏。这是那条从未接线的 FTS 索引被删掉（register #53）之后
+剩下的唯一消费者。
 
 ### 3.2 用户/API 直接写 store：唯一一条**不穿透**的写路径（G7；**信号半边 2026-09-18 已落地**）
 

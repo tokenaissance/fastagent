@@ -10,14 +10,7 @@ import (
 	"sort"
 	"strings"
 	"time"
-
-	"github.com/fastclaw-ai/fastclaw/internal/store"
 )
-
-// FTSSearcher is the interface for FTS5-based memory search.
-type FTSSearcher interface {
-	Search(query string, limit int) ([]store.FTSResult, error)
-}
 
 type memorySearchArgs struct {
 	Query string `json:"query"`
@@ -32,14 +25,13 @@ type searchResult struct {
 	Score     float64 `json:"-"`
 }
 
-// RegisterMemorySearch registers the memory_search tool.
-// If fts is non-nil, FTS5 search is used; otherwise falls back to file scan.
-func RegisterMemorySearch(r *Registry, workspace string, fts ...FTSSearcher) {
-	var searcher FTSSearcher
-	if len(fts) > 0 {
-		searcher = fts[0]
-	}
-
+// RegisterMemorySearch registers the memory_search tool. It scans the memory
+// logs on disk: the FTS5 index this used to prefer was removed on 2026-09-22
+// (change-register row 53) because neither end of it was ever wired — the store
+// was only constructed in a zero-caller constructor and no caller ever handed a
+// searcher to this tool, so the file scan is the only implementation that ever
+// ran.
+func RegisterMemorySearch(r *Registry, workspace string) {
 	r.Register("memory_search", "Search through conversation history logs using keyword matching with recency weighting", map[string]interface{}{
 		"type": "object",
 		"properties": map[string]interface{}{
@@ -53,10 +45,10 @@ func RegisterMemorySearch(r *Registry, workspace string, fts ...FTSSearcher) {
 			},
 		},
 		"required": []string{"query"},
-	}, makeMemorySearch(workspace, searcher))
+	}, makeMemorySearch(workspace))
 }
 
-func makeMemorySearch(workspace string, fts FTSSearcher) ToolFunc {
+func makeMemorySearch(workspace string) ToolFunc {
 	return func(ctx context.Context, rawArgs json.RawMessage) (string, error) {
 		var args memorySearchArgs
 		if err := json.Unmarshal(rawArgs, &args); err != nil {
@@ -70,15 +62,6 @@ func makeMemorySearch(workspace string, fts FTSSearcher) ToolFunc {
 		limit := args.Limit
 		if limit <= 0 {
 			limit = 10
-		}
-
-		// Try FTS5 first if available
-		if fts != nil {
-			ftsResults, err := fts.Search(args.Query, limit)
-			if err == nil && len(ftsResults) > 0 {
-				return formatFTSResults(ftsResults, args.Query), nil
-			}
-			// Fall through to file scan on error or empty results
 		}
 
 		results := searchMemoryLogs(workspace, args.Query, limit)
@@ -97,26 +80,6 @@ func makeMemorySearch(workspace string, fts FTSSearcher) ToolFunc {
 
 		return sb.String(), nil
 	}
-}
-
-func formatFTSResults(results []store.FTSResult, query string) string {
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Found %d results for %q:\n\n", len(results), query))
-	for i, r := range results {
-		sb.WriteString(fmt.Sprintf("--- Result %d (agent: %s, chat: %s, time: %s) ---\n",
-			i+1, r.AgentID, r.ChatID, r.Timestamp.Format("2006-01-02 15:04")))
-		if r.Snippet != "" {
-			sb.WriteString(r.Snippet)
-		} else {
-			content := r.Content
-			if len(content) > 500 {
-				content = content[:500] + "..."
-			}
-			sb.WriteString(content)
-		}
-		sb.WriteString("\n\n")
-	}
-	return sb.String()
 }
 
 func searchMemoryLogs(workspace, query string, limit int) []searchResult {

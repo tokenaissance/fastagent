@@ -8,9 +8,9 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/provider"
 )
 
-// Origin tagging guards the compaction / WebChatHistory / FTS
+// Origin tagging guards the compaction / WebChatHistory
 // filters that check Origin != OriginUser. Before this was wired
-// the field stayed "" on goal continuations and all three filters
+// the field stayed "" on goal continuations and both filters
 // silently no-op'd. Cover every declared Source so a future
 // rename or added source is caught at build/test time.
 func TestBuildUserMessageOriginPropagates(t *testing.T) {

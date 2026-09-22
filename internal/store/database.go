@@ -1748,7 +1748,7 @@ func migrationSQLForDialect(dialect string) []string {
 			raw_assistant TEXT NOT NULL DEFAULT '',
 			-- origin marks runtime-injected rows (currently only
 			-- "goal_context"). Empty = real user / assistant exchange.
-			-- WebChatHistory + FTS skip non-empty origin to keep
+			-- WebChatHistory skips non-empty origin to keep
 			-- synthetic prompts out of user-visible / searchable views.
 			origin TEXT NOT NULL DEFAULT '',
 			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
