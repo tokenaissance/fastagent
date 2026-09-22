@@ -293,19 +293,9 @@ func NewAgentWithFullCfg(rc config.ResolvedAgent, prov provider.Provider, mb *bu
 		}
 	}
 
-	// Set up skills learner if configured
-	if fullCfg.SkillsLearner.Enabled {
-		model := fullCfg.SkillsLearner.Model
-		if model == "" {
-			model = rc.Model
-		}
-		learnerLoader := NewSkillsLoaderWithGlobal(homeDir, rc.Home, "", rc.Skills, fullCfg.Skills)
-		learnerLoader.agentID = rc.ID
-		ag.skillsLearner = NewSkillsLearner(rc.Home, prov, model, learnerLoader.AllSkillDirs()...)
-		if fullCfg.SkillsLearner.MinToolCalls > 0 {
-			ag.skillsLearner.minToolCalls = fullCfg.SkillsLearner.MinToolCalls
-		}
-	}
+	// Skills learner: through the shared helper, so this path installs the
+	// skills namespace's single writer too instead of writing SKILL.md itself.
+	ag.enableSkillsLearner(fullCfg.SkillsLearner)
 
 	// Set memory auto-persist defaults
 	if ag.memoryCfg.AutoPersist.EveryNTurns == 0 {
@@ -333,6 +323,51 @@ func (a *Agent) setProvider(p provider.Provider) {
 		p = privacy.Wrap(p)
 	}
 	a.provider = p
+	// The background skills learner calls the provider too (skill extraction),
+	// so it holds the agent's provider rather than one handed to it at
+	// construction: this is the one place a provider can enter, which keeps the
+	// learner inside the piiScrubbing rule (row 49) and keeps hot reloads
+	// (UpdateProvider / UpdateProviderResolved) from leaving it on a stale one.
+	if a.skillsLearner != nil {
+		a.skillsLearner.SetProvider(p)
+	}
+}
+
+// skillDirs returns the layered skill directories this agent scans — the same
+// list load_skill searches — so the learner resolves the skill-learner prompt
+// through the same layer precedence as everything else. Deliberately does no
+// hydration: it answers a path question, it is not a turn.
+func (a *Agent) skillDirs() []string {
+	loader := NewSkillsLoaderWithGlobal(a.homeDir, a.homePath, "", a.skillsCfg, a.globalSkillsCfg).
+		WithUserID(a.ownerUserID)
+	if a.workspaceStore != nil {
+		loader.WithObjectStore(a.workspaceStore, a.agentID)
+	}
+	return loader.AllSkillDirs()
+}
+
+// enableSkillsLearner turns on the background skills learner described by the
+// `skillsLearner` namespace. It exists as a method (rather than a block in the
+// constructor) because the learner needs two things that are only true once the
+// agent is being built by the Manager: the registry already knows where
+// `skills/` writes go (per-user bucket + workspace store), and the provider has
+// been through setProvider. It is the single construction path — the file-tool
+// side already refuses to let anything else write the skills namespace, so the
+// learner must be a client of that writer, not a second owner of it.
+func (a *Agent) enableSkillsLearner(cfg config.SkillsLearnerCfg) {
+	if !cfg.Enabled {
+		return
+	}
+	model := cfg.Model
+	if model == "" {
+		model = a.model
+	}
+	learner := NewSkillsLearner(a.homePath, a.provider, model, a.skillDirs()...)
+	learner.SetWriter(a.registry)
+	if cfg.MinToolCalls > 0 {
+		learner.minToolCalls = cfg.MinToolCalls
+	}
+	a.skillsLearner = learner
 }
 
 // newAgentWithActor is the shared constructor. actorUserID is the session
