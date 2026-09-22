@@ -374,6 +374,12 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, messages []Message, too
 		toolCalls := make(map[int]*ToolCall)
 		var contentBuilder, reasoningBuilder strings.Builder
 		var usage Usage
+		// Why generation ended, as the wire said it. OpenAI sends it on the last
+		// content chunk (often an empty delta of its own); "length" here is the
+		// only record that the model was cut off rather than finished — the
+		// truncated tool arguments it leaves behind look like ordinary JSON
+		// prefixes otherwise.
+		var finishReason string
 
 		for scanner.Scan() {
 			line := scanner.Text()
@@ -416,6 +422,7 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, messages []Message, too
 				case ch <- StreamChunk{
 					ToolCalls:    tcs,
 					Done:         true,
+					FinishReason: finishReason,
 					Thinking:     reasoning,
 					Usage:        usage,
 					RawAssistant: raw,
@@ -440,6 +447,10 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, messages []Message, too
 
 			if len(chunk.Choices) == 0 {
 				continue
+			}
+
+			if fr := chunk.Choices[0].FinishReason; fr != "" {
+				finishReason = fr
 			}
 
 			delta := chunk.Choices[0].Delta
