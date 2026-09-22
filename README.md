@@ -405,7 +405,7 @@ See `deploy/helm/fastagent/values.yaml` for all available options.
 helm upgrade fastagent ./deploy/helm/fastagent \
   --set sandbox.enabled=true \
   --set sandbox.backend=e2b \
-  --set sandbox.image=fastclaw-sandbox \
+  --set sandbox.image=fastagent-sandbox \
   --set sandbox.e2bApiKey="e2b_你的API_KEY"
 ```
 
