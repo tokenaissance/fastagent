@@ -12,14 +12,18 @@
 #                                                       # multi-arch buildx
 #
 # After building, point the gateway at it via Settings → Sandbox →
-# Image, or during onboard. Default: thinkany/fastclaw-sandbox:latest.
+# Image, or during onboard. Default:
+# registry.digitalocean.com/tokenaissance/fastagent-sandbox:latest.
+# That registry is private, so `--push` needs credentials first:
+# `doctl registry login` (the same pair bakes the E2B template, see
+# deploy/docker/sandbox/template.ts).
 
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/../../.." && pwd)
 
-IMAGE_NAME=${IMAGE_NAME:-thinkany/fastclaw-sandbox}
+IMAGE_NAME=${IMAGE_NAME:-registry.digitalocean.com/tokenaissance/fastagent-sandbox}
 TAG=latest
 PUSH=0
 PLATFORM=""
