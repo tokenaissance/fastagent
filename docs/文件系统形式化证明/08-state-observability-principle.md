@@ -672,6 +672,16 @@ false`），而 agent 记录里带的只有覆盖值。这在第 52 行没有读
 因此写者这一半最后**没有一个实例还停在"只有 API 可写"**；规则本身留着，因为它现在是检查表里的一条，
 而不是一次性的补课。
 
+**四个开关行的现状（2026-09-22）。** 这张表存在的理由很具体：为了回答"哪些行是开关、谁在读、谁能写"，
+两天里 grep 了三次——register 的格子说的是**变了什么**，这张说的是**现在是什么**：
+
+| 行 | 在哪里被解析 | 生产路径上的读者 | 写者 | 见证 |
+|-----|-------------|-------------------------------|--------|-----------|
+| 49 `privacy.piiScrubbing.enabled` | system ← user ← agent（`gateway/userspace.go`，`scope.SettingInto(…, NSPrivacy, …)`） | `Agent.setProvider` 每个 agent 只包一次 provider，于是每个模型调用都被脱敏 | webui Runtime 页（super_admin ⇒ system scope），或 `POST /api/config` | `TestThePiiScrubbingRowReachesEveryAgentProvider`、`TestRuntimePage_CanSetMemoryAndSkillLearning` |
+| 51 `skillsLearner.enabled` / `.minToolCalls` / `.model` | 同一条链（`NSSkillsLearner`） | `Manager.buildAgent` → `enableSkillsLearner` | 同一页，或 API | `TestTheSkillsLearnerRowReachesTheLearnerAndWritesThroughTheSingleWriter`、`TestTheSkillsLearnerRowReachesTheSingleWriter`（云端通路） |
+| 52 `memory.autoPersist.enabled` / `.everyNTurns` / `.model` | system ← user（`NSMemory`）；per-agent 的 `agents.defaults.autoPersist` 盖在其上 | `managerOptions` → `WithMemory` → runPostTurn 闸门 | 同一页写这一行；per-agent 覆盖值写在其 Context 面板（cloud） | `TestTheMemoryRowIsTheDefaultLayerAndThePerAgentFlagOverridesIt`、`TestTheMemoryRowIsWhatTurnsAutoPersistOn`、cloud `src/__tests__/fastagent/auto-persist-inherited-state.test.tsx` |
+| 53 `memory.fts.*` | ——（已删除） | —— | —— | 无：删除（`86c38b9`）的验证是全仓引用计数加各套件 |
+
 见证（每一跳一个，外加关键那一跳的反证）：`19834b5` ——
 `TestThePiiScrubbingRowReachesEveryAgentProvider`（行到达 gateway 构建的那个 provider）与
 `TestTheSwitchRedactsEveryModelCallTheTurnMakes`（这一回合的每个调用点）；`17f3a3f` ——

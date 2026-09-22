@@ -764,6 +764,17 @@ switch keeps (the model's own earlier reply is replayed byte-for-byte, so a PII 
 The writer half therefore ends with **no row left API-only** among the four instances; the rule stays for
 the next switch, which is why it is a checklist item and not a one-off pass.
 
+**The four rows as they stand (2026-09-22).** The table exists because answering "which rows are
+switches, who reads them, and who can write them" took three separate greps in two days — the register's
+cells say what *changed*, this says what *stands*:
+
+| Row | Resolved at | Reader on the production path | Writer | Witnesses |
+|-----|-------------|-------------------------------|--------|-----------|
+| 49 `privacy.piiScrubbing.enabled` | system ← user ← agent (`gateway/userspace.go`, `scope.SettingInto(…, NSPrivacy, …)`) | `Agent.setProvider` wraps the provider once per agent, so every model call is redacted | webui Runtime page (super_admin ⇒ system scope), or `POST /api/config` | `TestThePiiScrubbingRowReachesEveryAgentProvider`, `TestRuntimePage_CanSetMemoryAndSkillLearning` |
+| 51 `skillsLearner.enabled` / `.minToolCalls` / `.model` | same chain (`NSSkillsLearner`) | `Manager.buildAgent` → `enableSkillsLearner` | same page, or the API | `TestTheSkillsLearnerRowReachesTheLearnerAndWritesThroughTheSingleWriter`, `TestTheSkillsLearnerRowReachesTheSingleWriter` (cloud path) |
+| 52 `memory.autoPersist.enabled` / `.everyNTurns` / `.model` | system ← user (`NSMemory`); the per-agent `agents.defaults.autoPersist` stamps over it | `managerOptions` → `WithMemory` → the runPostTurn gate | same page for the row; the agent Context panel (cloud) for the per-agent override | `TestTheMemoryRowIsTheDefaultLayerAndThePerAgentFlagOverridesIt`, `TestTheMemoryRowIsWhatTurnsAutoPersistOn`, cloud `src/__tests__/fastagent/auto-persist-inherited-state.test.tsx` |
+| 53 `memory.fts.*` | — (deleted) | — | — | none: the deletion (`86c38b9`) is verified by a repo-wide reference count plus the suites |
+
 Witnesses (one per hop, and the falsification for the hop that matters): `19834b5` —
 `TestThePiiScrubbingRowReachesEveryAgentProvider` (the row reaches the provider the gateway builds) and
 `TestTheSwitchRedactsEveryModelCallTheTurnMakes` (every call site the turn makes); `17f3a3f` —
