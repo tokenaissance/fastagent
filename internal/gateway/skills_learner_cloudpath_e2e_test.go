@@ -7,8 +7,8 @@ package gateway
 // namespace's single writer (host disk plus object-store mirror).
 //
 // This one proves the link above it: that the row an operator writes —
-// namespace "skillsLearner", the only surface that exists for it (no dashboard
-// renders these fields) — actually becomes that option, so a real turn's
+// namespace "skillsLearner", saved from the webui's Runtime page (super_admin ⇒
+// system scope) or through POST /api/config — actually becomes that option, so a real turn's
 // post-turn pass publishes a learned skill. Without it the row is what it was
 // before this change: writable, readable back, and read by nobody, because the
 // learner was only ever constructed in agent.NewAgentWithFullCfg, a constructor

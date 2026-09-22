@@ -5,10 +5,12 @@ package gateway
 // The agent-side witness (internal/agent/pii_scrub_cloudpath_e2e_test.go) proves
 // that a Manager built with WithPrivacy redacts every model call. This one
 // proves the link above it: that the row an operator writes
-// (namespace "privacy", agent/user scope) actually becomes that option. Without
-// it the row is exactly what it was before this change — writable in the admin
-// UI, readable back, and read by nobody, because the redaction used to live in
-// agent.NewAgentWithFullCfg, a constructor no production path calls.
+// (namespace "privacy", system ← user ← agent scope; since 2026-09-22 it also
+// has a switch on the webui's Runtime page) actually becomes that option.
+// Without it the row is exactly what it was before this change — writable
+// through the config API, readable back, and read by nobody, because the
+// redaction used to live in agent.NewAgentWithFullCfg, a constructor no
+// production path calls.
 //
 // Cloud zero-impact rationale: no endpoint, auth rule or wire shape changes.
 // This is the same room the model-precedence test lives in: a settings row that
