@@ -375,6 +375,12 @@ Removed items are gone, not hidden: if your plan depended on one, re-check with 
       skills 面板，它直接读 pod 的目录，于是读不到只有出口能做出的那类拒绝。
       **而如果这次投递刚被扩大过，还要重读那句话本身**（§10.5 D-4）：对第一个消费者能承载的
       情形成立的 σ，可能对新的那个消费者承载的情形不成立——transport 测试两种情况都会是绿的。
+- [ ] **若这次变更新增或移动了一个开关**（§10.8，O8）：这一行在生产路径上有读者吗——行 → 解析后的
+      cfg → 承载它的那个选项 → 真正照着它做事的闸门，每一跳各有见证，且反证能让**缺失的那一跳**变红
+      ——并且闸门做的，是不是这一行自己的文档说那个值**意味着**的事（nil = 继承、`false` = 一票否决）？
+      实例：四行（register 49/51/52/53）唯一的读者住在 `NewAgentWithFullCfg` 里。
+      **若某个面把这一行当作控件呈现**：它对那个面所服务的角色可写吗？而当某个面显示一个从这一行
+      派生的值时，它显示的是**状态**，还是状态的一个输入？
 
 参考实现（本目录内）：
 `TestExecObservesSandboxChanges`、`TestExecIsQuietWhenNothingChanged`、
@@ -615,3 +621,58 @@ O7 刚接通的那两个面）宣告一个没有读者能观察到的差异—�
 真反证：触发条件改回"任何携带者" → 2 条红（规则见证与 wire）；句子改回"replaced when this agent
 loads the skill" → 1 条红。现在**不再报**的那一类——只有随包文件携带 token——记为一条决策而非静默
 丢弃：没有任何解析它，所以那是创作期 lint，不是出口事实；要报它得先给它一条义务。
+
+### 10.8 O8 —— 开关必须在生产路径上有读者，且它的承诺必须与它的效果同构
+
+O1–O7 讲的都是**被产生出来**、必须到达的事实。O8 讲的是一个**开关**：一行设置，它的全部含义就是
+"这个行为是开着的"。它的失效比丢掉一个 δ 更安静——根本没有任何东西被产生，所以没有东西可丢、没有
+哪个界面会自相矛盾，机制自己的测试全绿，而操作者点下去什么都不会发生。这样的行曾经**同时**有四条
+躺在树里（register 49、51、52、53），而且形状是同一个：**这一行写得进、也从面板镜像读得回，可它
+唯一的读者住在 `NewAgentWithFullCfg` 里——一个没有任何生产路径调用的构造函数**（存在的调用者是
+`NewAgent`、`NewAgentWithSkillsCfg`，以及 Manager 的 `buildAgent`）。
+
+判据分两半：
+
+> **给操作者看的开关，必须在生产路径上有读者**——行 → 解析后的 cfg → 承载它的那个选项 → 真正照着
+> 它做事的闸门，每一跳都有见证，且反证必须能让**缺失的那一跳**变红（这就是把 §5.1 的规则用在开关
+> 上；register 的"归属"列现在为 49/51/52 行写明这条链）。**并且开关的承诺必须与它的效果同构**：字段
+> 自己的文档说这个值是什么意思——nil = 继承、`false` = 一票否决、"开着 ⇒ 出网的字节是脱敏的"——
+> 闸门就必须真是那个意思。注释描述一种行为、闸门实现另一种，是一个两半各自的测试都看不见的假 σ。
+
+四个实例，以及各自怎么收尾。**49 `privacy.piiScrubbing`**（`19834b5`）：把开关在调用点强行打开后
+才看见，脱敏只装在十一个 provider 调用点里的三个——所以这行不只是没人读，它"行开着 ⇒ 出网即脱敏"
+的承诺即使在读了的地方也是假的；修法是一个归宿，装在每个模型调用都要经过的那个 provider 上。
+**51 `skillsLearner`**（`17f3a3f`）：这一行只有那个零调用者构造函数在读，所以打开它学不到任何东西；
+现在 Manager 构建 learner，学到的 `SKILL.md` 走 `skills/…` 的唯一写者落地。**52
+`memory.autoPersist`**（`4ecadc7`）：per-agent 字段自己写着 "nil = 继承"，而当时没有任何东西可以被
+继承——工作区那行的唯一读者还是那个死构造函数，于是"没有覆盖"等于"关"（正好与承诺相反），
+`everyNTurns` / `model` 更是完全没有通路。**53 `memory.fts`**（`86c38b9`）：它两端从未接线
+（store 只在那同一个构造函数里被构造，也从来没有任何调用者传过 searcher），所以这一行的承诺——由全文
+索引支撑 `memory_search`——从未成立过；它被删除而不是被接上，因为文件扫描本身是一个完整实现，而每个
+pod 一份的 sqlite 索引要多副本正确就得重建。
+
+**第五个实例是一个渲染点，不是一行设置，而且它是在审计第四个的修法时找出来的**（2026-09-22）。cloud
+上下文面板的"自动记忆"开关写的是 per-agent 覆盖值，却把它当成状态来渲染（`agent?.autoPersist ??
+false`），而 agent 记录里带的只有覆盖值。这在第 52 行没有读者时恰好无害——第 52 行一有读者，工作区
+把那行打开就意味着：面板显示"关"，而运行时每五轮 chatter 对话就在蒸馏记忆。现在面板把两个事实分开读
+（`useWorkspaceMemoryAutoPersist`），渲染继承到的状态，并在读不到那行时渲染**未知**（非管理员访问
+`GET /api/config` 会拿到 403），而不是让"没读到"变成"关"。修在 cloud `80ac0833`。
+
+**写者那一半，要说窄**——说宽了就只是噪音：一个面**把它当作控件来呈现**的开关，必须对该面所服务的
+角色可写，否则同一个假 σ 会从另一边出现（一个改变不了它看似在控制的东西的控件）。如果唯一的写者是
+配置 API，那这一行就是操作者/API 开关，而展示它的面必须说明这一点。今天的实测：`memory`、`privacy`、
+`skillsLearner` 三个都只有 API 写者——`POST /api/config`；两个仓库的面板都没有它们的表单，也没有任何
+面宣称有。这里记为一条观测，不记成违规；上面那个自动记忆开关才是唯一一个真的呈现了相关行、并且呈现
+错了的面。
+
+见证（每一跳一个，外加关键那一跳的反证）：`19834b5` ——
+`TestThePiiScrubbingRowReachesEveryAgentProvider`（行到达 gateway 构建的那个 provider）与
+`TestTheSwitchRedactsEveryModelCallTheTurnMakes`（这一回合的每个调用点）；`17f3a3f` ——
+`TestTheSkillsLearnerRowReachesTheLearnerAndWritesThroughTheSingleWriter`、
+`TestTheSkillsLearnerExtractionCallSitsInsideThePiiScrubbingRule`，云端通路再加
+`TestTheSkillsLearnerRowReachesTheSingleWriter`；`4ecadc7` ——
+`TestTheMemoryRowIsTheDefaultLayerAndThePerAgentFlagOverridesIt`（四种优先级，含一票否决）与
+`TestTheMemoryRowIsWhatTurnsAutoPersistOn`（行 → 真回合 → 蒸馏真的开火）；`80ac0833` —— cloud
+`src/__tests__/fastagent/auto-persist-inherited-state.test.tsx`（渲染：继承开 / 继承关 / 未知，以及
+一旦有覆盖就不再出现继承行）。每一行自己的反证都真跑过，记在 register 的格子里；`53` 是删除形态，
+所以它的验证是全仓引用计数加各套件，不是一条见证。

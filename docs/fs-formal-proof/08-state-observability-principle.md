@@ -417,6 +417,14 @@ When adding any mechanism that changes harness state, answer each line:
       **And when the delivery just widened, re-read the sentence itself** (§10.5 D-4): a σ that was
       true for the cases the first consumer could carry can be false for the cases the new one
       carries, and the transport test will stay green either way.
+- [ ] **If this change adds or moves a switch** (§10.8, O8): does the row have a reader on the
+      production path — row → the resolved cfg → the option that carries it → the gate that acts on
+      it, each hop witnessed, with a falsification that reddens the missing hop — and does the gate do
+      what the row's own documentation says the value *means* (nil = inherit, `false` = veto)? Worked
+      example: four rows (register 49/51/52/53) whose only reader lived in `NewAgentWithFullCfg`.
+      **And if a surface presents the row as a control**: is it writable there for the role that
+      surface is for, and — when a surface shows a value derived from the row — does what it shows
+      stand for the state, rather than for one input to it?
 
 Reference implementations (inside this directory):
 `TestExecObservesSandboxChanges`, `TestExecIsQuietWhenNothingChanged`,
@@ -694,3 +702,69 @@ witnessed at the delivery point too), and `TestScanAndCatalogReportTheBaseDirTok
 skill" reddens 1. The case that is now *not* reported — a token only a bundled file carries — is
 recorded as a decision, not dropped in silence: nobody resolves it, so it is an authoring lint and
 not an egress fact, and it would need its own obligation before it gets a code.
+
+### 10.8 O8 — a switch must have a reader on the production path, and its promise must be isomorphic to its effect
+
+O1–O7 are about a fact that is **produced** and has to arrive. O8 is about a **switch**: a settings row
+whose entire meaning is "this behaviour is on". Its failure mode is quieter than a lost δ — nothing is
+produced at all, so there is nothing to lose, no surface to contradict, and every test of the mechanism
+stays green while an operator's click does nothing. Four rows sat in the tree in exactly that state at
+once (register 49, 51, 52, 53), and they shared one shape: **the row was writable, readable back through
+the panel's mirror, and its only reader lived in `NewAgentWithFullCfg`, a constructor no production path
+calls** (`NewAgent`, `NewAgentWithSkillsCfg` and the Manager's `buildAgent` are the callers that exist).
+
+The criterion, in two halves:
+
+> **A switch that is visible to the operator must have a reader on the production path** — row → the
+> resolved cfg → the option that carries it → the gate that acts on it, each hop witnessed, with the
+> falsification able to redden the hop that is missing (§5.1's rule applied to a switch; the register's
+> "belongs to" column now names the chain for rows 49/51/52). **And the switch's promise must be
+> isomorphic to its effect**: what the field's own documentation says the value means — nil = inherit,
+> `false` = veto, "on ⇒ what leaves for a provider is redacted" — has to be what the gate does. A row
+> whose comment describes one behaviour while its gate implements another is a false σ that no test of
+> either half can see.
+
+The four instances, and how each ended. **49 `privacy.piiScrubbing`** (`19834b5`): forcing the flag on at
+the call site showed the redaction was applied at three of eleven provider call sites, so the row was
+not merely unread — its promise ("if the row is on, what leaves is redacted") was false even where it
+was read; the fix is one home, on the provider every model call already passes. **51 `skillsLearner`**
+(`17f3a3f`): the row was read only by the zero-caller constructor, so turning it on learned nothing; the
+Manager now builds the learner and the learned `SKILL.md` lands through the single writer for
+`skills/…`. **52 `memory.autoPersist`** (`4ecadc7`): the per-agent field documented "nil = inherit",
+while nothing could inherit — the workspace row's only reader was the same dead constructor, so "no
+override" meant "off" (the opposite of the promise) and `everyNTurns` / `model` had no path at all.
+**53 `memory.fts`** (`86c38b9`): neither end of it was ever wired (the store was constructed only in
+that constructor, no caller ever passed a searcher), so the row's promise — a full-text index backing
+`memory_search` — was never true; it was deleted rather than wired, because the file scan is a complete
+implementation and a per-pod sqlite index would have to be rebuilt for multi-replica correctness.
+
+**The fifth instance is a render, not a row, and it was found by auditing the fix of the fourth**
+(2026-09-22). The cloud context panel's auto-remember switch writes the per-agent override and rendered
+it as if it were the state (`agent?.autoPersist ?? false`); the agent record carries the override and
+nothing else. That was harmless for exactly as long as row 52 had no reader — and the moment row 52 got
+one, a workspace row turned on meant the panel said Off while the runtime distilled memory every fifth
+chatter turn. The panel now reads the two facts separately (`useWorkspaceMemoryAutoPersist`), renders
+the inherited state, and renders **unknown** when the row cannot be read (a non-admin dashboard answers
+403 to `GET /api/config`) rather than letting an absent read become "off". Fixed in cloud `80ac0833`.
+
+**The writer half, stated narrowly** — because over-claiming it would be noise: a switch that a surface
+*presents as a control* must be writable by the role that surface is for, or else the same false σ
+appears from the other side (a control that cannot change what it appears to control). Where the only
+writer is the config API, the row is an operator/API switch and the surfaces that show it must say so.
+Measured today: `memory`, `privacy` and `skillsLearner` are API-only — `POST /api/config` is the writer,
+neither repo's panel has a form for them, and no surface claims otherwise. That is recorded here, not
+booked as a violation; the auto-remember switch above was the one surface that did present a related row
+and got it wrong.
+
+Witnesses (one per hop, and the falsification for the hop that matters): `19834b5` —
+`TestThePiiScrubbingRowReachesEveryAgentProvider` (the row reaches the provider the gateway builds) and
+`TestTheSwitchRedactsEveryModelCallTheTurnMakes` (every call site the turn makes); `17f3a3f` —
+`TestTheSkillsLearnerRowReachesTheLearnerAndWritesThroughTheSingleWriter` and
+`TestTheSkillsLearnerExtractionCallSitsInsideThePiiScrubbingRule`, plus
+`TestTheSkillsLearnerRowReachesTheSingleWriter` on the cloud path; `4ecadc7` —
+`TestTheMemoryRowIsTheDefaultLayerAndThePerAgentFlagOverridesIt` (the four precedence cases, including
+the veto) and `TestTheMemoryRowIsWhatTurnsAutoPersistOn` (row → real turn → the pass fires); `80ac0833` —
+cloud `src/__tests__/fastagent/auto-persist-inherited-state.test.tsx` (the render: inherited on / off /
+unknown, and no inherit line once an override exists). Each row's own falsification was run for real and
+is recorded in the register cell; `53` is deletion-shaped, so its verification is a repo-wide reference
+count plus the suites, not a witness.

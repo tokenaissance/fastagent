@@ -155,13 +155,15 @@ Covered by none of them → §7's bucket E (the F4 candidate: concurrency and vi
 | **O5** no noise | — (no "spoke without a change" instance yet) | `TestExecIsQuietWhenNothingChanged`, `TestWriteFileStaysQuietOnASharedBackend` |
 | **O7** a delivered fact whose meaning changed | the 2026-09-21 egress audit (no G number: recorded as [11](./11-change-register.md) row 38) | `skills-list-chain.test.ts` (the delivery point) + `catalog.test.ts`, `skills-service.test.ts`, `policy.test.ts`, `tools-service.test.ts` |
 | **O6** an absence must speak (promoted [08 §10.3](./08-state-observability-principle.md)) | the 2026-09-21 egress audit: two consumers of one fact, and only one could see it — they read different producers (no G number: [11](./11-change-register.md) row 40) | `skills-list-chain.test.ts` (MCP) + cloud `fastagent-proxy-route.test.ts` (**the panel's delivery point**) + `skills-service.test.ts` (one partition, two projections) |
+| **O8** a switch must have a reader on the production path, and its promise must be isomorphic to its effect (promoted [08 §10.8](./08-state-observability-principle.md)) | register rows 49 (`piiScrubbing`), 51 (`skillsLearner`), 52 (`memory.autoPersist`), 53 (`memory.fts` — resolved by deletion), plus the cloud panel's auto-remember switch, which is the render half (2026-09-22) | `TestThePiiScrubbingRowReachesEveryAgentProvider`, `TestTheSwitchRedactsEveryModelCallTheTurnMakes`, `TestTheSkillsLearnerRowReachesTheLearnerAndWritesThroughTheSingleWriter`, `TestTheSkillsLearnerRowReachesTheSingleWriter` (cloud path), `TestTheMemoryRowIsTheDefaultLayerAndThePerAgentFlagOverridesIt`, `TestTheMemoryRowIsWhatTurnsAutoPersistOn`, cloud `src/__tests__/fastagent/auto-persist-inherited-state.test.tsx` |
 | **F1** preconditions / zero migration | ~~the incident, D~~ | `TestSyncContract_StoreEditIsNotOverwritten`, `TestSyncContract_SecondReconcileWritesNothing`, `TestSyncContract_DomainUnchanged`, `TestE2BLive*` |
 | **F1** boundary (inside / outside) | **G4** (a deletion is irreversible; no snapshot) | — (a missing witness is itself part of that gap) |
 
 > D₃ was promoted in [08 §10.2](./08-state-observability-principle.md) after this table was written
 > and has no row here yet. O6 was promoted the same way and **got its row on 2026-09-21**, when the
-> egress audit produced its second consumer and a witness for it; O7 was added with its row. So the
-> index does not drift further.
+> egress audit produced its second consumer and a witness for it; O7 was added with its row, and **O8
+> got its row on 2026-09-22** when the switch audit found four rows whose reader lived in a constructor
+> no production path calls. So the index does not drift further.
 
 ### 5.1 The witness column has two halves (2026-09-21, brought back from the cloud re-audit)
 

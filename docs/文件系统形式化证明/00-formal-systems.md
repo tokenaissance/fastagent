@@ -148,12 +148,14 @@ F3 投递（定义 08 §2.2）
 | **O5** 不扰 | —（迄今没有"无变化也说话"的实例） | `TestExecIsQuietWhenNothingChanged`、`TestWriteFileStaysQuietOnASharedBackend` |
 | **O7** 已投递但含义变了的事实 | 2026-09-21 出口审计（无 G 编号：记在 [11](./11-change-register.md) 第 38 行） | `skills-list-chain.test.ts`（投递点）+ `catalog.test.ts`、`skills-service.test.ts`、`policy.test.ts`、`tools-service.test.ts` |
 | **O6** 缺席也必须发声（升格于 [08 §10.3](./08-state-observability-principle.md)） | 2026-09-21 出口审计：同一条事实有两个消费者，只有一个看得见——因为它们读的不是同一个生产者（无 G 编号：[11](./11-change-register.md) 第 40 行） | `skills-list-chain.test.ts`（MCP 侧）+ cloud `fastagent-proxy-route.test.ts`（**面板的投递点**）+ `skills-service.test.ts`（一份分区、两个投影） |
+| **O8** 开关必须在生产路径上有读者，且承诺必须与效果同构（升格于 [08 §10.8](./08-state-observability-principle.md)） | register 第 49 行（`piiScrubbing`）、第 51 行（`skillsLearner`）、第 52 行（`memory.autoPersist`）、第 53 行（`memory.fts`，以删除收尾），外加 cloud 面板那个"自动记忆"开关——那是渲染那一半（2026-09-22） | `TestThePiiScrubbingRowReachesEveryAgentProvider`、`TestTheSwitchRedactsEveryModelCallTheTurnMakes`、`TestTheSkillsLearnerRowReachesTheLearnerAndWritesThroughTheSingleWriter`、`TestTheSkillsLearnerRowReachesTheSingleWriter`（云端通路）、`TestTheMemoryRowIsTheDefaultLayerAndThePerAgentFlagOverridesIt`、`TestTheMemoryRowIsWhatTurnsAutoPersistOn`、cloud `src/__tests__/fastagent/auto-persist-inherited-state.test.tsx` |
 | **F1** 前置条件 / 零迁移 | ~~事故 D~~ | `TestSyncContract_StoreEditIsNotOverwritten`、`TestSyncContract_SecondReconcileWritesNothing`、`TestSyncContract_DomainUnchanged`、`TestE2BLive*` |
 | **F1** 边界（inside / outside） | **G4**（删除不可逆、无快照） | —（缺 witness，本身就是缺口的一部分） |
 
 > D₃ 是在这张表写完之后才在 [08 §10.2](./08-state-observability-principle.md) 里升格为义务的，
 > 本表还没有它的行。O6 同样迟升格，但 **2026-09-21 补上了它的行**——出口审计发现它有第二个消费者，
-> 并为它产出了见证；O7 是连行一起加的。免得这个索引继续漂移。
+> 并为它产出了见证；O7 是连行一起加的；**O8 在 2026-09-22 补上行**——开关审计发现四行的读者住在
+> 一个没有任何生产路径调用的构造函数里。免得这个索引继续漂移。
 
 ### 5.1 witness 有两半（2026-09-21，由 cloud 侧再审计带回）
 
