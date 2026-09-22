@@ -57,7 +57,13 @@ type Store interface {
 	// VersionAbsent means "this key must not exist yet" (a create-only write).
 	//
 	// Strength is per backend and MUST be declared, not assumed:
-	//   S3      — exact (an If-Match / If-None-Match conditional PUT)
+	//   S3      — exact where the bucket evaluates If-Match (AWS S3, MinIO);
+	//             Ceph RGW — the store behind DigitalOcean Spaces, which this
+	//             deployment runs on — implements only the create-only form and
+	//             answers 412 to every If-Match, so an overwrite there is a
+	//             compare-then-write: best-effort, like LocalFS. Which one you
+	//             get is the bucket's property, not the protocol's; see
+	//             S3.PutIfVersion and docs/fs-formal-proof/01-current-implementation.md.
 	//   LocalFS — best-effort (read-then-write; there is no kernel CAS). LocalFS
 	//             deployments are single-host by construction; multi-replica
 	//             installs must use S3 or a database-backed store.
