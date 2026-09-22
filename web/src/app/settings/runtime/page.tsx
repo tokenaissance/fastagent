@@ -15,7 +15,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Save, Check, Clock, Container } from "lucide-react";
+import { Save, Check, Clock, Container, Brain, GraduationCap } from "lucide-react";
 import { getConfig, updateConfig, getMe, type ConfigResponse } from "@/lib/api";
 
 export default function RuntimeSettingsPage() {
@@ -35,6 +35,12 @@ export default function RuntimeSettingsPage() {
   const [sandboxBoxliteKey, setSandboxBoxliteKey] = useState("");
   const [sandboxBoxliteURL, setSandboxBoxliteURL] = useState("");
   const [defaultTimezone, setDefaultTimezone] = useState("");
+  const [autoPersistEnabled, setAutoPersistEnabled] = useState(false);
+  const [autoPersistEveryNTurns, setAutoPersistEveryNTurns] = useState("5");
+  const [autoPersistModel, setAutoPersistModel] = useState("");
+  const [skillsLearnerEnabled, setSkillsLearnerEnabled] = useState(false);
+  const [skillsLearnerMinToolCalls, setSkillsLearnerMinToolCalls] = useState("");
+  const [skillsLearnerModel, setSkillsLearnerModel] = useState("");
 
   useEffect(() => {
     // Belt-and-suspenders gate: the layout already hides the nav item,
@@ -69,6 +75,26 @@ export default function RuntimeSettingsPage() {
           setSandboxBoxliteKey(cfg.sandbox?.boxliteKey || "");
           setSandboxBoxliteURL(cfg.sandbox?.boxliteUrl || "");
           setDefaultTimezone(cfg.prefs?.timezone || "");
+          // Auto-persist and the skills learner are system-scope rows with no
+          // per-agent counterpart for their cadence/model — before this page
+          // the only writer was POST /api/config by hand.
+          const autoPersist = cfg.memory?.autoPersist;
+          setAutoPersistEnabled(autoPersist?.enabled ?? false);
+          // 0 is "unset" on the wire (the runtime stamps its own default), so
+          // show the default the operator would actually get.
+          setAutoPersistEveryNTurns(
+            autoPersist?.everyNTurns && autoPersist.everyNTurns > 0
+              ? String(autoPersist.everyNTurns)
+              : "5",
+          );
+          setAutoPersistModel(autoPersist?.model || "");
+          setSkillsLearnerEnabled(cfg.skillsLearner?.enabled ?? false);
+          setSkillsLearnerMinToolCalls(
+            cfg.skillsLearner?.minToolCalls && cfg.skillsLearner.minToolCalls > 0
+              ? String(cfg.skillsLearner.minToolCalls)
+              : "",
+          );
+          setSkillsLearnerModel(cfg.skillsLearner?.model || "");
         })
         .catch(() => {})
         .finally(() => setLoading(false));
@@ -89,10 +115,29 @@ export default function RuntimeSettingsPage() {
         : sandboxBackend === "boxlite"
           ? sandboxBoxliteImage
           : sandboxDockerImage;
+    // 0 is the wire's "unset": the runtime stamps auto-persist's cadence
+    // default (5) and the learner's tool-call floor (3) at build time, so an
+    // emptied box resets to the documented default instead of freezing the
+    // stored number the operator just deleted.
+    const cadence = Number.parseInt(autoPersistEveryNTurns, 10);
+    const minToolCalls = Number.parseInt(skillsLearnerMinToolCalls, 10);
     try {
       const result = await updateConfig({
         prefs: {
           timezone: defaultTimezone.trim() || undefined,
+        },
+        memory: {
+          autoPersist: {
+            enabled: autoPersistEnabled,
+            everyNTurns: Number.isFinite(cadence) && cadence > 0 ? cadence : 0,
+            model: autoPersistModel.trim() || undefined,
+          },
+        },
+        skillsLearner: {
+          enabled: skillsLearnerEnabled,
+          minToolCalls:
+            Number.isFinite(minToolCalls) && minToolCalls > 0 ? minToolCalls : 0,
+          model: skillsLearnerModel.trim() || undefined,
         },
         sandbox: {
           enabled: sandboxEnabled,
@@ -136,7 +181,9 @@ export default function RuntimeSettingsPage() {
         <div>
           <h3 className="text-xl font-semibold tracking-tight">Runtime</h3>
           <p className="text-sm text-muted-foreground mt-1">
-            Gateway and sandbox configuration.
+            Gateway, sandbox, memory and learning configuration. Saved at
+            system scope, so a save reaches every agent that has not overridden
+            the setting.
           </p>
         </div>
         <Button
@@ -295,6 +342,121 @@ export default function RuntimeSettingsPage() {
                   />
                 </div>
               )}
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="rounded-lg border border-border bg-card">
+        <div className="p-5">
+          <div className="flex items-center justify-between">
+            <div>
+              <div className="flex items-center gap-2 mb-1">
+                <Brain className="h-4 w-4 text-amber-500" />
+                <h3 className="font-medium">Memory auto-persist</h3>
+              </div>
+              <p className="text-sm text-muted-foreground">
+                Every N chatter turns, a small model call distills the recent
+                conversation into that chatter&apos;s USER.md / MEMORY.md. Applies
+                to every agent that has not overridden it; the per-agent override
+                is the toggle in the agent&apos;s Context settings.
+              </p>
+            </div>
+            <Switch
+              aria-label="Memory auto-persist"
+              checked={autoPersistEnabled}
+              onCheckedChange={setAutoPersistEnabled}
+            />
+          </div>
+        </div>
+        {autoPersistEnabled && (
+          <div className="px-5 pb-5 space-y-4">
+            <Separator />
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label htmlFor="auto-persist-cadence">Every N chatter turns</Label>
+                <Input
+                  id="auto-persist-cadence"
+                  type="number"
+                  min={1}
+                  value={autoPersistEveryNTurns}
+                  onChange={(e) => setAutoPersistEveryNTurns(e.target.value)}
+                  placeholder="5"
+                  className="font-mono text-sm"
+                />
+                <p className="text-xs text-muted-foreground">
+                  Leave empty for the default (5).
+                </p>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="auto-persist-model">Distill model (optional)</Label>
+                <Input
+                  id="auto-persist-model"
+                  value={autoPersistModel}
+                  onChange={(e) => setAutoPersistModel(e.target.value)}
+                  placeholder="provider/model"
+                  className="font-mono text-sm"
+                />
+                <p className="text-xs text-muted-foreground">
+                  Leave empty to use each agent&apos;s own model.
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
+        <Separator />
+        <div className="p-5">
+          <div className="flex items-center justify-between">
+            <div>
+              <div className="flex items-center gap-2 mb-1">
+                <GraduationCap className="h-4 w-4 text-emerald-500" />
+                <h3 className="font-medium">Skills learner</h3>
+              </div>
+              <p className="text-sm text-muted-foreground">
+                After a turn that used enough tools, a background pass writes the
+                procedure it worked out as a skill (SKILL.md) the agent can reuse.
+                Learned skills land in the agent owner&apos;s skills folder.
+              </p>
+            </div>
+            <Switch
+              aria-label="Skills learner"
+              checked={skillsLearnerEnabled}
+              onCheckedChange={setSkillsLearnerEnabled}
+            />
+          </div>
+        </div>
+        {skillsLearnerEnabled && (
+          <div className="px-5 pb-5 space-y-4">
+            <Separator />
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label htmlFor="skills-learner-min-tools">Minimum tool calls</Label>
+                <Input
+                  id="skills-learner-min-tools"
+                  type="number"
+                  min={1}
+                  value={skillsLearnerMinToolCalls}
+                  onChange={(e) => setSkillsLearnerMinToolCalls(e.target.value)}
+                  placeholder="3"
+                  className="font-mono text-sm"
+                />
+                <p className="text-xs text-muted-foreground">
+                  Leave empty for the default (3).
+                </p>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="skills-learner-model">Extraction model (optional)</Label>
+                <Input
+                  id="skills-learner-model"
+                  value={skillsLearnerModel}
+                  onChange={(e) => setSkillsLearnerModel(e.target.value)}
+                  placeholder="provider/model"
+                  className="font-mono text-sm"
+                />
+                <p className="text-xs text-muted-foreground">
+                  Leave empty to use each agent&apos;s own model.
+                </p>
+              </div>
             </div>
           </div>
         )}

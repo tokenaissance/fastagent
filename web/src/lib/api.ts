@@ -247,6 +247,28 @@ export interface ConfigResponse {
   prefs?: {
     timezone?: string;
   };
+  // The `memory` namespace (system scope) — the default layer for the
+  // auto-persist pass. A per-agent `agents.defaults.autoPersist` override
+  // wins over it (nil = inherit, false = veto); the cadence and the distill
+  // model have no per-agent counterpart, so this row is their only home.
+  memory?: {
+    autoPersist?: {
+      enabled?: boolean;
+      /** 0/absent = the runtime's default (5). */
+      everyNTurns?: number;
+      /** Empty = each agent's own model. */
+      model?: string;
+    };
+  };
+  // The `skillsLearner` namespace (system scope): the background extractor
+  // that turns a finished turn into a learned SKILL.md.
+  skillsLearner?: {
+    enabled?: boolean;
+    /** 0/absent = the learner's default (3 tool calls). */
+    minToolCalls?: number;
+    /** Empty = each agent's own model. */
+    model?: string;
+  };
   wechat?: {
     splitReplies?: boolean;
   };
