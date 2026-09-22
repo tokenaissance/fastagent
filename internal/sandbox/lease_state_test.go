@@ -50,7 +50,7 @@ func TestSleepRecordsPausedAfterPublishingARebuild(t *testing.T) {
 	pool.leaseEpochs[rebuildScopeKey] = 3
 
 	// Rebuild, leaving the row (as production would) still naming the old id.
-	if err := ex.recreateIfCurrent(ctx, ex.identSnapshot()); err != nil {
+	if err := ex.recreateIfCurrent(ctx, ex.identSnapshot(), nil); err != nil {
 		t.Fatalf("recreate: %v", err)
 	}
 	store.getRec = &SandboxLeaseRecord{SandboxID: "sb-old", EnvdToken: "tok-old", Template: "tpl", Epoch: 3}

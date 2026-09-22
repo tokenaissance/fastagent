@@ -263,7 +263,7 @@ func TestE2BPoolReconcileRepublishesRebuiltSandbox(t *testing.T) {
 	pool.executors[rebuildScopeKey] = ex
 	pool.leaseEpochs[rebuildScopeKey] = 3
 
-	if err := ex.recreateIfCurrent(ctx, ex.identSnapshot()); err != nil {
+	if err := ex.recreateIfCurrent(ctx, ex.identSnapshot(), nil); err != nil {
 		t.Fatalf("recreate: %v", err)
 	}
 	if _, pending := ex.pendingPublish(); !pending {
@@ -310,7 +310,7 @@ func TestE2BPoolRebuildPublishFailureKeepsLocalAndRetries(t *testing.T) {
 	pool.executors[rebuildScopeKey] = ex
 	pool.leaseEpochs[rebuildScopeKey] = 3
 
-	if err := ex.recreateIfCurrent(ctx, ex.identSnapshot()); err != nil {
+	if err := ex.recreateIfCurrent(ctx, ex.identSnapshot(), nil); err != nil {
 		t.Fatalf("recreate: %v", err)
 	}
 	store.getRec = &SandboxLeaseRecord{SandboxID: "sb-old", EnvdToken: "tok-old", Template: "tpl", Epoch: 3}
@@ -349,7 +349,7 @@ func TestE2BPoolRebuildSupersededByAnotherPodAdoptsCurrent(t *testing.T) {
 	pool.executors[rebuildScopeKey] = ex
 	pool.leaseEpochs[rebuildScopeKey] = 3
 
-	if err := ex.recreateIfCurrent(ctx, ex.identSnapshot()); err != nil {
+	if err := ex.recreateIfCurrent(ctx, ex.identSnapshot(), nil); err != nil {
 		t.Fatalf("recreate: %v", err)
 	}
 	store.getRec = &SandboxLeaseRecord{SandboxID: "sb-other", EnvdToken: "tok-other", Template: "tpl", Epoch: 9}
@@ -381,7 +381,7 @@ func TestE2BPoolRebuildWithoutLeaseStoreIsInert(t *testing.T) {
 	ex, _ := rebuildableExecutor(t, rec, "sb-old", "tok-old", "sb-new", "tok-new")
 	pool.executors[rebuildScopeKey] = ex
 
-	if err := ex.recreateIfCurrent(ctx, ex.identSnapshot()); err != nil {
+	if err := ex.recreateIfCurrent(ctx, ex.identSnapshot(), nil); err != nil {
 		t.Fatalf("recreate: %v", err)
 	}
 	got, err := pool.Get(ctx, "agt_1", "", "chat_1")
@@ -412,7 +412,7 @@ func TestE2BPoolRebuildPublishedByExpiryReacquire(t *testing.T) {
 	ex, _ := rebuildableExecutor(t, rec, "sb-old", "tok-old", "sb-new", "tok-new")
 	pool.executors[rebuildScopeKey] = ex
 
-	if err := ex.recreateIfCurrent(ctx, ex.identSnapshot()); err != nil {
+	if err := ex.recreateIfCurrent(ctx, ex.identSnapshot(), nil); err != nil {
 		t.Fatalf("recreate: %v", err)
 	}
 	if _, pending := ex.pendingPublish(); !pending {
@@ -496,7 +496,7 @@ func TestE2BExecutorFailedRebuildRestoresIdentityAndDestroysReplacement(t *testi
 		return newAdoptedE2BExecutor("api-key", "sb-new", "tok-new", "tpl", time.Minute), nil
 	}
 
-	if err := ex.recreateIfCurrent(ctx, ex.identSnapshot()); err == nil {
+	if err := ex.recreateIfCurrent(ctx, ex.identSnapshot(), nil); err == nil {
 		t.Fatal("a rebuild whose hydrate fails must surface the error")
 	}
 	if got := ex.identSnapshot().id; got != "sb-old" {

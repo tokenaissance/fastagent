@@ -492,7 +492,7 @@ func e2bCreateBody(template string, timeout time.Duration) []byte {
 // sandbox die queue on rebuildMu, and every waiter but the first finds the
 // executor already pointing somewhere else and returns without creating
 // anything.
-func (e *E2BExecutor) recreateIfCurrent(ctx context.Context, observed sandboxIdent) error {
+func (e *E2BExecutor) recreateIfCurrent(ctx context.Context, observed sandboxIdent, cause error) error {
 	e.rebuildMu.Lock()
 	defer e.rebuildMu.Unlock()
 
@@ -506,7 +506,12 @@ func (e *E2BExecutor) recreateIfCurrent(ctx context.Context, observed sandboxIde
 	if create == nil {
 		create = newE2BExecutor
 	}
-	slog.Info("e2b sandbox expired, recreating", "oldSandboxID", observed.id)
+	// cause is the whole forensic value of this line: it is the only record of
+	// WHAT the instance answered. The body is what separates a dead instance from
+	// a live one answering about a path, and when the 09-22 rebuilds were being
+	// diagnosed this field did not exist — the first attempt's answer had to be
+	// inferred from the timestamps around it.
+	slog.Info("e2b sandbox expired, recreating", "oldSandboxID", observed.id, "error", cause)
 	newEx, err := create(ctx, e.apiKey, e.template, e.timeout)
 	if err != nil {
 		return err
@@ -1239,7 +1244,7 @@ func (e *E2BExecutor) Exec(ctx context.Context, command string, timeout time.Dur
 	// the bound is applied on every return path including the retries below.
 	result, err := e.execOn(ctx, observed, wrapped, timeout, newClipOutput("exec/e2b"))
 	if sandboxGone(err) {
-		if rerr := e.recreateIfCurrent(ctx, observed); rerr != nil {
+		if rerr := e.recreateIfCurrent(ctx, observed, err); rerr != nil {
 			return "", fmt.Errorf("sandbox recreate failed: %w (original: %v)", rerr, err)
 		}
 		return e.execOnce(ctx, wrapped, timeout)
@@ -1465,7 +1470,7 @@ func (e *E2BExecutor) ReadFile(ctx context.Context, path string) (string, error)
 	// The file API's own 404 is a verdict about the path, not the instance
 	// (sandboxGoneOnFileAPI): a file that is not there must not cost a sandbox.
 	if sandboxGoneOnFileAPI(err) {
-		if rerr := e.recreateIfCurrent(ctx, observed); rerr != nil {
+		if rerr := e.recreateIfCurrent(ctx, observed, err); rerr != nil {
 			return "", rerr
 		}
 		return e.readFileOnce(ctx, path)
@@ -1510,7 +1515,7 @@ func (e *E2BExecutor) WriteFile(ctx context.Context, path, content string) (stri
 	observed := e.identSnapshot()
 	result, err := e.writeFileOn(ctx, observed, path, content)
 	if sandboxGoneOnFileAPI(err) {
-		if rerr := e.recreateIfCurrent(ctx, observed); rerr != nil {
+		if rerr := e.recreateIfCurrent(ctx, observed, err); rerr != nil {
 			return "", rerr
 		}
 		return e.writeFileOnce(ctx, path, content)
