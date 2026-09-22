@@ -13,7 +13,8 @@
 
 | # | 要求（规范小节） | 我们要做的 | 验收 | 现状 |
 | :-- | :--- | :--- | :--- | :--- |
-| A1 | 必须同时声明 `resources` 能力与 `capabilities.extensions["io.modelcontextprotocol.skills"]`；`directoryRead: true` 才可实现目录读取（Capability Negotiation） | 在 `server/discover` 与 `initialize` 两条握手里都带上（我们已经带上 capabilities.extensions） | 客户端握手应答里能看到该键 | ✅ 实测（握手返回 `resources: {}` + 扩展键） |
+| A1 | 必须同时声明 `resources` 能力与 `capabilities.extensions["io.modelcontextprotocol.skills"]`；`directoryRead: true` 才可实现目录读取（Capability Negotiation） | 在 `server/discover` 与 `initialize` 两条握手里都带上（我们已经带上 capabilities.extensions） | 客户端握手应答里能看到该键 | ⚠️ 2026-09-22 修正：原来"✅ 实测（握手返回 `resources: {}` + 扩展键）"是用**能容忍信封形状**的工具看的——真客户端根本不接受那个信封（见 A5）。扩展键本身仍在，**要求改成：能力键 + 合法信封一起才算过** |
+| A5 | 两条握手的信封不同：`server/discover`（2026-07-28，SEP-2575）是 `resultType: 'complete'`；legacy 客户端的 `initialize` 必须回一个合法 `InitializeResult`，其中 **`protocolVersion` 是必填** | 两条握手各自成形；声明的版本要能被客户端在后续请求的 `MCP-Protocol-Version` 里引用（2025-11-25 起该 header 强制） | 真客户端能完成握手并调到工具；单测断言 `protocolVersion` 存在且 `resultType` 不在 `initialize` 的结果里 | ✅ 2026-09-22：真机先红（codex-cli 0.154.0-alpha.6.2：`expect initialized result, but received …`，一条工具都调不到），修后钉住——cloud `mcp-surface-e2e.test.ts` 驱动真实 dispatcher 走 challenge → 两份 discovery → initialize → notification → tools/list → 两个 tools/call → resources/list → resources/read；反证：握手改回共用形状 ⇒ 3 条红。可重复的真机检查：cloud `scripts/mcp-egress-live-check.sh` |
 | A2 | 声明了扩展就**必须**实现 `skills/list` 与 `skills/get` | 实现两个方法 | conformance `sep-2640-skills-enumeration` | ✅ 已实现（该套件无此场景，见 E1） |
 | A3 | 声明 `directoryRead: true` 就必须实现 `resources/directory/read`；没声明时按未知方法处理 | **本轮改为不声明**：方法未实现，声明了就等于给客户端一个假承诺；实现目录读取时再把 flag 加回来 | `resources/directory/read` 必须落到未知方法分支 | ✅ 已撤回声明（实测扩展键为 `{}`）+ 单测锁住"声明 ↔ 实现" |
 | A4 | 声明 `resources` 能力就必须响应 `resources/list`（base Resources："Servers that declare the `resources` capability **MUST** respond to `resources/list`"）；扩展又强制我们必须声明该能力 | 由已发布 entry 投影出资源列表（`resourcesFromEntries`），不第二次扫盘 | `resources/list` 的 URI 集合 == pod 的文件集合 | ✅ 实测（27 条，与 pod 文件集合完全相等；无 token → 401；带 `resultType/resources/ttlMs/cacheScope`） |
@@ -53,7 +54,7 @@
 
 1. **规范一致性**：`npx @modelcontextprotocol/conformance server --url <endpoint> --scenario sep-2640-skills-manifest | -enumeration | -directory`
    —— **2026-09-18 实测：该套件（0.1.16）尚无任何 SEP-2640 skills 场景**（`list` 只有 base 协议到 2025-11-25 的场景），且 server 模式无法携带 bearer（不会走 401→OAuth 发现），所以这一条现在**跑不了**。在套件补上场景之前，规范一致性只能靠"实测 + 单测"两条腿，见下。
-2. **真机**：MCP Inspector（人工读一次）+ Codex CLI / Claude Code（工具兜底路径）
+2. **真机**：MCP Inspector（人工读一次）+ Codex CLI / Claude Code（工具兜底路径）。2026-09-22 起，真机这一步有可重复脚本：cloud `scripts/mcp-egress-live-check.sh`（它先断言 401 + PRM，再真跑 `codex mcp add`/`login` 与一次 `list_skills`，握手被拒就报红并指出缺 `protocolVersion`）。**教训**：这套清单原来把"握手应答里有扩展键"记成实测通过，而真客户端拒绝的是信封形状——凡是"实测"，必须写明**用什么客户端**测的。
 3. **诊断**：D1 的三类坏 fixture
 4. **回归**：现有 UT 全绿 + e2e 与基线失败集合一致
 
