@@ -984,6 +984,49 @@ func sandboxGone(err error) bool {
 	return ok && isSandboxGone(status)
 }
 
+// sandboxGoneOnFileAPI is sandboxGone for envd's file endpoints, which answer a
+// missing PATH with a 404 of their own:
+//
+//	{"code":404,"message":"path '/home/user/CURRENT.md' does not exist"}
+//
+// Believing that as "the instance is gone" replaced a live sandbox over a file
+// that simply was not there — production 09-22, three rebuilds in 21 minutes,
+// the first triggered by two read_file calls for missing paths. Each rebuild
+// hydrated a replacement whose workspace held only the persisted files, so the
+// retry answered from an instance that really did not have them and the model
+// was told the file it had just written was gone.
+//
+// A 502 is still the edge saying the instance is gone, and so is a 404 that does
+// not name a path: an answer this classifier does not recognise stays on the
+// safe side, which is one rebuild.
+func sandboxGoneOnFileAPI(err error) bool {
+	status, ok := statusCodeOf(err)
+	if !ok {
+		return false
+	}
+	if status != http.StatusNotFound {
+		return isSandboxGone(status)
+	}
+	var httpErr *sandboxHTTPError
+	if errors.As(err, &httpErr) && bodyNamesAPath(httpErr.body) {
+		return false
+	}
+	return true
+}
+
+// bodyNamesAPath reports whether an envd error body is a verdict about a path
+// rather than about the instance. Only the shape measured against the provider is
+// recognised; anything else falls back to the instance-level reading.
+func bodyNamesAPath(body string) bool {
+	var payload struct {
+		Message string `json:"message"`
+	}
+	if json.Unmarshal([]byte(body), &payload) != nil {
+		return false
+	}
+	return strings.Contains(payload.Message, "does not exist")
+}
+
 // sandboxUnusable reports whether err indicts the INSTANCE rather than the
 // command that ran on it: the sandbox is gone (502/404 from the edge), or the
 // exec stream ended without its exit-status trailer.
@@ -1419,7 +1462,9 @@ func (e *E2BExecutor) execOn(ctx context.Context, id sandboxIdent, command strin
 func (e *E2BExecutor) ReadFile(ctx context.Context, path string) (string, error) {
 	observed := e.identSnapshot()
 	result, err := e.readFileOn(ctx, observed, path)
-	if sandboxGone(err) {
+	// The file API's own 404 is a verdict about the path, not the instance
+	// (sandboxGoneOnFileAPI): a file that is not there must not cost a sandbox.
+	if sandboxGoneOnFileAPI(err) {
 		if rerr := e.recreateIfCurrent(ctx, observed); rerr != nil {
 			return "", rerr
 		}
@@ -1464,7 +1509,7 @@ func (e *E2BExecutor) readFileOn(ctx context.Context, id sandboxIdent, path stri
 func (e *E2BExecutor) WriteFile(ctx context.Context, path, content string) (string, error) {
 	observed := e.identSnapshot()
 	result, err := e.writeFileOn(ctx, observed, path, content)
-	if sandboxGone(err) {
+	if sandboxGoneOnFileAPI(err) {
 		if rerr := e.recreateIfCurrent(ctx, observed); rerr != nil {
 			return "", rerr
 		}
