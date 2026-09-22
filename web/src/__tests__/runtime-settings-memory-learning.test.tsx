@@ -44,6 +44,7 @@ type UpdatePayload = {
   sandbox?: Record<string, unknown>;
   memory: { autoPersist: { enabled: boolean; everyNTurns: number; model?: string } };
   skillsLearner: { enabled: boolean; minToolCalls: number; model?: string };
+  privacy: { piiScrubbing: { enabled: boolean } };
 };
 
 const baseConfig = (overrides: Record<string, unknown> = {}) => ({
@@ -69,6 +70,7 @@ describe("runtime settings — memory auto-persist and the skills learner", () =
       baseConfig({
         memory: { autoPersist: { enabled: true, everyNTurns: 7, model: "p/distill" } },
         skillsLearner: { enabled: true, minToolCalls: 4, model: "p/extract" },
+        privacy: { piiScrubbing: { enabled: true } },
       }),
     );
 
@@ -82,6 +84,7 @@ describe("runtime settings — memory auto-persist and the skills learner", () =
     expect(screen.getByLabelText("Extraction model (optional)")).toHaveValue("p/extract");
     expect(screen.getByRole("switch", { name: "Memory auto-persist" })).toBeChecked();
     expect(screen.getByRole("switch", { name: "Skills learner" })).toBeChecked();
+    expect(screen.getByRole("switch", { name: "Redact PII before the model" })).toBeChecked();
   });
 
   it("an untouched save sends both namespaces with the stored numbers", async () => {
@@ -89,6 +92,7 @@ describe("runtime settings — memory auto-persist and the skills learner", () =
       baseConfig({
         memory: { autoPersist: { enabled: true, everyNTurns: 7 } },
         skillsLearner: { enabled: true, minToolCalls: 4 },
+        privacy: { piiScrubbing: { enabled: true } },
       }),
     );
 
@@ -108,6 +112,7 @@ describe("runtime settings — memory auto-persist and the skills learner", () =
       minToolCalls: 4,
       model: undefined,
     });
+    expect(payload.privacy).toEqual({ piiScrubbing: { enabled: true } });
     // The namespaces this page already owned must still be in the patch — the
     // handler is a PATCH, and a payload that dropped them would look saved.
     expect(payload.prefs).toBeDefined();
@@ -139,17 +144,20 @@ describe("runtime settings — memory auto-persist and the skills learner", () =
       baseConfig({
         memory: { autoPersist: { enabled: false } },
         skillsLearner: { enabled: true },
+        privacy: { piiScrubbing: { enabled: true } },
       }),
     );
 
     render(<RuntimeSettingsPage />);
     const learner = await screen.findByRole("switch", { name: "Skills learner" });
     await userEvent.click(learner);
+    await userEvent.click(screen.getByRole("switch", { name: "Redact PII before the model" }));
     await userEvent.click(screen.getByRole("button", { name: /save/i }));
 
     await waitFor(() => expect(api.updateConfig).toHaveBeenCalledTimes(1));
     const payload = api.updateConfig.mock.calls[0][0] as UpdatePayload;
     expect(payload.skillsLearner.enabled).toBe(false);
     expect(payload.memory.autoPersist.enabled).toBe(false);
+    expect(payload.privacy.piiScrubbing.enabled).toBe(false);
   });
 });

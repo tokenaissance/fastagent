@@ -269,6 +269,13 @@ export interface ConfigResponse {
     /** Empty = each agent's own model. */
     model?: string;
   };
+  // The `privacy` namespace (system scope): redaction of what leaves for a
+  // provider, installed once on the provider every model call passes through.
+  privacy?: {
+    piiScrubbing?: {
+      enabled?: boolean;
+    };
+  };
   wechat?: {
     splitReplies?: boolean;
   };

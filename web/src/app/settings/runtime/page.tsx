@@ -15,7 +15,15 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Save, Check, Clock, Container, Brain, GraduationCap } from "lucide-react";
+import {
+  Save,
+  Check,
+  Clock,
+  Container,
+  Brain,
+  GraduationCap,
+  ShieldCheck,
+} from "lucide-react";
 import { getConfig, updateConfig, getMe, type ConfigResponse } from "@/lib/api";
 
 export default function RuntimeSettingsPage() {
@@ -41,6 +49,7 @@ export default function RuntimeSettingsPage() {
   const [skillsLearnerEnabled, setSkillsLearnerEnabled] = useState(false);
   const [skillsLearnerMinToolCalls, setSkillsLearnerMinToolCalls] = useState("");
   const [skillsLearnerModel, setSkillsLearnerModel] = useState("");
+  const [piiScrubbingEnabled, setPiiScrubbingEnabled] = useState(false);
 
   useEffect(() => {
     // Belt-and-suspenders gate: the layout already hides the nav item,
@@ -95,6 +104,7 @@ export default function RuntimeSettingsPage() {
               : "",
           );
           setSkillsLearnerModel(cfg.skillsLearner?.model || "");
+          setPiiScrubbingEnabled(cfg.privacy?.piiScrubbing?.enabled ?? false);
         })
         .catch(() => {})
         .finally(() => setLoading(false));
@@ -138,6 +148,11 @@ export default function RuntimeSettingsPage() {
           minToolCalls:
             Number.isFinite(minToolCalls) && minToolCalls > 0 ? minToolCalls : 0,
           model: skillsLearnerModel.trim() || undefined,
+        },
+        privacy: {
+          piiScrubbing: {
+            enabled: piiScrubbingEnabled,
+          },
         },
         sandbox: {
           enabled: sandboxEnabled,
@@ -460,6 +475,37 @@ export default function RuntimeSettingsPage() {
             </div>
           </div>
         )}
+      </div>
+
+      <div className="rounded-lg border border-border bg-card">
+        <div className="p-5">
+          <div className="flex items-center justify-between">
+            <div>
+              <div className="flex items-center gap-2 mb-1">
+                <ShieldCheck className="h-4 w-4 text-rose-500" />
+                <h3 className="font-medium">Redact PII before the model</h3>
+              </div>
+              <p className="text-sm text-muted-foreground">
+                Emails, phone numbers, card numbers, SSNs, API keys, tokens, IPs and
+                private keys are replaced with placeholders in everything an agent
+                sends to a provider — the turn, the streaming turn, delegated
+                sub-agents, compaction and the memory extractor all pass through the
+                same provider, so the rule is installed once.
+              </p>
+              <p className="text-xs text-muted-foreground mt-1">
+                Known limit: the model&apos;s own earlier reply is replayed to it
+                byte-for-byte (prompt-cache identity), so a PII echo inside that reply
+                still travels. The session itself keeps the original text; only what
+                leaves is rewritten.
+              </p>
+            </div>
+            <Switch
+              aria-label="Redact PII before the model"
+              checked={piiScrubbingEnabled}
+              onCheckedChange={setPiiScrubbingEnabled}
+            />
+          </div>
+        </div>
       </div>
     </div>
   );
