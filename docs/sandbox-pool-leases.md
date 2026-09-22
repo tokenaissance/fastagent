@@ -402,13 +402,13 @@ the previous token.
 
 The pool adds a third, coarser one: `Get`/`Release` serialize **per scope**
 (64 striped locks), not process-wide. Everything in that path does network I/O
-— lease reads and writes, create, hydrate, verify, warmup (bounded at 120s) —
-and an earlier version held a single `p.mu` across all of it, so one cold scope
-stalled sandbox binding for every other agent. `p.mu` now guards only the
-executor/epoch maps, every critical section on it being a map lookup or
-assignment. Same-scope callers still queue on the same stripe, which is what
-preserves "one sandbox per scope"; unrelated scopes only queue when their keys
-happen to hash alike. Pinned by `TestE2BPoolProvisionsScopesConcurrently`.
+— lease reads and writes, create, hydrate, verify — and an earlier version held
+a single `p.mu` across all of it, so one cold scope stalled sandbox binding for
+every other agent. `p.mu` now guards only the executor/epoch maps, every
+critical section on it being a map lookup or assignment. Same-scope callers
+still queue on the same stripe, which is what preserves "one sandbox per
+scope"; unrelated scopes only queue when their keys happen to hash alike.
+Pinned by `TestE2BPoolProvisionsScopesConcurrently`.
 
 **A rebuild that fails** — hydrate or the `/workspace` probe can fail against a
 replacement that was created fine. The executor then destroys the unusable
@@ -432,6 +432,49 @@ Alternatives rejected as heavier than the problem:
 - **Reading `owner` back from the row to make the distinction.** The column
   exists, but the pool already knows whether *it* rebuilt the sandbox, so no
   schema or record change is needed.
+
+## Browser cold start (2026-09-22): the warm-up left the pool
+
+Provisioning used to end with `camoufox-cli open about:blank`, bounded at
+120 s, so that an agent's first `open` would attach to a live daemon instead of
+racing the client's own 5 s spawn wait. Two things were wrong with that.
+
+It dominated the cold start, for everyone: dev logged `e2b camoufox daemon
+warmed` and then `e2b sandbox provisioned … elapsedMs=25886`, while the same
+scope's *rebuilds* — create + hydrate + verify, no warm-up — logged
+`elapsedMs=1600`, `1759`, `1932`. The warm-up was ~24 s of a 26 s cold start,
+paid by every fresh scope including the ones that never open a browser.
+
+And it insured the wrong path. Only `Get`'s create path warmed: an instance
+adopted from another pod and a rebuilt one (`recreateIfCurrent`) were handed
+over cold, so the instances most likely to hit the race were exactly the ones
+that skipped the warm-up.
+
+The race is now absorbed where every launch path passes through:
+`deploy/docker/sandbox/camoufox-cli-shim.sh`. If the client exits non-zero
+**and no daemon socket exists** (the client's `ensure_daemon` never got past
+spawning, so the command was never sent), the shim waits for the socket — the
+daemon it already started keeps booting — and re-runs the same argv once,
+bounded by `CAMOUFOX_SHIM_WAIT_SECS` (default 20). Re-running the *same* argv is
+the point: the daemon the retry attaches to is configured with the caller's
+proxy / persistent profile / locale rather than a re-derived guess, which is
+why this is not a warm-up we control from Go. A command that a live daemon
+already answered is never replayed — that would replay a click or a fill.
+
+What it changes for an operator:
+
+- `e2b camoufox daemon warmed` is gone; `e2b sandbox provisioned` on a cold
+  scope should now land where the rebuild path does (~1.6-1.9 s on dev).
+- The first browser call in a fresh scope pays the cold start itself
+  (~25 s, previously hidden inside provisioning). Provisioning is no longer
+  slow for every agent in order to make one call fast.
+- The insurance lives in the sandbox **image**: rebuild and re-register the e2b
+  template *before* rolling out a gateway that no longer pre-warms, otherwise
+  the race is unguarded for the window between the two.
+
+Pinned by `internal/sandbox/camoufox_cli_shim_test.go` (offline, against a fake
+client) and the live cold-start check `TestE2BLiveBrowserColdStart`, which
+needs the rebuilt template.
 
 ## Files
 
@@ -459,6 +502,9 @@ Alternatives rejected as heavier than the problem:
   is destroy-and-replace, never a pause, see
   [§7 of the leak record](sandbox-scope-leak.md))
 - `internal/gateway/userspace.go` — pool wiring: per-pod owner id + lease store
+- `deploy/docker/sandbox/camoufox-cli-shim.sh` — the in-image shim in front of
+  `camoufox-cli`: injects `--proxy`, and absorbs the daemon's cold-start race
+  (see "Browser cold start")
 - `docs/sandbox-secret-rotation.md` — key rotation runbook
 
 ## Rollout
@@ -519,8 +565,7 @@ path:
   registry — it becomes one of the residues catalogued in "Orphan reaping".
 - **E2B provider failure during create/adopt**: create/hydrate/verify
   failures tear the new sandbox down so callers retry loudly; adopt-renew
-  errors keep the adopted executor usable but unregistered; warmup errors
-  are best-effort.
+  errors keep the adopted executor usable but unregistered.
 - **Race conditions**: concurrent acquire yields exactly one winner; losers
   adopt the winner; the double race (Acquire loss + CAS adoption miss) keeps
   the local unregistered sandbox until the next reconcile. This covers racing
