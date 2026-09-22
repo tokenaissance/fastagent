@@ -1268,6 +1268,20 @@ func (a *Agent) streamChatToResponseWithOptions(ctx context.Context, messages []
 			}
 		}
 		if chunk.Done {
+			// A reply that ended on the cap is not a reply: it stopped
+			// mid-message, and if it was emitting a tool call, that call's
+			// arguments are a JSON prefix. Name it here, where the cause is
+			// still a fact — downstream the only evidence is a tool answering
+			// a question the model never asked (2026-09-22: two write_file
+			// calls whose arguments ended mid-string, both at max_tokens).
+			if chunk.FinishReason == provider.FinishReasonLength {
+				slog.Warn("model output hit the token cap; its reply is cut off, and any tool call in it carries partial arguments",
+					"agent", a.name,
+					"model", a.model,
+					"max_tokens", a.maxTokens,
+					"tool_calls", len(chunk.ToolCalls),
+				)
+			}
 			toolCalls = chunk.ToolCalls
 			if chunk.Thinking != "" {
 				thinking = chunk.Thinking
