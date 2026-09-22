@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -105,12 +106,14 @@ func (t *toolAdapter) IsReadOnly(input map[string]interface{}) bool {
 // sdkEngine wraps SDK components for concurrent tool execution and cost tracking.
 type sdkEngine struct {
 	costTracker *costtracker.Tracker
+	sessionID   string
 }
 
 // newSDKEngine creates a new SDK engine with cost tracking.
 func newSDKEngine(sessionID string) *sdkEngine {
 	return &sdkEngine{
 		costTracker: costtracker.NewTracker(sessionID),
+		sessionID:   sessionID,
 	}
 }
 
@@ -140,6 +143,50 @@ type toolCallResult struct {
 	err        error
 }
 
+// parseToolCallArguments turns one call's argument text into the map the tool
+// sees — or into the failure the model must hear instead of running it.
+//
+// Empty arguments are a call, not a broken one: providers send "" for a call
+// that takes no parameters, and the tool should see the same {} it would see for
+// "{}". Everything else has to parse. A truncated call must never reach a tool
+// as though the model had said something.
+func (e *sdkEngine) parseToolCallArguments(tc provider.ToolCall) (map[string]interface{}, *toolCallResult) {
+	raw := tc.Function.Arguments
+	if strings.TrimSpace(raw) == "" {
+		return map[string]interface{}{}, nil
+	}
+	var input map[string]interface{}
+	if err := json.Unmarshal([]byte(raw), &input); err != nil {
+		slog.Warn("tool call arguments are not valid JSON; the tool was not run",
+			"session", e.sessionID, "tool", tc.Function.Name, "call", tc.ID,
+			"bytes", len(raw), "error", err)
+		return nil, &toolCallResult{
+			toolCallID: tc.ID,
+			toolName:   tc.Function.Name,
+			result:     uncallableArgumentsMessage(tc.Function.Name, len(raw)),
+			err:        fmt.Errorf("%s: arguments are not valid JSON: %w", tc.Function.Name, err),
+		}
+	}
+	if input == nil { // a literal "null" parses cleanly into a nil map
+		input = map[string]interface{}{}
+	}
+	return input, nil
+}
+
+// uncallableArgumentsMessage is what the model hears when its own output was cut
+// off mid-call. It names the cause and the size, and it may not hand the model a
+// downstream tool's guess about a missing key: on 2026-09-22 "write_file: path
+// is required" for a call that did carry a path sent the model off to re-emit
+// the whole document, straight back into the cap that had cut it off.
+func uncallableArgumentsMessage(toolName string, size int) string {
+	return fmt.Sprintf(
+		"%s was not run: its arguments are not valid JSON (%d bytes received). "+
+			"The call was cut off before it finished — most often because the response hit the output token limit. "+
+			"Nothing was executed. Re-send the work in smaller pieces; for write_file, write a short first chunk and append the rest with edit_file.",
+		toolName, size,
+	)
+}
+
 // executeToolsConcurrently runs tool calls using the SDK's executor.
 //
 // Each call is launched on its own instead of handing the executor one batch, so
@@ -155,12 +202,20 @@ func (e *sdkEngine) executeToolsConcurrently(ctx context.Context, fcRegistry *to
 		AbortCtx:   ctx,
 	})
 
-	// Convert FastAgent tool calls to SDK format
+	// Convert FastAgent tool calls to SDK format. A call whose arguments do not
+	// parse is never converted: it fails here, in its own words, and no tool runs
+	// on it. Until 2026-09-22 the bridge substituted {"_raw": <the broken text>}
+	// and dispatched it anyway, so a call cut off mid-string came back as the
+	// tool's guess about a missing key ("write_file: path is required" for a call
+	// that carried a path) and the model went off to re-emit the 17 KB document
+	// it had just failed to emit.
 	calls := make([]sdktools.ToolCallRequest, len(toolCalls))
+	preflight := make([]*toolCallResult, len(toolCalls))
 	for i, tc := range toolCalls {
-		var input map[string]interface{}
-		if err := json.Unmarshal([]byte(tc.Function.Arguments), &input); err != nil {
-			input = map[string]interface{}{"_raw": tc.Function.Arguments}
+		input, failure := e.parseToolCallArguments(tc)
+		if failure != nil {
+			preflight[i] = failure
+			continue
 		}
 		calls[i] = sdktools.ToolCallRequest{
 			ToolUseID: tc.ID,
@@ -176,7 +231,12 @@ func (e *sdkEngine) executeToolsConcurrently(ctx context.Context, fcRegistry *to
 	start := time.Now()
 	results := make([]toolCallResult, len(toolCalls))
 	run := func(i int) {
-		r := convertToolResponses(toolCalls[i:i+1], executor.RunTools(ctx, calls[i:i+1]))[0]
+		r := toolCallResult{}
+		if preflight[i] != nil {
+			r = *preflight[i]
+		} else {
+			r = convertToolResponses(toolCalls[i:i+1], executor.RunTools(ctx, calls[i:i+1]))[0]
+		}
 		results[i] = r
 		if onResult != nil {
 			onResult(r)
@@ -189,6 +249,12 @@ func (e *sdkEngine) executeToolsConcurrently(ctx context.Context, fcRegistry *to
 	// a finished call be reported without waiting for the round's join.
 	var parallel, serial []int
 	for i := range calls {
+		if preflight[i] != nil {
+			// Nothing to dispatch: the call already failed and is reported at its
+			// declared position on the in-order path below.
+			serial = append(serial, i)
+			continue
+		}
 		if tool := sdkReg.Get(calls[i].ToolName); tool != nil && tool.IsConcurrencySafe(calls[i].Input) {
 			parallel = append(parallel, i)
 		} else {
