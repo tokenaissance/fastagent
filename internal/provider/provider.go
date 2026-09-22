@@ -252,11 +252,22 @@ func (r *Response) HasToolCalls() bool {
 	return len(r.ToolCalls) > 0
 }
 
+// FinishReasonLength is the normalized way a provider says "I stopped because I
+// ran out of output budget" — OpenAI-compatible providers send "length",
+// Anthropic sends "max_tokens". It is the one ending that is not the model
+// choosing to stop: it cuts messages (and tool call arguments) mid-sentence, so
+// the consumer logs it rather than reading it as a reply that simply ended.
+const FinishReasonLength = "length"
+
 // StreamChunk represents a single chunk from a streaming response.
 type StreamChunk struct {
 	Content   string
 	ToolCalls []ToolCall
 	Done      bool
+	// FinishReason is the provider's own word for why generation ended
+	// ("stop", "tool_calls", FinishReasonLength, …), carried on the final
+	// (Done) chunk. Empty when the provider did not say.
+	FinishReason string
 	// Thinking is emitted once at message_stop (if the model produced any)
 	// so callers can persist it alongside the final assistant message —
 	// required so the next turn can echo content[].thinking back to
