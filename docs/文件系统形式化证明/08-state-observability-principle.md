@@ -660,10 +660,13 @@ false`），而 agent 记录里带的只有覆盖值。这在第 52 行没有读
 
 **写者那一半，要说窄**——说宽了就只是噪音：一个面**把它当作控件来呈现**的开关，必须对该面所服务的
 角色可写，否则同一个假 σ 会从另一边出现（一个改变不了它看似在控制的东西的控件）。如果唯一的写者是
-配置 API，那这一行就是操作者/API 开关，而展示它的面必须说明这一点。今天的实测：`memory`、`privacy`、
-`skillsLearner` 三个都只有 API 写者——`POST /api/config`；两个仓库的面板都没有它们的表单，也没有任何
-面宣称有。这里记为一条观测，不记成违规；上面那个自动记忆开关才是唯一一个真的呈现了相关行、并且呈现
-错了的面。
+配置 API，那这一行就是操作者/API 开关，而展示它的面必须说明这一点。这条分两趟测。2026-09-22 早上，
+这三行都只有 API 写者——`POST /api/config`；两个仓库的面板都没有它们的表单，也没有任何面宣称有——
+所以这一半当时是**记成观测、不记成违规**：没有任何面在歪曲它们。当天下午，前两个拿到了缺的那个
+控件：fastagent webui 的 Runtime 页面（super_admin ⇒ `scopeForSave` → system scope，sandbox 那块
+本来就从同一个 scope 存）现在带着 `memory.autoPersist`（开关 / 节奏 / 模型）与 `skillsLearner`
+（开关 / 工具调用下限 / 模型）——正是 register 第 52、51 行：它们的读者几天前就有了见证，而写者一直是
+一次手搓的 HTTP 调用。`privacy.piiScrubbing` 仍然只有 API 写者：记为观测，不记成违规。
 
 见证（每一跳一个，外加关键那一跳的反证）：`19834b5` ——
 `TestThePiiScrubbingRowReachesEveryAgentProvider`（行到达 gateway 构建的那个 provider）与
@@ -675,4 +678,8 @@ false`），而 agent 记录里带的只有覆盖值。这在第 52 行没有读
 `TestTheMemoryRowIsWhatTurnsAutoPersistOn`（行 → 真回合 → 蒸馏真的开火）；`80ac0833` —— cloud
 `src/__tests__/fastagent/auto-persist-inherited-state.test.tsx`（渲染：继承开 / 继承关 / 未知，以及
 一旦有覆盖就不再出现继承行）。每一行自己的反证都真跑过，记在 register 的格子里；`53` 是删除形态，
-所以它的验证是全仓引用计数加各套件，不是一条见证。
+所以它的验证是全仓引用计数加各套件，不是一条见证。写者那一半落在 `e611f3c`：页面发出的载荷由
+`web/src/__tests__/runtime-settings-memory-learning.test.tsx` 钉住（四例，含"空格子 = 0，也就是
+线上的 unset"），而从那串载荷到读者的那一跳由 `TestRuntimePage_CanSetMemoryAndSkillLearning` 钉住
+（真 handler、真 store、system scope，再用网关同一条 typed 读法读回）。已真反证：把两个命名空间从
+载荷里去掉 ⇒ web 四例中 3 例红；把保存改成 user scope ⇒ Go 那条每一处断言都红。

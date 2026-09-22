@@ -751,10 +751,14 @@ the inherited state, and renders **unknown** when the row cannot be read (a non-
 *presents as a control* must be writable by the role that surface is for, or else the same false σ
 appears from the other side (a control that cannot change what it appears to control). Where the only
 writer is the config API, the row is an operator/API switch and the surfaces that show it must say so.
-Measured today: `memory`, `privacy` and `skillsLearner` are API-only — `POST /api/config` is the writer,
-neither repo's panel has a form for them, and no surface claims otherwise. That is recorded here, not
-booked as a violation; the auto-remember switch above was the one surface that did present a related row
-and got it wrong.
+Measured in two passes. On 2026-09-22 morning all three rows were API-only — `POST /api/config` was the
+writer, no panel had a form for them, and no surface claimed otherwise — which is why this half was
+recorded rather than booked: nothing was misrepresenting a row. The same afternoon the first two got the
+control they were missing: the fastagent webui's Runtime page (super_admin ⇒ `scopeForSave` → system
+scope, the scope the sandbox block is already saved from) now carries `memory.autoPersist` (enabled /
+cadence / model) and `skillsLearner` (enabled / tool-call floor / model) — register rows 52 and 51, whose
+readers were witnessed days earlier while their writers were a hand-made HTTP call. `privacy.piiScrubbing`
+is still API-only: recorded, not booked.
 
 Witnesses (one per hop, and the falsification for the hop that matters): `19834b5` —
 `TestThePiiScrubbingRowReachesEveryAgentProvider` (the row reaches the provider the gateway builds) and
@@ -767,4 +771,9 @@ the veto) and `TestTheMemoryRowIsWhatTurnsAutoPersistOn` (row → real turn → 
 cloud `src/__tests__/fastagent/auto-persist-inherited-state.test.tsx` (the render: inherited on / off /
 unknown, and no inherit line once an override exists). Each row's own falsification was run for real and
 is recorded in the register cell; `53` is deletion-shaped, so its verification is a repo-wide reference
-count plus the suites, not a witness.
+count plus the suites, not a witness. The writer half landed as `e611f3c`: the page's payload is pinned by
+`web/src/__tests__/runtime-settings-memory-learning.test.tsx` (the four cases, including "an emptied box
+means 0, the wire's unset"), and the hop from that payload to the reader by
+`TestRuntimePage_CanSetMemoryAndSkillLearning` (real handler, real store, system scope, read back through
+the typed call the gateway makes). Falsified for real: dropping the two namespaces reddens 3 of the 4 web
+cases, and saving at user scope instead of system scope reddens the Go test on every assertion.
