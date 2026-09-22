@@ -7,8 +7,8 @@ package gateway
 // turns on really writes MEMORY.md / USER.md).
 //
 // This one pins the link above it: that the row an operator writes — namespace
-// "memory", the only surface for it (no dashboard renders autoPersist's cadence
-// or model) — reaches the option, so a real turn's post-turn pass actually
+// "memory", saved from the webui's Runtime page (super_admin ⇒ system scope),
+// which is also the only place its cadence and model can be set — reaches the option, so a real turn's post-turn pass actually
 // fires. The negative half (no row, no firing) is what makes the positive half
 // mean something rather than pass on some other default.
 
