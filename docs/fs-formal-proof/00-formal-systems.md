@@ -44,7 +44,7 @@ For a mechanism M that changes the agent's world:
 |--------|--------|---------|----------------|
 | `World(t)` / `Belief(t)` | F2 | the world's real state / the agent's belief about it | `envSnapshot` |
 | `δ` | F2 | one fact that the world changed | `sandbox.delta`, `sandbox.WriteThroughOutcome`, the diffs inside `envSnapshot` |
-| `σ(δ)` | F2 | δ rendered as one sentence the agent can read | `signalsFor(delta)`, `Registry.writeThroughSignal`, `envTracker.signal` |
+| `σ(δ)` | F2 | δ rendered as one sentence the agent can read | `signalsFor(delta)`, `Registry.writeThroughSignal`, `renderEnvDelta` / `Agent.signalEnvironmentChanges` |
 | C1 / C2 / C3 | F2 | a channel it really reads / silence ≠ no change / an exception channel | the three exits + the witnesses in §5 |
 | `produce` / `place` / `take` | F3 | produce / place / take | the role table in [08 §2.2.1](./08-state-observability-principle.md) |
 | **I1** | F3 | the separation of the three powers: `place` belongs to the change side, `take` to the consumer | — |

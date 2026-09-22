@@ -41,7 +41,7 @@
 |------|------|------|---------|
 | `World(t)` / `Belief(t)` | F2 | 世界真实状态 / agent 对它的信念 | `envSnapshot` |
 | `δ` | F2 | 一次世界变化的事实 | `sandbox.delta`、`sandbox.WriteThroughOutcome`、`envSnapshot` 的各项 diff |
-| `σ(δ)` | F2 | 把 δ 变成 agent 可读的一句话 | `signalsFor(delta)`、`Registry.writeThroughSignal`、`envTracker.signal` |
+| `σ(δ)` | F2 | 把 δ 变成 agent 可读的一句话 | `signalsFor(delta)`、`Registry.writeThroughSignal`、`renderEnvDelta` / `Agent.signalEnvironmentChanges` |
 | C1 / C2 / C3 | F2 | 进真正读的通道 / 沉默 ≠ 无变化 / 异常通道 | 三个出口 + §5 的 witness |
 | `produce` / `place` / `take` | F3 | 产生 / 投递 / 取走 | 见 [08 §2.2.1](./08-state-observability-principle.md) 的角色表 |
 | **I1** | F3 | 三权分离：`place` 归变更侧，`take` 归消费侧 | — |

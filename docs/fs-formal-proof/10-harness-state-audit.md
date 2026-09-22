@@ -653,9 +653,10 @@ warning instead of stalling the drain loop — a remedy for observability must n
 > replicas, started in the same minute with **0 restarts**, do not have the same footprint:
 > `kubectl -n production top pod` on 2026-09-19 read **96Mi** (62mx9) and **88Mi** (vxrcx) after 2d9h.
 >
-> **Fix (landed in the working tree, not yet deployed)**: an LRU bound — `sessionCacheMaxSize = 128`,
-> never dropping the caller's own session or any session with work in flight — plus one footprint line
-> per 100 cache-touching `Get`s. `TestSessionCacheEvictsIdleEntriesAndRebuildsThem` pins that a dropped
+> **Fix (landed in the working tree, not yet deployed)**: an LRU bound — `sessionCacheMaxSize = 128`
+> (later renamed and re-sized: the constant is now `agentSessionCacheMaxSessions` = **10 sessions per
+> agent** — see the blockquote below), never dropping the caller's own session or any session with work
+> in flight — plus one footprint line per 100 cache-touching `Get`s. `TestSessionCacheEvictsIdleEntriesAndRebuildsThem` pins that a dropped
 > entry is rebuilt from the authoritative store (so eviction is unobservable) and
 > `TestSessionCacheKeepsSessionsWithWorkInFlight` pins that in-flight state is never dropped.
 > **The first implementation was a pure idle TTL and the test caught it**: when every entry was touched
