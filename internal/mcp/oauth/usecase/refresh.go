@@ -114,7 +114,13 @@ func (uc *RefreshToken) Execute(ctx context.Context, in RefreshInput) (*domain.O
 		return tokens, nil
 	}
 	if tokens.RefreshToken == "" {
-		return nil, fmt.Errorf("oauth: no refresh token stored")
+		// The mechanical fact ("this record has no refresh token") is a
+		// property of the provider, not of this store: some authorization
+		// servers grant only `authorization_code` and never issue one. What
+		// the caller can act on is the remedy, so say that.
+		return nil, fmt.Errorf("%w: the stored credential for %q carries no refresh token, "+
+			"so it cannot be renewed automatically; authorize the server again",
+			domain.ErrReauthRequired, in.ServerName)
 	}
 	md, err := uc.Meta.Fetch(ctx, in.ServerURL)
 	if err != nil {
