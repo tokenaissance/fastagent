@@ -49,6 +49,38 @@ fastagent 的 MCP 客户端（`internal/mcp/`）目前只支持 **静态 header 
 | token 生命周期 | access 7 天 + refresh 自动旋转 | 客户端必须实现刷新 |
 | `revocation_endpoint` | 存在 | 支持主动吊销 |
 
+### 0.1.1 对 QuantConnect 服务端的实测结论（2026-09-22）
+
+`quantconnect` @ `https://www.quantconnect.com/api/v2/mcp`（dev，agent `agt_e5867879c33d9e98662b`）。元数据实取 `https://www.quantconnect.com/.well-known/oauth-authorization-server`。
+
+| 项目 | 实测值 | 影响 |
+|---|---|---|
+| `grant_types_supported` | **只有 `authorization_code`** | 没有 `refresh_token` 授权类型 ⇒ 该 server 的凭证**天生一次性** |
+| `scopes_supported` | **未声明** | 只能请求空 scope（`start.go` 回落到 `md.ScopesSupported`=空）；也**不要**盲加 `offline_access`——RFC 6749 §3.3 允许 AS 对未知 scope 报错 |
+| `authorization_endpoint` | `https://www.quantconnect.com/mcp-authorize` | 未登录先 302 到 `/login/`，scope 校验在登录之后 ⇒ 未登录无法探测 scope 是否被接受 |
+| `token_endpoint` | `https://www.quantconnect.com/api/v2/mcp/token` | |
+| `registration_endpoint` | `https://www.quantconnect.com/api/v2/mcp/register` | 动态注册可用 |
+| `code_challenge_methods_supported` | `S256` | PKCE |
+| `revocation_endpoint` | **未声明** | 吊销只能删本地 |
+| access token 寿命 | **7200 s（2 小时）** | 实测：落库 `2026-09-19T12:00:33Z` → `expires_at 2026-09-19T14:00:33Z` |
+
+同一时刻从共享表里解出的存量凭证（**只看形状，不看 token 值**）：
+
+```
+keys=[access_token expires_at issuer]   refresh_token_present=false
+expires_at="2026-09-19T14:00:33.981129839Z"   scopes=[]   issuer="https://www.quantconnect.com"
+```
+
+**结论：QuantConnect 的凭证是一次性的。** 授权后最多用 2 小时，之后没有任何本地手段能续——`refresh` 无物可刷，只能由 owner 重新授权。三条后果：
+
+1. 客户端不能把它归入「刷新失败」（那是可重试的），必须归入「需要重新授权」（只有人能修）⇒ `domain.ErrReauthRequired`（§11.1 的领域错误块）；
+2. `mcp.Manager` 的跳过日志必须点明补救动作，不能与「主机连不上」共用一句话（`manager_reauth_log_test.go` 钉住这个区分）；
+3. 产品含义：**每 2 小时一次人工浏览器授权**。自动化场景下 QuantConnect 远程 MCP 目前不适合长期挂着，除非 QC 侧给 refresh。
+
+> 未核实项：请求 `offline_access` 是否会让 QC 下发 refresh token。它的元数据没有声明 `refresh_token` 授权类型，而实测请求未带 `offline_access` 时确实没下发；登录前又无法探测 scope 是否被接受，所以这一点目前只能标「未核实」。
+
+（对照：`quandora` 是 7 天 access + 旋转 refresh，本客户端面向它的假设成立，见上一张表。）
+
 **核心矛盾**：fastagent 是无头服务器，浏览器在用户机器上；OAuth 回调的 redirect 永远落在**浏览器那端**，code 必须经一条安全通道回到服务器。
 
 ### 0.2 目标
@@ -549,9 +581,12 @@ agent 侧 `mcp` 工具是 **host 级发起器**（§5.6）：模型产 URL、宿
 
 ```
 authorized ── access 过期 ──> refresh（带锁） ──> authorized
+authorized ── access 过期且 provider 不发 refresh token ──> reauth_required（本地无法续，等 owner 重新授权；§0.1.1）
 authorized ──> revoke（调 revocation_endpoint + 删本地）
 authorized ──> logout ──> 删本地（可选远端）
 ```
+
+`reauth_required` 是一个**独立状态**，不是 refresh 的错误分支：它的判据是 `domain.ErrReauthRequired`，对人可见的形态是控制台 `/api/mcp/oauth/servers` 的 `expired` 徽标，对运维可见的形态是 gateway 日志里的 `MCP server needs re-authorization, skipping`。
 
 ### 7.3 安全边界声明
 
@@ -820,6 +855,10 @@ var (
 	ErrDenied        = errors.New("oauth: authorization denied")
 	ErrMissingCode   = errors.New("oauth: missing authorization code")
 	ErrIssuerMismatch = errors.New("oauth: issuer mismatch")
+	// 凭证无法本地续期：provider 从未下发 refresh token（如 QuantConnect，
+	// §0.1.1）。与「刷新调用失败」不是同一件事——那个可以重试，这个只能由
+	// owner 重新授权，所以单独命名，让调用方能分辨（§7.2）。
+	ErrReauthRequired = errors.New("oauth: re-authorization required")
 )
 
 // —— 纯函数 ——
@@ -1214,7 +1253,11 @@ func (uc *RefreshToken) Execute(ctx context.Context, in RefreshInput) (*domain.O
 		return nil, err
 	}
 	if tokens.RefreshToken == "" {
-		return nil, fmt.Errorf("oauth: no refresh token stored")
+		// 该字段缺失是 **provider 从未下发**（如 QuantConnect 只授权 authorization_code），
+		// 不是本地存储坏了；能采取的动作是重新授权，所以复述这个动作（§0.1.1）。
+		return nil, fmt.Errorf("%w: the stored credential for %q carries no refresh token, "+
+			"so it cannot be renewed automatically; authorize the server again",
+			domain.ErrReauthRequired, in.ServerName)
 	}
 	md, err := uc.Meta.Fetch(ctx, in.ServerURL)
 	if err != nil {
