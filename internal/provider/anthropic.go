@@ -412,6 +412,14 @@ type anthropicMessageStart struct {
 }
 
 type anthropicMessageDelta struct {
+	// delta.stop_reason is why generation ended ("end_turn", "tool_use",
+	// "max_tokens"). Anthropic's "max_tokens" is the same fact as OpenAI's
+	// "length", so it is normalized to FinishReasonLength below rather than
+	// passed through — a consumer deciding whether a reply was cut off must
+	// not have to know which provider it is talking to.
+	Delta struct {
+		StopReason string `json:"stop_reason"`
+	} `json:"delta"`
 	Usage anthropicUsage `json:"usage"`
 }
 
@@ -472,6 +480,7 @@ func (p *AnthropicProvider) ChatStream(ctx context.Context, messages []Message, 
 		}
 		blocks := make(map[int]*blockState)
 		var usage Usage
+		var finishReason string
 
 		for scanner.Scan() {
 			line := scanner.Text()
@@ -495,8 +504,19 @@ func (p *AnthropicProvider) ChatStream(ctx context.Context, messages []Message, 
 				}
 			case "message_delta":
 				var md anthropicMessageDelta
-				if json.Unmarshal([]byte(data), &md) == nil && md.Usage.OutputTokens > 0 {
-					usage.OutputTokens = md.Usage.OutputTokens
+				if json.Unmarshal([]byte(data), &md) == nil {
+					if md.Usage.OutputTokens > 0 {
+						usage.OutputTokens = md.Usage.OutputTokens
+					}
+					// Only the cap is translated: every other stop_reason
+					// ("end_turn", "tool_use") already means the same thing
+					// here as it does on the OpenAI side.
+					if fr := md.Delta.StopReason; fr != "" {
+						if fr == "max_tokens" {
+							fr = FinishReasonLength
+						}
+						finishReason = fr
+					}
 				}
 			case "content_block_start":
 				var cbs anthropicContentBlockStart
@@ -575,6 +595,7 @@ func (p *AnthropicProvider) ChatStream(ctx context.Context, messages []Message, 
 					Thinking:          thinkingText,
 					ThinkingSignature: thinkingSig,
 					Usage:             usage,
+					FinishReason:      finishReason,
 					Done:              true,
 				}:
 				case <-ctx.Done():
