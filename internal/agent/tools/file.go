@@ -93,6 +93,23 @@ func writeFileSchema(pathDescription string) map[string]interface{} {
 	}
 }
 
+// singlePathSchema is the JSON schema for the tools that take exactly one path
+// argument (read_file, list_dir). Like writeFileSchema it is a function because
+// the path hint is written from each registration's own vantage point, and the
+// two registrations share the rest so only that one sentence can ever drift.
+func singlePathSchema(pathDescription string) map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"path": map[string]interface{}{
+				"type":        "string",
+				"description": pathDescription,
+			},
+		},
+		"required": []string{"path"},
+	}
+}
+
 const editDescription = "Edit a file by replacing an exact substring. Prefer this over write_file when changing only part of a file (especially identity files like SOUL.md / MEMORY.md): it's cheaper, can't drop unrelated content, and validates the replacement was applied. old_string must match a unique substring unless replace_all is true; new_string must differ from old_string. Read the file first if you're unsure of the exact text."
 
 // validateFileTargetPath rejects path arguments to write-like ops that
@@ -410,30 +427,14 @@ func (r *Registry) rootForPath(path string) string {
 }
 
 func registerFile(r *Registry) {
-	r.Register("read_file", "Read the contents of a file", map[string]interface{}{
-		"type": "object",
-		"properties": map[string]interface{}{
-			"path": map[string]interface{}{
-				"type":        "string",
-				"description": "File path (relative to your working directory or absolute)",
-			},
-		},
-		"required": []string{"path"},
-	}, makeReadFile(r))
+	r.Register("read_file", "Read the contents of a file",
+		singlePathSchema("File path (relative to your working directory or absolute)"), makeReadFile(r))
 
 	r.Register("write_file", writeFileDescription,
 		writeFileSchema("File path (relative to your working directory or absolute)"), makeWriteFile(r))
 
-	r.Register("list_dir", "List files and directories in a path", map[string]interface{}{
-		"type": "object",
-		"properties": map[string]interface{}{
-			"path": map[string]interface{}{
-				"type":        "string",
-				"description": "Directory path (relative to your working directory or absolute)",
-			},
-		},
-		"required": []string{"path"},
-	}, makeListDir(r))
+	r.Register("list_dir", "List files and directories in a path",
+		singlePathSchema("Directory path (relative to your working directory or absolute)"), makeListDir(r))
 
 	r.Register("edit_file", editDescription, editSchema, makeEditFile(r))
 }
@@ -1110,16 +1111,9 @@ func (r *Registry) writeThroughSignal(ctx context.Context, path, content, previo
 // sandbox badge is emitted only for the executor-fallback path — store
 // hits intentionally don't badge, since they didn't run in the sandbox.
 func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
-	r.Register("read_file", "Read the contents of a file", map[string]interface{}{
-		"type": "object",
-		"properties": map[string]interface{}{
-			"path": map[string]interface{}{
-				"type":        "string",
-				"description": "File path (identity file, workspace-relative, or absolute inside the sandbox)",
-			},
-		},
-		"required": []string{"path"},
-	}, func(ctx context.Context, rawArgs json.RawMessage) (string, error) {
+	// One line on purpose, same as write_file below: wrapping the argument list
+	// would re-indent the closure and bury the change in whitespace.
+	r.Register("read_file", "Read the contents of a file", singlePathSchema("File path (identity file, workspace-relative, or absolute inside the sandbox)"), func(ctx context.Context, rawArgs json.RawMessage) (string, error) {
 		var args readFileArgs
 		if err := json.Unmarshal(rawArgs, &args); err != nil {
 			return "", fmt.Errorf("parse args: %w", err)
@@ -1276,16 +1270,7 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 		}
 	})
 
-	r.Register("list_dir", "List files and directories in a path", map[string]interface{}{
-		"type": "object",
-		"properties": map[string]interface{}{
-			"path": map[string]interface{}{
-				"type":        "string",
-				"description": "Directory path (workspace-relative or absolute inside the sandbox)",
-			},
-		},
-		"required": []string{"path"},
-	}, func(ctx context.Context, rawArgs json.RawMessage) (string, error) {
+	r.Register("list_dir", "List files and directories in a path", singlePathSchema("Directory path (workspace-relative or absolute inside the sandbox)"), func(ctx context.Context, rawArgs json.RawMessage) (string, error) {
 		var args listDirArgs
 		if err := json.Unmarshal(rawArgs, &args); err != nil {
 			return "", fmt.Errorf("parse args: %w", err)
