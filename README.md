@@ -420,7 +420,7 @@ nothing below works out of order:
 2. Register the E2B template from its SDK definition — a TS script, not the TOML the
    retired Build System 1.0 read:
    ```bash
-   E2B_API_KEY=... bun deploy/docker/sandbox/build.prod.ts   # -> fastclaw-sandbox
+   E2B_API_KEY=... bun deploy/docker/sandbox/build.prod.ts   # -> fastagent-sandbox-prod
    E2B_API_KEY=... bun deploy/docker/sandbox/build.dev.ts    # -> fastagent-sandbox
    ```
    Both import the `e2b` SDK. `bun` runs these TS files directly (no `tsx` step); this repo has
@@ -432,7 +432,7 @@ nothing below works out of order:
    that sentence rather than letting a stale template pass.
 4. Get your E2B API key from [e2b.dev/dashboard](https://e2b.dev/dashboard).
 
-> The value must be a **template name or id** (`fastclaw-sandbox`, `fastagent-sandbox`), never a
+> The value must be a **template name or id** (`fastagent-sandbox-prod`, `fastagent-sandbox`), never a
 > Docker image reference, and two places can carry it — the per-backend field wins: the dashboard at
 > Settings -> Runtime -> Sandbox -> **E2B Template** (writes `sandbox.e2bTemplate`), and `sandbox.image`
 > above, which lands in the legacy shared slot (`FASTAGENT_SANDBOX_IMAGE`) and is read only when
