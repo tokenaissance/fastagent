@@ -1,12 +1,14 @@
 package workspace
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -46,6 +48,14 @@ type fakeS3 struct {
 	// Every conditional PUT's headers, so a test can read what the client sent
 	// rather than infer it from a status code.
 	putHeaders []http.Header
+	// The byte count of every PUT body, so a retry that "succeeds" with an empty
+	// payload cannot pass as a landed write.
+	putBodies []int
+	// ifMatchUnsupported reproduces the store we actually run on: Ceph RGW
+	// (DigitalOcean Spaces) implements the create-only form and nothing else —
+	// every If-Match answers 412, even when the object still carries exactly the
+	// version the client just read. Measured 2026-09-22 against nyc3 Spaces.
+	ifMatchUnsupported bool
 }
 
 func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -84,10 +94,26 @@ func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			s3Error(w, http.StatusBadRequest, "InvalidRequest")
 			return
 		}
+		// The client signs a stream, so the payload arrives in aws-chunked
+		// framing and Go's server hands it over exactly as sent. Real S3 decodes
+		// it; the fake has to as well, or "the bytes landed" is not assertable.
+		if strings.Contains(r.Header.Get("Content-Encoding"), "aws-chunked") {
+			decoded, derr := decodeAWSChunked(body)
+			if derr != nil {
+				s3Error(w, http.StatusBadRequest, "InvalidChunk")
+				return
+			}
+			body = decoded
+		}
 		f.putHeaders = append(f.putHeaders, r.Header.Clone())
+		f.putBodies = append(f.putBodies, len(body))
 		// S3 semantics: If-None-Match: * means "must not exist", If-Match means
 		// "must still be this version". Both answer 412 on failure.
 		if r.Header.Get("If-None-Match") == "*" && exists {
+			s3Error(w, http.StatusPreconditionFailed, "PreconditionFailed")
+			return
+		}
+		if f.ifMatchUnsupported && r.Header.Get("If-Match") != "" {
 			s3Error(w, http.StatusPreconditionFailed, "PreconditionFailed")
 			return
 		}
@@ -104,6 +130,37 @@ func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	default:
 		s3Error(w, http.StatusMethodNotAllowed, r.Method+" "+r.URL.String())
+	}
+}
+
+// decodeAWSChunked unwraps SigV4 streaming framing:
+//
+//	<hex size>;chunk-signature=<sig>\r\n<bytes>\r\n … 0;chunk-signature=…\r\n\r\n
+func decodeAWSChunked(b []byte) ([]byte, error) {
+	var out []byte
+	for {
+		i := bytes.Index(b, []byte("\r\n"))
+		if i < 0 {
+			return nil, fmt.Errorf("chunk header: no CRLF")
+		}
+		head := string(b[:i])
+		b = b[i+2:]
+		sizeField, _, _ := strings.Cut(head, ";")
+		n, err := strconv.ParseInt(strings.TrimSpace(sizeField), 16, 64)
+		if err != nil {
+			return nil, fmt.Errorf("chunk size %q: %w", sizeField, err)
+		}
+		if n == 0 {
+			return out, nil
+		}
+		if int64(len(b)) < n {
+			return nil, fmt.Errorf("chunk of %d bytes, %d left", n, len(b))
+		}
+		out = append(out, b[:n]...)
+		b = b[n:]
+		if len(b) >= 2 {
+			b = b[2:] // the CRLF that closes the chunk
+		}
 	}
 }
 
@@ -168,6 +225,76 @@ func TestS3VersionIsTheETagAndTheConditionRidesTheRequest(t *testing.T) {
 	// make the witness depend on the SDK's encoding.)
 	if got := fake.objects["agt/notes.md"].etag; got != "etag-2" {
 		t.Fatalf("the object's ETag after the refused write = %q; want etag-2 (the stale write must not land)", got)
+	}
+}
+
+// The store we actually run on answers 412 to every If-Match (see
+// fakeS3.ifMatchUnsupported). On that backend a refused precondition is not a
+// competing writer — the object still carries exactly the version we sent — so
+// an overwrite has to land anyway. Without this, every edit of an existing file
+// fails while every brand-new file succeeds, which is exactly what the 09-22 dev
+// session looked like (todo.md created ✓, the 25 KB document created ✓, then
+// edit_file / apply_patch refused three times in a row as "another writer
+// changed it").
+//
+// Falsification: drop the fallback from S3.PutIfVersion and the first
+// PutIfVersion below fails with ErrVersionConflict.
+func TestS3OverwriteLandsOnABackendWithoutIfMatch(t *testing.T) {
+	ctx := context.Background()
+	store, fake := newFakeS3Store(t)
+	fake.ifMatchUnsupported = true
+
+	if err := store.Put(ctx, "agt", "", "", "notes.md", strings.NewReader("v1"), 2, "text/markdown"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	info, err := store.Stat(ctx, "agt", "", "", "notes.md")
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if err := store.PutIfVersion(ctx, "agt", "", "", "notes.md", strings.NewReader("v2"), 2, "text/markdown", info.Version); err != nil {
+		t.Fatalf("overwrite with the live version = %v; want the write to land", err)
+	}
+	// The landing write is the unconditional one: retrying the conditional form
+	// would only buy another 412.
+	if got := fake.putHeaders[len(fake.putHeaders)-1].Get("If-Match"); got != "" {
+		t.Fatalf("the write that landed carried If-Match %q; want an unconditional write", got)
+	}
+	// The payload really landed (decoded: the client signs a stream, so what the
+	// bucket stores is only visible after unwrapping the framing), and the retry
+	// carried it — an "unconditional write of nothing" would pass a looser test.
+	if got := fake.objects["agt/notes.md"]; string(got.body) != "v2" {
+		t.Fatalf("stored body = %q; want v2 (the overwrite must reach the store)", got.body)
+	}
+	if got := fake.putBodies[len(fake.putBodies)-1]; got != 2 {
+		t.Fatalf("the landing PUT carried %d bytes; want 2", got)
+	}
+
+	// Create-only is still exact on this backend — that form works there, and
+	// nothing in this fix may weaken it.
+	if err := store.PutIfVersion(ctx, "agt", "", "", "fresh.md", strings.NewReader("v1"), 2, "text/markdown", VersionAbsent); err != nil {
+		t.Fatalf("create-only on a free key: %v", err)
+	}
+	err = store.PutIfVersion(ctx, "agt", "", "", "fresh.md", strings.NewReader("v2"), 2, "text/markdown", VersionAbsent)
+	if !errors.Is(err, ErrVersionConflict) {
+		t.Fatalf("create-only on a taken key = %v; want ErrVersionConflict", err)
+	}
+
+	// And a genuinely superseded expectation is still refused: the fallback
+	// re-checks the object, so "someone else got there first" keeps its answer.
+	live, err := store.Stat(ctx, "agt", "", "", "notes.md")
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if err := store.Put(ctx, "agt", "", "", "notes.md", strings.NewReader("v3"), 2, "text/markdown"); err != nil {
+		t.Fatalf("the other writer: %v", err)
+	}
+	err = store.PutIfVersion(ctx, "agt", "", "", "notes.md", strings.NewReader("v4"), 2, "text/markdown", live.Version)
+	if !errors.Is(err, ErrVersionConflict) {
+		t.Fatalf("write with a superseded version = %v; want ErrVersionConflict", err)
+	}
+	got := fake.objects["agt/notes.md"]
+	if string(got.body) != "v3" {
+		t.Fatalf("object body after the refused write = %q; want v3 (the stale write must not land)", got.body)
 	}
 }
 
