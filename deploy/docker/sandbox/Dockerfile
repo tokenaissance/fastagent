@@ -57,31 +57,13 @@ RUN camoufox-cli install --with-deps
 
 RUN rm -rf /var/lib/apt/lists/*
 
-# Auto-inject --proxy from $HTTPS_PROXY (or its lowercase variants) into
-# every camoufox-cli call when the caller didn't pass --proxy explicitly.
-# Playwright/Camoufox don't pick up HTTPS_PROXY for the browser process —
-# only the --proxy flag works — so without this shim a sandbox in a
-# proxy-only network (e.g. behind the GFW) silently fails with
-# `NS_ERROR_NET_INTERRUPT` on the first Page.goto, even though curl /
-# pip / npm in the same container work fine via the env vars.
-#
-# Move the pip-installed entry point to camoufox-cli-bin and replace
-# /usr/local/bin/camoufox-cli with the shim so PATH-based lookups (the
-# only way the agent invokes it) flow through us transparently.
+# Move the pip-installed entry point to camoufox-cli-bin and put our shim in
+# its place, so every PATH-based lookup (the only way the agent invokes it)
+# flows through the shim. The shim's own header explains what it does and
+# why it lives here rather than in the Go code.
+COPY camoufox-cli-shim.sh /usr/local/bin/camoufox-cli-shim
 RUN mv /usr/local/bin/camoufox-cli /usr/local/bin/camoufox-cli-bin \
- && printf '%s\n' \
-        '#!/bin/sh' \
-        'proxy="${HTTPS_PROXY:-${https_proxy:-${HTTP_PROXY:-${http_proxy:-}}}}"' \
-        'if [ -n "$proxy" ]; then' \
-        '    for a in "$@"; do' \
-        '        case "$a" in' \
-        '            --proxy|--proxy=*) exec /usr/local/bin/camoufox-cli-bin "$@" ;;' \
-        '        esac' \
-        '    done' \
-        '    exec /usr/local/bin/camoufox-cli-bin --proxy "$proxy" "$@"' \
-        'fi' \
-        'exec /usr/local/bin/camoufox-cli-bin "$@"' \
-    > /usr/local/bin/camoufox-cli \
- && chmod +x /usr/local/bin/camoufox-cli
+ && mv /usr/local/bin/camoufox-cli-shim /usr/local/bin/camoufox-cli \
+ && chmod 0755 /usr/local/bin/camoufox-cli
 
 WORKDIR /workspace
