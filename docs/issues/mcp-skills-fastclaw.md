@@ -1,5 +1,9 @@
 # Issue 提案：云端 skill 库的 MCP 出口（FastAgent / FastClaw 作为 Server）
 
+> **已被取代（2026-09-22）**：本文冻结的 per-agent 出口（`resource = https://<host>/mcp/agents/<id>`）**从未上线**，
+> 现已删除。当前出口只有一个账号级端点 `/mcp`（`resource = https://<host>/mcp`，工具 `list_agents` → `list_skills(agent)`
+> → `read_skill(agent, …)`）；当前口径见 cloud 仓库 `docs/agent-readiness.md` §2。本文保留为当时的决策记录。
+
 > 本地 Agent 接一个 URL + token 即用，不需要 git。
 
 **状态**：提案（未实现，待排期） · **目标仓库**：`tokenaissance/fastclaw` · **日期**：2026-09-18

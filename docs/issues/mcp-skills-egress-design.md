@@ -1,5 +1,9 @@
 # 设计：云端 skill 库的 MCP 出口（基于 fastagent）
 
+> **已被取代（2026-09-22）**：本文冻结的 per-agent 出口（`resource = https://<host>/mcp/agents/<id>`）**从未上线**，
+> 现已删除。当前出口只有一个账号级端点 `/mcp`（`resource = https://<host>/mcp`，工具 `list_agents` → `list_skills(agent)`
+> → `read_skill(agent, …)`）；当前口径见 cloud 仓库 `docs/agent-readiness.md` §2。本文保留为当时的决策记录。
+
 **状态**：设计（未实现） · **日期**：2026-09-18
 **方法**：Clean Architecture 四层 + 依赖规则 + Musk 五步门；形式化沿用 `docs/fastagent/fs-formal-proof` 的 F1/F2/F3 约定
 **关联**：`mcp-skills-fastclaw.md`（提案）、`mcp-server-capability-map.md`（能力清单）

@@ -1,7 +1,11 @@
 # 决策版：云端 skill 库的 MCP 出口（OAuth + skills）
 
+> **已被取代（2026-09-22）**：本文冻结的 per-agent 出口（`resource = https://<host>/mcp/agents/<id>`）**从未上线**，
+> 现已删除。当前出口只有一个账号级端点 `/mcp`（`resource = https://<host>/mcp`，工具 `list_agents` → `list_skills(agent)`
+> → `read_skill(agent, …)`）；当前口径见 cloud 仓库 `docs/agent-readiness.md` §2。本文保留为当时的决策记录。
+
 **状态**：决策记录（实现未开始） · **日期**：2026-09-18
-**地位**：本文档是当前唯一有效的决策来源；冲突时以本文为准
+**地位**：本文档是当时的决策来源；**出口面的部分自 2026-09-22 起以 cloud `docs/agent-readiness.md` §2 为准**（per-agent 面从未上线、已删），其余决策仍有效
 
 **输入文档**（保留为推导过程，不再单独作为决策依据）：
 `mcp-skills-fastclaw.md`（提案与分片）、`mcp-skills-egress-design.md`（四层与形式化）、

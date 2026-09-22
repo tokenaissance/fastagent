@@ -1,5 +1,9 @@
 # 决策：MCP 的 OAuth 2.0 如何与 cloud 现有登录体系结合
 
+> **已被取代（2026-09-22）**：本文冻结的 per-agent 出口（`resource = https://<host>/mcp/agents/<id>`）**从未上线**，
+> 现已删除。当前出口只有一个账号级端点 `/mcp`（`resource = https://<host>/mcp`，工具 `list_agents` → `list_skills(agent)`
+> → `read_skill(agent, …)`）；当前口径见 cloud 仓库 `docs/agent-readiness.md` §2。本文保留为当时的决策记录。
+
 **状态**：设计（未实现） · **日期**：2026-09-18
 **问题**：MCP + OAuth 2.0 如何与 cloud / fastagent 当前的用户鉴权体系结合，MCP 登录复用 cloud 的用户登录
 **规范**：MCP 2026-07-28 基础协议 Authorization（OAuth 2.1 + RFC 9728 资源元数据 + RFC 8414 AS 元数据 +
