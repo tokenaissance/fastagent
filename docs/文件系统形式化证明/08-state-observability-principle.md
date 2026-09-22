@@ -666,7 +666,11 @@ false`），而 agent 记录里带的只有覆盖值。这在第 52 行没有读
 控件：fastagent webui 的 Runtime 页面（super_admin ⇒ `scopeForSave` → system scope，sandbox 那块
 本来就从同一个 scope 存）现在带着 `memory.autoPersist`（开关 / 节奏 / 模型）与 `skillsLearner`
 （开关 / 工具调用下限 / 模型）——正是 register 第 52、51 行：它们的读者几天前就有了见证，而写者一直是
-一次手搓的 HTTP 调用。`privacy.piiScrubbing` 仍然只有 API 写者：记为观测，不记成违规。
+一次手搓的 HTTP 调用。`privacy.piiScrubbing` 当天也在同一页补上了（`70fa91e`）——于是那个还缺
+写者的实例（第 49 行：读者已于当天修好、写者还是一次手搓的 POST）现在两半齐了，而且它的卡片把开关
+保留的那个例外也写出来了（模型自己早前那条回复是逐字回放的，所以里面若有 PII 回显仍会随之外发）。
+因此写者这一半最后**没有一个实例还停在"只有 API 可写"**；规则本身留着，因为它现在是检查表里的一条，
+而不是一次性的补课。
 
 见证（每一跳一个，外加关键那一跳的反证）：`19834b5` ——
 `TestThePiiScrubbingRowReachesEveryAgentProvider`（行到达 gateway 构建的那个 provider）与

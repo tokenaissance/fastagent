@@ -758,7 +758,11 @@ control they were missing: the fastagent webui's Runtime page (super_admin ⇒ `
 scope, the scope the sandbox block is already saved from) now carries `memory.autoPersist` (enabled /
 cadence / model) and `skillsLearner` (enabled / tool-call floor / model) — register rows 52 and 51, whose
 readers were witnessed days earlier while their writers were a hand-made HTTP call. `privacy.piiScrubbing`
-is still API-only: recorded, not booked.
+followed on the same page (`70fa91e`), so the row that was still missing its writer — row 49's reader was
+fixed on 2026-09-22 and its writer was a hand-made POST — now has both halves, and its card states the limit the
+switch keeps (the model's own earlier reply is replayed byte-for-byte, so a PII echo inside it travels).
+The writer half therefore ends with **no row left API-only** among the four instances; the rule stays for
+the next switch, which is why it is a checklist item and not a one-off pass.
 
 Witnesses (one per hop, and the falsification for the hop that matters): `19834b5` —
 `TestThePiiScrubbingRowReachesEveryAgentProvider` (the row reaches the provider the gateway builds) and
