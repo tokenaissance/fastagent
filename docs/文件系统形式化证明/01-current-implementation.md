@@ -312,6 +312,17 @@ hydrate 的时机决定沙箱副本的"出生版本"。之后沙箱长时间存�
 顺带清掉一处本轮引入的遗留：`Registry.sandboxSessionID` 全仓零引用，且注释指向一个不存在的
 `sandboxScopeSession`——已删（[10](./10-harness-state-audit.md) §9）。
 
+§8.1 **没有**声称、而 2026-09-22 这一趟必须补上的一点：`apply_patch` 是唯一不走 `routeFor` 的文件
+工具——它保留着自己手写的后端梯子（`readForPatch` / `writeForPatch` / `deleteForPatch` 及其
+`*ForPatchSandbox` 孪生）。§8.1 修好的 store 键解析是共享的，但 `routeFor` 的**策略**那一半（技能
+规则）没有：那条梯子既不守任何 `SKILL.md`，也不路由任何 `skills/<name>/…`。于是
+`Update File /skills/<name>/SKILL.md` + `*** Move to:` 能把操作者的清单文本带出只读挂载、落到一个
+chatter 随后可以 `read_file` 的路径；而一条 `skills/<name>/…` 补丁会落进沙箱 `/workspace`（或 agent
+home）而不是技能桶。两者现在都在工具入口、任何 op 规划之前被拒绝（`applyPatchRefusal`），命名空间那
+条拒绝里点名 `write_file`——登记册第 50 行。这里要报的**不是**"应该用手搓梯子换掉 `routeFor`"（那是
+更大的重构，而且未必对：apply_patch 需要逐路径做同样的宿主/沙箱分流）；而是：一个自持梯子的工具，
+也就自持了"把共享梯子上每一条规则都带上"的责任，而它之前没带上。
+
 ### 8.2 已修（G17：可见性走 G+H、同步回写走 A）——下面是当时的 as-built 记录
 
 > **2026-09-18 最终更新**：本节描述的错配**已经全部修掉**，三件事一起：

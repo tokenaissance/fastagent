@@ -354,6 +354,20 @@ One leftover from the earlier pass was removed along the way: `Registry.sandboxS
 references across the repo and its comment pointed at a non-existent `sandboxScopeSession`
 ([10](./10-harness-state-audit.md) §9).
 
+One thing §8.1 did **not** claim, and the 2026-09-22 pass had to add to: `apply_patch` is the only
+file tool that does not dispatch through `routeFor` — it keeps its own backend ladder
+(`readForPatch` / `writeForPatch` / `deleteForPatch` and their `*ForPatchSandbox` twins). The store-key
+resolution §8.1 fixed is shared, but `routeFor`'s **policy** half (the skill rules) was not: the ladder
+gated no `SKILL.md` and routed no `skills/<name>/…`. So `Update File /skills/<name>/SKILL.md` +
+`*** Move to:` could carry the operator's manifest text out of the read-only mount to a path the
+chatter could then `read_file`, and a `skills/<name>/…` patch landed in the sandbox `/workspace` (or the
+agent home) instead of the skills bucket. Both are now refused at the tool's entry, before any op is
+planned (`applyPatchRefusal`), with the refusal naming `write_file` for the namespace case — register
+row 50. The report is **not** that the ladder should be replaced by `routeFor` (that is a larger
+refactor and not obviously right: apply_patch needs the same host/sandbox split per path); it is that a
+tool which owns its own ladder also owns the duty to carry every rule the shared one carries, and this
+one had not.
+
 ### 8.2 Fixed (G17: visibility via G+H, the sync write-back via A) — the as-built record follows
 
 > **Final update, 2026-09-18**: the mismatch described in this section has been fixed in all three
