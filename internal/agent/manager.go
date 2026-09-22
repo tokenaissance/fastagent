@@ -82,6 +82,11 @@ type managerOpts struct {
 	globalSkillsCfg config.SkillsCfg
 	mcpConfigNotify func(userID, agentID string)
 	sessionLease    SessionLease
+	// privacyCfg is the resolved privacy settings (privacy.piiScrubbing.enabled)
+	// for the user space this Manager builds agents for. Every agent it builds —
+	// and every agent whose provider it swaps in on hot-reload — gets the
+	// redaction wrapper when the switch is on (see Agent.setProvider).
+	privacyCfg config.PrivacyCfg
 }
 
 func WithSessionStore(st session.SessionStore) ManagerOption {
@@ -139,6 +144,16 @@ func WithQuotaStore(qs usage.QuotaStore) ManagerOption {
 // REPLICATE_API_TOKEN regardless of what's saved in the DB.
 func WithGlobalSkillsCfg(cfg config.SkillsCfg) ManagerOption {
 	return func(o *managerOpts) { o.globalSkillsCfg = cfg }
+}
+
+// WithPrivacy threads the user space's resolved privacy settings
+// (privacy.piiScrubbing.enabled) into every agent the Manager builds. Without
+// it the switch has no reader on this path: the row would be writable in the
+// admin UI, readable back, and do nothing — which is what it did until the
+// change register's row 49, because its only reader lived in
+// NewAgentWithFullCfg, a constructor with no callers.
+func WithPrivacy(cfg config.PrivacyCfg) ManagerOption {
+	return func(o *managerOpts) { o.privacyCfg = cfg }
 }
 
 // WithSessionLease installs the cross-replica turn lease on every agent the
@@ -224,7 +239,7 @@ func (m *Manager) buildAgent(rc config.ResolvedAgent, prov provider.Provider, mb
 	// an agent attached into a foreign UserSpace carries the visitor as
 	// actor while rc.UserID stays the agent owner, so the token provider
 	// refuses the visitor before reading the owner's credential.
-	ag := newAgentWithActor(rc, providerForAgent(rc, prov), mb, homeDir, m.opts.globalSkillsCfg, m.uid)
+	ag := newAgentWithActor(rc, providerForAgent(rc, prov), mb, homeDir, m.opts.globalSkillsCfg, m.uid, m.opts.privacyCfg)
 	ag.SetOwnerUserID(m.uid)
 	// Per-user skills bucket: chat-time `skills/...` writes route to
 	// ~/.fastagent/users/<uid>/, where SkillsLoader's "personal" layer
@@ -438,7 +453,11 @@ func (m *Manager) Names() []string {
 // only affects agents that were using the shared instance.
 func (m *Manager) UpdateProvider(prov provider.Provider) {
 	for _, ag := range m.agents {
-		ag.provider = prov
+		// setProvider, not a raw assignment: a swapped-in provider has to
+		// pass through the same piiScrubbing decision as the one built at
+		// construction, or a settings reload would silently unship the
+		// redaction (the shape row 49 removed).
+		ag.setProvider(prov)
 	}
 }
 
@@ -453,9 +472,9 @@ func (m *Manager) UpdateProviderResolved(shared provider.Provider, resolved []co
 	}
 	for id, ag := range m.agents {
 		if rc, ok := byID[id]; ok {
-			ag.provider = providerForAgent(rc, shared)
+			ag.setProvider(providerForAgent(rc, shared))
 		} else {
-			ag.provider = shared
+			ag.setProvider(shared)
 		}
 	}
 }

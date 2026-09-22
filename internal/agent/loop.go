@@ -101,8 +101,12 @@ type Agent struct {
 	messageBus      *bus.MessageBus
 	subAgentSpawner tools.SubAgentSpawner
 	ftsStore        *store.FTSStore
-	piiScrubEnabled bool
-	memoryCfg       config.MemoryCfg
+	// piiScrub records the piiScrubbing setting for this agent. It is not
+	// read by the loops: it decides whether every provider that enters the
+	// agent goes through setProvider's redaction wrapper, so the rule lives
+	// at the one place a provider can enter and no call site can miss it.
+	piiScrub  bool
+	memoryCfg config.MemoryCfg
 	// splitReplies is the per-agent multi-bubble toggle. Gates the
 	// per-turn system-prompt hint that advertises SplitMessageMarker
 	// to the LLM (see renderChannelHints) AND stamps
@@ -261,14 +265,13 @@ func (a *Agent) bindSession(ctx context.Context, channel, accountID, sessionID, 
 
 // NewAgent creates a new Agent from a resolved config.
 func NewAgent(rc config.ResolvedAgent, prov provider.Provider, mb *bus.MessageBus, homeDir string) *Agent {
-	return newAgentWithActor(rc, prov, mb, homeDir, config.SkillsCfg{}, rc.UserID)
+	return newAgentWithActor(rc, prov, mb, homeDir, config.SkillsCfg{}, rc.UserID, config.PrivacyCfg{})
 }
 
 // NewAgentWithFullCfg creates a new Agent with full config support (memory, privacy, skills learner).
 func NewAgentWithFullCfg(rc config.ResolvedAgent, prov provider.Provider, mb *bus.MessageBus, homeDir string, fullCfg *config.Config) *Agent {
-	ag := newAgentWithActor(rc, prov, mb, homeDir, fullCfg.Skills, rc.UserID)
+	ag := newAgentWithActor(rc, prov, mb, homeDir, fullCfg.Skills, rc.UserID, fullCfg.Privacy)
 	ag.memoryCfg = fullCfg.Memory
-	ag.piiScrubEnabled = fullCfg.Privacy.PIIScrubbing.Enabled
 	// splitReplies is plumbed inside NewAgentWithSkillsCfg so foreign-
 	// attached agents also pick up the toggle; don't re-stamp here.
 
@@ -314,7 +317,22 @@ func NewAgentWithFullCfg(rc config.ResolvedAgent, prov provider.Provider, mb *bu
 
 // NewAgentWithSkillsCfg creates a new Agent with global skills config for env injection.
 func NewAgentWithSkillsCfg(rc config.ResolvedAgent, prov provider.Provider, mb *bus.MessageBus, homeDir string, globalSkillsCfg config.SkillsCfg) *Agent {
-	return newAgentWithActor(rc, prov, mb, homeDir, globalSkillsCfg, rc.UserID)
+	return newAgentWithActor(rc, prov, mb, homeDir, globalSkillsCfg, rc.UserID, config.PrivacyCfg{})
+}
+
+// setProvider installs the provider the agent's model calls go through. It is
+// the only writer of Agent.provider — construction (newAgentWithActor) and the
+// Manager's two hot-reload paths (UpdateProvider / UpdateProviderResolved) all
+// come through here — so a provider cannot enter an agent with the
+// piiScrubbing switch ignored. That is the whole point: the switch used to be
+// applied at three individual call sites, which is how the /v1 `stream:true`
+// turn and delegate_task kept sending raw user text to the model with the knob
+// on (docs/fs-formal-proof/11-change-register.md row 49).
+func (a *Agent) setProvider(p provider.Provider) {
+	if a.piiScrub {
+		p = privacy.Wrap(p)
+	}
+	a.provider = p
 }
 
 // newAgentWithActor is the shared constructor. actorUserID is the session
@@ -323,7 +341,12 @@ func NewAgentWithSkillsCfg(rc config.ResolvedAgent, prov provider.Provider, mb *
 // while rc.UserID keeps the agent owner — the pair feeds the scheme-A
 // owner-only gate on OAuth-protected MCP servers. Direct callers default
 // the actor to the agent owner (single-user / legacy semantics).
-func newAgentWithActor(rc config.ResolvedAgent, prov provider.Provider, mb *bus.MessageBus, homeDir string, globalSkillsCfg config.SkillsCfg, actorUserID string) *Agent {
+// privacyCfg is the resolved privacy settings (privacy.piiScrubbing.enabled).
+// It is passed in rather than read here because resolving it is the config
+// layer's job — and it is threaded through *this* constructor rather than
+// applied by each caller so there is one place an agent can learn the switch,
+// the same way it learns skillsCfg.
+func newAgentWithActor(rc config.ResolvedAgent, prov provider.Provider, mb *bus.MessageBus, homeDir string, globalSkillsCfg config.SkillsCfg, actorUserID string, privacyCfg config.PrivacyCfg) *Agent {
 	workspace := rc.Workspace
 	if workspace == "" {
 		// Fallback for callers (tests, legacy configs) that don't populate
@@ -383,7 +406,6 @@ func newAgentWithActor(rc config.ResolvedAgent, prov provider.Provider, mb *bus.
 
 	ag := &Agent{
 		name:                 rc.ID,
-		provider:             prov,
 		registry:             registry,
 		sessions:             session.NewManager(rc.Home + "/sessions"),
 		memory:               memory,
@@ -408,7 +430,11 @@ func newAgentWithActor(rc config.ResolvedAgent, prov provider.Provider, mb *bus.
 		messageBus:           mb,
 		engine:               eng,
 		costTracker:          eng.costTracker,
+		// The provider enters through setProvider, so the piiScrubbing
+		// switch is applied here — once, on the way in (see setProvider).
+		piiScrub: privacyCfg.PIIScrubbing.Enabled,
 	}
+	ag.setProvider(prov)
 
 	// Multi-bubble split-replies: per-agent only — system-level toggle
 	// was removed since "every agent splits the same way" is rarely
@@ -2192,10 +2218,6 @@ func (a *Agent) handlePlanMode(ctx context.Context, msg bus.InboundMessage) stri
 		messages = append(messages, provider.Message{Role: "system", Content: catalog})
 	}
 	messages = append(messages, a.withMessageTimestampsForChatter(sess.GetMessages(), chatterUID)...)
-	if a.piiScrubEnabled {
-		messages = privacy.ScrubMessages(messages)
-	}
-
 	resp, err := a.streamChatToResponse(ctx, messages, nil)
 	if err != nil {
 		slog.Error("plan-mode chat failed", "agent", a.name, "error", err)
@@ -2638,11 +2660,10 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		hcBefore := &HookContext{AgentName: a.name, Point: BeforeModelCall, Messages: messages, Channel: msg.Channel, AccountID: msg.AccountID, ChatID: msg.ChatID, UserID: a.ownerUserID}
 		a.hooks.Run(ctx, hcBefore)
 
-		// PII scrubbing: redact sensitive data before sending to LLM
+		// The provider this call goes through redacts PII (setProvider): the
+		// session keeps the user's own words, the model reads placeholders.
+		// llmMessages is the per-round copy the failed-rounds nudge extends.
 		llmMessages := messages
-		if a.piiScrubEnabled {
-			llmMessages = privacy.ScrubMessages(messages)
-		}
 
 		if a.provider == nil {
 			slog.Error("agent has no provider configured", "agent", a.name, "model", a.model)
@@ -2968,9 +2989,6 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	// old behavior of just returning a canned warning, which left users
 	// with zero deliverable after a full iteration budget got burned.
 	finalMessages := append(messages, capReachedNudge(capBudget))
-	if a.piiScrubEnabled {
-		finalMessages = privacy.ScrubMessages(finalMessages)
-	}
 	finalContent := ""
 	finalResp, finalErr := a.streamChatToResponseQuiet(ctx, finalMessages, nil)
 	if finalErr == nil {
