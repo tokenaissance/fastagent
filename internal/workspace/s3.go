@@ -5,12 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"mime"
 	"net/http"
 	"net/url"
 	"path"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/minio/minio-go/v7"
@@ -27,6 +29,10 @@ type S3 struct {
 	client *minio.Client
 	bucket string
 	prefix string // prepended to every key; can be "" for bucket root
+	// warnedNoIfMatch keeps the degradation notice to one line per process —
+	// "this bucket answers 412 to If-Match" is a property of the backend, not of
+	// the individual write that discovered it.
+	warnedNoIfMatch atomic.Bool
 }
 
 // S3Config holds the bits NewS3 needs. Field naming follows the fastagent.json
@@ -105,6 +111,22 @@ func (s *S3) Put(ctx context.Context, agentID, projectID, sessionID, p string, r
 // PutIfVersion is S3's conditional PUT: the expectation rides the request as
 // If-Match (or If-None-Match: * for "must not exist"), so the check and the
 // write share one round trip — the window the port's doc promises to close.
+//
+// That is only as good as the bucket. S3-compatible services split here: Ceph
+// RGW — the store behind DigitalOcean Spaces, which is what this deployment
+// runs on — implements the create-only form and nothing else, answering 412 to
+// every If-Match even when the object still carries exactly the version just
+// read from it (measured 2026-09-22 against nyc3 Spaces). Reporting those 412s
+// as ErrVersionConflict made every overwrite of an existing path fail while
+// every brand-new path succeeded, and the file tools turned that into "another
+// writer changed X" — three retries and three refusals in the 09-22 dev
+// session.
+//
+// So a refused precondition is checked against the object before it is
+// believed: if the object still carries `expected`, the refusal was about the
+// header and the write lands unconditionally — compare-then-write, the strength
+// LocalFS has always had. A superseded expectation still comes back as
+// ErrVersionConflict, because then the object really has moved on.
 func (s *S3) PutIfVersion(ctx context.Context, agentID, projectID, sessionID, p string, r io.Reader, size int64, contentType string, expected Version) error {
 	if contentType == "" {
 		contentType = mime.TypeByExtension(filepath.Ext(p))
@@ -113,19 +135,49 @@ func (s *S3) PutIfVersion(ctx context.Context, agentID, projectID, sessionID, p 
 		}
 	}
 	opts := minio.PutObjectOptions{ContentType: contentType}
+	key := s.key(agentID, projectID, sessionID, p)
 	if expected == VersionAbsent {
 		// Create-only. S3 spells it If-None-Match: *.
 		opts.SetMatchETagExcept("*")
 	} else {
 		opts.SetMatchETag(string(expected))
 	}
-	if _, err := s.client.PutObject(ctx, s.bucket, s.key(agentID, projectID, sessionID, p), r, size, opts); err != nil {
-		if isPreconditionFailed(err) {
+	if _, err := s.client.PutObject(ctx, s.bucket, key, r, size, opts); err != nil {
+		if !isPreconditionFailed(err) {
+			return mapS3Err(err)
+		}
+		// Create-only is exact on every backend we have met, so a 412 there is
+		// the answer it looks like: the key is taken.
+		if expected == VersionAbsent || !s.stillHasVersion(ctx, agentID, projectID, sessionID, p, expected) {
 			return ErrVersionConflict
 		}
-		return mapS3Err(err)
+		// The object is exactly what we expected, so nothing superseded us. The
+		// failed PUT consumed the body; a rewindable one is required to land it.
+		seeker, ok := r.(io.Seeker)
+		if !ok {
+			return fmt.Errorf("workspace put: this backend does not evaluate If-Match and the payload cannot be replayed, so nothing was written")
+		}
+		if _, err := seeker.Seek(0, io.SeekStart); err != nil {
+			return fmt.Errorf("workspace put: rewind for the unconditional retry: %w", err)
+		}
+		if s.warnedNoIfMatch.CompareAndSwap(false, true) {
+			slog.Warn("this bucket answers 412 to If-Match; overwrites of existing paths degrade to compare-then-write",
+				"bucket", s.bucket, "prefix", s.prefix)
+		}
+		if _, err := s.client.PutObject(ctx, s.bucket, key, r, size, minio.PutObjectOptions{ContentType: contentType}); err != nil {
+			return mapS3Err(err)
+		}
 	}
 	return nil
+}
+
+// stillHasVersion reports whether the object carries exactly `expected`. It is
+// the witness that separates "this backend does not evaluate If-Match" from "we
+// were superseded": both arrive as 412 from the PUT, and only the object itself
+// tells them apart.
+func (s *S3) stillHasVersion(ctx context.Context, agentID, projectID, sessionID, p string, expected Version) bool {
+	info, err := s.Stat(ctx, agentID, projectID, sessionID, p)
+	return err == nil && info != nil && info.Version == expected
 }
 
 // isPreconditionFailed recognises the 412 both AWS S3 and MinIO return for a
