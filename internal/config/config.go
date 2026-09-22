@@ -407,13 +407,15 @@ type AgentDefaults struct {
 	SplitReplies *bool `json:"splitReplies,omitempty"`
 	// AutoPersist — per-agent override of MemoryCfg.AutoPersist.Enabled.
 	// Pointer-typed for the same reason as SplitReplies: distinguishing
-	// "operator hasn't touched it" from "explicitly false". When non-nil,
-	// flips ag.memoryCfg.AutoPersist.Enabled at agent build time so the
-	// runPostTurn check at loop.go:2286 either fires the background
-	// distill-into-USER.md/MEMORY.md pass or skips it. Mainly useful in
-	// chatbot mode — that mode's curated tool allowlist has no write_file,
-	// so this is the only way for the agent to remember a chatter across
-	// sessions.
+	// "operator hasn't touched it" from "explicitly false". nil = inherit the
+	// `memory` namespace row (system ← user scope, handed to the constructor
+	// by the Manager); non-nil = authoritative for this agent, including false
+	// as a veto against a system-level on. Whichever value wins lands in
+	// ag.memoryCfg.AutoPersist.Enabled at build time so the runPostTurn gate
+	// either fires the background distill-into-USER.md/MEMORY.md pass or skips
+	// it. Mainly useful in chatbot mode — that mode's curated tool allowlist
+	// has no write_file, so this is the only way for the agent to remember a
+	// chatter across sessions.
 	AutoPersist *bool `json:"autoPersist,omitempty"`
 }
 

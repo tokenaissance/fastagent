@@ -965,6 +965,11 @@ func managerOptions(cfg *config.Config, userID string, st store.Store, ws worksp
 		// a learned SKILL.md goes through the one writer for `skills/` instead
 		// of landing on a single pod's disk.
 		agent.WithSkillsLearner(cfg.SkillsLearner),
+		// cfg.Memory is the "memory" namespace (system ← user ← agent scope).
+		// The per-agent autoPersist override is stamped over it inside the
+		// constructor, so this line is what makes "no override" mean "inherit"
+		// instead of "off" — and it is the only path for everyNTurns/model.
+		agent.WithMemory(cfg.Memory),
 		agent.WithSessionStore(session.NewStoreAdapter(st, userID)),
 		agent.WithMemoryStore(agent.NewMemoryStoreAdapter(st)),
 		agent.WithDataStore(st),
