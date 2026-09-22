@@ -49,6 +49,61 @@ const execHostDescription = "Execute a shell command and return stdout/stderr."
 
 const execSandboxDescription = "Execute a shell command in the sandbox and return stdout/stderr."
 
+// execSharedParams is everything a caller reads about running a command, in one
+// copy because the two registrations used to carry hand-copied text and the
+// copies drifted: `stdin` lost its example and `allow_long_wait` its consequence
+// on whichever registration an edit did not name, and the sandbox copy is the
+// one a cloud turn reads (TestNoToolParameterIsOneSided fails by key when this
+// happens again). execHostParams adds the one parameter only the host path can
+// honour.
+//
+// The wording is the union of the two copies, because each had a fact the other
+// lacked: "build watchers, migrations" and "batch jobs, training runs, dev
+// servers"; "terminate with" and "stop it with"; and the note that a background
+// job ignores `timeout`. Location is deliberately not repeated here — each
+// description already says which machine runs the command.
+func execSharedParams() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"command": map[string]interface{}{
+				"type":        "string",
+				"description": "The shell command to execute",
+			},
+			"stdin": map[string]interface{}{
+				"type":        "string",
+				"description": "Optional input piped to the command's stdin. Use this to feed JSON args to a skill script: command='python /skills/x/main.py', stdin='{\"prompt\":\"...\"}'.",
+			},
+			"timeout": map[string]interface{}{
+				"type":        "integer",
+				"description": "Timeout in seconds (default 120). Headless-browser workflows (camoufox-cli) need a longer ceiling for the first call — the daemon + browser cold-start can take 2-3 min when traffic is proxied; subsequent calls in the same session are sub-second.",
+			},
+			"run_in_background": map[string]interface{}{
+				"type":        "boolean",
+				"description": "Run the command detached and return a bash_id immediately, without waiting for it to finish. ANY command that waits belongs here — sleeps, polling loops, build watchers, batch jobs, migrations, dev servers, training runs — because a foreground call is ended by the turn's clock and the observation (not the work) is what dies. Read progress later with bash_output(bash_id); stop it with kill_shell(bash_id). The `timeout` argument does not apply to a background job.",
+			},
+			"allow_long_wait": map[string]interface{}{
+				"type":        "boolean",
+				"description": "Override for the guard that refuses a foreground wait of 30s or more. Use it only for a wait that genuinely cannot be backgrounded — the turn's clock can still end this call and take the output with it, which is how the r39–r45 runs lost their results. Default false.",
+			},
+		},
+		"required": []string{"command"},
+	}
+}
+
+// execHostParams is the shared schema plus the switch only the host closure can
+// act on: there, `exec` may run in either place, so the caller has to be able to
+// say which.
+func execHostParams() map[string]interface{} {
+	params := execSharedParams()
+	props := params["properties"].(map[string]interface{})
+	props["sandbox"] = map[string]interface{}{
+		"type":        "boolean",
+		"description": "Force execution in sandbox container",
+	}
+	return params
+}
+
 var dangerousCommands = []string{
 	"rm -rf /",
 	"mkfs",
@@ -190,36 +245,7 @@ func RegisterExecWithSkillEnv(r *Registry, sbCfg *SandboxConfig, envProvider Ski
 }
 
 func registerExecFull(r *Registry, sbCfg *SandboxConfig, envProvider SkillEnvProvider, skillDirs []string) {
-	r.Register("exec", execHostDescription, map[string]interface{}{
-		"type": "object",
-		"properties": map[string]interface{}{
-			"command": map[string]interface{}{
-				"type":        "string",
-				"description": "The shell command to execute",
-			},
-			"stdin": map[string]interface{}{
-				"type":        "string",
-				"description": "Optional input piped to the command's stdin. Use this to feed JSON args to a skill script: command='python /skills/x/main.py', stdin='{\"prompt\":\"...\"}'.",
-			},
-			"timeout": map[string]interface{}{
-				"type":        "integer",
-				"description": "Timeout in seconds (default 120). Headless-browser workflows (camoufox-cli) need a longer ceiling for the first call — the daemon + browser cold-start can take 2-3 min when traffic is proxied; subsequent calls in the same session are sub-second.",
-			},
-			"sandbox": map[string]interface{}{
-				"type":        "boolean",
-				"description": "Force execution in sandbox container",
-			},
-			"run_in_background": map[string]interface{}{
-				"type":        "boolean",
-				"description": "Run the command detached and return a bash_id immediately. ANY command that waits belongs here — sleeps, polling loops, build watchers, migrations, dev servers, training runs — because a foreground call is ended by the turn's clock and the observation (not the work) is what dies. Read progress later with bash_output(bash_id); terminate with kill_shell(bash_id).",
-			},
-			"allow_long_wait": map[string]interface{}{
-				"type":        "boolean",
-				"description": "Override for the guard that refuses a foreground wait of 30s or more. Use it only for a wait that genuinely cannot be backgrounded — the turn's clock can still end this call and take the output with it, which is how the r39–r45 runs lost their results. Default false.",
-			},
-		},
-		"required": []string{"command"},
-	}, makeExecToolFull(r, sbCfg, envProvider, skillDirs))
+	r.Register("exec", execHostDescription, execHostParams(), makeExecToolFull(r, sbCfg, envProvider, skillDirs))
 }
 
 // makeExecToolFull captures the registry pointer so it can consult the
@@ -531,32 +557,7 @@ func registerHostExec(r *Registry, envProvider SkillEnvProvider, skillDirs []str
 func registerSandboxedExec(r *Registry, ex sandbox.Executor) {
 	envProvider := r.envProvider
 	skillDirs := r.skillDirs
-	r.Register("exec", execSandboxDescription, map[string]interface{}{
-		"type": "object",
-		"properties": map[string]interface{}{
-			"command": map[string]interface{}{
-				"type":        "string",
-				"description": "The shell command to execute",
-			},
-			"stdin": map[string]interface{}{
-				"type":        "string",
-				"description": "Optional input piped to the command's stdin.",
-			},
-			"timeout": map[string]interface{}{
-				"type":        "integer",
-				"description": "Timeout in seconds (default 120). Headless-browser workflows (camoufox-cli) need a longer ceiling for the first call — the daemon + browser cold-start can take 2-3 min when traffic is proxied; subsequent calls in the same session are sub-second.",
-			},
-			"run_in_background": map[string]interface{}{
-				"type":        "boolean",
-				"description": "Run the command detached in the sandbox and return a bash_id immediately, without waiting for it to finish. ANY command that waits belongs here — sleeps, polling loops, batch jobs, training runs, dev servers — because a foreground call is ended by the turn's clock and the observation (not the job) is what dies. Read progress later with bash_output(bash_id); stop it with kill_shell(bash_id). The `timeout` argument does not apply to a background job.",
-			},
-			"allow_long_wait": map[string]interface{}{
-				"type":        "boolean",
-				"description": "Override for the guard that refuses a foreground wait of 30s or more. Use it only for a wait that genuinely cannot be backgrounded — the turn's clock can still end this call and take the output with it. Default false.",
-			},
-		},
-		"required": []string{"command"},
-	}, func(ctx context.Context, rawArgs json.RawMessage) (string, error) {
+	r.Register("exec", execSandboxDescription, execSharedParams(), func(ctx context.Context, rawArgs json.RawMessage) (string, error) {
 		var args execArgs
 		if err := json.Unmarshal(rawArgs, &args); err != nil {
 			return "", fmt.Errorf("parse args: %w", err)
