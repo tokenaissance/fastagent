@@ -66,6 +66,12 @@ type fakeEnvdTransport struct {
 	// unauthorizedFirstN makes the first N exec attempts answer 401: the shape
 	// of a token the provider has superseded.
 	unauthorizedFirstN int
+	// missingPaths are paths envd answers 404 for — its verdict about a file,
+	// not about the instance:
+	//	{"code":404,"message":"path '/home/user/CURRENT.md' does not exist"}
+	// Without this the fake answers 200 to every /files call, so a rebuild that
+	// "fixed" a missing file would look like a successful empty read.
+	missingPaths []string
 
 	mu           sync.Mutex
 	commands     []string
@@ -148,6 +154,14 @@ func (f *fakeEnvdTransport) RoundTrip(req *http.Request) (*http.Response, error)
 		}
 	}
 	if strings.Contains(req.URL.Path, "/files") {
+		if p := req.URL.Query().Get("path"); p != "" {
+			for _, missing := range f.missingPaths {
+				if p == missing {
+					body := fmt.Sprintf(`{"code":404,"message":"path '%s' does not exist"}`, p)
+					return envdResponse(req, http.StatusNotFound, []byte(body)), nil
+				}
+			}
+		}
 		return envdResponse(req, http.StatusOK, nil), nil
 	}
 	if cmd := execCommandFrom(body); cmd != "" {
