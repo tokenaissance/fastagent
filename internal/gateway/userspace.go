@@ -957,6 +957,14 @@ func managerOptions(cfg *config.Config, userID string, st store.Store, ws worksp
 		// — and hot-reloads — the agents, so it is the only layer that can
 		// install the redaction on every provider an agent ends up holding.
 		agent.WithPrivacy(cfg.Privacy),
+		// cfg.SkillsLearner is the "skillsLearner" namespace (system ← user ←
+		// agent scope). Same shape as the privacy entry above, and the same
+		// failure if it were missing: a switch an operator can turn on whose
+		// only reader was a constructor no production path calls. The Manager
+		// builds the learner *after* the skill routing above it is wired, so
+		// a learned SKILL.md goes through the one writer for `skills/` instead
+		// of landing on a single pod's disk.
+		agent.WithSkillsLearner(cfg.SkillsLearner),
 		agent.WithSessionStore(session.NewStoreAdapter(st, userID)),
 		agent.WithMemoryStore(agent.NewMemoryStoreAdapter(st)),
 		agent.WithDataStore(st),

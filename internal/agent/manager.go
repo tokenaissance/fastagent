@@ -82,6 +82,12 @@ type managerOpts struct {
 	globalSkillsCfg config.SkillsCfg
 	mcpConfigNotify func(userID, agentID string)
 	sessionLease    SessionLease
+	// skillsLearnerCfg is the resolved `skillsLearner` namespace for the user
+	// space this Manager builds agents for. Threaded through the same way as
+	// privacyCfg: without it the row is writable and read by nobody, because
+	// its only reader used to live in NewAgentWithFullCfg, a constructor with
+	// no callers.
+	skillsLearnerCfg config.SkillsLearnerCfg
 	// privacyCfg is the resolved privacy settings (privacy.piiScrubbing.enabled)
 	// for the user space this Manager builds agents for. Every agent it builds —
 	// and every agent whose provider it swaps in on hot-reload — gets the
@@ -154,6 +160,16 @@ func WithGlobalSkillsCfg(cfg config.SkillsCfg) ManagerOption {
 // NewAgentWithFullCfg, a constructor with no callers.
 func WithPrivacy(cfg config.PrivacyCfg) ManagerOption {
 	return func(o *managerOpts) { o.privacyCfg = cfg }
+}
+
+// WithSkillsLearner threads the user space's resolved `skillsLearner` settings
+// into every agent the Manager builds, so the background skill extractor is
+// reachable on the production path at all. Its construction must happen *here*
+// (after the registry's skill routing is configured) rather than in the
+// constructor: the learner writes through the skills namespace's single writer,
+// which needs the per-user bucket and the workspace store to be wired first.
+func WithSkillsLearner(cfg config.SkillsLearnerCfg) ManagerOption {
+	return func(o *managerOpts) { o.skillsLearnerCfg = cfg }
 }
 
 // WithSessionLease installs the cross-replica turn lease on every agent the
@@ -340,6 +356,12 @@ func (m *Manager) buildAgent(rc config.ResolvedAgent, prov provider.Provider, mb
 	if m.opts.quotaStore != nil {
 		ag.SetQuotaStore(m.opts.quotaStore)
 	}
+	// Background skills learner (`skillsLearner` namespace). Last, because it
+	// needs the wiring above: the registry must already know the per-user skill
+	// bucket and the workspace store before the learner can write through it,
+	// and the provider must already have gone through setProvider so the
+	// extraction call is redacted like every other call site.
+	ag.enableSkillsLearner(m.opts.skillsLearnerCfg)
 	return ag
 }
 

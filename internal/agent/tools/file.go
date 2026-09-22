@@ -313,6 +313,31 @@ func (r *Registry) writeSkillToHost(ctx context.Context, path, content string) (
 	return full, nil
 }
 
+// WriteSkillFile is the skills namespace's write entry point for callers that
+// are not file tools — today the background skills learner. It goes through
+// writeSkillToHost, so a skill written by any path lands in the same place
+// (host disk plus the object-store mirror) instead of on one pod's disk:
+// a second writer for `skills/` is exactly how a learned SKILL.md ends up
+// invisible to sibling pods and lost on restart (the same hole apply_patch
+// had for its own write path — docs/fs-formal-proof/11-change-register.md
+// row 50).
+//
+// slug must be a single path segment; rel is relative to the skill dir.
+func (r *Registry) WriteSkillFile(ctx context.Context, slug, rel, content string) (string, error) {
+	path := filepath.ToSlash(filepath.Join("skills", slug, rel))
+	if !r.isSkillPath(path) {
+		return "", fmt.Errorf("writeSkillFile: %q is not a skills/<name>/... path", path)
+	}
+	return r.writeSkillToHost(ctx, path, content)
+}
+
+// SkillsRoot reports the host parent of the `skills/` subtree this registry
+// writes into — the same root skillRoot picks for a chat-time write, so a
+// caller that needs to stat what it is about to write (the skills learner's
+// existence check) reads the tree it actually writes to. Empty when no root
+// is configured.
+func (r *Registry) SkillsRoot() string { return r.skillRoot() }
+
 // rootForPath returns the root a relative path should resolve against:
 //   - systemRoot (agent home) for identity files (SOUL.md, IDENTITY.md, …);
 //   - userSkillsRoot (~/.fastagent/users/<uid>/skills/) for `skills/...`

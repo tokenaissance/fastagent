@@ -77,7 +77,7 @@
 | `update_goal` | goal 状态 / 预算 | 回执；预算耗尽时另有 `BudgetLimitPrompt` | 工具结果 + 回合提示 | ✅ |
 | `set_preference` / `set_timezone` | scope 偏好 / `USER.md`（系统文件） | 回执 | 工具结果 | ✅（是它自己写的，C1） |
 | MCP 配置工具（`mcp add/remove/…`） | 工具集变化 | 回执 + 下一轮 `[Environment changes …] tools now/ no longer available` | 工具结果 + 回合提示 | ✅ 2026-09-18 |
-| 技能安装/生成（`skill install`、SkillsLearner 后台抽取） | 技能集变化 | 下一轮 `[Environment changes …] skills added / removed / changed` | 回合提示 | ✅ 2026-09-18 |
+| 技能安装/生成（`skill install`、SkillsLearner 后台抽取） | 技能集变化 | 下一轮 `[Environment changes …] skills added / removed / changed` | 回合提示 | ✅ 2026-09-18 —— **2026-09-22 更正**：`skill install` 那半一直是真的，但"后台抽取"那半此前建立在一个**在生产路径上没有读者**的开关上（learner 只在零调用者的 `NewAgentWithFullCfg` 里被构造），所以这一格曾领先于代码，直到 register **#51** 把它变成真的 |
 | 记忆写入（memory 工具 / heartbeat 复盘） | `MEMORY.md` 内容变化 | 下一轮 `[Environment changes …] long-term memory was rewritten/created/CLEARED` | 回合提示 | ✅ 2026-09-18 |
 | 身份文件写入（`write_file('SOUL.md', …)` 等） | 系统提示词的一部分被改写 | 回执（是它自己写的） | 工具结果 | ✅ 自己写时；**被外部改写时见 G8** |
 | `exec run_in_background` / 沙箱后台 job | 进程在工具结果之后继续写文件；它退出也是一次 δ | 文件改动被下一次同步报出；**退出本身不推送**，但 `bash_output` 每次调用**从世界重算**并给出 `[status] exited (code=N)` / `killed` / `lost — the sandbox was replaced` | 工具结果（消费侧下一次读取） | ✅ **pull 形态的 σ**（判据可重算 ⇒ 落点 1，不需要载体；见 §4 G13） |
