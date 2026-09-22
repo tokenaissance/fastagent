@@ -1,7 +1,8 @@
 package setup
 
-// The writer half of register rows 52 (`memory.autoPersist`) and 51
-// (`skillsLearner`): the Runtime page in the fastagent webui.
+// The writer half of register rows 52 (`memory.autoPersist`), 51
+// (`skillsLearner`) and 49 (`privacy.piiScrubbing`): the Runtime page in the
+// fastagent webui.
 //
 // Both rows are read at agent-build time, and before this page existed their
 // only writer was a hand-made POST /api/config — register row 52's audit found
@@ -30,9 +31,9 @@ import (
 )
 
 // runtimePageMemoryLearningBody is the payload the Runtime page sends for these
-// two namespaces (web/src/app/settings/runtime/page.tsx): the switches on, a
+// three namespaces (web/src/app/settings/runtime/page.tsx): the switches on, a
 // cadence of 2, and a tool-call floor of 4.
-const runtimePageMemoryLearningBody = `{"memory":{"autoPersist":{"enabled":true,"everyNTurns":2}},"skillsLearner":{"enabled":true,"minToolCalls":4}}`
+const runtimePageMemoryLearningBody = `{"memory":{"autoPersist":{"enabled":true,"everyNTurns":2}},"skillsLearner":{"enabled":true,"minToolCalls":4},"privacy":{"piiScrubbing":{"enabled":true}}}`
 
 func TestRuntimePage_CanSetMemoryAndSkillLearning(t *testing.T) {
 	s, _, _ := setupFileUploadTest(t)
@@ -64,6 +65,9 @@ func TestRuntimePage_CanSetMemoryAndSkillLearning(t *testing.T) {
 	if got := digPath(t, body, []string{"skillsLearner", "minToolCalls"}); got != float64(4) {
 		t.Errorf("skillsLearner.minToolCalls read back as %#v", got)
 	}
+	if got := digPath(t, body, []string{"privacy", "piiScrubbing", "enabled"}); got != true {
+		t.Errorf("privacy.piiScrubbing.enabled read back as %#v", got)
+	}
 
 	// ── 2. The reader. This is literally the call the gateway makes while
 	// assembling a user space (scope.SettingInto over the system ← user ← agent
@@ -82,5 +86,12 @@ func TestRuntimePage_CanSetMemoryAndSkillLearning(t *testing.T) {
 	}
 	if !learner.Enabled || learner.MinToolCalls != 4 {
 		t.Errorf("the skillsLearner row did not survive into the typed read: %+v", learner)
+	}
+	var privacy config.PrivacyCfg
+	if err := scope.SettingInto(ctx, s.dataStore, "privacy", "", "", &privacy); err != nil {
+		t.Fatalf("typed privacy read: %v", err)
+	}
+	if !privacy.PIIScrubbing.Enabled {
+		t.Errorf("the privacy row did not survive into the typed read the gateway uses: %+v", privacy)
 	}
 }
