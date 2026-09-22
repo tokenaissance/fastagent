@@ -84,7 +84,7 @@ The key asymmetry:
 
 | Backend | What `Version` is | Strength of `PutIfVersion` | Consequence for callers |
 |---|---|---|---|
-| **S3 / Spaces (multi-replica production)** | the object's ETag | **Exact**: `If-Match` (or `If-None-Match: *` for create-only) shares the request with the write; 412 ⇒ `ErrVersionConflict` | may be used to **refuse** an overwrite |
+| **S3 / Spaces (multi-replica production)** | the object's ETag | **Exact where the bucket evaluates `If-Match`** (AWS S3, MinIO): the conditional PUT shares the request with the write, 412 ⇒ `ErrVersionConflict`. Ceph RGW — the store behind DigitalOcean Spaces, which this deployment runs on — implements only the create-only form and answers 412 to *every* `If-Match`, even with the ETag the client just read (measured 2026-09-22 against nyc3 Spaces), so an overwrite there is a **compare-then-write**: `Stat` the object and land the write unconditionally only while it still carries `expected` | may be used to **refuse** an overwrite where the bucket is exact; on Spaces it can only detect an already-stale expectation, and create-only (`If-None-Match: *`) stays exact either way |
 | **LocalFS (single host / dev)** | `size:mtime_ns` | **Best-effort**: stat → compare → write, with no kernel CAS | can only "detect and refuse an already-stale expectation"; multi-replica installs must use S3/PG |
 | **Metered** | pass-through | same as its inner store | — |
 
