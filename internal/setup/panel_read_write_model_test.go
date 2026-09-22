@@ -140,11 +140,13 @@ func TestPanelReadModelMatchesRuntimeResolver(t *testing.T) {
 		}},
 		{"namespace lives only in the mirror", func(t *testing.T, s *Server, uid string) {
 			seedSystemView(t, s, uid)
-			seedMirrorValue(t, s.dataStore, store.KindSetting, "system", "", "memory.fts.enabled", true)
-			seedMirrorValue(t, s.dataStore, store.KindSetting, "system", "", "memory.fts.db_path", "/tmp/x.db")
+			// A live namespace (the `memory` row still exists after the FTS
+			// removal, register #52) seeded ONLY as a mirror row: the panel
+			// must serve it from the mirror after the blob layer.
+			seedMirrorValue(t, s.dataStore, store.KindSetting, "system", "", "memory.auto_persist.enabled", true)
 		}, func(t *testing.T, panel map[string]any) {
-			if got := digPath(t, panel, []string{"memory", "fts", "enabled"}); got != true {
-				t.Errorf("mirror-only namespace not served: memory.fts.enabled = %#v", got)
+			if got := digPath(t, panel, []string{"memory", "autoPersist", "enabled"}); got != true {
+				t.Errorf("mirror-only namespace not served: memory.autoPersist.enabled = %#v", got)
 			}
 		}},
 		{"blob wins over a stale mirror row", func(t *testing.T, s *Server, uid string) {
@@ -422,7 +424,7 @@ func TestUpdateConfigLeavesUnmentionedNamespacesAlone(t *testing.T) {
 	ctx := context.Background()
 
 	if err := scope.SaveSetting(ctx, s.dataStore, uid, "", "memory",
-		map[string]interface{}{"fts": map[string]interface{}{"enabled": true}}); err != nil {
+		map[string]interface{}{"autoPersist": map[string]interface{}{"enabled": true, "everyNTurns": 7}}); err != nil {
 		t.Fatalf("seed memory: %v", err)
 	}
 
@@ -436,8 +438,8 @@ func TestUpdateConfigLeavesUnmentionedNamespacesAlone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Setting: %v", err)
 	}
-	fts, ok := got["fts"].(map[string]interface{})
-	if !ok || fts["enabled"] != true {
+	ap, ok := got["autoPersist"].(map[string]interface{})
+	if !ok || ap["enabled"] != true {
 		t.Fatalf("unmentioned namespace was clobbered: %#v", got)
 	}
 }

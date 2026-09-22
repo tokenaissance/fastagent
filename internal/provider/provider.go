@@ -38,8 +38,7 @@ func newLLMHTTPClient() *http.Client {
 // Origin tags a Message that was produced by the runtime rather than a
 // real user / model exchange. Empty means "this came from the user
 // (or the model in response to the user)" — the common case. Hooks
-// that filter user-visible history or skip FTS indexing for runtime
-// inserts gate on this.
+// that filter user-visible history for runtime inserts gate on this.
 const (
 	OriginUser        = "" // default — pre-existing producers stay correct without edits
 	OriginGoalContext = "goal_context"
@@ -107,10 +106,10 @@ type Message struct {
 	// Origin distinguishes runtime-injected messages from real user /
 	// assistant exchanges. Empty (OriginUser) is the default. Currently
 	// only OriginGoalContext is set, by the /goal continuation path.
-	// User-visible history (WebChatHistory) and the FTS index filter
-	// on this so synthetic prompts don't pollute either view. Rides
-	// as part of the JSONB sessions.messages working set and as a
-	// column on the structured session_messages archive.
+	// User-visible history (WebChatHistory) filters on this so synthetic
+	// prompts don't pollute that view. Rides as part of the JSONB
+	// sessions.messages working set and as a column on the structured
+	// session_messages archive.
 	Origin string `json:"origin,omitempty"`
 
 	// Provider and Model record which LLM produced this message.

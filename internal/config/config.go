@@ -258,18 +258,12 @@ type RateLimitCfg struct {
 
 type MemoryCfg struct {
 	AutoPersist AutoPersistCfg `json:"autoPersist,omitempty"`
-	FTS         FTSCfg         `json:"fts,omitempty"`
 }
 
 type AutoPersistCfg struct {
 	Enabled     bool   `json:"enabled"`
 	EveryNTurns int    `json:"everyNTurns,omitempty"`
 	Model       string `json:"model,omitempty"`
-}
-
-type FTSCfg struct {
-	Enabled bool   `json:"enabled"`
-	DBPath  string `json:"dbPath,omitempty"`
 }
 
 type PrivacyCfg struct {
