@@ -875,6 +875,16 @@ func (s *Session) GetMessages() []provider.Message {
 func (s *Session) AcquireTurn(ctx context.Context) bool {
 	s.mu.Lock()
 	if !s.turnActive {
+		// The uncontended path still has to look at ctx. Without this check a caller whose context was
+		// canceled while the slot was free (or while its goroutine had not been scheduled yet — the
+		// window is real: CI hit it under `-race` with the whole-tree gate on 2026-09-23) takes the
+		// slot and returns true, so the caller that was refused is now holding a slot nobody expects
+		// it to release. The test that found it, `TestAcquireTurnCancelAtHandoffDoesNotStrandSlot`,
+		// documents the invariant: cancel racing release must leave the slot free.
+		if ctx.Err() != nil {
+			s.mu.Unlock()
+			return false
+		}
 		s.turnActive = true
 		s.mu.Unlock()
 		return true
