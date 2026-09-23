@@ -30,6 +30,22 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.25"
+      # `internal/setup/embed.go` does `//go:embed all:web`, and `internal/setup/web` is created by
+      # `make build-web` (gitignored; the image build produces the real one). A clean checkout therefore
+      # cannot COMPILE `internal/setup` or `cmd/fastclaw` at all: `pattern all:web: no matching files
+      # found` — found on 2026-09-23, the first time this job tested the whole tree instead of four
+      # named packages. It also explains why the old list looked deliberate: it was the subset that
+      # compiles without a web build.
+      #
+      # The stub is the cheap honest half. Those packages' tests drive their own HTTP handlers
+      # (`NewServer(0)` + mux) and never read the SPA assets, so an empty embed directory is enough to
+      # compile and run them; the REAL bundle is exercised by the image build (`docker.yml` runs
+      # `make build-web`). If a test ever starts serving `/`, replace this stub with `make build-web` and
+      # the failure will say so.
+      - name: Stub the embedded web bundle (go:embed needs the directory to exist)
+        run: |
+          mkdir -p internal/setup/web
+          printf 'placeholder — the real bundle is produced by `make build-web` (see docker.yml)\n' > internal/setup/web/PLACEHOLDER.txt
       - name: Unit + adapter + Postgres concurrency tests
         env:
           FASTAGENT_TEST_PG_DSN: "postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable"
