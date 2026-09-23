@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   sandbox-leases:
-    name: sandbox + store + gateway tests (Postgres)
+    name: every package (unit + adapter + Postgres concurrency, -race)
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -33,11 +33,21 @@ jobs:
       - name: Unit + adapter + Postgres concurrency tests
         env:
           FASTAGENT_TEST_PG_DSN: "postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable"
-        # -race is load-bearing here, not decoration: the sandbox pool runs a
-        # sweeper on a background goroutine and parallel tool calls share one
-        # executor, so the interesting bugs are races. The rebuild tests drive
-        # that concurrency deliberately, and the test doubles had to grow locks
-        # of their own the first time this ran.
+        # The WHOLE tree, not a package list. Until 2026-09-23 this job named four
+        # packages (sandbox, store, gateway, and agent/tools in the job below) while the
+        # repository had 392 test files across ~33 packages — so most unit tests existed,
+        # passed locally under `make test`, and never ran here. `make test` IS `go test ./...`;
+        # this job is that command plus `-race` and a Postgres service, which is the shape a
+        # CI gate should have: the same thing the developer ran, run where they cannot skip it.
+        #
+        # `-race` is load-bearing, not decoration: the sandbox pool runs a sweeper on a
+        # background goroutine and parallel tool calls share one executor, so the interesting
+        # bugs are races. Measured 2026-09-23 on this tree: 1m39s with -race across all
+        # packages, and the first run found one real defect — a security test whose
+        # "plaintext token found in DB" assertion searched 2-letter substrings inside random
+        # ciphertext, i.e. it failed ~1 run in a few hundred with the property intact
+        # (fixed in internal/mcp/oauth/adapter/db_test.go).
+        #
         # The live e2b tests (TestE2BPool…, TestSandboxBackgroundE2BLive,
         # TestE2BLiveBrowserColdStart) are owned by the credentials job below;
         # they FAIL — by design, so a green run can't be mistaken for verified —
@@ -45,7 +55,7 @@ jobs:
         # by name keeps that rule intact for the job that owns them instead of
         # weakening it here.
         run: >
-          go test ./internal/sandbox/ ./internal/store/ ./internal/gateway/
+          go test ./...
           -skip '^TestE2BPoolCrossPodAdoption$|^TestE2BPoolCrossPodRebuild$|^TestSandboxBackgroundE2BLive$|^TestE2BLiveBrowserColdStart$'
           -count=1 -race
 
@@ -76,7 +86,11 @@ jobs:
         # first browser call is what proves the shim in the image carries it.
         run: |
           if [ -z "$E2B_API_KEY" ] || [ -z "$E2B_TEMPLATE" ]; then
-            echo "no E2B credentials in this repository — skipping the live e2e"
+            # Green, but not silent. This job is a no-op without the two secrets, and a no-op
+            # that looks like a pass is the thing this workflow spent a comment learning to
+            # avoid — so it says so in the run's annotations, where a reader sees it without
+            # opening the log.
+            echo "::notice title=live e2e did not run::no E2B_API_KEY / E2B_TEMPLATE secrets in this repository. The real-backend tests are unverified on this run."
             exit 0
           fi
           go test ./internal/sandbox/ ./internal/agent/tools/ \
@@ -87,6 +101,11 @@ jobs:
     name: sandbox background exec (unit + real-shell + docker)
     runs-on: ubuntu-latest
     steps:
+      # NOTE (2026-09-23): this job is now a SUBSET of the whole-tree job above — it predates it,
+      # when CI only ran four named packages. It is kept because its `-v` output is what the
+      # JobOutlivesTheToolCall failures are read from, and dropping it would trade a minute of CI for a
+      # worse debugging view. If someone wants the minute back, delete this job: the coverage is
+      # already in `go test ./... -race`.
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
