@@ -2,7 +2,7 @@
 
 ## error suffix on every failed tool
 
-<!-- source: internal/agent/tools/registry.go:935 -->
+<!-- source: internal/agent/tools/registry.go:960 -->
 
 ````text
 [Analyze the error above and try a different approach.]
@@ -10,7 +10,7 @@
 
 ## long foreground wait refusal
 
-<!-- source: internal/agent/tools/exec.go:152 -->
+<!-- source: internal/agent/tools/exec.go:207 -->
 
 ````text
 Refused: this command waits ~%ds in the foreground, and a turn can end before that arrives (the smallest turn budget is 300s — the observation dies with it, the work does not). Anything that waits belongs on run_in_background:
@@ -24,7 +24,7 @@ Re-issue the same command with run_in_background — do not sleep in a foregroun
 
 ## exec cancelled hint
 
-<!-- source: internal/sandbox/e2b_executor.go:1016 -->
+<!-- source: internal/sandbox/e2b_executor.go:1196 -->
 
 ````text
  [hint: the exec request was cancelled by the runtime, not by the sandbox — the turn's budget expired, the turn was superseded, or the caller disconnected. A process this command started may still be running inside the sandbox: check it (ps, plus whatever log file it was redirected to) and adopt that result before re-running anything. To make that check possible next time, start it with exec({"run_in_background": true}) and read it with bash_output.]
@@ -32,7 +32,7 @@ Re-issue the same command with run_in_background — do not sleep in a foregroun
 
 ## exec stalled hint
 
-<!-- source: internal/sandbox/e2b_executor.go:1031 -->
+<!-- source: internal/sandbox/e2b_executor.go:1211 -->
 
 <!-- NOTE: 2 branch point(s) — literals concatenated in source order, not rendered -->
 
@@ -42,7 +42,7 @@ deadline_exceeded [hint: the output above was delivered, but a process this comm
 
 ## sandbox-absence hint
 
-<!-- source: internal/agent/tools/exec.go:642 -->
+<!-- source: internal/agent/tools/exec.go:639 -->
 
 ````text
 %w
@@ -51,7 +51,7 @@ deadline_exceeded [hint: the output above was delivered, but a process this comm
 
 ## background job started
 
-<!-- source: internal/agent/tools/sandbox_background.go:401 -->
+<!-- source: internal/agent/tools/sandbox_background.go:466 -->
 
 ````text
 Started background job %s (pid %s) in the sandbox: %s
@@ -63,15 +63,15 @@ The job keeps running after this call returns, and its output is captured at %s 
 
 <!-- source: internal/agent/tools/sandbox_background.go:330-360 -->
 
-<!-- NOTE: 6 branch point(s) — literals concatenated in source order, not rendered -->
+<!-- NOTE: 5 branch point(s) — literals concatenated in source order, not rendered -->
 
 ````text
-sandbox background poll: %wmissing
+fcbg1sandbox background launch: no job handle in output %q — the shell could not start a detached processsandbox background poll: no status marker in output %qsandbox background poll: unterminated status marker in output %qfcbgsandbox background poll: malformed status marker %q
 ````
 
 ## interrupted-call placeholder
 
-<!-- source: internal/provider/provider.go:59 -->
+<!-- source: internal/provider/provider.go:71 -->
 
 ````text
 (stopped — execution was interrupted before the tool returned)

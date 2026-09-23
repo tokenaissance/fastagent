@@ -2,7 +2,7 @@
 
 ## buildDateLine
 
-<!-- source: internal/agent/prompt_modules.go:159 -->
+<!-- source: internal/agent/prompt_modules.go:161 -->
 
 <!-- NOTE: 2 branch point(s) — literals concatenated in source order, not rendered -->
 
@@ -12,7 +12,7 @@ Current date/time: %s (%s, %s — the chatter's local timezone). This is NOW; do
 
 ## modIdentityAnchor
 
-<!-- source: internal/agent/prompt_modules.go:192 -->
+<!-- source: internal/agent/prompt_modules.go:194 -->
 
 <!-- NOTE: 1 branch point(s) — literals concatenated in source order, not rendered -->
 
@@ -26,7 +26,7 @@ Your full personality and behavioral rules are defined in SOUL.md and IDENTITY.m
 
 ## modDateOnly
 
-<!-- source: internal/agent/prompt_modules.go:212 -->
+<!-- source: internal/agent/prompt_modules.go:214 -->
 
 ````text
 (no literal text in this block — it delegates to a constant listed above/below)
@@ -34,7 +34,7 @@ Your full personality and behavioral rules are defined in SOUL.md and IDENTITY.m
 
 ## modAgentIntro
 
-<!-- source: internal/agent/prompt_modules.go:219 -->
+<!-- source: internal/agent/prompt_modules.go:221 -->
 
 <!-- NOTE: 5 branch point(s) — literals concatenated in source order, not rendered -->
 
@@ -89,7 +89,7 @@ USER.md, which grow over time and would lose context if rewritten in full.
 
 ## modChatbotIntro
 
-<!-- source: internal/agent/prompt_modules.go:294 -->
+<!-- source: internal/agent/prompt_modules.go:296 -->
 
 ````text
 ````Your identity (name, role, personality) is
@@ -179,7 +179,7 @@ identity files.
 
 ## modBootstrapFiles
 
-<!-- source: internal/agent/prompt_modules.go:387 -->
+<!-- source: internal/agent/prompt_modules.go:389 -->
 
 <!-- NOTE: 7 branch point(s) — literals concatenated in source order, not rendered -->
 
@@ -196,7 +196,7 @@ This is who you are talking to right now. Treat the content below as factual, cu
 
 ## modMemory
 
-<!-- source: internal/agent/prompt_modules.go:431 -->
+<!-- source: internal/agent/prompt_modules.go:433 -->
 
 <!-- NOTE: 1 branch point(s) — literals concatenated in source order, not rendered -->
 
@@ -212,7 +212,7 @@ Facts you have persisted about this chatter across earlier sessions. Treat as fa
 
 ## modConfidentiality
 
-<!-- source: internal/agent/prompt_modules.go:447 -->
+<!-- source: internal/agent/prompt_modules.go:449 -->
 
 ````text
 # Confidentiality (load-bearing)
@@ -245,7 +245,7 @@ spirit of the refusal politely, do not pass the bracketed message through.
 
 ## modSandbox
 
-<!-- source: internal/agent/prompt_modules.go:489 -->
+<!-- source: internal/agent/prompt_modules.go:491 -->
 
 <!-- NOTE: 4 branch point(s) — literals concatenated in source order, not rendered -->
 
@@ -308,7 +308,7 @@ e2b
 
 ## modTaskDelegation
 
-<!-- source: internal/agent/prompt_modules.go:566 -->
+<!-- source: internal/agent/prompt_modules.go:568 -->
 
 ````text
 (no literal text in this block — it delegates to a constant listed above/below)
@@ -316,7 +316,7 @@ e2b
 
 ## modSkills
 
-<!-- source: internal/agent/prompt_modules.go:571 -->
+<!-- source: internal/agent/prompt_modules.go:573 -->
 
 <!-- NOTE: 1 branch point(s) — literals concatenated in source order, not rendered -->
 
@@ -327,7 +327,7 @@ e2b
 
 ## modGroupChat
 
-<!-- source: internal/agent/prompt_modules.go:579 -->
+<!-- source: internal/agent/prompt_modules.go:581 -->
 
 <!-- NOTE: 1 branch point(s) — literals concatenated in source order, not rendered -->
 
@@ -343,7 +343,7 @@ When you DO respond: your full skill catalog and tool registry above are still i
 
 ## modThinking
 
-<!-- source: internal/agent/prompt_modules.go:597 -->
+<!-- source: internal/agent/prompt_modules.go:599 -->
 
 <!-- NOTE: 1 branch point(s) — literals concatenated in source order, not rendered -->
 
@@ -353,7 +353,7 @@ off
 
 ## modToolDiscipline
 
-<!-- source: internal/agent/prompt_modules.go:606 -->
+<!-- source: internal/agent/prompt_modules.go:608 -->
 
 ````text
 (no literal text in this block — it delegates to a constant listed above/below)
@@ -361,7 +361,7 @@ off
 
 ## modWorkspaceUpdate
 
-<!-- source: internal/agent/prompt_modules.go:611 -->
+<!-- source: internal/agent/prompt_modules.go:629 -->
 
 ````text
 (no literal text in this block — it delegates to a constant listed above/below)
@@ -369,7 +369,7 @@ off
 
 ## modChatbotTools
 
-<!-- source: internal/agent/prompt_modules.go:617 -->
+<!-- source: internal/agent/prompt_modules.go:635 -->
 
 ````text
 # Tool Use
@@ -439,7 +439,7 @@ tool. camoufox-cli is the ONLY browser tool in this sandbox. Do NOT run
 
 ## modIdentityTail
 
-<!-- source: internal/agent/prompt_modules.go:686 -->
+<!-- source: internal/agent/prompt_modules.go:704 -->
 
 <!-- NOTE: 1 branch point(s) — literals concatenated in source order, not rendered -->
 
@@ -451,7 +451,7 @@ Every response you give must be in character as %s, following the personality an
 
 ## taskDelegationContent
 
-<!-- source: internal/agent/prompt_modules.go:707 -->
+<!-- source: internal/agent/prompt_modules.go:725 -->
 
 ````text
 # Task delegation
@@ -549,7 +549,7 @@ conversational replies. todo.md is for plans the user tracks, not chat overhead.
 
 ## toolDisciplineContent
 
-<!-- source: internal/agent/prompt_modules.go:799 -->
+<!-- source: internal/agent/prompt_modules.go:817 -->
 
 ````text
 # Tool Use
@@ -651,7 +651,7 @@ with what you know, marked clearly as unverified.
 
 ## workspaceUpdateContent
 
-<!-- source: internal/agent/prompt_modules.go:895 -->
+<!-- source: internal/agent/prompt_modules.go:913 -->
 
 ````text
 # Workspace Self-Update

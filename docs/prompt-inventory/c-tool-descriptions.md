@@ -156,7 +156,7 @@ Execute a shell command in the sandbox and return stdout/stderr.
 
 ## read_file
 
-<!-- source: internal/agent/tools/file.go:348 -->
+<!-- source: internal/agent/tools/file.go:429 -->
 
 ````text
 Read the contents of a file
@@ -164,15 +164,15 @@ Read the contents of a file
 
 ## write_file
 
-<!-- source: internal/agent/tools/file.go:357 -->
+<!-- source: internal/agent/tools/file.go:73 (via writeFileDescription) -->
 
 ````text
-Write content to a file (creates directories as needed)
+Write content to a file (creates directories as needed). For a long document this is one call and one set of arguments, and those arguments cannot exceed your output limit — write the first section, then append the rest with edit_file.
 ````
 
 ## list_dir
 
-<!-- source: internal/agent/tools/file.go:373 -->
+<!-- source: internal/agent/tools/file.go:434 -->
 
 ````text
 List files and directories in a path
@@ -180,7 +180,7 @@ List files and directories in a path
 
 ## edit_file
 
-<!-- source: internal/agent/tools/file.go:63 (via editDescription) -->
+<!-- source: internal/agent/tools/file.go:113 (via editDescription) -->
 
 ````text
 Edit a file by replacing an exact substring. Prefer this over write_file when changing only part of a file (especially identity files like SOUL.md / MEMORY.md): it's cheaper, can't drop unrelated content, and validates the replacement was applied. old_string must match a unique substring unless replace_all is true; new_string must differ from old_string. Read the file first if you're unsure of the exact text.
@@ -188,7 +188,7 @@ Edit a file by replacing an exact substring. Prefer this over write_file when ch
 
 ## read_file
 
-<!-- source: internal/agent/tools/file.go:902 -->
+<!-- source: internal/agent/tools/file.go:1115 -->
 
 ````text
 Read the contents of a file
@@ -196,15 +196,15 @@ Read the contents of a file
 
 ## write_file
 
-<!-- source: internal/agent/tools/file.go:996 -->
+<!-- source: internal/agent/tools/file.go:73 (via writeFileDescription) -->
 
 ````text
-Write content to a file (creates directories as needed)
+Write content to a file (creates directories as needed). For a long document this is one call and one set of arguments, and those arguments cannot exceed your output limit — write the first section, then append the rest with edit_file.
 ````
 
 ## list_dir
 
-<!-- source: internal/agent/tools/file.go:1069 -->
+<!-- source: internal/agent/tools/file.go:1269 -->
 
 ````text
 List files and directories in a path
@@ -212,7 +212,7 @@ List files and directories in a path
 
 ## edit_file
 
-<!-- source: internal/agent/tools/file.go:63 (via editDescription) -->
+<!-- source: internal/agent/tools/file.go:113 (via editDescription) -->
 
 ````text
 Edit a file by replacing an exact substring. Prefer this over write_file when changing only part of a file (especially identity files like SOUL.md / MEMORY.md): it's cheaper, can't drop unrelated content, and validates the replacement was applied. old_string must match a unique substring unless replace_all is true; new_string must differ from old_string. Read the file first if you're unsure of the exact text.
@@ -252,7 +252,7 @@ Load the full content of a skill by name. Use this when you need detailed instru
 
 ## memory_search
 
-<!-- source: internal/agent/tools/memory_search.go:38 -->
+<!-- source: internal/agent/tools/memory_search.go:34 -->
 
 ````text
 Search through conversation history logs using keyword matching with recency weighting
