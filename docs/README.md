@@ -15,7 +15,7 @@
 | **B. 设计与决策** | 某块机制的 as-built 设计与决策记录 | 见 §2 表 |
 | **C. 事故与排查** | 一次真实事故的取证与结论 | [04](./文件系统形式化证明/04-incident-workspace-2026-09-17.md) · [sandbox-scope-leak.md](./sandbox-scope-leak.md) |
 | **D. 一次性分析 / 运维** | 一次性扫描、清理、发布准备 | 见 §2 表（多为零引用） |
-| **E. 提案** | 尚未实现的提案与清单（MCP / skills 出口） | [issues/mcp-egress-decisions.md](./issues/mcp-egress-decisions.md)（**该主题的唯一有效决策来源**） |
+| **E. 提案** | 尚未实现的提案与清单（MCP / skills 出口） | [issues/mcp-egress-decisions.md](./issues/mcp-egress-decisions.md)（**该主题的唯一有效决策来源**；出口面的**审计判据 I1–I5 与循环**在 cloud `docs/audits/README.md`——规则只有那一个家，这里只记决定与指向） |
 
 ## 2. 每篇一行
 
