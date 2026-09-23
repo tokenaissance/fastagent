@@ -77,6 +77,59 @@ func createProbeSandbox(t *testing.T, apiKey, template string, secure bool) (id,
 	return out.SandboxID, out.EnvdAccessToken
 }
 
+// destroyProbeSandbox removes an instance this probe created and then proves
+// it is gone. The probe used to leave both of its sandboxes behind — one of
+// them paused on purpose — and a leftover shows up nowhere except the
+// provider's sandbox list, which is to say never, for anyone reading the test
+// output.
+func destroyProbeSandbox(t *testing.T, apiKey, sandboxID string) {
+	t.Helper()
+	req, err := http.NewRequest("DELETE", fmt.Sprintf("%s/sandboxes/%s", e2bBaseURL, sandboxID), nil)
+	if err != nil {
+		t.Errorf("build destroy request for %s: %v", sandboxID, err)
+		return
+	}
+	req.Header.Set("X-API-Key", apiKey)
+	resp, err := (&http.Client{Timeout: 60 * time.Second}).Do(req)
+	if err != nil {
+		t.Errorf("destroy sandbox %s: %v", sandboxID, err)
+		return
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	// 404 is success here, for the same reason it is in closeSandboxByID: the
+	// instance is not running, which is the entire goal.
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotFound {
+		t.Errorf("destroy sandbox %s: HTTP %d: %s", sandboxID, resp.StatusCode, raw)
+		return
+	}
+	// Prove it rather than assume it. Reporting success on a rejected or
+	// ignored DELETE is exactly how leftovers accumulate.
+	getReq, err := http.NewRequest("GET", fmt.Sprintf("%s/sandboxes/%s", e2bBaseURL, sandboxID), nil)
+	if err != nil {
+		t.Errorf("build verify request for %s: %v", sandboxID, err)
+		return
+	}
+	getReq.Header.Set("X-API-Key", apiKey)
+	getResp, err := (&http.Client{Timeout: 60 * time.Second}).Do(getReq)
+	if err != nil {
+		t.Errorf("verify sandbox %s is gone: %v", sandboxID, err)
+		return
+	}
+	defer getResp.Body.Close()
+	if getResp.StatusCode != http.StatusNotFound {
+		body, _ := io.ReadAll(getResp.Body)
+		t.Errorf("sandbox %s survived its own destroy: HTTP %d: %s", sandboxID, getResp.StatusCode, body)
+	}
+}
+
+// trackProbeSandbox makes an instance disappear when the (sub)test that
+// created it ends, t.Fatal and t.Skipf included.
+func trackProbeSandbox(t *testing.T, apiKey, sandboxID string) {
+	t.Helper()
+	t.Cleanup(func() { destroyProbeSandbox(t, apiKey, sandboxID) })
+}
+
 // connectProbeSandbox resumes a paused sandbox (a no-op when it is running) and
 // returns the token from the response — the one a resumed lease row would need.
 func connectProbeSandbox(t *testing.T, apiKey, sandboxID string) string {
@@ -125,6 +178,7 @@ func TestE2BEnvdTokenAcrossPauseResume(t *testing.T) {
 		// holds, a lease row's envd_token is empty by construction and the
 		// pause/resume question is moot for it.
 		id, token := createProbeSandbox(t, apiKey, template, false)
+		trackProbeSandbox(t, apiKey, id)
 		t.Logf("created non-secure sandbox %s (token %q)", id, token)
 		if token != "" {
 			t.Errorf("non-secure sandbox returned a token: %q — the schema says null", token)
@@ -136,6 +190,7 @@ func TestE2BEnvdTokenAcrossPauseResume(t *testing.T) {
 
 	t.Run("secure: does the create token survive a pause+resume?", func(t *testing.T) {
 		id, created := createProbeSandbox(t, apiKey, template, true)
+		trackProbeSandbox(t, apiKey, id)
 		if created == "" {
 			t.Fatal("secure sandbox returned no envdAccessToken — the schema says it must")
 		}
