@@ -23,6 +23,7 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 	"github.com/fastclaw-ai/fastclaw/internal/sandbox"
 	"github.com/fastclaw-ai/fastclaw/internal/scope"
+	"github.com/fastclaw-ai/fastclaw/internal/skills"
 	"github.com/fastclaw-ai/fastclaw/internal/store"
 	"github.com/fastclaw-ai/fastclaw/internal/users"
 	"github.com/fastclaw-ai/fastclaw/internal/workspace"
@@ -291,8 +292,8 @@ func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 	}
 	// Batch-fetch all agent model configs in 1 query (replaces N calls).
 	modelMap := make(map[string]string)
+	agentIDs := make([]string, len(owned))
 	if len(owned) > 0 {
-		agentIDs := make([]string, len(owned))
 		for i, ar := range owned {
 			agentIDs[i] = ar.ID
 		}
@@ -306,22 +307,89 @@ func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	// How many skills each agent publishes, from the same layers the catalog
+	// serves. It is the number the MCP listing prints beside the agent, so it has
+	// to be the number `list_skills` would list: a caller that sees 4 here and 3
+	// there reads a disagreement as a change. Failure is per agent (an unreadable
+	// layer is not "no skills"), which is why the pair is returned rather than one
+	// map with a zero in it.
+	//
+	// The cost this adds to a listing is one scan of the shared platform layer plus
+	// one per agent, and that is the price of the number agreeing with `list_skills`:
+	// a cheaper count would be a second rule about which skills count, read by the
+	// same caller that then reads the other number.
+	//
+	// Agreement is per read, not an invariant. `list_skills` scans again when it is
+	// called, so a skill written between the two calls makes the two numbers differ.
+	// That divergence is accepted (2026-09-23): it is bounded by the time between two
+	// tool calls, it heals on the next read, and no billing or authorization decision
+	// is taken from either number - the balance line is the number that decides
+	// whether work is paid for, and it comes from a single read of its own.
+	skillCounts, skillCountFailures := skills.PublishedCounts(agentIDs)
+
+	owners := make(map[string]map[string]any, len(owned))
 	out := make([]map[string]any, 0, len(owned))
 	for _, ar := range owned {
 		desc, _ := ar.Config["description"].(string)
-		out = append(out, map[string]any{
+		entry := map[string]any{
 			"id":          ar.ID,
 			"name":        ar.Name,
 			"description": desc,
 			"model":       modelMap[ar.ID],
 			"avatarUrl":   "/api/agents/" + ar.ID + "/files/avatar.png",
 			"createdAt":   ar.CreatedAt,
+			"updatedAt":   ar.UpdatedAt,
 			"userId":      ar.UserID,
 			"role":        "owner",
 			"isPublic":    ar.IsPublic,
-		})
+		}
+		// Owner identity: who the agent belongs to, which the id alone does not
+		// answer for a reader.
+		if _, cached := owners[ar.UserID]; !cached {
+			owners[ar.UserID] = s.agentOwner(r, ar.UserID)
+		}
+		if owner := owners[ar.UserID]; owner != nil {
+			entry["owner"] = owner
+		}
+		if reason, failed := skillCountFailures[ar.ID]; failed {
+			entry["skillCountError"] = reason
+		} else {
+			entry["skillCount"] = skillCounts[ar.ID]
+		}
+		out = append(out, entry)
 	}
 	jsonResponse(w, http.StatusOK, map[string]any{"agents": out})
+}
+
+// agentOwner is the owner block for one agent: the id always, the account's name
+// fields when the account is known. A missing account is not an error here — the
+// agent row is the fact being listed, and the owner block is decoration on it.
+//
+// It can name the caller and no one else, because the rows this listing walks are
+// the caller's own (ListAgents filters by owner). That is what makes an email safe
+// to include; a future widening of that row set has to revisit this function.
+func (s *Server) agentOwner(r *http.Request, ownerID string) map[string]any {
+	if ownerID == "" {
+		return nil
+	}
+	owner := map[string]any{"id": ownerID}
+	if s.accounts == nil {
+		return owner
+	}
+	acct, err := s.accounts.Get(r.Context(), ownerID)
+	if err != nil || acct == nil {
+		return owner
+	}
+	if acct.Username != "" {
+		owner["username"] = acct.Username
+	}
+	if acct.DisplayName != "" {
+		owner["displayName"] = acct.DisplayName
+	}
+	if acct.Email != "" {
+		owner["email"] = acct.Email
+	}
+	return owner
 }
 
 type createAgentRequest struct {
