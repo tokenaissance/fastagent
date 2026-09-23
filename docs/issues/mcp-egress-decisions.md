@@ -37,6 +37,7 @@
 | **D11** | **错误语义写死** | 无 token/过期/audience 不符/scope 不足 → `401` + `WWW-Authenticate`（缺 scope 带 `scope=`）；无权访问该 agent → `403`；上游故障 → `502/503`，**绝不 401**。AS 侧失败一律用 OAuth error redirect，`error_description` 保持编码安全（客户端不解码 `+`） |
 | **D12** | **`oauth_clients` / `oauth_authorization_codes` / `oauth_tokens` / `oauth_consents` 落在边缘库** | 只新增表；`users` / `apikeys` / `web_sessions` 一行不动。回滚 = 下线边缘端点；apikey 兜底始终可用 |
 | **D13** | **skill 名字的三处持久化按序迁移** | 顺序：目录 → 对象存储 key → configs_kv 行。reconcile 命令已实现（默认 dry run）。顺序不可换：先改名会让 hydrate 的 prune 删掉新目录；先同步会让两个名字并存 |
+| **D14** | **见证经济：只对"转换"要求逐点见证，纯透传字段只要求边界那一处；本主题的规则以 cloud `docs/audits/README.md` 为准** | 「每个投递点都要见证」落到透传字段上会把测试写成同一件事的复述，所以判据 I2 加了例外条款：**转换**（判据 / 派生 / 失败语义 / 翻译与组合）逐点见证；**纯透传**（值原样穿过，可以加标签、缩进）只要求生产侧"它确实上了线" + 边界"客户端读到它"两处。规则本体、判据来源与循环记在 cloud `docs/audits/README.md`（**唯一来源**，本文不复述）；实例（2026-09-23 的 `list_agents` 字段审计）见 cloud `docs/audits/2026-09-23-mcp-egress-fields.md` §5 E2。**重开条件**：某个透传字段一旦被拿去做判据（配额 / 结算 / 同步判定），它就不再是透传，按转换重算见证 |
 
 ## 3. 实测证据（2026-09-18，本机）
 
