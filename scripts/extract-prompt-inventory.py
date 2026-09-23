@@ -219,14 +219,31 @@ def range_text(rel, start, end):
 PLACEHOLDERS = []
 
 
+def normalize_ws(text):
+    """Collapse every run of whitespace to one space.
+
+    `gofmt` aligns the `=` of a const block the moment a longer name joins it, so
+    `StoppedToolResult = "…"` becomes `StoppedToolResult      = "…"` while the
+    prompt text is unchanged. A pin that breaks on that reports a content change
+    where none happened — which is what happened on 2026-09-23: the CI job went
+    red on `pin 'StoppedToolResult =' matches 0 lines` and the prompt was fine.
+    """
+    return " ".join(text.split())
+
+
 def pinned_text(rel, needle):
     """Find the one line holding `needle` and return its number.
 
     Content, not position: these pins name a single line of prompt text, and a
     line number breaks on every insertion above it. Ambiguity is an error too —
     a needle matching two lines would pin whichever came first.
+
+    Whitespace is normalized on BOTH sides before comparing (see
+    `normalize_ws`), so reformatting cannot read as a prompt change, while the
+    needle still has to be specific enough to hit one line.
     """
-    hits = [i + 1 for i, line in enumerate(read(rel)) if needle in line]
+    want = normalize_ws(needle)
+    hits = [i + 1 for i, line in enumerate(read(rel)) if want in normalize_ws(line)]
     if len(hits) != 1:
         raise SystemExit(
             "%s: pin %r matches %d lines (want exactly one) — the text moved or was "
