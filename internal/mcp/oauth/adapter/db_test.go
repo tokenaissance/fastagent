@@ -51,8 +51,16 @@ func TestDBTokenStoreSharedAcrossInstances(t *testing.T) {
 	ctx := context.Background()
 	key := "oauth/u1/a1/quandora.json"
 
+	// Distinctive token values on purpose. The check at the bottom asks "is the plaintext on disk?",
+	// and a SHORT token makes that question unanswerable: ciphertext is random bytes, so a two-letter
+	// probe ("at") matches by chance in roughly one run out of a few hundred — which is how this test
+	// failed inside `go test ./... -race` on 2026-09-23 while the property it guards was intact.
+	// Long values make a match mean something.
+	const accessToken = "at-4f19c2-plaintext-must-not-reach-the-database"
+	const refreshToken = "rt-9c07ab-plaintext-must-not-reach-the-database"
+
 	if err := sa.Save(ctx, key, &domain.OAuthTokens{
-		AccessToken: "at", RefreshToken: "rt", ExpiresAt: time.Now().UTC().Add(time.Hour),
+		AccessToken: accessToken, RefreshToken: refreshToken, ExpiresAt: time.Now().UTC().Add(time.Hour),
 	}); err != nil {
 		t.Fatalf("save on A: %v", err)
 	}
@@ -60,7 +68,7 @@ func TestDBTokenStoreSharedAcrossInstances(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load on B: %v", err)
 	}
-	if got.AccessToken != "at" || got.RefreshToken != "rt" {
+	if got.AccessToken != accessToken || got.RefreshToken != refreshToken {
 		t.Fatalf("unexpected tokens: %+v", got)
 	}
 
@@ -69,7 +77,7 @@ func TestDBTokenStoreSharedAcrossInstances(t *testing.T) {
 	if err := a.DB().QueryRowContext(ctx, "SELECT ciphertext FROM mcp_oauth_tokens WHERE token_key = ?", key).Scan(&raw); err != nil {
 		t.Fatalf("query raw: %v", err)
 	}
-	if strings.Contains(string(raw), "at") || strings.Contains(string(raw), "rt") {
+	if strings.Contains(string(raw), accessToken) || strings.Contains(string(raw), refreshToken) {
 		t.Fatal("plaintext token found in DB")
 	}
 
