@@ -146,7 +146,9 @@ table and is edited through the dashboard or `fastagent agents config`.
 - Web chat `/api/chat/stream` (SSE)
 - Live agent push via `/api/chat/subscribe` (SSE) — surfaces cron-fired and other async replies into the open chat panel without a refresh
 - Session management `/api/chat/sessions`
-- Agent CRUD `/api/agents` (`?all=true` returns the cross-tenant view, admin-only)
+- Agent CRUD `/api/agents` (`?all=true` returns the cross-tenant view, admin-only). The per-user listing carries
+  the owner, `createdAt`/`updatedAt`, `model` and `skillCount` (with `skillCountError` when the skill layers could
+  not be read), so one call answers "which agent, whose, how much to read" — the MCP egress prints exactly these
 - Per-agent scheduler `/api/agents/{id}/cron` (list / toggle / delete)
 - Provider management `/api/config`
 - Skill install `/api/skills/install` (ClawHub + GitHub)
