@@ -1,7 +1,8 @@
 # Chat event delivery: placement — session-key affinity, not a fan-out relay
 
-> **Status**: decided · 2026-09-24 · in force, **not implemented** (nothing in the
-> tree sends or reads the affinity header yet — §7 lists the landing order)
+> **Status**: decided · 2026-09-24 · in force, **landed in code, not yet deployed**
+> (§7 lists what shipped and what is left — steps 1–9 are in the tree; the rollout
+> and the two-browser check are not)
 > **Scope**: *which pod* a session's requests land on, and why that is a delivery
 > input at all. The mechanism that carries events across pods is
 > [chat-event-delivery.md](./chat-event-delivery.md).
@@ -185,16 +186,28 @@ Affinity stays the decision until one of these is true:
 
 ## 7. Status of the work
 
-Nothing is implemented: no header, no ingress annotation, no server change, no
-client change. The landing order is steps 1 → 5 in §3, red case first, one file per
-commit. Until then the behaviour is exactly what
-[chat-event-delivery.md](./chat-event-delivery.md) describes: persisted events
-arrive cross-pod, `content_delta` does not.
+Steps 1–9 of §8 are in the tree, red case first, one file per commit:
+
+| Step | Where it landed |
+|---|---|
+| 1–3 server | fastagent `06740e6` (red: the subscriber got `body=": ok\n\n"`) → `8849ad5` (hub branch no longer skips live-only) → `9112ecc` (the predicate's comment now names the tail) |
+| 4–5 webui | fastagent `05ae99d` (red: URL lacked `sessionId`) → `3884256` → `a0c26bc`/`6700fcb` (delta renders on the subscribe path, behind `inFlightSendSessionRef`) |
+| 6–7 cloud | `55553323` (red) → `296968ed` → `0c8e054c`/`b9d6e4a9` (same shape, behind `streamingSessionsRef`) |
+| 8 cloud doc | `9aacbf69` (D6 → A′) + `b21e4379` (the C4 clause that still contradicted it) |
+| 9 ingress | fastagent `27ea0bb` — cookie affinity out, `upstream-hash-by: "$arg_sessionId"` in |
+
+**Step 10 has not run**: nothing is deployed, so production still routes by
+round-robin and the behaviour is exactly what
+[chat-event-delivery.md](./chat-event-delivery.md) describes — persisted events
+arrive cross-pod, `content_delta` does not. Deployment is the single act that
+turns the key on; it is also the only step where a mistake reads as "one browser
+stopped streaming" instead of as a failed test.
 
 ## 8. Execution plan (files, order, tests)
 
-Order is "inert first": every code step is a no-op until step 6 turns affinity
-on, so nothing here can regress today's behaviour on its own.
+Order is "inert first": every code step is a no-op until step 9 (the ingress
+annotation) turns affinity on, so nothing here can regress today's behaviour on
+its own.
 
 | # | Repo / file | Change | Red case first |
 |---|---|---|---|
@@ -205,7 +218,7 @@ on, so nothing here can regress today's behaviour on its own.
 | 5 | fastagent `web/src/components/chat-screen.tsx` | `content_delta` case on the subscribe path | ✅ `web/src/__tests__/chat-subscribe-content-delta.test.tsx` (watch-only tab renders tokens; owning tab does not) |
 | 6 | cloud `src/shared/lib/fastagent/chat.ts` | `?sessionId=` on the stream POST | (same) |
 | 7 | cloud `src/features/chat/use-chat-subscription.ts` | `content_delta` branch behind the existing POST-owns guard; rewrite the D6 comment | ✅ `src/__tests__/fastagent/chat-streaming-parity.test.tsx` — the two D6 cases invert: a watching tab renders, the owning tab still does not |
-| 8 | cloud `docs/audits/2026-09-13-fastagent-chat-parity-audit.md` | D6 is amended, not deleted: *who* renders the delta changed | — |
+| 8 | cloud `docs/fastagent/design/10-chat-client-parity.md` | D6 is amended, not deleted: *who* renders the delta changed — and C4, the clause D6 feeds, with it | — |
 | 9 | fastagent `deploy/helm/fastagent` | the ingress annotation (§3 step 2), cookie affinity out | — |
 | 10 | dev cluster | deploy, then a two-browser check on one session | manual |
 
