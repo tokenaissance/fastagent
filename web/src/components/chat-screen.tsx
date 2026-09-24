@@ -847,6 +847,16 @@ export function ChatScreen() {
     // a canonicalising reload even when no content bubble was built (a turn
     // that only ran tools).
     let renderedToolRows = false;
+    // True once this connection streamed content_delta tokens into a bubble.
+    // Only this connection can render them: the tokens are live-only, so the
+    // history reload after `done` never carries them back. Same reason as
+    // renderedToolRows — `done` owes a canonicalising read whenever this
+    // connection rendered part of the turn itself.
+    let renderedStream = false;
+    // True while the round's text came from this connection's own tokens, so
+    // the trailing `content` seals by replacing rather than appending: a
+    // subscription that opened mid-round accumulated only a suffix of it.
+    let streamedIntoTransient = false;
     const resetToolRows = () => {
       toolGroupId = null;
       toolCalls = [];
@@ -876,6 +886,8 @@ export function ChatScreen() {
         text?: string;
         data?: {
           content?: string;
+          // content_delta's token chunk (live-only; never persisted).
+          delta?: string;
           message?: string;
           // tool_call / tool_result fields
           id?: string;
@@ -917,10 +929,71 @@ export function ChatScreen() {
           if (seq >= 0) maxSeqRef.current = seq;
         };
         switch (data.type) {
+          case "content_delta": {
+            // A turn this connection did not start has no other transport for
+            // its tokens: they are never persisted, so the tail cannot replay
+            // them and only the hub carries them (placement §3). The tab that
+            // owns the POST never gets here — it returns above while its
+            // foreground stream is in flight, so it renders its own copy.
+            const delta = data.data?.delta || "";
+            if (!delta) break;
+            claim();
+            const openId = transientBubbleIdRef.current;
+            if (!openId) {
+              // Text that arrives after tool rows closes that round, the same
+              // thing the trailing `content` event does.
+              resetToolRows();
+              const id = `stream-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+              transientBubbleIdRef.current = id;
+              renderedStream = true;
+              streamedIntoTransient = true;
+              setMessages((prev) => [
+                ...prev,
+                { id, role: "agent", content: delta, timestamp: Date.now() },
+              ]);
+              break;
+            }
+            renderedStream = true;
+            streamedIntoTransient = true;
+            setMessages((prev) => {
+              const idx = prev.findIndex((m) => m.id === openId);
+              if (idx < 0) return prev;
+              const updated = [...prev];
+              updated[idx] = {
+                ...updated[idx],
+                content: (updated[idx].content || "") + delta,
+              };
+              return updated;
+            });
+            break;
+          }
           case "content": {
             const content = data.data?.content || "";
             const meta = data.data?.metadata;
             if (!content && !meta) break;
+            if (streamedIntoTransient) {
+              // This connection streamed the round's tokens itself, so this
+              // event is that round's canonical text — replace, never append
+              // (a subscription that opened mid-round holds only a suffix).
+              streamedIntoTransient = false;
+              claim();
+              const id = transientBubbleIdRef.current;
+              transientBubbleIdRef.current = null;
+              if (id) {
+                setMessages((prev) => {
+                  const idx = prev.findIndex((m) => m.id === id);
+                  if (idx < 0) return prev;
+                  const updated = [...prev];
+                  updated[idx] = {
+                    ...updated[idx],
+                    ...(content ? { content } : {}),
+                    metadata: meta ? { ...updated[idx].metadata, ...meta } : updated[idx].metadata,
+                  };
+                  return updated;
+                });
+              }
+              break;
+            }
             // The active POST sendChatStream is rendering this turn
             // via content_delta into streamingMsgIdRef. Both
             // subscriptions sit on the same hub, so the `content`
@@ -1022,10 +1095,11 @@ export function ChatScreen() {
             // a transient content bubble, or tool rows it painted itself (a
             // turn that only ran tools has no bubble but still needs the
             // canonical padded results).
-            if (transientBubbleIdRef.current || renderedToolRows) {
+            if (transientBubbleIdRef.current || renderedToolRows || renderedStream) {
               transientBubbleIdRef.current = null;
               resetToolRows();
               renderedToolRows = false;
+              renderedStream = false;
               getChatHistoryWithCursor(selectedAgent, sessionId)
                 .then(({ history, latestEventSeq }) => {
                   if (latestEventSeq > maxSeqRef.current) maxSeqRef.current = latestEventSeq;
