@@ -1,6 +1,6 @@
 # 00 · The three formal systems: an index
 
-> Status: index · last verified: 2026-09-20 (added the single-source family to §4.1, with its boundary note)
+> Status: index · last verified: 2026-09-24 (F3 mechanism 3 now carries its **boundary**: live-only events are outside the log's guarantee)
 > This directory (`文件系统形式化证明`, formerly `文件系统`) actually carries **three** formal systems:
 > its name only describes the first one's application area; the other two constrain the whole harness.
 > This document is their **single entry point** — what each defines, how they compose, which code each
@@ -107,6 +107,7 @@ F3 delivery (defined in 08 §2.2)
 ├── mechanism 2 · durable carriers (a signal rides the instance/turn into the store, never an in-process queue)
 │     └─ 09 §3 G3 · 10 §4 G3/G19 · register #9
 ├── mechanism 3 · the event log as the transport of record (cross-replica delivery + seq dedup) → ../chat-event-delivery.md
+│     └─ boundary: live-only events (`content_delta`) are outside the log's guarantee — **placement** carries them → ../chat-event-delivery-placement.md
 └── mechanism 4 · the client reads facts only (turnActive / queued{holder,ETA} / progress.id + the five states)
       └─ ../session-turn-integrity.md A4 · [tokenaissance-cloud › design/09-delegate-task-design.md](https://github.com/tokenaissance/tokenaissance-cloud/blob/develop/docs/fastagent/design/09-delegate-task-design.md)
 
@@ -285,7 +286,7 @@ reads its frames live, which is why the G11 row above is struck through.
 | session turn integrity | [../session-turn-integrity.md](../session-turn-integrity.md) §Invariant | **W** single writer · **P** call/reply pairing · **O** ordering · **T** a projection that does not lie | `internal/session/manager.go:86`, `internal/agent/loop.go:2322`/`:2526`/`:3279` | `turn_queue_test.go:97`/`:148`, `tool_recovery_test.go:215`, `TestConcurrentWebAndCronTurnSerialize` |
 | sandbox pool lease | [../sandbox-pool-leases.md](../sandbox-pool-leases.md) | **U** naming authority · **A** no rebuild per call · **I** the row names the live instance | `internal/sandbox/lease.go:57-61` | `lease_rebuild_test.go:421`/`:469`, `TestE2BPool*` |
 | bounded tool output | [../tool-output-limits.md](../tool-output-limits.md) | a result is bounded as it leaves its producer + the **delivered-frames clause** | `internal/sandbox/e2b_executor.go:1161` | `TestE2BExecClockHints` |
-| event delivery | [../chat-event-delivery.md](../chat-event-delivery.md) | the event log is the transport of record: D1–D5 decisions + R1–R4 falsifications | the SSE subscription / tail poll | — |
+| event delivery | [../chat-event-delivery.md](../chat-event-delivery.md) · [../chat-event-delivery-placement.md](../chat-event-delivery-placement.md) (boundary) | the event log is the transport of record: D1–D5 decisions + R1–R4 falsifications. **Boundary**: live-only events (`content_delta`) are outside that guarantee — **placement** (session-key affinity) carries them, and it cannot reach a cron/goal producer, whose pod is decided by a lock race | the SSE subscription / tail poll | — |
 | path and scope identity | [01 §3.5/§8](./01-current-implementation.md) · [02 §5](./02-semantics-and-architecture.md) | one path, one key (the G18/G21/G22 family) | `scopeSessionID`/`wsPath`, `sandbox.StoreScope` | `TestE2BLiveOnePathIsOneKey` |
 | project tree invariant | [10 §4](./10-harness-state-audit.md) (G17) | one project, one tree, many containers, writes broadcast | `LiveProjectExecutors`, `syncStoreScope` | — |
 | MCP OAuth security clauses | [../mcp-oauth-design.md](../mcp-oauth-design.md) | state is one-shot (`Take` reads-and-deletes) + PKCE S256 + TTL + bound to userID | `usecase/complete`, `pending_store.go` | `internal/mcp/oauth/...` |
