@@ -1,6 +1,6 @@
 # 00 · 三套形式化系统：总索引
 
-> 状态：索引 · 最后核对：2026-09-20（新增 §4.1 的单一来源族与其边界备注）
+> 状态：索引 · 最后核对：2026-09-24（F3 机制 3 登记它的**边界**：live-only 事件不在日志的保证内）
 > 本目录（`文件系统形式化证明`，前身 `文件系统`）实际承载了**三套**形式化系统：目录名只描述了第一套的
 > 应用场景，后两套约束的是整个 harness。本文是它们的**唯一入口**——谁定义什么、如何组合、符号落在
 > 哪些代码上、每条义务由哪条测试钉住。
@@ -103,6 +103,7 @@ F3 投递（定义 08 §2.2）
 ├── 机制 2 · 持久载体（信号随实例/回合落库，不靠进程内队列）
 │     └─ 09 §3 G3 · 10 §4 G3/G19 · 11 册 #9
 ├── 机制 3 · 事件日志即传输层（跨副本投递 + seq 去重）→ ../chat-event-delivery.md
+│     └─ 边界：live-only 事件（`content_delta`）不在日志的保证内，由**落点**承担 → ../chat-event-delivery-placement.md
 └── 机制 4 · 客户端只读事实（turnActive / queued{holder,ETA} / progress.id + 五态）
       └─ ../session-turn-integrity.md A4 · [tokenaissance-cloud › design/09-delegate-task-design.md](https://github.com/tokenaissance/tokenaissance-cloud/blob/develop/docs/fastagent/design/09-delegate-task-design.md)
 
@@ -251,7 +252,7 @@ G11 的**两个半边**（stdio 2026-09-18、HTTP 2026-09-22，登记册第 45 �
 | 会话轮次完整性 | [../session-turn-integrity.md](../session-turn-integrity.md) §Invariant | **W** 单写者 · **P** 调用/回复成对 · **O** 顺序 · **T** 投影不说假话 | `internal/session/manager.go:86`、`internal/agent/loop.go:2322`/`:2526`/`:3279` | `turn_queue_test.go:97`/`:148`、`tool_recovery_test.go:215`、`TestConcurrentWebAndCronTurnSerialize` |
 | 沙箱池租约 | [../sandbox-pool-leases.md](../sandbox-pool-leases.md) | **U** 命名权威 · **A** 免重建 · **I** 行指向真实实例 | `internal/sandbox/lease.go:57-61` | `lease_rebuild_test.go:421`/`:469`、`TestE2BPool*` |
 | 工具输出有界 | [../tool-output-limits.md](../tool-output-limits.md) | 结果离开生产者即有上界 + **delivered-frames 条款** | `internal/sandbox/e2b_executor.go:1161` | `TestE2BExecClockHints` |
-| 事件投递 | [../chat-event-delivery.md](../chat-event-delivery.md) | 事件日志即传输层：D1–D5 决策 + R1–R4 反证 | SSE 订阅 / tail 轮询 | — |
+| 事件投递 | [../chat-event-delivery.md](../chat-event-delivery.md) · [../chat-event-delivery-placement.md](../chat-event-delivery-placement.md)（边界） | 事件日志即传输层：D1–D5 决策 + R1–R4 反证。**边界**：live-only 事件（`content_delta`）不在日志的保证内——由**落点**（session 键亲和）承担，而 cron/goal 的生产者是抢锁决定的，亲和覆盖不到 | SSE 订阅 / tail 轮询 | — |
 | 路径与作用域同一性 | [01 §3.5/§8](./01-current-implementation.md) · [02 §5](./02-semantics-and-architecture.md) | 一条路径一个键（G18/G21/G22 同族） | `scopeSessionID`/`wsPath`、`sandbox.StoreScope` | `TestE2BLiveOnePathIsOneKey` |
 | 项目树不变式 | [10 §4](./10-harness-state-audit.md)（G17） | 一个项目一棵树、多容器、写广播 | `LiveProjectExecutors`、`syncStoreScope` | — |
 | MCP OAuth 安全条款 | [../mcp-oauth-design.md](../mcp-oauth-design.md) | state 一次性（`Take` 读即删）+ PKCE S256 + TTL + 绑定 userID | `usecase/complete`、`pending_store.go` | `internal/mcp/oauth/...` |
