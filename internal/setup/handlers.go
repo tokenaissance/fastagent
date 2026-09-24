@@ -1621,11 +1621,16 @@ func (s *Server) handleChatSubscribe(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
-			// Live-only types belong to the tab that started the turn (see
-			// liveOnlyEventTypes): forwarding them here double-renders.
-			if isLiveOnlyEventType(env.Event.Type) {
-				continue
-			}
+			// Live-only types are forwarded here like any other event: a tab
+			// that did not start this turn has no other transport for them
+			// (the log never keeps them, so the tail cannot carry them either),
+			// and "I already have this from my own POST stream" is a fact only
+			// the client can evaluate. Both clients do: each one ignores this
+			// connection's events while its own foreground POST is in flight
+			// for the session (cloud use-chat-subscription.ts, webui
+			// inFlightSendSessionRef). The server cannot tell the two tabs
+			// apart, so the rule lives where the difference is visible.
+			// See docs/chat-event-delivery-placement.md §3.
 			eventData, _ := json.Marshal(env.Event.Data)
 			events.emit(env.Seq, env.Event.Type, eventData)
 		case msg, ok := <-outbound:
