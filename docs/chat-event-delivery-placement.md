@@ -95,24 +95,40 @@ likely to be re-litigated:
 
 ## 3. The mechanism, when it lands
 
-1. **client / cloud**: every fastagent call carries `X-Fastagent-Session: <sessionId>`.
-   Today the id lives in the stream POST's body and in the subscribe/history query
-   string; one header unifies both.
-2. **cloud proxy**: forward that header — the same place it sets `Authorization`
-   (`forwardRequest`).
-3. **ingress**: `nginx.ingress.kubernetes.io/upstream-hash-by: "$http_x_fastagent_session"`,
-   and drop the three cookie-affinity annotations (wrong granularity, and inert).
-4. **server**: drop the two live-only skips on the subscription path so deltas are
-   forwarded. This half is testable in-process: the two-replica harness in
-   `internal/setup/chat_event_delivery_e2e_test.go` already subscribes on B while
-   A runs the turn — its `content_delta` assertion flips from "must not arrive" to
-   "must arrive".
-5. **client**: render `content_delta` in the subscribe handler, and split the flag
-   that today means both "this tab POSTed" and "this tab is receiving".
+**The key is the `sessionId` query parameter**, not a header. That choice is
+forced: `/api/chat/subscribe` is consumed by `EventSource`, which cannot set
+request headers at all — and every chat-scoped call already carries `sessionId`
+in its query string (`…/chat/subscribe?agentId=…&sessionId=…`, the history/todo
+reads, the session routes). So the ingress hashes on `$arg_sessionId` and the
+cloud proxy needs **no change**: it already forwards the query string verbatim
+when it builds the upstream URL.
 
-Step 4 is the one with a red test before it. Steps 1–3 are infrastructure and are
-verified against a live cluster: open the same session in two browsers and check
-that both subscriptions report the same holder.
+1. **client**: the one call that carries the id in its body instead of the URL —
+   `POST /api/chat/stream` — also puts it in the query (`?sessionId=<id>`). One
+   line per app (reference webui, cloud), no new header, no proxy edit.
+2. **ingress**: `nginx.ingress.kubernetes.io/upstream-hash-by: "$arg_sessionId"`,
+   and drop the three cookie-affinity annotations (wrong granularity, and inert).
+3. **server**: drop the live-only skip on the **hub** branch of the subscription
+   loop so deltas reach a watching tab. The tail branch keeps its guard — a delta
+   is never in the table, so that branch is a no-op by construction, and the guard
+   is what keeps it a no-op if that ever changes.
+4. **client**: render `content_delta` on the subscription path. Both apps already
+   have the other half of the rule — the "the foreground POST owns this turn, so
+   ignore this connection" early return (cloud
+   `use-chat-subscription.ts`, webui `inFlightSendSessionRef`) — so the delta
+   branch lands behind that guard and only the *watching* tabs take it.
+
+Steps 1 and 3 are the ones with a red test before them (a subscriber on another
+replica is a *different* assertion and stays red: it must still never see a
+delta). Step 2 is infrastructure, verified against a live cluster: open the same
+session in two browsers and check that both subscriptions report the same holder.
+
+> **Known limit of the key.** Requests with no `sessionId` hash on the empty
+> string, i.e. they all land on one pod. That covers the non-chat surface
+> (admin, skills, files, agent settings) — low-volume and interactive, so the
+> cost is a lopsided but tiny load rather than a stall; if it ever matters, the
+> fix is a fallback component in the key (a `map` in the controller's
+> http-snippet), not a different key.
 
 ## 4. What affinity does not cover
 
@@ -174,3 +190,25 @@ client change. The landing order is steps 1 → 5 in §3, red case first, one fi
 commit. Until then the behaviour is exactly what
 [chat-event-delivery.md](./chat-event-delivery.md) describes: persisted events
 arrive cross-pod, `content_delta` does not.
+
+## 8. Execution plan (files, order, tests)
+
+Order is "inert first": every code step is a no-op until step 6 turns affinity
+on, so nothing here can regress today's behaviour on its own.
+
+| # | Repo / file | Change | Red case first |
+|---|---|---|---|
+| 1 | fastagent `internal/setup/chat_event_delivery_e2e_test.go` | the hub branch must forward a live-only event | ✅ `TestChatSubscribeForwardsLiveOnlyEventsFromTheHub` (fails: the skip drops it) |
+| 2 | fastagent `internal/setup/handlers.go` | delete the hub-branch skip; the comment becomes "the client owns this rule" | — |
+| 3 | fastagent `internal/setup/chat_event_tail.go` | comment: the predicate now guards the **tail** only | — |
+| 4 | fastagent `web/src/lib/api.ts` | `?sessionId=` on the stream POST | (covered by the harness's URL assertions) |
+| 5 | fastagent `web/src/components/chat-screen.tsx` | `content_delta` case on the subscribe path | ✅ `web/src/__tests__/chat-subscribe-content-delta.test.tsx` (watch-only tab renders tokens; owning tab does not) |
+| 6 | cloud `src/shared/lib/fastagent/chat.ts` | `?sessionId=` on the stream POST | (same) |
+| 7 | cloud `src/features/chat/use-chat-subscription.ts` | `content_delta` branch behind the existing POST-owns guard; rewrite the D6 comment | ✅ `src/__tests__/fastagent/chat-streaming-parity.test.tsx` — the two D6 cases invert: a watching tab renders, the owning tab still does not |
+| 8 | cloud `docs/audits/2026-09-13-fastagent-chat-parity-audit.md` | D6 is amended, not deleted: *who* renders the delta changed | — |
+| 9 | fastagent `deploy/helm/fastagent` | the ingress annotation (§3 step 2), cookie affinity out | — |
+| 10 | dev cluster | deploy, then a two-browser check on one session | manual |
+
+Steps 1–8 are inert until 9. Step 9 is the one that changes production
+behaviour, and step 10 is where a mistake would show up as "one browser stopped
+streaming" rather than as a failed test.
