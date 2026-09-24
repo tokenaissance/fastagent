@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fastclaw-ai/fastclaw/internal/agent"
 	"github.com/fastclaw-ai/fastclaw/internal/auth"
 	"github.com/fastclaw-ai/fastclaw/internal/provider"
 	"github.com/fastclaw-ai/fastclaw/internal/store"
@@ -134,6 +135,34 @@ func TestChatSubscribeSeesEventsPersistedByAnotherPod(t *testing.T) {
 	// would double-render it).
 	if sub.seen("content_delta") {
 		t.Fatalf("a live-only event came through the tail; body=%q", sub.body.String())
+	}
+}
+
+// A tab that did not start the turn has only the hub for the live half:
+// content_delta is never persisted, so the tail cannot carry it either.
+//
+// The skip this pins was written for a different assumption — that the only
+// client of a subscription is the tab that owns the POST, so forwarding deltas
+// "here" would double-render them. Every other tab was the price: a second
+// browser watching the same session saw nothing until `done`, then the whole
+// answer at once. The guard belongs on the client, which can tell the two cases
+// apart (it knows whether *its* POST is in flight); the server cannot.
+func TestChatSubscribeForwardsLiveOnlyEventsFromTheHub(t *testing.T) {
+	podA, _, _ := newReplicaPair(t, &fanOutE2EProvider{fanout: 1}, 3)
+
+	sub, _, stopSub := subscribeOn(t, podA, "agt_e2e", "chat-delta")
+	defer stopSub()
+
+	// seq = -1 is what the emitter stamps on a live-only event: the log never
+	// keeps it, so the hub is its only transport.
+	podA.chatEventHub().Publish("u_1", "agt_e2e", "chat-delta", agent.EventEnvelope{
+		Seq:   -1,
+		Event: agent.ChatEvent{Type: "content_delta", Data: map[string]any{"delta": "tok"}},
+	})
+
+	waitForBody(t, sub, `"type":"content_delta"`, 2*time.Second)
+	if !sub.seen(`"delta":"tok"`) {
+		t.Fatalf("the delta arrived without its text; body=%q", sub.body.String())
 	}
 }
 
