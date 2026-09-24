@@ -6,6 +6,9 @@ matter which replica ran the turn.
 **Related**: `docs/session-turn-integrity.md` (turn + event semantics),
 [tokenaissance-cloud › design/09-delegate-task-design.md](https://github.com/tokenaissance/tokenaissance-cloud/blob/develop/docs/fastagent/design/09-delegate-task-design.md) §5.5
 (the user-visible symptom this fixes).
+**Placement**: [chat-event-delivery-placement.md](./chat-event-delivery-placement.md) —
+which pod a subscriber lands on, and the decision to pin a session to one pod
+(session-key affinity) instead of adding a fan-out relay.
 
 ## 1. The problem, in one screen
 
@@ -124,7 +127,7 @@ about replicas.
 | Item | Why it is not in this change |
 |---|---|
 | **Third terminal state in the panel** ("this turn ended without a result") | **Both sides landed, and now agree** (2026-09-16: webui `ccba1ca`, cloud `28ef00a5`). The signal is the bubble's own flag — exactly "still being written" — so no new state was needed. The server cannot supply this: `normalizeForPrompt` pads an interrupted call only in the *prompt* projection (*"the stored session is left untouched"*). The earlier note here ("the reference webui still says `Executing...`") was already wrong when written: the webui has derived a client-side terminal state since Q4 — `chat-screen.tsx` writes `"(stopped)"` into its own row on abort and again when folding history. What it did *not* have was a truthful rendering of it: the sentinel counted as a result, so the row drew a green check and the header said "Executed N tools", while the cloud said "Interrupted" and spun forever. Both now render the same amber exclamation, the same "Interrupted — X of Y tools returned" summary, and the same sentence in the Output slot. Note for anyone reading the cloud parity audit: its D15 entry ("remove cloud's inferred stopped") rested on the same two stale claims and is superseded | 
-| `content_delta` across replicas | Would need persisting deltas or a real pub/sub; both cost more than the gap (typing feel only) |
+| `content_delta` across replicas | **Decided** (2026-09-24), not implemented: this doc's tail cannot carry it, so [placement](./chat-event-delivery-placement.md) makes the subscriber's pod a decision — a session is pinned to one pod (session-key affinity) rather than adding a fan-out relay or persisting deltas |
 | `subagent_progress` volume | Currently one row per iteration per sub-agent. If the table grows, persist only `start`/`done` and keep iterations live-only — decided by measurement, not now |
 | Same session written by two replicas (Q6) | Decided-deferred; `seq` dedupe hides duplicates, not semantic interleaving |
 
