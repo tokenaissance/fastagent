@@ -12,11 +12,19 @@ import (
 //
 // content_delta streams roughly one row per generated token; persisting it would
 // dwarf session_events for no replay value (the trailing `content` event carries
-// the full text). It reaches the tab that started the turn through that tab's
-// own POST stream, so the subscribe path must not forward a second copy — hence
-// a shared predicate instead of the single `== "content_delta"` comparison that
-// used to live in the hub branch. The guard also covers the tail: if a live-only
-// type ever does reach the table, it still must not be fanned out.
+// the full text).
+//
+// The predicate guards the **tail** only. The hub branch forwards these like
+// anything else: a tab that did not start the turn has no other transport for
+// them (the log does not keep them, so the tail cannot carry them either), and
+// "I already have this from my own POST" is a judgement only the client can
+// make — see docs/chat-event-delivery-placement.md §3.
+//
+// The tail guard is a no-op by construction today (the table cannot contain a
+// type the emitter refuses to persist). It stays because it is what keeps that
+// true the day one of these types does get persisted: a token chunk replayed
+// from the store would be a second copy of a live stream, and no seq cursor
+// could dedupe it (a live-only event carries seq = -1 by definition).
 var liveOnlyEventTypes = map[string]bool{
 	"content_delta": true,
 }
