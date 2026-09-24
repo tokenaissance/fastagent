@@ -1,6 +1,6 @@
 # fastagent/docs · 顶层索引（L2）
 
-> 状态：索引 · 最后核对：2026-09-19 · 维护规则见文末
+> 状态：索引 · 最后核对：2026-09-24 · 维护规则见文末
 > 用途：一份**能一眼看全**的目录索引——每篇文档做什么、什么状态、是不是某主题的**唯一有效来源**、
 > 被代码引用多少、以及它被哪套形式化系统约束。
 > **形式化推理的唯一入口**：[文件系统形式化证明/00-formal-systems.md](./文件系统形式化证明/00-formal-systems.md)
@@ -29,6 +29,7 @@
 | [configs-kv-scope-decision.md](./configs-kv-scope-decision.md) | 决策 | `状态：已决策（08-25 维持；09-13 保留并继续演进）` | **该数据域唯一决策来源** | 子系统契约（scope） | 0 |
 | [prompt-inventory.md](./prompt-inventory.md) + [prompt-inventory/](./prompt-inventory/) | 参考资料 | `状态：清单已生成（改提示词须重跑脚本）` | 模型可见文本的唯一清单（A–F 六份） | —（提示词资产） | 2 |
 | [chat-event-delivery.md](./chat-event-delivery.md) | 设计 | `Status: ✅ landed` | 跨副本事件投递唯一来源 | F3（机制 3） | 1 |
+| [chat-event-delivery-placement.md](./chat-event-delivery-placement.md) | 决策 | `Status: decided · 2026-09-24 · 未实现` | **订阅落点（session 键亲和 vs fan-out 中继）唯一决策来源** | —（放置 / 容量） | 0 |
 | [sandbox-pool-leases.md](./sandbox-pool-leases.md) | 设计 | `Status: implemented, unreleased` | 沙箱池租约 U/A/I 唯一来源（含 G25 备注） | F1（机制 3 的 as-built 格） | 1 |
 | [mcp-oauth-design.md](./mcp-oauth-design.md) | 设计 | `状态：Draft` | MCP OAuth 客户端（协议合规族） | 子系统契约（OAuth 安全条款） | 1 |
 | [coding-agent-runtime.md](./coding-agent-runtime.md) | 设计 | `状态：as-built 契约` | coding 会话与预览运行时 | F1（作用域） | 1 |
@@ -67,7 +68,7 @@ docs/
 ├── README.md                        ← 本文件（L2 索引）
 ├── 文件系统形式化证明/                 ★ 中文 origin（00–12 + README，14 篇）
 ├── fs-formal-proof/                 ★ 上面 14 篇的 1:1 英文镜像
-├── <顶层 18 篇>                      设计/决策/事故/一次性分析（见 §2 表）
+├── <顶层 19 篇>                      设计/决策/事故/一次性分析（见 §2 表）
 ├── issues/                          9 篇：MCP/skills 提案、决策、对照清单
 ├── prompt-inventory/                6 篇 + 同名顶层 md：模型可见文本清单
 ├── query_optimization/              1 篇
