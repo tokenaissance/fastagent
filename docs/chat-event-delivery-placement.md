@@ -1,8 +1,9 @@
 # Chat event delivery: placement — session-key affinity, not a fan-out relay
 
-> **Status**: decided · 2026-09-24 · in force, **landed in code, not yet deployed**
-> (§7 lists what shipped and what is left — steps 1–9 are in the tree; the rollout
-> and the two-browser check are not)
+> **Status**: decided · 2026-09-24 · in force, **landed in code, live in dev, not in
+> production** (§7 lists what shipped, the dev probe that confirmed it, and what is
+> left — steps 1–9 are in the tree; the production rollout and the cloud deploy are
+> not)
 > **Scope**: *which pod* a session's requests land on, and why that is a delivery
 > input at all. The mechanism that carries events across pods is
 > [chat-event-delivery.md](./chat-event-delivery.md).
@@ -202,6 +203,17 @@ round-robin and the behaviour is exactly what
 arrive cross-pod, `content_delta` does not. Deployment is the single act that
 turns the key on; it is also the only step where a mistake reads as "one browser
 stopped streaming" instead of as a failed test.
+
+**Verified in dev, 2026-09-24** (`development`, release 86,
+`…/fastagent:20260924105957-fastagent-11152df`): the ingress carries
+`upstream-hash-by: "$arg_sessionId"` and no cookie annotations, and the hash
+behaves — eight distinct session ids, each sampled twice, were **stable per key**
+(2/2) and split 6/2 across the two pods. That split is §5's argument in
+miniature: a hash is deterministic, not balanced. Requests with no `sessionId`
+(`/healthz`, the `/api/skills` reads the cloud worker makes) all landed on one
+pod, the known limit noted in §3. The two-client check is the last thing this
+list cannot do for us: it needs two signed-in browsers on one session, and the
+ingress probes above prove the routing it would be observing.
 
 ## 8. Execution plan (files, order, tests)
 
