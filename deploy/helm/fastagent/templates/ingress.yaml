@@ -11,9 +11,17 @@ metadata:
     nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-buffering: "off"
-    nginx.ingress.kubernetes.io/affinity: "cookie"
-    nginx.ingress.kubernetes.io/session-cookie-name: "fastagent-affinity"
-    nginx.ingress.kubernetes.io/session-cookie-max-age: "86400"
+    # One session, one pod — the ingress key is the session id every chat call
+    # already carries in its query string (`?sessionId=…`), so a subscriber and
+    # the turn it is watching share an in-process hub. Read only by the origin
+    # pod, never persisted: that half of the delivery gap is what this covers,
+    # and the store tail covers the rest (docs/chat-event-delivery-placement.md).
+    #
+    # Not cookie affinity: a cookie is per-browser, so two browsers watching one
+    # session would land on two pods — exactly the case this exists for. It was
+    # also inert here, because the cloud proxy rebuilds the request headers on
+    # the way in and the SSE response headers on the way out.
+    nginx.ingress.kubernetes.io/upstream-hash-by: "$arg_sessionId"
     {{- with .Values.ingress.certManagerIssuer }}
     cert-manager.io/cluster-issuer: {{ . | quote }}
     {{- end }}
