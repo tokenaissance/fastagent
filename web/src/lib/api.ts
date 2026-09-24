@@ -1224,7 +1224,10 @@ export async function sendChatStream(
   // queued-message block can withdraw a turn that has not started yet.
   turnId?: string,
 ): Promise<void> {
-  const res = await apiFetch("/api/chat/stream", {
+  // The sessionId rides in the query as well as the body: the body is what the
+  // server reads, and the query is what the ingress hashes to pin every request
+  // of this session to one pod (docs/chat-event-delivery-placement.md §3).
+  const res = await apiFetch(`/api/chat/stream?sessionId=${encodeURIComponent(sessionId)}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
