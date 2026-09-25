@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"reflect"
 	"testing"
 
@@ -42,6 +43,33 @@ func TestBuildUserMessagePlainText(t *testing.T) {
 	got := buildUserMessage(bus.InboundMessage{Text: "hi"})
 	if got.Role != "user" || got.Content != "hi" || got.ContentParts != nil {
 		t.Errorf("plain-text shape wrong: %+v", got)
+	}
+}
+
+// O1 (docs/mcp-task-submission.md §11): the client's turn id is stamped on the
+// user message, so a reader that arrives after the turn can address it. Two
+// cases, and the second matters as much as the first: a source that supplies no
+// id must not grow the field, or "no id" and "empty id" would look different.
+func TestBuildUserMessageStampsTurnID(t *testing.T) {
+	got := buildUserMessage(bus.InboundMessage{Text: "hi", TurnID: "turn-1"})
+	if got.Metadata["turnId"] != "turn-1" {
+		t.Fatalf("metadata = %#v, want turnId=turn-1", got.Metadata)
+	}
+
+	none := buildUserMessage(bus.InboundMessage{Text: "hi"})
+	if _, present := none.Metadata["turnId"]; present {
+		t.Fatalf("metadata gained a turnId with none supplied: %#v", none.Metadata)
+	}
+}
+
+// The id rides the context from the HTTP handler to the message it becomes; an
+// empty id is a no-op so every existing caller keeps today's behaviour.
+func TestTurnIDContextRoundTrip(t *testing.T) {
+	if got := TurnIDFromContext(ContextWithTurnID(context.Background(), "t-9")); got != "t-9" {
+		t.Fatalf("round trip = %q, want t-9", got)
+	}
+	if got := TurnIDFromContext(ContextWithTurnID(context.Background(), "")); got != "" {
+		t.Fatalf("empty id should attach nothing, got %q", got)
 	}
 }
 
