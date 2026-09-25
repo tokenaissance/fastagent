@@ -974,6 +974,10 @@ func (a *Agent) HandleWebChat(ctx context.Context, sessionId, projectIDHint, use
 		ChatID:    chatID,
 		ProjectID: projectID,
 		UserID:    userID,
+		// Stamped from the context the HTTP handler set (see turn_id.go):
+		// the id exists before this message does, and travels on the
+		// message from here on.
+		TurnID:    TurnIDFromContext(ctx),
 		Text:      text,
 		PeerKind:  "dm",
 		PhotoURLs: imageURLs,
@@ -1005,6 +1009,10 @@ func (a *Agent) HandleWebChatStream(ctx context.Context, sessionId, projectIDHin
 		ChatID:    chatID,
 		ProjectID: projectID,
 		UserID:    userID,
+		// Stamped from the context the HTTP handler set (see turn_id.go).
+		// This is the path the web POST takes; HandleWebChat stamps the
+		// same field so both entry points agree.
+		TurnID:    TurnIDFromContext(ctx),
 		Text:      text,
 		PeerKind:  "dm",
 		PhotoURLs: imageURLs,
@@ -1442,11 +1450,23 @@ func buildUserMessage(msg bus.InboundMessage) provider.Message {
 	// messages before queueing, so msg.Text already carries `[A]: …`
 	// when PeerKind=="group". We pass it through unchanged.
 	userText := msg.Text
+	// The turn id rides on the message's metadata (see bus.InboundMessage.TurnID):
+	// it is what makes "the reply under THIS submission" a lookup instead of a
+	// guess, for any reader that arrives after the turn is over. `senderMetadata`
+	// returns nil for web turns (no sender name), so the map is created only when
+	// there is something to put in it.
+	metadata := senderMetadata(msg)
+	if msg.TurnID != "" {
+		if metadata == nil {
+			metadata = map[string]any{}
+		}
+		metadata["turnId"] = msg.TurnID
+	}
 	userMsg := provider.Message{
 		Role:     "user",
 		Content:  userText,
 		Origin:   origin,
-		Metadata: senderMetadata(msg),
+		Metadata: metadata,
 	}
 	imageURLs := msg.PhotoURLs
 	if msg.PhotoURL != "" {
@@ -1574,6 +1594,15 @@ func (a *Agent) WebChatHistory(sessionId string) []map[string]any {
 			entry := map[string]any{"role": "user", "content": text}
 			if len(imageURLs) > 0 {
 				entry["imageUrls"] = imageURLs
+			}
+			// The turn this user message opened, when the client supplied one.
+			// Surfaced on purpose (2026-09-25): the MCP task surface addresses a
+			// finished turn by this id — "the reply under my submission" — and
+			// history is the only thing that outlives the request. Absent for
+			// sources that don't send one, which is every channel except the web
+			// POST that mints it.
+			if v, ok := m.Metadata["turnId"].(string); ok && v != "" {
+				entry["turnId"] = v
 			}
 			if senderName != "" {
 				entry["senderName"] = senderName

@@ -50,8 +50,17 @@ type InboundMessage struct {
 	// jobs, web chat, sub-agent spawns) — bypasses binding lookup +
 	// default-agent fallback in routeDM. Empty for IM-channel messages
 	// where the gateway has to figure out the agent from bindings.
-	AgentID    string
-	MessageID  string // unique message identifier within the chat
+	AgentID   string
+	MessageID string // unique message identifier within the chat
+	// TurnID is the id the *client* generated for this POST
+	// (`chatRequest.TurnID` on the web API). It keys the pending-turn
+	// registry while the turn is queued or running, and it is stamped onto
+	// the user message's metadata so the turn can still be addressed AFTER
+	// it finishes — a reader that only sees the stored history can find
+	// "the reply under this id" without guessing by position or text.
+	// Empty for every source that does not supply one (IM channels, cron,
+	// sub-agents); nothing downstream requires it.
+	TurnID     string
 	Text       string // message text
 	PeerKind   string // "group" or "dm"
 	SenderName string // display name of the sender
