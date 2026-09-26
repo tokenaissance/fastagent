@@ -1316,11 +1316,11 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		turnDeadline = time.Now().Add(agentTurnTimeout)
 	}
 	agentCtx = agent.ContextWithStream(agentCtx, nil, s.dataStore, hub, uid, agentID, req.SessionID)
-	// The client-generated id for this turn travels with the turn itself: it is
-	// stamped onto the user message (bus.InboundMessage.TurnID → message
-	// metadata) so a reader that arrives after the turn is over can still ask
-	// for "the reply under this submission" — see internal/agent/turn_id.go.
-	// Empty is a no-op, so every existing caller behaves exactly as before.
+	// The client's id for this POST rides the context so the code that answers about
+	// this submission can name it: the pending-turn registry (withdrawal of a queued
+	// turn) and the `queued` event (a tab that did not POST learns whose submission is
+	// waiting). It is NOT stored on the messages — see internal/agent/turn_id.go for why
+	// that half was removed.
 	agentCtx = agent.ContextWithTurnID(agentCtx, req.TurnID)
 	// admissionStarted closes when the agent holds the session's turn slot;
 	// until then this turn is still queued and may be withdrawn.
