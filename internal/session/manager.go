@@ -548,14 +548,23 @@ type Manager struct {
 	// prints it next to cacheGets: misses ~= gets means the cache is not holding anything long enough
 	// to matter, which is what a too-small per-session share would look like from the outside.
 	cacheMisses int64
-	// cacheStoreReads counts every read that actually reached the store, from the ONE place a read
+	// cacheGetReads / cacheProbeReads split the store reads by WHO asked. They used to share one
+	// counter, and the ratio then read as "two reads per Get" — but `getByKey` makes exactly ONE read
+	// (hit or build, the branches are exclusive and the hit branch returns), and the other read came
+	// from the resolver's existence probe (`SessionExists`). Measured 2026-09-29; the misreading is
+	// the reason the split exists.
+	//
+	// cacheGetReads counts every read that actually reached the store, from the ONE place a read
 	// happens (loadMessages). Printed next to cacheGets, that ratio answers the question the whole
 	// per-session share hinges on: does a HIT still read?
 	//   storeReads ≈ gets  ⇒ residency saves allocation and projection only, so dropping a big
 	//                        session costs no database round trip;
 	//   storeReads ≪ gets  ⇒ a resident session avoids the read, and then a busy big session
 	//                        deserves to KEEP its cache (the share rule should be "big AND cold").
-	cacheStoreReads int64
+	cacheGetReads int64
+	// cacheProbeReads is the resolver's half (SessionExists): a read that exists to answer "is this a
+	// real session_key or a legacy chat_id", not to serve a Get.
+	cacheProbeReads int64
 	dataDir         string
 	store           SessionStore
 	userID          string
@@ -590,7 +599,14 @@ func NewManagerWithStoreForUser(dataDir string, st SessionStore, userID, agentID
 // loadMessages is the single place the manager reads a session from the store, so the counter next
 // to it cannot drift from the reads it is counting.
 func (m *Manager) loadMessages(ctx context.Context, agentID, sessionKey string) ([]provider.Message, error) {
-	m.cacheStoreReads++
+	m.cacheGetReads++
+	return m.store.GetSession(ctx, agentID, sessionKey)
+}
+
+// probeMessages is the same store read as loadMessages, from the existence probe. Separate method,
+// separate counter — see the note on cacheGetReads.
+func (m *Manager) probeMessages(ctx context.Context, agentID, sessionKey string) ([]provider.Message, error) {
+	m.cacheProbeReads++
 	return m.store.GetSession(ctx, agentID, sessionKey)
 }
 
@@ -724,7 +740,7 @@ func (m *Manager) SessionExists(sessionKey string) bool {
 		// on disk (empty file → empty Session, harmless).
 		return true
 	}
-	msgs, err := m.loadMessages(m.ctx(), m.agentID, sessionKey)
+	msgs, err := m.probeMessages(m.ctx(), m.agentID, sessionKey)
 	return err == nil && msgs != nil
 }
 
@@ -871,7 +887,8 @@ func (m *Manager) getByKey(key, channel, accountID, chatID, projectID string) *S
 			"byteBudgetMiB", agentSessionCacheMaxBytes>>20,
 			"estResidentMiB", float64(m.cacheResidentBytes())/(1<<20),
 			"heapAllocMiB", float64(ms.HeapAlloc)/(1<<20),
-			"gets", m.cacheGets, "rebuilds", m.cacheMisses, "storeReads", m.cacheStoreReads)
+			"gets", m.cacheGets, "rebuilds", m.cacheMisses,
+			"getReads", m.cacheGetReads, "probeReads", m.cacheProbeReads)
 	}
 	return s
 }
