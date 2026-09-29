@@ -215,7 +215,7 @@ func (m *Manager) evictIdleLocked(now time.Time) {
 		// touched for sessionCacheMaxIdle, so the walk continues (it has already happened).
 		anyDroppable := false
 		for _, c := range cands {
-			if now.Sub(c.touched) >= sessionCacheMaxIdle || c.bytes > agentSessionCacheMaxSessionBytes {
+			if now.Sub(c.touched) >= sessionCacheMaxIdle {
 				anyDroppable = true
 				break
 			}
@@ -241,8 +241,7 @@ func (m *Manager) evictIdleLocked(now time.Time) {
 		//   - it has gone idle (sessionCacheMaxIdle) — dropped regardless of the budgets;
 		//   - the cache is over a budget — dropped oldest-first until it is not.
 		idle := now.Sub(c.touched) >= sessionCacheMaxIdle
-		oversized := c.bytes > agentSessionCacheMaxSessionBytes
-		if !idle && !oversized && len(m.sessions) <= agentSessionCacheMaxSessions && totalMessages <= agentSessionCacheMaxMessages && totalBytes <= agentSessionCacheMaxBytes {
+		if !idle && len(m.sessions) <= agentSessionCacheMaxSessions && totalMessages <= agentSessionCacheMaxMessages && totalBytes <= agentSessionCacheMaxBytes {
 			return
 		}
 		delete(m.sessions, c.key)
@@ -525,10 +524,6 @@ const (
 	// is counted with estimateSessionBytes (len() of the payload fields + a fixed per-message
 	// overhead), which is the same reasoning `pg_column_size` follows on the row.
 	agentSessionCacheMaxBytes = 64 << 20
-	// agentSessionCacheMaxSessionBytes is the share one conversation may hold before it stops being
-	// worth keeping warm: the byte budget split across the session budget (64 MiB / 10 ≈ 6.4 MiB).
-	// Dev, 2026-09-29 measured one session at 3708 lines / 32 MB — five times this share.
-	agentSessionCacheMaxSessionBytes = agentSessionCacheMaxBytes / agentSessionCacheMaxSessions
 )
 
 type Manager struct {
