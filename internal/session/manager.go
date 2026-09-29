@@ -850,7 +850,10 @@ func (m *Manager) getByKey(key, channel, accountID, chatID, projectID string) *S
 	// Occasional footprint line (every 100 cache-touching calls). Cheap, and the
 	// only way to tell "bounded by concurrency" from "growing with history".
 	m.cacheGets++
-	if m.cacheGets%100 == 0 {
+	// Diagnostic window: every 10 Gets instead of 100, so a probe with a handful of MCP
+	// round trips can see the counters at all (a manual probe reached ~80 per pod and printed
+	// nothing). Put it back to 100 once the share is tuned from these numbers.
+	if m.cacheGets%10 == 0 {
 		var ms runtime.MemStats
 		runtime.ReadMemStats(&ms)
 		fmt.Fprintf(os.Stderr, "session cache footprint: sessions=%d messages=%d (LINES, not bytes; bytes=heapAllocMiB) sessionBudget=%d messageBudget=%d byteBudgetMiB=%d estResidentMiB=%.1f heapAllocMiB=%.1f gets=%d rebuilds=%d storeReads=%d\n",
