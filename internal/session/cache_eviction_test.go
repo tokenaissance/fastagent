@@ -202,3 +202,25 @@ func TestSessionSnapshotExpiresAndStopsPinningHistory(t *testing.T) {
 		t.Fatalf("history was disturbed by an expired snapshot: %d message(s)", got)
 	}
 }
+
+// Dev, 2026-09-29: the largest session held 3708 lines / 32 MB — ~8.6 KB per line, because the
+// weight is the payload. At that width the line budget (20_000) is ~180 MB, so it stops bounding
+// memory exactly when it is needed. The byte budget is what catches this shape.
+//
+// Falsification: drop the byte term from the budget checks and this fails with "cache holds N
+// sessions" — four 25 MiB sessions fit under every other budget.
+func TestSessionCacheEvictsOnTheByteBudget(t *testing.T) {
+	m := NewManager(t.TempDir())
+	big := strings.Repeat("x", 25<<20) // 25 MiB of payload in ONE message
+	for i := 0; i < 4; i++ {
+		s := m.Get("web", "", fmt.Sprintf("chat-big-%d", i), "")
+		s.Append(provider.Message{Role: "user", Content: big})
+	}
+	m.evictIdleLocked(time.Now())
+	if got := len(m.sessions); got > 3 {
+		t.Fatalf("cache holds %d sessions (~%d MiB of payload), want <= 3", got, got*25)
+	}
+	if bytes := m.cacheResidentBytes(); bytes > agentSessionCacheMaxBytes {
+		t.Fatalf("estimate exceeds the byte budget: %d > %d", bytes, agentSessionCacheMaxBytes)
+	}
+}

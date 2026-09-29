@@ -186,26 +186,30 @@ func (m *Manager) evictIdleLocked(now time.Time) {
 		key      string
 		touched  time.Time
 		messages int
+		bytes    int
 	}
 	cands := make([]candidate, 0, len(m.sessions))
 	totalMessages := 0
+	totalBytes := 0
 	for key, sess := range m.sessions {
 		sess.mu.Lock()
 		sess.snapshotExpiredLocked(now)
 		messages := len(sess.Messages) + len(sess.snapshot)
+		bytes := sess.residentBytesLocked()
 		busy := sess.turnActive || sess.turnDepth > 0
 		touched := sess.lastTouched
 		sess.mu.Unlock()
 		totalMessages += messages
+		totalBytes += bytes
 		if key == m.lastKey {
 			continue // the caller is holding this one right now
 		}
 		if busy {
 			continue // in-flight state (steer buffer, fence, waiters) is not rebuildable
 		}
-		cands = append(cands, candidate{key: key, touched: touched, messages: messages})
+		cands = append(cands, candidate{key: key, touched: touched, messages: messages, bytes: bytes})
 	}
-	if len(m.sessions) <= agentSessionCacheMaxSessions && totalMessages <= agentSessionCacheMaxMessages {
+	if len(m.sessions) <= agentSessionCacheMaxSessions && totalMessages <= agentSessionCacheMaxMessages && totalBytes <= agentSessionCacheMaxBytes {
 		// Under budget is not "nothing to do": the idle rule below still drops entries nobody has
 		// touched for sessionCacheMaxIdle, so the walk continues (it has already happened).
 		anyIdle := false
@@ -236,11 +240,12 @@ func (m *Manager) evictIdleLocked(now time.Time) {
 		//   - it has gone idle (sessionCacheMaxIdle) — dropped regardless of the budgets;
 		//   - the cache is over a budget — dropped oldest-first until it is not.
 		idle := now.Sub(c.touched) >= sessionCacheMaxIdle
-		if !idle && len(m.sessions) <= agentSessionCacheMaxSessions && totalMessages <= agentSessionCacheMaxMessages {
+		if !idle && len(m.sessions) <= agentSessionCacheMaxSessions && totalMessages <= agentSessionCacheMaxMessages && totalBytes <= agentSessionCacheMaxBytes {
 			return
 		}
 		delete(m.sessions, c.key)
 		totalMessages -= c.messages
+		totalBytes -= c.bytes
 	}
 }
 
@@ -253,6 +258,18 @@ func (m *Manager) evictIdleLocked(now time.Time) {
 // the working set and is NOT rebuildable from the store (Undo restores from
 // process memory only), which is why "rebuildable" has to be judged per field,
 // not per struct (docs 10 §10.5).
+// cacheResidentBytes sums the estimate over the cache — the same walk cacheMessagesLocked does,
+// for the log line only.
+func (m *Manager) cacheResidentBytes() int {
+	total := 0
+	for _, sess := range m.sessions {
+		sess.mu.Lock()
+		total += sess.residentBytesLocked()
+		sess.mu.Unlock()
+	}
+	return total
+}
+
 func (m *Manager) cacheMessagesLocked() int {
 	total := 0
 	for _, sess := range m.sessions {
@@ -499,6 +516,13 @@ const (
 	// 2026-09-19) and ~10× its average session; it is a ceiling on what the process KEEPS, never
 	// on what it can serve — the store is authoritative and `Get` re-reads the working set.
 	agentSessionCacheMaxMessages = 20_000
+	// agentSessionCacheMaxBytes is the budget that matches the measured shape. Dev, 2026-09-29:
+	// the largest session held 3708 lines / 32 MB — ~8.6 KB per line, because the weight is in the
+	// payload (tool output, long thinking), not in the line count. At that width 20_000 lines is
+	// ~180 MB, i.e. the line budget stops being a real ceiling exactly when it is needed. This one
+	// is counted with estimateSessionBytes (len() of the payload fields + a fixed per-message
+	// overhead), which is the same reasoning `pg_column_size` follows on the row.
+	agentSessionCacheMaxBytes = 64 << 20
 )
 
 type Manager struct {
@@ -799,8 +823,9 @@ func (m *Manager) getByKey(key, channel, accountID, chatID, projectID string) *S
 	if m.cacheGets%100 == 0 {
 		var ms runtime.MemStats
 		runtime.ReadMemStats(&ms)
-		fmt.Fprintf(os.Stderr, "session cache footprint: sessions=%d messages=%d (LINES, not bytes; bytes=heapAllocMiB) sessionBudget=%d messageBudget=%d heapAllocMiB=%.1f gets=%d\n",
-			len(m.sessions), m.cacheMessagesLocked(), agentSessionCacheMaxSessions, agentSessionCacheMaxMessages, float64(ms.HeapAlloc)/(1<<20), m.cacheGets)
+		fmt.Fprintf(os.Stderr, "session cache footprint: sessions=%d messages=%d (LINES, not bytes; bytes=heapAllocMiB) sessionBudget=%d messageBudget=%d byteBudgetMiB=%d estResidentMiB=%.1f heapAllocMiB=%.1f gets=%d\n",
+			len(m.sessions), m.cacheMessagesLocked(), agentSessionCacheMaxSessions, agentSessionCacheMaxMessages,
+			agentSessionCacheMaxBytes>>20, float64(m.cacheResidentBytes())/(1<<20), float64(ms.HeapAlloc)/(1<<20), m.cacheGets)
 	}
 	return s
 }
@@ -1481,6 +1506,40 @@ func (s *Session) HasSnapshot() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.snapshot != nil && !s.snapshotExpiredLocked(time.Now())
+}
+
+// estimateMessageBytes is a cheap, allocation-free estimate of what one message holds: the payload
+// fields' lengths plus a fixed per-message overhead. Deliberately NOT the allocator's number —
+// strings and []byte headers are counted by their length, and slice/map headers by the constant —
+// because this runs inside the eviction walk (every Get) and must not allocate.
+func estimateMessageBytes(m provider.Message) int {
+	const perMessageOverhead = 190 // the struct itself: headers for content/parts/calls/raw + int64
+	n := perMessageOverhead
+	n += len(m.Content) + len(m.Thinking) + len(m.ToolCallID) + len(m.Name) + len(m.Role)
+	n += len(m.RawAssistant)
+	for _, tc := range m.ToolCalls {
+		n += len(tc.ID) + len(tc.Type) + len(tc.Function.Name) + len(tc.Function.Arguments)
+	}
+	for _, cp := range m.ContentParts {
+		n += len(cp.Text) + len(cp.Type)
+		if cp.ImageURL != nil {
+			n += len(cp.ImageURL.URL) + len(cp.ImageURL.Detail)
+		}
+	}
+	return n
+}
+
+// residentBytesLocked is this session's share of the cache, by the estimate above. Read under the
+// session's lock (the caller holds it), like cacheMessagesLocked.
+func (s *Session) residentBytesLocked() int {
+	total := 0
+	for _, m := range s.Messages {
+		total += estimateMessageBytes(m)
+	}
+	for _, m := range s.snapshot {
+		total += estimateMessageBytes(m)
+	}
+	return total
 }
 
 // snapshotExpiredLocked reports whether the snapshot has outlived its window, and releases it if so.
