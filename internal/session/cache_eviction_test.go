@@ -1,8 +1,10 @@
 package session
 
 import (
+	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -222,5 +224,90 @@ func TestSessionCacheEvictsOnTheByteBudget(t *testing.T) {
 	}
 	if bytes := m.cacheResidentBytes(); bytes > agentSessionCacheMaxBytes {
 		t.Fatalf("estimate exceeds the byte budget: %d > %d", bytes, agentSessionCacheMaxBytes)
+	}
+}
+
+// mapStore is the smallest SessionStore that is a real store: it keeps what it is given. That is the
+// whole point — with no authoritative copy behind it, "the cache dropped it" and "it never existed"
+// are the same observation, which is what made the first two attempts at the test below fail for the
+// wrong reason.
+type mapStore struct {
+	mu   sync.Mutex
+	msgs map[string][]provider.Message
+}
+
+func newMapStore() *mapStore { return &mapStore{msgs: map[string][]provider.Message{}} }
+func (s *mapStore) k(agentID, sessionKey string) string {
+	return agentID + "/" + sessionKey
+}
+func (s *mapStore) GetSession(_ context.Context, agentID, sessionKey string) ([]provider.Message, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	held := s.msgs[s.k(agentID, sessionKey)]
+	out := make([]provider.Message, len(held))
+	copy(out, held)
+	return out, nil
+}
+func (s *mapStore) SaveSession(_ context.Context, agentID, sessionKey string, messages []provider.Message, _ WriteScope) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]provider.Message, len(messages))
+	copy(out, messages)
+	s.msgs[s.k(agentID, sessionKey)] = out
+	return nil
+}
+func (s *mapStore) AppendMessage(_ context.Context, agentID, sessionKey string, msg provider.Message, _ WriteScope) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := s.k(agentID, sessionKey)
+	s.msgs[key] = append(s.msgs[key], msg)
+	return nil
+}
+func (s *mapStore) ListMessages(ctx context.Context, agentID, sessionKey string) ([]provider.Message, error) {
+	return s.GetSession(ctx, agentID, sessionKey)
+}
+func (s *mapStore) ListWebSessions(context.Context, string) ([]WebSession, error) { return nil, nil }
+func (s *mapStore) DeleteSession(_ context.Context, agentID, sessionKey string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.msgs, s.k(agentID, sessionKey))
+	return nil
+}
+func (s *mapStore) RenameSession(context.Context, string, string, string) error { return nil }
+func (s *mapStore) MoveSession(context.Context, string, string, string) error   { return nil }
+func (s *mapStore) ResolveActiveSessionKey(context.Context, string, string, string, string) (string, error) {
+	return "", nil
+}
+func (s *mapStore) LookupSessionTriple(context.Context, string, string) (string, string, string, error) {
+	return "", "", "", nil
+}
+func (s *mapStore) LookupSessionProject(context.Context, string, string) (string, error) {
+	return "", nil
+}
+
+// One conversation above its share of the byte budget is dropped even when every other budget is
+// satisfied. Dev, 2026-09-29: the largest session held 3708 lines / 32 MB — five times the 6.4 MiB
+// share — which is the shape that let a single agent sit at ~190 MB: one session, under the session
+// count, and its lines were not what made it heavy.
+//
+// Falsification: remove the `oversized` term from the drop loop and it fails with "stayed resident".
+func TestSessionCacheDropsOneOversizedConversation(t *testing.T) {
+	m := NewManagerWithStoreForUser(t.TempDir(), newMapStore(), "u_owner", "agent-1")
+	big := strings.Repeat("x", 8<<20)
+	for i := 0; i < 3; i++ {
+		s := m.Get("web", "", "chat-huge", "")
+		s.Append(provider.Message{Role: "user", Content: big})
+	}
+	m.Get("web", "", "chat-small", "") // so `chat-huge` is not the entry in hand
+
+	m.evictIdleLocked(time.Now())
+	if _, still := m.sessions["chat-huge"]; still {
+		t.Fatalf("an oversized conversation stayed resident (%d sessions)", len(m.sessions))
+	}
+
+	// And it rebuilds: dropping is unobservable only because the store had it.
+	back := m.Get("web", "", "chat-huge", "")
+	if msgs := back.GetMessages(); len(msgs) == 0 {
+		t.Fatalf("the rebuilt session is empty — the store did not have it")
 	}
 }
