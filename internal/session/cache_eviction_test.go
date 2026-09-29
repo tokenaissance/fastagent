@@ -136,3 +136,39 @@ func TestSessionCacheFootprintCountsTheUndoSnapshot(t *testing.T) {
 		t.Fatalf("footprint counts %d lines with a snapshot, want 10 (the snapshot is a second resident copy)", got)
 	}
 }
+
+// The idle window is a DROP rule, not only an ordering preference: an entry
+// nobody has touched for sessionCacheMaxIdle goes even when both budgets are
+// satisfied. Before this, a single warm conversation stayed resident for the
+// life of the process merely because the cache was under budget — which is how a
+// long-lived pod's footprint tracks the history it has served instead of the
+// work in flight (serverless invariant S1).
+//
+// Falsification: turn the idle test back into an ordering preference (drop only
+// while over budget) and this fails with "still resident".
+func TestSessionCacheDropsEntriesPastTheIdleWindow(t *testing.T) {
+	m := NewManager(t.TempDir())
+	idle := m.Get("web", "", "chat-idle", "")
+	idle.Append(provider.Message{Role: "user", Content: "hello"})
+	// A second Get, so the idle one is not the entry the caller is holding: the sweeper never
+	// drops `lastKey` (the caller is holding it right now), and that exemption is not what this
+	// test is about.
+	m.Get("web", "", "chat-other", "")
+
+	// Both budgets satisfied, nothing in flight — the only reason to drop `chat-idle` is that it
+	// has gone idle.
+	idle.mu.Lock()
+	idle.lastTouched = time.Now().Add(-(sessionCacheMaxIdle + time.Minute))
+	idle.mu.Unlock()
+
+	m.evictIdleLocked(time.Now())
+	if _, still := m.sessions["chat-idle"]; still {
+		t.Fatalf("an idle entry is still resident: %d session(s)", len(m.sessions))
+	}
+
+	// And it rebuilds: the store is authoritative, so dropping is unobservable.
+	rebuilt := m.Get("web", "", "chat-idle", "")
+	if msgs := rebuilt.GetMessages(); len(msgs) == 0 || msgs[0].Content != "hello" {
+		t.Fatalf("rebuilt session lost its history: %+v", msgs)
+	}
+}
