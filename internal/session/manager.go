@@ -26,7 +26,8 @@ type Session struct {
 	mu         sync.Mutex
 	Messages   []provider.Message
 	filePath   string
-	snapshot   []provider.Message // undo snapshot
+	snapshot   []provider.Message // undo snapshot: a SHALLOW copy — see Snapshot()
+	snapshotAt time.Time          // when that snapshot was taken; it has a lifetime
 	store      SessionStore
 	userID     string
 	agentID    string
@@ -190,6 +191,7 @@ func (m *Manager) evictIdleLocked(now time.Time) {
 	totalMessages := 0
 	for key, sess := range m.sessions {
 		sess.mu.Lock()
+		sess.snapshotExpiredLocked(now)
 		messages := len(sess.Messages) + len(sess.snapshot)
 		busy := sess.turnActive || sess.turnDepth > 0
 		touched := sess.lastTouched
@@ -449,6 +451,13 @@ const (
 	// sessionCacheMinIdle marks entries too fresh to prefer dropping; it never
 	// prevents reaching the bound (see evictIdleLocked).
 	sessionCacheMinIdle = 2 * time.Minute
+	// sessionSnapshotMaxAge is how long an undo snapshot may keep pinning history. The snapshot is
+	// a shallow copy (Go copies the struct headers; Content/Thinking/Arguments are strings, so the
+	// BYTES are shared), which is why its own cost is ~200 B per line and not a second copy. What it
+	// does cost is TIME: every message that later replaced the ones it holds stays reachable until the
+	// snapshot goes, and it used to go only on Undo or eviction. Measured shape it is meant to stop:
+	// a long conversation where someone took a snapshot once and never undid it.
+	sessionSnapshotMaxAge = 30 * time.Minute
 	// agentSessionCacheMaxSessions is one AGENT's cache budget, counted in
 	// **sessions**: that agent's Manager may hold this many, and the LRU drops the
 	// rest. "Per agent" is in the name because it is a real scope — a Manager is
@@ -790,7 +799,7 @@ func (m *Manager) getByKey(key, channel, accountID, chatID, projectID string) *S
 	if m.cacheGets%100 == 0 {
 		var ms runtime.MemStats
 		runtime.ReadMemStats(&ms)
-		fmt.Fprintf(os.Stderr, "session cache footprint: sessions=%d messages=%d sessionBudget=%d messageBudget=%d heapAllocMiB=%.1f gets=%d\n",
+		fmt.Fprintf(os.Stderr, "session cache footprint: sessions=%d messages=%d (LINES, not bytes; bytes=heapAllocMiB) sessionBudget=%d messageBudget=%d heapAllocMiB=%.1f gets=%d\n",
 			len(m.sessions), m.cacheMessagesLocked(), agentSessionCacheMaxSessions, agentSessionCacheMaxMessages, float64(ms.HeapAlloc)/(1<<20), m.cacheGets)
 	}
 	return s
@@ -1441,8 +1450,12 @@ func (m *Manager) readSessionTitle(sessionId string) string {
 func (s *Session) Snapshot() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Shallow on purpose: the structs are copied, the strings they point at are shared. A deep copy
+	// would be the one thing that actually doubles bytes, and nothing here needs it (Undo puts the
+	// same values back).
 	s.snapshot = make([]provider.Message, len(s.Messages))
 	copy(s.snapshot, s.Messages)
+	s.snapshotAt = time.Now()
 }
 
 // Undo restores the last snapshot. Returns false if no snapshot exists.
@@ -1452,9 +1465,13 @@ func (s *Session) Undo() bool {
 	if s.snapshot == nil {
 		return false
 	}
+	if s.snapshotExpiredLocked(time.Now()) {
+		return false
+	}
 	s.Messages = make([]provider.Message, len(s.snapshot))
 	copy(s.Messages, s.snapshot)
 	s.snapshot = nil
+	s.snapshotAt = time.Time{}
 	s.rewriteFile()
 	return true
 }
@@ -1463,5 +1480,20 @@ func (s *Session) Undo() bool {
 func (s *Session) HasSnapshot() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.snapshot != nil
+	return s.snapshot != nil && !s.snapshotExpiredLocked(time.Now())
+}
+
+// snapshotExpiredLocked reports whether the snapshot has outlived its window, and releases it if so.
+// Called from the reader paths (so a command never sees a stale one) and from the cache walk below
+// (so a session nobody asks about still lets its history go).
+func (s *Session) snapshotExpiredLocked(now time.Time) bool {
+	if s.snapshot == nil || s.snapshotAt.IsZero() {
+		return false
+	}
+	if now.Sub(s.snapshotAt) < sessionSnapshotMaxAge {
+		return false
+	}
+	s.snapshot = nil
+	s.snapshotAt = time.Time{}
+	return true
 }
