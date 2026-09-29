@@ -853,7 +853,10 @@ func (m *Manager) getByKey(key, channel, accountID, chatID, projectID string) *S
 	// Diagnostic window: every 10 Gets instead of 100, so a probe with a handful of MCP
 	// round trips can see the counters at all (a manual probe reached ~80 per pod and printed
 	// nothing). Put it back to 100 once the share is tuned from these numbers.
-	if m.cacheGets%10 == 0 {
+	// Print on the FIRST Get as well: a probe with a handful of round trips must be able to see
+	// whether this line reaches anyone at all, which is the question two load-heavy attempts
+	// failed to answer. Back to every 100 once the share is tuned.
+	if m.cacheGets == 1 || m.cacheGets%10 == 0 {
 		var ms runtime.MemStats
 		runtime.ReadMemStats(&ms)
 		fmt.Fprintf(os.Stderr, "session cache footprint: sessions=%d messages=%d (LINES, not bytes; bytes=heapAllocMiB) sessionBudget=%d messageBudget=%d byteBudgetMiB=%d estResidentMiB=%.1f heapAllocMiB=%.1f gets=%d rebuilds=%d storeReads=%d\n",
