@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -859,9 +860,18 @@ func (m *Manager) getByKey(key, channel, accountID, chatID, projectID string) *S
 	if m.cacheGets == 1 || m.cacheGets%10 == 0 {
 		var ms runtime.MemStats
 		runtime.ReadMemStats(&ms)
-		fmt.Fprintf(os.Stderr, "session cache footprint: sessions=%d messages=%d (LINES, not bytes; bytes=heapAllocMiB) sessionBudget=%d messageBudget=%d byteBudgetMiB=%d estResidentMiB=%.1f heapAllocMiB=%.1f gets=%d rebuilds=%d storeReads=%d\n",
-			len(m.sessions), m.cacheMessagesLocked(), agentSessionCacheMaxSessions, agentSessionCacheMaxMessages,
-			agentSessionCacheMaxBytes>>20, float64(m.cacheResidentBytes())/(1<<20), float64(ms.HeapAlloc)/(1<<20), m.cacheGets, m.cacheMisses, m.cacheStoreReads)
+		// slog, not a bare fprintf to stderr: this line is for whoever operates the pod, and that is
+		// the stream they read. Written to stderr it looked like "the counter never fired" for two
+		// load-heavy probes, when the counters were working the whole time (measured 2026-09-29:
+		// every line in the container log was slog stdout; no stderr sample was ever seen).
+		slog.Info("session cache footprint",
+			"note", "messages counts LINES, not bytes; bytes are heapAllocMiB",
+			"sessions", len(m.sessions), "messages", m.cacheMessagesLocked(),
+			"sessionBudget", agentSessionCacheMaxSessions, "messageBudget", agentSessionCacheMaxMessages,
+			"byteBudgetMiB", agentSessionCacheMaxBytes>>20,
+			"estResidentMiB", float64(m.cacheResidentBytes())/(1<<20),
+			"heapAllocMiB", float64(ms.HeapAlloc)/(1<<20),
+			"gets", m.cacheGets, "rebuilds", m.cacheMisses, "storeReads", m.cacheStoreReads)
 	}
 	return s
 }
