@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -177,31 +178,33 @@ func (s *Session) ClearTurnFence() {
 // from the authoritative store on every call, so evicting an entry costs a
 // rebuild that was going to happen anyway.
 func (m *Manager) evictIdleLocked(now time.Time) {
-	if len(m.sessions) <= agentSessionCacheMaxSessions {
-		return
-	}
-	// An idle TTL alone cannot bound a busy process: when every session was
-	// touched recently nothing is "idle" and the map grows without limit (this
-	// exact hole was caught by the test). So the budget is enforced by LRU —
-	// drop the least-recently-touched entries that have no work in flight until
-	// the cache is back within it.
+	// Count first, decide second. Two things a dropped entry buys back: a session slot and the
+	// lines it holds. The candidates carry their own line count so the loop can subtract instead
+	// of re-walking (the walk below is already one lock per entry, which is the whole cost).
 	type candidate struct {
-		key     string
-		touched time.Time
+		key      string
+		touched  time.Time
+		messages int
 	}
 	cands := make([]candidate, 0, len(m.sessions))
+	totalMessages := 0
 	for key, sess := range m.sessions {
-		if key == m.lastKey {
-			continue // the caller is holding this one right now
-		}
 		sess.mu.Lock()
+		messages := len(sess.Messages) + len(sess.snapshot)
 		busy := sess.turnActive || sess.turnDepth > 0
 		touched := sess.lastTouched
 		sess.mu.Unlock()
+		totalMessages += messages
+		if key == m.lastKey {
+			continue // the caller is holding this one right now
+		}
 		if busy {
 			continue // in-flight state (steer buffer, fence, waiters) is not rebuildable
 		}
-		cands = append(cands, candidate{key: key, touched: touched})
+		cands = append(cands, candidate{key: key, touched: touched, messages: messages})
+	}
+	if len(m.sessions) <= agentSessionCacheMaxSessions && totalMessages <= agentSessionCacheMaxMessages {
+		return
 	}
 	// Genuinely idle entries go first (sessionCacheMinIdle), then oldest-first.
 	// The idle test is an ordering *preference*, never a shield: if everything is
@@ -216,10 +219,11 @@ func (m *Manager) evictIdleLocked(now time.Time) {
 		return cands[a].touched.Before(cands[b].touched)
 	})
 	for _, c := range cands {
-		if len(m.sessions) <= agentSessionCacheMaxSessions {
+		if len(m.sessions) <= agentSessionCacheMaxSessions && totalMessages <= agentSessionCacheMaxMessages {
 			return
 		}
 		delete(m.sessions, c.key)
+		totalMessages -= c.messages
 	}
 }
 
@@ -433,7 +437,9 @@ const (
 	// agent's own conversations are the ones worth keeping warm); a pod-wide quota
 	// would be a different mechanism, see docs 10 §10.7.
 	//
-	// This is the single knob — there is no byte or line budget alongside it.
+	// Two knobs, not one: this count, and agentSessionCacheMaxMessages below. The count
+	// alone cannot bound bytes (one session's size is not fixed), which is what the
+	// measurements in this block were already saying.
 	//
 	// What it buys and what it does not, stated rather than implied:
 	//   - it bounds the *bookkeeping* (identity, in-flight state, lastTouched)
@@ -453,6 +459,17 @@ const (
 	// per agent), and docs 10 §10.6 records the field-by-field proof that dropping
 	// an entry is unobservable.
 	agentSessionCacheMaxSessions = 10
+	// agentSessionCacheMaxMessages is one AGENT's cache budget counted in **lines** — the knob
+	// that bounds bytes. Why the session count is not enough, in this file's own numbers: the
+	// same ten-entry cache measured 2.3 MiB with small chats and 77.1 MiB with tool-output-heavy
+	// ones, and production's largest single session held 1.85 MiB (docs 10 §10.3). A long
+	// conversation is exactly the shape that grows, so a count of conversations bounds the
+	// bookkeeping and nothing else.
+	//
+	// 20_000 lines is ~2.4× production's whole-cache figure (8366 lines across 108 sessions,
+	// 2026-09-19) and ~10× its average session; it is a ceiling on what the process KEEPS, never
+	// on what it can serve — the store is authoritative and `Get` re-reads the working set.
+	agentSessionCacheMaxMessages = 20_000
 )
 
 type Manager struct {
@@ -751,8 +768,10 @@ func (m *Manager) getByKey(key, channel, accountID, chatID, projectID string) *S
 	// only way to tell "bounded by concurrency" from "growing with history".
 	m.cacheGets++
 	if m.cacheGets%100 == 0 {
-		fmt.Fprintf(os.Stderr, "session cache footprint: sessions=%d messages=%d sessionBudget=%d gets=%d\n",
-			len(m.sessions), m.cacheMessagesLocked(), agentSessionCacheMaxSessions, m.cacheGets)
+		var ms runtime.MemStats
+		runtime.ReadMemStats(&ms)
+		fmt.Fprintf(os.Stderr, "session cache footprint: sessions=%d messages=%d sessionBudget=%d messageBudget=%d heapAllocMiB=%.1f gets=%d\n",
+			len(m.sessions), m.cacheMessagesLocked(), agentSessionCacheMaxSessions, agentSessionCacheMaxMessages, float64(ms.HeapAlloc)/(1<<20), m.cacheGets)
 	}
 	return s
 }
