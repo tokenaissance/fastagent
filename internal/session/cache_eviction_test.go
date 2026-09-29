@@ -172,3 +172,33 @@ func TestSessionCacheDropsEntriesPastTheIdleWindow(t *testing.T) {
 		t.Fatalf("rebuilt session lost its history: %+v", msgs)
 	}
 }
+
+// A snapshot has a lifetime: it is a shallow copy, so its own cost is per line, but while it exists
+// every message it replaced stays reachable. It used to go only on Undo or on cache eviction, so a
+// single snapshot taken once and never undone could pin a long conversation's old history for the
+// life of the process.
+//
+// Falsification: drop the expiry from HasSnapshot/Undo and both assertions below fail.
+func TestSessionSnapshotExpiresAndStopsPinningHistory(t *testing.T) {
+	m := NewManager(t.TempDir())
+	s := m.Get("web", "", "chat-snap", "")
+	s.Append(provider.Message{Role: "user", Content: "one"})
+	s.Snapshot()
+	if !s.HasSnapshot() {
+		t.Fatal("a fresh snapshot is not reported")
+	}
+
+	s.mu.Lock()
+	s.snapshotAt = time.Now().Add(-(sessionSnapshotMaxAge + time.Minute))
+	s.mu.Unlock()
+
+	if s.HasSnapshot() {
+		t.Fatal("an expired snapshot is still reported")
+	}
+	if s.Undo() {
+		t.Fatal("an expired snapshot was still applied")
+	}
+	if got := len(s.GetMessages()); got != 1 {
+		t.Fatalf("history was disturbed by an expired snapshot: %d message(s)", got)
+	}
+}
