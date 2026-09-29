@@ -543,10 +543,14 @@ type Manager struct {
 	// lastKey is the session the most recent Get asked for; the sweeper never
 	// drops it (the caller is holding it right now).
 	lastKey string
-	dataDir string
-	store   SessionStore
-	userID  string
-	agentID string
+	// cacheMisses counts the Gets that had to build the session (not resident). The footprint line
+	// prints it next to cacheGets: misses ~= gets means the cache is not holding anything long enough
+	// to matter, which is what a too-small per-session share would look like from the outside.
+	cacheMisses int64
+	dataDir     string
+	store       SessionStore
+	userID      string
+	agentID     string
 }
 
 func NewManager(dataDir string) *Manager {
@@ -818,6 +822,12 @@ func (m *Manager) getByKey(key, channel, accountID, chatID, projectID string) *S
 		s.load()
 	}
 
+	// This is the insert path: a session that was not resident, so this Get paid for building it.
+	// Counted next to `cacheGets` because the ratio of the two is the only honest answer to "how
+	// often does the cache actually save anything" — and the first half of the question this counter
+	// exists for is whether a HIT still re-reads the store (that needs the GetSession call site, not
+	// this one; see the note on the footprint line).
+	m.cacheMisses++
 	m.lastKey = key
 	s.lastTouched = time.Now()
 	m.sessions[key] = s
@@ -828,9 +838,9 @@ func (m *Manager) getByKey(key, channel, accountID, chatID, projectID string) *S
 	if m.cacheGets%100 == 0 {
 		var ms runtime.MemStats
 		runtime.ReadMemStats(&ms)
-		fmt.Fprintf(os.Stderr, "session cache footprint: sessions=%d messages=%d (LINES, not bytes; bytes=heapAllocMiB) sessionBudget=%d messageBudget=%d byteBudgetMiB=%d estResidentMiB=%.1f heapAllocMiB=%.1f gets=%d\n",
+		fmt.Fprintf(os.Stderr, "session cache footprint: sessions=%d messages=%d (LINES, not bytes; bytes=heapAllocMiB) sessionBudget=%d messageBudget=%d byteBudgetMiB=%d estResidentMiB=%.1f heapAllocMiB=%.1f gets=%d rebuilds=%d\n",
 			len(m.sessions), m.cacheMessagesLocked(), agentSessionCacheMaxSessions, agentSessionCacheMaxMessages,
-			agentSessionCacheMaxBytes>>20, float64(m.cacheResidentBytes())/(1<<20), float64(ms.HeapAlloc)/(1<<20), m.cacheGets)
+			agentSessionCacheMaxBytes>>20, float64(m.cacheResidentBytes())/(1<<20), float64(ms.HeapAlloc)/(1<<20), m.cacheGets, m.cacheMisses)
 	}
 	return s
 }
