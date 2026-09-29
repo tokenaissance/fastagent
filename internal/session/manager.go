@@ -204,7 +204,18 @@ func (m *Manager) evictIdleLocked(now time.Time) {
 		cands = append(cands, candidate{key: key, touched: touched, messages: messages})
 	}
 	if len(m.sessions) <= agentSessionCacheMaxSessions && totalMessages <= agentSessionCacheMaxMessages {
-		return
+		// Under budget is not "nothing to do": the idle rule below still drops entries nobody has
+		// touched for sessionCacheMaxIdle, so the walk continues (it has already happened).
+		anyIdle := false
+		for _, c := range cands {
+			if now.Sub(c.touched) >= sessionCacheMaxIdle {
+				anyIdle = true
+				break
+			}
+		}
+		if !anyIdle {
+			return
+		}
 	}
 	// Genuinely idle entries go first (sessionCacheMinIdle), then oldest-first.
 	// The idle test is an ordering *preference*, never a shield: if everything is
@@ -219,7 +230,11 @@ func (m *Manager) evictIdleLocked(now time.Time) {
 		return cands[a].touched.Before(cands[b].touched)
 	})
 	for _, c := range cands {
-		if len(m.sessions) <= agentSessionCacheMaxSessions && totalMessages <= agentSessionCacheMaxMessages {
+		// Two reasons to drop, and the candidates are sorted so the first one comes first:
+		//   - it has gone idle (sessionCacheMaxIdle) — dropped regardless of the budgets;
+		//   - the cache is over a budget — dropped oldest-first until it is not.
+		idle := now.Sub(c.touched) >= sessionCacheMaxIdle
+		if !idle && len(m.sessions) <= agentSessionCacheMaxSessions && totalMessages <= agentSessionCacheMaxMessages {
 			return
 		}
 		delete(m.sessions, c.key)
@@ -425,6 +440,11 @@ type SessionStore interface {
 // served — otherwise a long-lived pod's memory grows with every session and
 // every turn (the serverless invariant S1).
 const (
+	// sessionCacheMaxIdle is now a DROP rule as well as an ordering preference: an entry no
+	// one has touched for this long is dropped even when both budgets are satisfied, because
+	// 'nobody is using it' is a reason to let it go on its own — the store rebuilds it on the
+	// next Get, and the alternative is a warm cache that outlives the conversation merely
+	// because the process happened to be under budget.
 	sessionCacheMaxIdle = 30 * time.Minute
 	// sessionCacheMinIdle marks entries too fresh to prefer dropping; it never
 	// prevents reaching the bound (see evictIdleLocked).
