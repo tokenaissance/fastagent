@@ -547,10 +547,18 @@ type Manager struct {
 	// prints it next to cacheGets: misses ~= gets means the cache is not holding anything long enough
 	// to matter, which is what a too-small per-session share would look like from the outside.
 	cacheMisses int64
-	dataDir     string
-	store       SessionStore
-	userID      string
-	agentID     string
+	// cacheStoreReads counts every read that actually reached the store, from the ONE place a read
+	// happens (loadMessages). Printed next to cacheGets, that ratio answers the question the whole
+	// per-session share hinges on: does a HIT still read?
+	//   storeReads ≈ gets  ⇒ residency saves allocation and projection only, so dropping a big
+	//                        session costs no database round trip;
+	//   storeReads ≪ gets  ⇒ a resident session avoids the read, and then a busy big session
+	//                        deserves to KEEP its cache (the share rule should be "big AND cold").
+	cacheStoreReads int64
+	dataDir         string
+	store           SessionStore
+	userID          string
+	agentID         string
 }
 
 func NewManager(dataDir string) *Manager {
@@ -578,6 +586,13 @@ func NewManagerWithStoreForUser(dataDir string, st SessionStore, userID, agentID
 }
 
 // ctx returns a context tagged with this Manager's user for store calls.
+// loadMessages is the single place the manager reads a session from the store, so the counter next
+// to it cannot drift from the reads it is counting.
+func (m *Manager) loadMessages(ctx context.Context, agentID, sessionKey string) ([]provider.Message, error) {
+	m.cacheStoreReads++
+	return m.store.GetSession(ctx, agentID, sessionKey)
+}
+
 func (m *Manager) ctx() context.Context {
 	if m.userID == "" {
 		return context.Background()
@@ -708,7 +723,7 @@ func (m *Manager) SessionExists(sessionKey string) bool {
 		// on disk (empty file → empty Session, harmless).
 		return true
 	}
-	msgs, err := m.store.GetSession(m.ctx(), m.agentID, sessionKey)
+	msgs, err := m.loadMessages(m.ctx(), m.agentID, sessionKey)
 	return err == nil && msgs != nil
 }
 
@@ -775,7 +790,7 @@ func (m *Manager) getByKey(key, channel, accountID, chatID, projectID string) *S
 
 	if s, ok := m.sessions[key]; ok {
 		if m.store != nil {
-			if msgs, err := m.store.GetSession(m.ctx(), m.agentID, key); err == nil {
+			if msgs, err := m.loadMessages(m.ctx(), m.agentID, key); err == nil {
 				s.mu.Lock()
 				s.Messages = msgs
 				s.mu.Unlock()
@@ -814,7 +829,7 @@ func (m *Manager) getByKey(key, channel, accountID, chatID, projectID string) *S
 
 	// Load from store (DB) if available, otherwise from file
 	if m.store != nil {
-		msgs, err := m.store.GetSession(m.ctx(), m.agentID, key)
+		msgs, err := m.loadMessages(m.ctx(), m.agentID, key)
 		if err == nil && len(msgs) > 0 {
 			s.Messages = msgs
 		}
@@ -838,9 +853,9 @@ func (m *Manager) getByKey(key, channel, accountID, chatID, projectID string) *S
 	if m.cacheGets%100 == 0 {
 		var ms runtime.MemStats
 		runtime.ReadMemStats(&ms)
-		fmt.Fprintf(os.Stderr, "session cache footprint: sessions=%d messages=%d (LINES, not bytes; bytes=heapAllocMiB) sessionBudget=%d messageBudget=%d byteBudgetMiB=%d estResidentMiB=%.1f heapAllocMiB=%.1f gets=%d rebuilds=%d\n",
+		fmt.Fprintf(os.Stderr, "session cache footprint: sessions=%d messages=%d (LINES, not bytes; bytes=heapAllocMiB) sessionBudget=%d messageBudget=%d byteBudgetMiB=%d estResidentMiB=%.1f heapAllocMiB=%.1f gets=%d rebuilds=%d storeReads=%d\n",
 			len(m.sessions), m.cacheMessagesLocked(), agentSessionCacheMaxSessions, agentSessionCacheMaxMessages,
-			agentSessionCacheMaxBytes>>20, float64(m.cacheResidentBytes())/(1<<20), float64(ms.HeapAlloc)/(1<<20), m.cacheGets, m.cacheMisses)
+			agentSessionCacheMaxBytes>>20, float64(m.cacheResidentBytes())/(1<<20), float64(ms.HeapAlloc)/(1<<20), m.cacheGets, m.cacheMisses, m.cacheStoreReads)
 	}
 	return s
 }
