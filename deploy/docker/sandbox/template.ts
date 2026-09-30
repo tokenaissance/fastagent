@@ -35,4 +35,13 @@ export const template = (
   .setWorkdir('/')
   .setWorkdir('/workspace')
   .setUser('user')
-  .setStartCmd('sudo sleep infinity', 'sleep 20')
+  // Background warm (2026-09-30): the first `camoufox-cli open` costs ~41 s cold and ~0.46 s warm
+  // once the daemon is up. Warming it in the FOREGROUND would make every sandbox pay 41 s, including
+  // the ones that never touch a browser — measured: T1 is 1.5–2.3 s today and that is the property
+  // worth keeping. So the warm is fired in the background and the sandbox starts immediately; a
+  // browser user then waits max(0, 41 s − time since creation), often zero.
+  //   (whether the daemon survives INTO a spawn is the open question — the probe records it.)
+  .setStartCmd(
+    'sh -lc "nohup camoufox-cli open about:blank >/dev/null 2>&1 & exec sleep infinity"',
+    'sleep 5'
+  )
