@@ -27,7 +27,7 @@ IMAGE_NAME=${IMAGE_NAME:-registry.digitalocean.com/tokenaissance/fastagent-sandb
 # One image name, a date tag (user ruling, 2026-09-30): the tag is the build's date, never a suffix
 # like -fastclaw073, so a person reading a tag knows when it was built and nothing else. Both
 # environment templates are baked from the SAME image; the environment lives in the template name.
-TAG=$(date +%Y%m%d)
+TAG=$(date +%Y%m%d%H%M%S)
 PUSH=0
 PLATFORM=""
 

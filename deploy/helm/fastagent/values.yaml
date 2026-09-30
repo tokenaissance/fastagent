@@ -94,7 +94,7 @@ sandbox:
   # FASTAGENT_SANDBOX_IMAGE), so it must be one of the templates that exist
   # (`fastagent-sandbox-dev` / `fastagent-sandbox-prod`); the default below is the pre-rename
   # spelling and would not resolve on its own.
-  image: registry.digitalocean.com/tokenaissance/fastagent-sandbox:20260930
+  image: registry.digitalocean.com/tokenaissance/fastagent-sandbox:20260930220914
   e2bApiKey: ""
 
 ## Ingress
