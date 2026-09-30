@@ -24,7 +24,10 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/../../.." && pwd)
 
 IMAGE_NAME=${IMAGE_NAME:-registry.digitalocean.com/tokenaissance/fastagent-sandbox}
-TAG=latest
+# One image name, a date tag (user ruling, 2026-09-30): the tag is the build's date, never a suffix
+# like -fastclaw073, so a person reading a tag knows when it was built and nothing else. Both
+# environment templates are baked from the SAME image; the environment lives in the template name.
+TAG=$(date +%Y%m%d)
 PUSH=0
 PLATFORM=""
 
