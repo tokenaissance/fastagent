@@ -15,6 +15,16 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
+# Pinned to what the WORKING image carried. Read out of thinkany/fastclaw-sandbox:latest on
+# 2026-09-30: camoufox-cli 0.4.0, camoufox 0.4.11, playwright 1.59.0. The unpinned build resolved
+# camoufox-cli to 0.7.3, whose config schema no longer matches the properties.json the browser
+# pipeline produced — `camoufox-cli open` died with "Unknown property navigator.appCodeName in
+# config" while looking like a successful install. These labels are how the next question about
+# versions gets answered by reading the image instead of a user's session log.
+LABEL org.fastagent.camoufox-cli="0.4.0" \
+      org.fastagent.camoufox="0.4.11" \
+      org.fastagent.playwright="1.59.0"
+
 # System deps: Python toolchain + the usual fetch/cert essentials +
 # CJK/emoji fonts so Firefox can render real glyphs instead of tofu
 # (.notdef) on Chinese/Japanese/Korean pages and emoji-laden sites.
@@ -39,12 +49,12 @@ RUN apt-get update \
 # `--break-system-packages` is the documented escape hatch and safe
 # inside a container.
 RUN pip install --break-system-packages --no-cache-dir \
-        camoufox-cli \
-        uv \
-        requests \
-        pillow \
-        beautifulsoup4 \
-        lxml
+        camoufox-cli==0.4.0 \
+        uv==0.11.13 \
+        requests==2.33.1 \
+        pillow==12.2.0 \
+        beautifulsoup4==4.14.3 \
+        lxml==6.1.0
 
 # Pull Camoufox (anti-detect Firefox) + the system libs it needs to run
 # headless. `--with-deps` shells out to apt for the Firefox runtime
@@ -54,6 +64,12 @@ RUN pip install --break-system-packages --no-cache-dir \
 # `camoufox-cli open` blows up at runtime, which is worse than a
 # build-time failure with an actionable error message.
 RUN camoufox-cli install --with-deps
+
+# Hard gate. An image whose browser cannot start must fail HERE, not in a user's session: the 0.7.x
+# incident shipped an image that installed cleanly and died on the first `camoufox-cli open`. The
+# old CLI has no `--version`, so the versions are read back with `pip show`.
+RUN camoufox-cli open about:blank \
+ && pip show camoufox-cli camoufox playwright | grep -E '^(Name|Version)'
 
 RUN rm -rf /var/lib/apt/lists/*
 
