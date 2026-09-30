@@ -1,40 +1,55 @@
-# fastagent-sandbox — runtime image for the agent's exec sandbox.
+# fastclaw-sandbox (rebuilt 2026-09-30) — runtime image for the agent's exec sandbox.
 #
-# Route A (2026-09-30): the browser comes from the image that WORKS, byte for byte.
+# Built from scratch, but PINNED to the version set that works:
+#   camoufox-cli 0.7.3  → camoufox==0.4.11, playwright==1.52.0   (its own pins; recorded in labels)
+# Read out of local/fastclaw-sandbox-ourbuild (the earlier from-scratch build, which opens a
+# browser fine). The 0.4.0 line cannot be reproduced — its `install --with-deps` now fails
+# because the remote asset it points at has moved — and an UNPINNED install resolves to
+# whatever the day gives, which is how the schema/config mismatch was shipped in the first place.
 #
-# What went wrong with building it from scratch: this Dockerfile used to install
-# `camoufox-cli` unpinned and then run `camoufox-cli install --with-deps`. The unpinned
-# build resolved camoufox-cli to 0.7.3, whose config schema no longer matches the
-# properties.json the browser pipeline produces, so `camoufox-cli open` died with
-# "Unknown property navigator.appCodeName in config" behind an install that looked
-# fine — users saw a browser that would not start. Pinning back to the working version
-# (read out of this image: camoufox-cli 0.4.0, camoufox 0.4.11, playwright 1.59.0) is not
-# enough either: that CLI's `install --with-deps` now FAILS (its remote asset has
-# moved), which is how this build failed today.
-#
-# So the working artifact is the source: its browser cache, its Firefox runtime libs and
-# its fonts are exactly what the agent needs, and re-deriving them is what turned a
-# working sandbox into a broken one. What this layer adds is only the gate that was
-# missing — an image whose browser cannot start now fails the build.
-#
-# The base is private (our own registry account) and is pulled while baking E2B
-# templates, same as before; `build.sh --push` needs `doctl registry login`.
-# The entry point is left alone on purpose: the base already carries the shim this repo
-# installs (camoufox-cli -> camouflage-cli-bin), and re-running that mv here would
-# overwrite the real binary with the shim.
+# The cache goes where the SANDBOX looks. Measured 2026-09-30 in E2B: whoami=user,
+# HOME=/home/user, and NEITHER /root/.cache/camoufox nor /home/user/.cache/camoufox existed —
+# the 1.3 GB the image carried under /root was simply not there, so the CLI regenerated a
+# config (>5 s, wrong keys) instead of using the baked one. Moving it in the SAME layer keeps
+# one copy (a `mv` in the layer that created it does not duplicate 1.3 GB) and makes it
+# readable by the runtime identity.
 
-FROM thinkany/fastclaw-sandbox:latest
+FROM node:22-bookworm-slim
 
-# The versions this image carries, so "which version is broken?" is answered by the image
-# instead of by a session log. Read from the base on 2026-09-30.
-LABEL org.fastagent.camoufox-cli="0.4.0" \
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        python3 python3-pip python3-venv ca-certificates curl git sudo \
+        fonts-noto-cjk fonts-noto-color-emoji \
+ && ln -sf /usr/bin/python3 /usr/local/bin/python
+
+RUN pip install --break-system-packages --no-cache-dir \
+        camoufox-cli==0.7.3 \
+        uv==0.11.13 \
+        requests==2.33.1 \
+        pillow==12.3.0 \
+        beautifulsoup4==4.14.3 \
+        lxml==6.1.0
+
+# Install as root (apt needs it), then hand the cache to the runtime user in the same layer.
+RUN camoufox-cli install --with-deps \
+ && mkdir -p /home/user/.cache \
+ && mv /root/.cache/camoufox /home/user/.cache/camoufox \
+ && chown -R 1000:1000 /home/user/.cache
+
+RUN rm -rf /var/lib/apt/lists/*
+
+LABEL org.fastagent.camoufox-cli="0.7.3" \
       org.fastagent.camoufox="0.4.11" \
-      org.fastagent.playwright="1.59.0" \
-      org.fastagent.sandbox-origin="thinkany/fastclaw-sandbox:latest"
+      org.fastagent.playwright="1.52.0" \
+      org.fastagent.sandbox-origin="from-scratch, pinned 2026-09-30"
 
-# Hard gate: an image whose browser cannot start must fail HERE, not in a user's session.
-# The old CLI has no --version, so the versions are read back with pip.
-RUN camoufox-cli open about:blank \
+# Hard gate, run with the same HOME the sandbox will have: an image whose browser cannot start
+# must fail HERE, not in a user's session.
+RUN HOME=/home/user camoufox-cli open about:blank \
  && pip show camoufox-cli camoufox playwright | grep -E '^(Name|Version)'
 
 WORKDIR /workspace
