@@ -87,7 +87,19 @@ objectStore:
 sandbox:
   enabled: false
   backend: e2b                  # "e2b" only (docker not available in k8s)
-  image: registry.digitalocean.com/tokenaissance/fastagent-sandbox:latest
+  # The SANDBOX TEMPLATE name, not a registry reference: the gateway passes this value straight
+  # through as FASTAGENT_SANDBOX_IMAGE and E2B resolves it as a template. The two live templates are
+  # `fastagent-sandbox-dev` and `fastagent-sandbox-prod` (both rebuilt 2026-09-30; browser open
+  # measured exit=0 in each). Production MUST pass its own name at deploy time:
+  #
+  #     helm upgrade … --reuse-values --set sandbox.image=fastagent-sandbox-prod
+  #
+  # The default below is the dev template. It used to read
+  # `registry.digitalocean.com/tokenaissance/fastagent-sandbox:latest`, which was a stale registry
+  # reference to a build whose browser could not start (and whose template name had been renamed) —
+  # a value that only looked right. If you change the template names, change this line and both
+  # `--set`s with it.
+  image: fastagent-sandbox-dev
   e2bApiKey: ""
 
 ## Ingress
