@@ -42,14 +42,38 @@ RUN camoufox-cli install --with-deps \
 
 RUN rm -rf /var/lib/apt/lists/*
 
+# The shim the agent's calls actually go through (proxy injection + one retry
+# when a call never reached a daemon). Its two jobs are in the file's own
+# header; what matters here is that it is a real file in the build context
+# rather than a printf block — internal/sandbox/camoufox_cli_shim_test.go runs
+# THIS file against a fake client, and TestE2BLiveBrowserColdStart reads it
+# back out of the baked template. It went missing for a while when the image
+# was rebuilt from scratch (the image shipped the bare pip entry point, so the
+# retry the docs promised did not exist in any sandbox), which is why the gate
+# below now runs through it.
+#
+# After `camoufox-cli install`, so the installer still runs straight against
+# the pip entry point: the shim would otherwise inject --proxy from the build
+# environment into `install`'s argv, which does not take one.
+COPY camoufox-cli-shim.sh /usr/local/bin/camoufox-cli-shim
+RUN mv /usr/local/bin/camoufox-cli /usr/local/bin/camoufox-cli-bin \
+ && mv /usr/local/bin/camoufox-cli-shim /usr/local/bin/camoufox-cli \
+ && chmod 0755 /usr/local/bin/camoufox-cli
+
 LABEL org.fastagent.camoufox-cli="0.7.3" \
       org.fastagent.camoufox="0.4.11" \
       org.fastagent.playwright="1.52.0" \
+      org.fastagent.sandbox-shim="camoufox-cli-shim (proxy + one retry)" \
       org.fastagent.sandbox-origin="from-scratch, pinned 2026-09-30"
 
-# Hard gate, run with the same HOME the sandbox will have: an image whose browser cannot start
-# must fail HERE, not in a user's session.
+# Hard gate, run with the same HOME the sandbox will have and THROUGH THE SHIM —
+# the only path the agent uses, so a missing or broken shim fails the build too.
+# The leftover socket and browser profile the gate leaves in /tmp go in the same
+# layer: a stale socket baked into the image is one the first sandbox would have
+# to clean up by hand.
 RUN HOME=/home/user camoufox-cli open about:blank \
- && pip show camoufox-cli camoufox playwright | grep -E '^(Name|Version)'
+ && pip show camoufox-cli camoufox playwright | grep -E '^(Name|Version)' \
+ && test -x /usr/local/bin/camoufox-cli-bin \
+ && rm -rf /tmp/camoufox-cli-* /tmp/playwright_* /tmp/.org.chromium.*
 
 WORKDIR /workspace

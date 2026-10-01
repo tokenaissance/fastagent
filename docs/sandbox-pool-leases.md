@@ -451,15 +451,56 @@ over cold, so the instances most likely to hit the race were exactly the ones
 that skipped the warm-up.
 
 The race is now absorbed where every launch path passes through:
-`deploy/docker/sandbox/camoufox-cli-shim.sh`. If the client exits non-zero
-**and no daemon socket exists** (the client's `ensure_daemon` never got past
-spawning, so the command was never sent), the shim waits for the socket — the
-daemon it already started keeps booting — and re-runs the same argv once,
-bounded by `CAMOUFOX_SHIM_WAIT_SECS` (default 20). Re-running the *same* argv is
-the point: the daemon the retry attaches to is configured with the caller's
-proxy / persistent profile / locale rather than a re-derived guess, which is
-why this is not a warm-up we control from Go. A command that a live daemon
-already answered is never replayed — that would replay a click or a fill.
+`deploy/docker/sandbox/camoufox-cli-shim.sh`. The shim re-runs the same argv
+once — and only for a call that never reached a daemon, decided from the
+client's own two messages: `Daemon did not start within 5 seconds` (it spawned
+a daemon and gave up on its socket; that daemon keeps booting, so the shim
+waits for the socket first, bounded by `CAMOUFOX_SHIM_WAIT_SECS`, default 20)
+and `Failed to connect to daemon after 5 attempts: [Errno 2|111]` (the daemon
+that was there is gone; the retry is what spawns the replacement). Re-running
+the *same* argv is the point: the daemon the retry attaches to is configured
+with the caller's proxy / persistent profile / locale rather than a re-derived
+guess, which is why this is not a warm-up we control from Go. A command a live
+daemon already answered reports something else and is forwarded untouched —
+replaying one would replay a click or a fill.
+
+## Browser cold start (2026-10-01): the template's warm-up was the bug
+
+The shim was not the whole story, and for a day it was not even present: when
+the image was rebuilt from scratch (2026-09-30, `71a2cd3`) the `COPY` that
+installs the shim was dropped, so every sandbox ran the bare pip entry point
+while this document promised a retry. `TestE2BLiveBrowserColdStart` reads the
+shim back out of a baked template, so it would have caught that — it needs
+`E2B_API_KEY`/`E2B_TEMPLATE` and had not been run against the new template.
+
+The second half is the interesting one. The shim's old predicate — "the call
+failed and no daemon socket exists" — was retrying in exactly the state a
+*killed* daemon leaves behind, and the daemon was being killed: measured in a
+fresh E2B sandbox on 2026-10-01, the platform kills everything the template's
+start command left behind about ten seconds after the sandbox is handed over.
+Daemon, socket and browser died together, three runs out of three; the daemon
+had already been reparented to pid 1 and was still killed, while a daemon
+started by the caller's own exec line survived 40 s+ and served two opens. So
+the warm-up was worse than useless: the first browser call in a fresh sandbox
+attached to a daemon that was about to die, and came back as
+`Failed to connect to daemon after 5 attempts: [Errno 2] No such file or
+directory` — the failure users saw on dev and prod. Because the socket was
+*gone* by then, the old shim waited out its full budget for a daemon nothing
+was going to start and then, still seeing no socket, never retried.
+
+What changed:
+
+- the template's start command no longer warms anything
+  (`deploy/docker/sandbox/template.ts`): `sh -lc "exec sleep infinity"`. With no
+  warm at all the first browser call in a fresh sandbox measured **5.4 s, exit
+  0** — faster than with the warm, because the warm's own browser launch used to
+  sit in front of the caller;
+- the shim decides on the client's own error text instead of on the socket, so
+  the killed-daemon case retries immediately (no wait for a socket nobody will
+  bind) and still never replays a command a live daemon answered;
+- the image installs the shim again, and the build's hard gate runs
+  `camoufox-cli open about:blank` *through* it, so a missing or broken shim
+  fails the build rather than a user's session.
 
 What it changes for an operator:
 
