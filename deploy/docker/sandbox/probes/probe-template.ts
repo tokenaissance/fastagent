@@ -25,7 +25,10 @@ console.log(`CREATE=${Date.now() - created}ms  (${target})`)
 
 const steps = [
   'whoami; echo HOME=$HOME',
-  'ls -d /home/user/.cache/camoufox 2>/dev/null; ls /home/user/.cache/camoufox 2>/dev/null | head -3; echo (cache)',
+  // Quoted: the unquoted `(cache)` was a bash syntax error that killed the whole
+  // step before it ran, so for a while this probe reported nothing about the
+  // cache it exists to check.
+  'ls -d /home/user/.cache/camoufox 2>/dev/null; ls /home/user/.cache/camoufox 2>/dev/null | head -3; echo "(cache)"',
   'ls -la /tmp/camoufox-cli-*.sock 2>&1 | head -2',
   'camoufox-cli open about:blank',
   'camoufox-cli open about:blank',
