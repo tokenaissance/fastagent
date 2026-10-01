@@ -28,7 +28,13 @@ earlier measurement came back with numbers that did not belong to the template i
 ## What the numbers mean
 
 - `CREATE=` — a sandbox exists and can run a command (T1). Non-browser work pays only this:
-  measured 1.5–3 s.
+  measured 0.8–1.4 s (2026-10-01, dev template). A sandbox that never opens a browser carries
+  ~90 MiB of RSS across ~77 processes and has 771 MiB of its 976 MiB still available.
+- browser work pays, once per fresh sandbox, the browser launch: first `open` measured 15–28 s
+  (the spread is host disk/CPU on the daemon's cold import plus the launch), exit 0; every call
+  after that 0.3–0.5 s. With the browser up the sandbox runs ~86 processes and MemAvailable drops
+  771 → ~405 MiB, i.e. the browser costs ~370 MiB of the ~1 GB box (camoufox-bin ~320 MiB, its
+  WebExtensions/Web Content children the rest).
 - `ls … .cache/camoufox` — whether the 1.3 GB browser cache reached the RUNTIME user (`user`,
   `HOME=/home/user`). When it does not, every `open` fails with a config or daemon error. This was
   the root cause on 2026-09-30: the image kept the cache at `/root/.cache`, and no sandbox saw it.
@@ -38,8 +44,11 @@ earlier measurement came back with numbers that did not belong to the template i
   command left behind about ten seconds after the sandbox is handed over, socket and browser with it,
   so a call attached at that moment died with `Failed to connect to daemon after 5 attempts:
   [Errno 2] No such file or directory`. A socket at creation time means someone put the warm back.
-- first `camoufox-cli open` — the cold path: 5.4 s, exit=0 (measured 2026-10-01 with no warm at all;
-  the 11–15 s measured on 2026-09-30 was a call queued behind the warm's own browser launch).
+- first `camoufox-cli open` — the cold path, now the only path: measured 14.3 s, 15.7 s, 18.7 s, 21.5 s
+  and 28.3 s across fresh sandboxes on 2026-10-01, always exit=0 (the spread is host disk/CPU while
+  the daemon imports and the browser starts). A 5.4 s reading from the same day is **not** the cold
+  path and should not be quoted as one: it came from a sandbox whose page cache the start command's
+  daemon had already warmed before the platform killed it, which is the warm that no longer exists.
 - second `open` — the warm path: 0.5–0.9 s, exit=0.
 
 If a first `open` ever comes back as `Failed to connect to daemon after 5 attempts: [Errno 2|111]`,
