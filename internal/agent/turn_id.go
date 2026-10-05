@@ -11,16 +11,17 @@ import (
  * [OUTPUT]: MintTurnID / ContextWithTurnID / TurnIDFromContext — one turn's internal
  *           identity, minted by the server at acceptance.
  * [POS]: Sibling of events.go's ContextWithChatEvents. The identity is the SERVER's
- *        (docs/fastagent/design/14-turn-identity.md §2–3, I1/I2): it is produced in the
- *        handler at the moment the submission is accepted and registered, so every turn
+ *        (docs/fastagent/design/14-turn-identity.md §2–3, I1/I2): the handler produces it
+ *        when it accepts and registers the submission, so every turn
  *        has one — including the ones nobody's client asked for (cron, goal, heartbeat,
  *        subagent), which is exactly why the caller may not supply it. The string a
  *        client sends is a dedupe key with its own name and its own owner.
- *        Two readers, both about the submission itself — the pending-turn registry (so a
- *        queued submission can be withdrawn) and the `queued` event (so a tab that did
- *        not POST can name whose submission is waiting). It is deliberately NOT written
- *        onto the stored messages: no reader asks for it there, and a stored fact with
- *        no reader is how the removed half (2026-09-26) got written in the first place.
+ *        Three readers use it. The pending-turn registry withdraws a queued submission.
+ *        The `queued` event names the submission that waits. The stored user message
+ *        carries it in metadata["turnId"] (loop.go, buildUserMessage), so a reader that
+ *        arrives after the turn can name the turn that produced a reply. That third write
+ *        is deliberate. Keep it in step with these readers: a stored fact with no reader
+ *        is how the removed half (2026-09-26) got written in the first place.
  * [PROTOCOL]: On change, update this header and check docs/session-turn-integrity.md
  *        (the turn facts named there) before adding a second key of this shape.
  */

@@ -1391,13 +1391,14 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		turnDeadline = time.Now().Add(agentTurnTimeout)
 	}
 	agentCtx = agent.ContextWithStream(agentCtx, nil, s.dataStore, hub, uid, agentID, req.SessionID)
-	// The turn's identity is minted HERE, at acceptance, and it rides the context so the
+	// The handler mints the turn's identity HERE, at acceptance, and it rides the context so the
 	// code that answers about this submission can name it: the pending-turn registry
 	// (withdrawal of a queued turn) and the `queued` event (a tab that did not POST learns
 	// whose submission is waiting). The callers' string — `idempotencyKey`, or `turnId` from
 	// an older client — is a DEDUPE key and never the identity
-	// (docs/fastagent/design/14-turn-identity.md §2, I1/I2). It is NOT stored on the
-	// messages — see internal/agent/turn_id.go for why that half was removed.
+	// (docs/fastagent/design/14-turn-identity.md §2, I1/I2). The stored user message also
+	// carries the identity, in metadata["turnId"], so a reader that arrives after the turn
+	// can name the turn that produced a reply. internal/agent/turn_id.go lists the readers.
 	turnID := agent.MintTurnID()
 	agentCtx = agent.ContextWithTurnID(agentCtx, turnID)
 	// Remembered in the same breath as the mint, before the turn's goroutine exists: a retry
