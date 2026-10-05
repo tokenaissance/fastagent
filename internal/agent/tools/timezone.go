@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/fastclaw-ai/fastclaw/internal/scope"
-	"github.com/fastclaw-ai/fastclaw/internal/store"
 )
 
 type setTimezoneArgs struct {
@@ -27,7 +26,7 @@ type setTimezoneArgs struct {
 //
 // Writing to both guarantees the timezone survives across sessions and
 // is visible to the model in the system prompt.
-func RegisterTimezoneTool(r *Registry, st store.Store) {
+func RegisterTimezoneTool(r *Registry, st ConfigToolStore) {
 	r.Register("set_timezone",
 		"Record the current chatter's timezone. Call this whenever the chatter tells you their timezone, city, or country (e.g. \"我在北京\" → Asia/Shanghai). This persists the timezone to the chatter's profile so future sessions use their local time automatically.",
 		map[string]interface{}{
@@ -44,7 +43,7 @@ func RegisterTimezoneTool(r *Registry, st store.Store) {
 	)
 }
 
-func makeSetTimezone(st store.Store, r *Registry) ToolFunc {
+func makeSetTimezone(st ConfigToolStore, r *Registry) ToolFunc {
 	return func(ctx context.Context, rawArgs json.RawMessage) (string, error) {
 		var args setTimezoneArgs
 		if err := json.Unmarshal(rawArgs, &args); err != nil {

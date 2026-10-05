@@ -35,7 +35,7 @@ type deleteCronJobArgs struct {
 // the registry before any tool fires; the boot-time userID the
 // registration used to take was only ever the UserSpace owner, which on
 // a shared agent is the binder and not the chatter.
-func RegisterCronTools(r *Registry, st store.Store, agentID string) {
+func RegisterCronTools(r *Registry, st CronToolStore, agentID string) {
 	r.Register("create_cron_job",
 		"Create a scheduled task. Use this for any user request that names a specific time, an interval, or a recurring schedule (e.g. \"5 分钟后提醒\", \"every Monday 9am\", \"each day at 8\"). When the schedule fires, the agent receives `message` as a fresh inbound prompt on the same channel the request originated from. Do NOT write timed reminders into HEARTBEAT.md — that file is only for conditional self-checks reviewed at every heartbeat tick.",
 		map[string]interface{}{
@@ -89,7 +89,7 @@ func RegisterCronTools(r *Registry, st store.Store, agentID string) {
 	)
 }
 
-func makeCreateCronJob(st store.Store, r *Registry, agentID string) ToolFunc {
+func makeCreateCronJob(st CronToolStore, r *Registry, agentID string) ToolFunc {
 	return func(ctx context.Context, rawArgs json.RawMessage) (string, error) {
 		var args createCronJobArgs
 		if err := json.Unmarshal(rawArgs, &args); err != nil {
@@ -191,7 +191,7 @@ func makeCreateCronJob(st store.Store, r *Registry, agentID string) ToolFunc {
 	}
 }
 
-func makeListCronJobs(st store.Store, r *Registry, agentID string) ToolFunc {
+func makeListCronJobs(st CronToolStore, r *Registry, agentID string) ToolFunc {
 	return func(ctx context.Context, rawArgs json.RawMessage) (string, error) {
 		jobs, err := st.ListCronJobsByAgent(ctx, agentID)
 		if err != nil {
@@ -217,7 +217,7 @@ func makeListCronJobs(st store.Store, r *Registry, agentID string) ToolFunc {
 	}
 }
 
-func makeDeleteCronJob(st store.Store, r *Registry, agentID string) ToolFunc {
+func makeDeleteCronJob(st CronToolStore, r *Registry, agentID string) ToolFunc {
 	return func(ctx context.Context, rawArgs json.RawMessage) (string, error) {
 		var args deleteCronJobArgs
 		if err := json.Unmarshal(rawArgs, &args); err != nil {

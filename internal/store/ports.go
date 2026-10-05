@@ -23,7 +23,11 @@
 //	KVStore         -> configs_kv only (the legacy blob stays untouched)
 package store
 
-import "context"
+import (
+	"context"
+
+	"github.com/fastclaw-ai/fastclaw/internal/config"
+)
 
 // ConfigReader is the read half of the configs domain: the legacy JSON-blob
 // table (GetConfigByName, ListConfigs) plus its configs_kv mirror
@@ -156,7 +160,104 @@ var (
 	_ ConfigMirrorReconciler = (Store)(nil)
 	_ ConfigStore            = (Store)(nil)
 	_ KVStore                = (Store)(nil)
+	_ AgentReader            = (Store)(nil)
+	_ AgentFileStore         = (Store)(nil)
+	_ AgentKnowledgeStore    = (Store)(nil)
+	_ AgentMCPServerStore    = (Store)(nil)
+	_ CronStore              = (Store)(nil)
+	_ ChatterCounter         = (Store)(nil)
+	_ SessionEventReader     = (Store)(nil)
+	_ ConfigValueReader      = (Store)(nil)
+	_ AgentRuntimeStore      = (Store)(nil)
 )
+
+// --- agent runtime ports ----------------------------------------------------
+//
+// The agent runtime and the tools it registers need identity files, the
+// knowledge corpus, MCP server rows, cron rows, session facts, one agent row,
+// and the configs domain. Declaring each slice lets a test double implement the
+// handful of methods a feature uses instead of embedding a database, and it
+// makes "what does the agent loop touch" a readable list.
+
+// AgentReader reads one agent row. The runtime needs the row's identity, not
+// the user, session, or channel tables next to it.
+type AgentReader interface {
+	GetAgent(ctx context.Context, agentID string) (*AgentRecord, error)
+}
+
+// AgentFileStore is the identity and memory file slice: SOUL.md, IDENTITY.md,
+// USER.md, MEMORY.md. Four methods, because a reader needs both the
+// owner-fallback form and the Exact form (a visitor must not inherit the
+// owner's accumulated memory), and a writer needs both the plain save and the
+// compare-and-set save that turns a lost update into a conflict.
+type AgentFileStore interface {
+	GetAgentFile(ctx context.Context, agentID, userID, filename string) ([]byte, error)
+	GetAgentFileExact(ctx context.Context, agentID, userID, filename string) ([]byte, error)
+	SaveAgentFile(ctx context.Context, agentID, userID, filename string, data []byte) error
+	SaveAgentFileIfVersion(ctx context.Context, agentID, userID, filename string, data []byte, expected AgentFileVersion) error
+}
+
+// AgentKnowledgeStore reads the owner-uploaded knowledge corpus.
+type AgentKnowledgeStore interface {
+	ListAgentKnowledgeDocs(ctx context.Context, agentID, userID string) ([]KnowledgeDoc, error)
+	SearchAgentKnowledgeChunks(ctx context.Context, agentID, userID, query string, limit int) ([]KnowledgeChunkRecord, error)
+}
+
+// AgentMCPServerStore is the per-key agent_mcp_servers slice. The MCP control
+// plane adds, removes, and lists rows here. The table is authoritative for
+// mcpServers, so this slice is separate from the agents.config JSON column.
+type AgentMCPServerStore interface {
+	AddMCPServer(ctx context.Context, agentID, serverName string, cfg config.MCPServerConfig) error
+	DeleteMCPServer(ctx context.Context, agentID, serverName string) error
+	ListMCPServers(ctx context.Context, agentID string) (map[string]config.MCPServerConfig, error)
+}
+
+// CronStore is the scheduled-task slice the cron tools use.
+type CronStore interface {
+	ListCronJobsByAgent(ctx context.Context, agentID string) ([]CronJobRecord, error)
+	GetCronJob(ctx context.Context, jobID string) (*CronJobRecord, error)
+	SaveCronJob(ctx context.Context, job *CronJobRecord) error
+	DeleteCronJob(ctx context.Context, jobID string) error
+}
+
+// ChatterCounter answers one question: how many user messages has this chatter
+// sent to this agent. The auto-persist distill pass uses it as a turn counter.
+type ChatterCounter interface {
+	CountChatterUserMessages(ctx context.Context, agentID, chatterUserID string) (int, error)
+}
+
+// SessionEventReader reads the append-only session event log from a sequence
+// number. The event hub polls it; the writer side is a different capability.
+type SessionEventReader interface {
+	ListSessionEventsSince(ctx context.Context, userID, agentID, sessionKey string, sinceSeq int64) ([]SessionEventRecord, error)
+}
+
+// ConfigValueReader reads one configs_kv value by its dotted name. It is not
+// part of ConfigReadStore because it does not certify the mirror: this reader
+// owns the row's shape and parses the text itself (see the MCP undo cursor).
+type ConfigValueReader interface {
+	GetConfigValue(ctx context.Context, kind, scope, scopeID, name string) (ConfigValue, error)
+}
+
+// AgentRuntimeStore is the whole slice internal/agent depends on. It composes
+// the capability ports above plus the configs domain, because the same value is
+// handed to the cron, timezone, and preference tools and to the config
+// resolver. The configs half is spelled out rather than written as ConfigStore:
+// the resolver also needs ListConfigMirrors, which lives in MirrorReader and
+// not in ConfigStore.
+type AgentRuntimeStore interface {
+	AgentReader
+	AgentFileStore
+	AgentKnowledgeStore
+	AgentMCPServerStore
+	CronStore
+	ChatterCounter
+	SessionEventReader
+	ConfigReadStore
+	ConfigValueReader
+	ConfigWriter
+	ConfigMirrorStore
+}
 
 // WithConfigTx is store.WithTx for a caller that typed its store as a port
 // rather than as Store: the transaction handle is handed back as a

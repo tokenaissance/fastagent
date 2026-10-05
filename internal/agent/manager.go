@@ -13,7 +13,6 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 	"github.com/fastclaw-ai/fastclaw/internal/provider"
 	"github.com/fastclaw-ai/fastclaw/internal/session"
-	"github.com/fastclaw-ai/fastclaw/internal/store"
 	"github.com/fastclaw-ai/fastclaw/internal/usage"
 	"github.com/fastclaw-ai/fastclaw/internal/workspace"
 )
@@ -77,7 +76,7 @@ type managerOpts struct {
 	sessionStore    session.SessionStore
 	memoryStore     MemoryStore
 	workspaceStore  workspace.Store
-	dataStore       store.Store
+	dataStore       Store
 	meter           usage.Meter
 	quotaStore      usage.QuotaStore
 	userID          string
@@ -136,7 +135,7 @@ func WithWorkspaceStore(ws workspace.Store) ManagerOption {
 // agent's tool list and time-bound requests fall back to natural-
 // language reminders in HEARTBEAT.md (which only get a lazy 30-minute
 // review and are wrong for short-fuse reminders).
-func WithDataStore(st store.Store) ManagerOption {
+func WithDataStore(st Store) ManagerOption {
 	return func(o *managerOpts) { o.dataStore = st }
 }
 

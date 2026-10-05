@@ -14,10 +14,10 @@ import (
 // for that chatter); writes also carry userID so chat-time updates land
 // in the chatter's row, never the shared template.
 type MemoryStoreAdapter struct {
-	st store.Store
+	st Store
 }
 
-func NewMemoryStoreAdapter(st store.Store) *MemoryStoreAdapter {
+func NewMemoryStoreAdapter(st Store) *MemoryStoreAdapter {
 	return &MemoryStoreAdapter{st: st}
 }
 

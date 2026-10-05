@@ -130,7 +130,7 @@ func mcpToolUndo(ctx context.Context, ag *Agent, rc config.ResolvedAgent) (strin
 // set and returns the persistence error: the inverse is already applied,
 // so a failure is surfaced explicitly rather than silently risking a
 // duplicate replay on the next undo.
-func markUndoCursor(ctx context.Context, st store.Store, agentID, cursorName string, consumed map[string]bool, id string) error {
+func markUndoCursor(ctx context.Context, st Store, agentID, cursorName string, consumed map[string]bool, id string) error {
 	consumed[id] = true
 	ids := make([]string, 0, len(consumed))
 	for k := range consumed {

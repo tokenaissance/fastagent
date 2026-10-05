@@ -208,7 +208,7 @@ func applyMCPRemove(ctx context.Context, ag *Agent, rc config.ResolvedAgent, ser
 // owner still matches the stored row (defense in depth behind the tool's
 // actor gate: an agent must never be written through a stale rc that names
 // a different owner).
-func requireAgentOwner(ctx context.Context, st store.Store, rc config.ResolvedAgent) (*store.AgentRecord, error) {
+func requireAgentOwner(ctx context.Context, st Store, rc config.ResolvedAgent) (*store.AgentRecord, error) {
 	if st == nil {
 		return nil, errors.New("agent config store is unavailable")
 	}
