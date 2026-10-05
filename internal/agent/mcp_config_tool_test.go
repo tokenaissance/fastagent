@@ -182,23 +182,34 @@ func TestMcpLoginSeesAServerAddedInTheSameSession(t *testing.T) {
 
 	// The build produced this session's snapshot with no MCP servers.
 	rc := config.ResolvedAgent{ID: "agent-1", UserID: "owner-1"}
-	reads := 0
+	// The read is the real use case over the real store, not a hand-rolled
+	// closure: the cache, the counter, and the read-repair loop are the ones
+	// production runs. The gateway supplies the same two things this test wires:
+	// a Store adapter, and a notify that stamps the counter.
+	cache, err := agentconfig.New(
+		mcpIncidentConfigStore{db: db},
+		agentconfig.NewMemoryMemo(0),
+	)
+	if err != nil {
+		t.Fatalf("build the read cache: %v", err)
+	}
 	ag := &Agent{
 		dataStore: db, agentID: "agent-1", ownerUserID: "owner-1",
-		mcpConfigNotify: func(string, string) {},
+		// The gateway wires NotifyAgentReload here, whose local half is
+		// InvalidateAgent → noteConfigChange → BumpConfigEpoch.
+		mcpConfigNotify: func(string, string) { _, _ = db.BumpConfigEpoch(context.Background()) },
 	}
-	// The gateway wires the versioned read. Here it resolves from the store the
-	// add writes to, which is the read the use case performs.
-	ag.rcProvider = func(ctx context.Context, scope agentconfig.Scope) (config.ResolvedAgent, error) {
-		reads++
-		servers, err := db.ListMCPServers(ctx, scope.AgentID)
-		if err != nil {
-			return config.ResolvedAgent{}, err
-		}
-		return config.ResolvedAgent{ID: rc.ID, UserID: rc.UserID, MCPServers: servers}, nil
-	}
+	ag.rcProvider = cache.For
 	fn := mcpToolFnWithAgent(testToolBootstrap(), rc, "owner-1", ag)
 	t.Setenv("FASTAGENT_OAUTH_CALLBACK_BASE", "https://app.example.com/oauth/mcp")
+
+	// The session read its configuration before the write, which is the shape
+	// of the incident: the build filled the cache, then the write landed. Warm
+	// the cache here for the same reason, so the assertion below can tell a
+	// stale hit from a cold miss.
+	if _, err := cache.For(context.Background(), agentconfig.Scope{UserID: "owner-1", AgentID: "agent-1"}); err != nil {
+		t.Fatalf("warm read: %v", err)
+	}
 
 	if _, err := callToolJSON(t, fn, map[string]any{
 		"action": "add", "serverName": "notion",
@@ -215,9 +226,42 @@ func TestMcpLoginSeesAServerAddedInTheSameSession(t *testing.T) {
 	if !strings.Contains(out, "https://as.example/oauth/authorize") {
 		t.Fatalf("login did not return an authorization URL: %q", out)
 	}
-	if reads == 0 {
-		t.Fatal("login never read the configuration through the provider; it used the stale snapshot")
+	stats := cache.Stats()
+	if stats.Checks == 0 {
+		t.Fatal("login never read the configuration through the cache; it used the stale snapshot")
 	}
+	if stats.StaleHits == 0 {
+		t.Fatal("the cache never noticed the add; the write did not move the counter")
+	}
+
+	// And the visible half of the same read: `status` lists the server the
+	// session just added, which is what the incident's user was told was
+	// missing.
+	status, err := callTool(t, fn, "status", "")
+	if err != nil {
+		t.Fatalf("status in the same session after add: %v", err)
+	}
+	if !strings.Contains(status, "notion") {
+		t.Fatalf("status in the same session did not list the new server: %q", status)
+	}
+}
+
+// mcpIncidentConfigStore is the agentconfig.Store adapter for the incident
+// test: the counter is the real one, and Resolve answers from the same rows the
+// tool writes. The production adapter does the full merge; the cache behaviour
+// under test does not depend on that.
+type mcpIncidentConfigStore struct{ db *store.DBStore }
+
+func (s mcpIncidentConfigStore) CurrentVersion(ctx context.Context) (agentconfig.Version, error) {
+	return s.db.CurrentConfigEpoch(ctx)
+}
+
+func (s mcpIncidentConfigStore) Resolve(ctx context.Context, scope agentconfig.Scope) (config.ResolvedAgent, error) {
+	servers, err := s.db.ListMCPServers(ctx, scope.AgentID)
+	if err != nil {
+		return config.ResolvedAgent{}, err
+	}
+	return config.ResolvedAgent{ID: scope.AgentID, UserID: scope.UserID, MCPServers: servers}, nil
 }
 
 // The boundary the review asked to keep honest: with no provider wired there is
