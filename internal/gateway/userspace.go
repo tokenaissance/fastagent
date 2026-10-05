@@ -13,6 +13,7 @@ import (
 
 	"github.com/fastclaw-ai/fastclaw/internal/agent"
 	"github.com/fastclaw-ai/fastclaw/internal/agent/tools"
+	"github.com/fastclaw-ai/fastclaw/internal/agentconfig"
 	"github.com/fastclaw-ai/fastclaw/internal/bus"
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 	"github.com/fastclaw-ai/fastclaw/internal/mcp/oauth/adapter"
@@ -998,7 +999,7 @@ func managerOptions(cfg *config.Config, userID string, st store.Store, ws worksp
 // by the resulting UserSpace. Pass nil when sandbox is disabled at
 // system scope; agents will run with path-only file roots in that
 // case.
-func loadUserSpace(ctx context.Context, userID string, mb *bus.MessageBus, st store.Store, ws workspace.Store, meter usage.Meter, quotaStore usage.QuotaStore, systemSandboxPool sandbox.ExecutorPool, pluginMgr *plugin.Manager, projectRuntime *coderuntime.Manager, notifyAgent func(userID, agentID string)) (*UserSpace, error) {
+func loadUserSpace(ctx context.Context, userID string, mb *bus.MessageBus, st store.Store, ws workspace.Store, meter usage.Meter, quotaStore usage.QuotaStore, systemSandboxPool sandbox.ExecutorPool, pluginMgr *plugin.Manager, projectRuntime *coderuntime.Manager, notifyAgent func(userID, agentID string), rcProvider func(ctx context.Context, scope agentconfig.Scope) (config.ResolvedAgent, error)) (*UserSpace, error) {
 	if userID == "" {
 		return nil, fmt.Errorf("loadUserSpace: userID required")
 	}
@@ -1055,72 +1056,7 @@ func loadUserSpace(ctx context.Context, userID string, mb *bus.MessageBus, st st
 		// otherwise the agent-scope Model never reaches NewManager
 		// and chat silently uses the system/user default.
 		rc := &resolved[i]
-		var agentOverride config.AgentDefaults
-		if err := scope.ExactSetting(ctx, st, "agents.defaults", "", rc.ID, &agentOverride); err == nil {
-			// Owner path: base is already system←user (ResolveAgents merged it
-			// above), there is no owner row to layer (this IS the owner's own
-			// space) and no viewer pin. So the agent row is the only overlay the
-			// model can get — and it wins, which is the rule the settings page's
-			// agent-context write depends on.
-			rc.Model = resolveModel(rc.Model, "", agentOverride.Model, "")
-			if agentOverride.MaxTokens > 0 {
-				rc.MaxTokens = agentOverride.MaxTokens
-			}
-			if agentOverride.Temperature > 0 {
-				rc.Temperature = agentOverride.Temperature
-			}
-			if agentOverride.MaxToolIterations > 0 {
-				rc.MaxToolIterations = agentOverride.MaxToolIterations
-			}
-			if agentOverride.MaxToolIterationContinues != nil {
-				rc.MaxToolIterationContinues = *agentOverride.MaxToolIterationContinues
-			}
-			if agentOverride.MaxParallelToolCalls > 0 {
-				rc.MaxParallelToolCalls = agentOverride.MaxParallelToolCalls
-			}
-			if agentOverride.Thinking != "" {
-				rc.Thinking = agentOverride.Thinking
-			}
-			if agentOverride.PolicyPreset != "" {
-				rc.PolicyPreset = agentOverride.PolicyPreset
-			}
-			if agentOverride.PromptMode != "" {
-				rc.PromptMode = agentOverride.PromptMode
-			}
-			// Per-agent WeChat split-replies — pointer semantics so
-			// "absent" (no row, or row without the key) is distinct
-			// from "explicitly false". Non-nil from the row means the
-			// operator made a deliberate choice; nil falls through to
-			// system WeChatCfg.SplitReplies later in NewAgentWithFullCfg.
-			if agentOverride.SplitReplies != nil {
-				v := *agentOverride.SplitReplies
-				rc.SplitReplies = &v
-			}
-			// Per-agent autoPersist — same pointer semantics. Non-nil
-			// here overrides the system/user memory.autoPersist.enabled
-			// for this agent specifically. Used most by chatbot-mode
-			// personas where the LLM can't write_file directly so the
-			// background distill pass is the only persistence path.
-			if agentOverride.AutoPersist != nil {
-				v := *agentOverride.AutoPersist
-				rc.AutoPersist = &v
-			}
-		}
-		// Same story for providers: assembleConfig was called with
-		// agentID="" so cfg.Providers (now in rc.Providers) only
-		// carries system+user rows. Without this, a per-agent
-		// provider key (e.g. an agent-scoped OpenRouter credential)
-		// is invisible to providerForAgent, which falls back to the
-		// shared provider — chat fires the agent's chosen model id
-		// at the wrong base URL and gets a 400 from the wrong vendor.
-		if agentProvs, err := scope.AgentScopeProviders(ctx, st, rc.ID); err == nil {
-			for k, v := range agentProvs {
-				if rc.Providers == nil {
-					rc.Providers = make(map[string]config.ProviderConfig)
-				}
-				rc.Providers[k] = v
-			}
-		}
+		resolveAgentScopeOverrides(ctx, st, rc)
 		ensureAgentHome(*rc)
 		if ws != nil {
 			if err := skills.HydrateSkillsDown(
@@ -1142,6 +1078,11 @@ func loadUserSpace(ctx context.Context, userID string, mb *bus.MessageBus, st st
 	}
 
 	managerOpts := managerOptions(cfg, userID, st, ws, meter, quotaStore, notifyAgent)
+	if rcProvider != nil {
+		// Read the resolved agent through the versioned cache: `mcp add` in a
+		// session must be visible to `mcp login` in the same session.
+		managerOpts = append(managerOpts, agent.WithAgentConfigProvider(rcProvider))
+	}
 	if ws != nil {
 		managerOpts = append(managerOpts, agent.WithWorkspaceStore(ws))
 	}
@@ -1349,6 +1290,10 @@ type userSpaceRegistry struct {
 	// construction (the manager is built later in boot than the
 	// registry), hence the mutable field + mutex rather than a ctor arg.
 	projectRuntime *coderuntime.Manager
+	// rcProvider is the versioned configuration read (agentconfig.Resolve),
+	// borrowed from the gateway. Held here so agents built by loadUserSpace and
+	// by EnsureAgent both read through the same cache. Nil in tests.
+	rcProvider func(ctx context.Context, scope agentconfig.Scope) (config.ResolvedAgent, error)
 	// notifyAgent is the gateway's per-agent reload notify (invalidate
 	// local UserSpaces + DB epoch + Redis broadcast). Passed into every
 	// agent.Manager so in-session `mcp add/remove` config writes take
@@ -1362,6 +1307,14 @@ func (r *userSpaceRegistry) setProjectRuntime(m *coderuntime.Manager) {
 	r.mu.Lock()
 	r.projectRuntime = m
 	r.mu.Unlock()
+}
+
+// setRCProvider wires the versioned configuration read into every agent this
+// registry builds from now on. Call once at boot, next to setProjectRuntime.
+func (r *userSpaceRegistry) setRCProvider(fn func(ctx context.Context, scope agentconfig.Scope) (config.ResolvedAgent, error)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.rcProvider = fn
 }
 
 // setSystemSandboxPool swaps the gateway-owned pool reference used for
@@ -1456,7 +1409,7 @@ func (r *userSpaceRegistry) getOrLoad(ctx context.Context, userID string) (*User
 		e.lastUsed = time.Now()
 		return e.space, nil
 	}
-	sp, err := loadUserSpace(ctx, userID, r.bus, r.store, r.workspace, r.meter, r.quotaStore, r.systemSandboxPool, r.pluginMgr, r.projectRuntime, r.notifyAgent)
+	sp, err := loadUserSpace(ctx, userID, r.bus, r.store, r.workspace, r.meter, r.quotaStore, r.systemSandboxPool, r.pluginMgr, r.projectRuntime, r.notifyAgent, r.rcProvider)
 	if err != nil {
 		return nil, err
 	}

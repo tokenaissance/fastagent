@@ -3,6 +3,8 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"github.com/fastclaw-ai/fastclaw/internal/agentconfig"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -147,4 +149,103 @@ func callToolJSON(t *testing.T, fn func(context.Context, json.RawMessage) (strin
 	t.Helper()
 	raw, _ := json.Marshal(in)
 	return fn(context.Background(), raw)
+}
+
+// The incident (2026-10-05): `mcp add notion …` then `mcp login notion` in the
+// SAME session answered `"notion" is not a configured OAuth MCP server`,
+// because the OAuth actions read the snapshot the agent was built with. The
+// agent now reads its configuration through the versioned cache
+// (internal/agentconfig), so the write is visible to the next read in the same
+// turn (docs/fastagent/design/15-agent-config-consistency.md).
+//
+// Falsification: leave rcProvider nil (the "without a provider" test below) and
+// that refusal comes back — the assertion is the incident verbatim.
+func TestMcpLoginSeesAServerAddedInTheSameSession(t *testing.T) {
+	dsn := filepath.Join(t.TempDir(), "agent-mcp-same-session.db")
+	st, err := store.New(&store.StorageConfig{Type: "sqlite", DSN: dsn, AutoMigrate: true}, t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	db, ok := st.(*store.DBStore)
+	if !ok {
+		t.Fatalf("store is %T, want *store.DBStore", st)
+	}
+	defer db.Close()
+
+	now := time.Now().UTC()
+	if err := db.SaveAgent(t.Context(), &store.AgentRecord{
+		ID: "agent-1", UserID: "owner-1", Name: "test",
+		Config: map[string]interface{}{}, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("seed agent: %v", err)
+	}
+
+	// The build produced this session's snapshot with no MCP servers.
+	rc := config.ResolvedAgent{ID: "agent-1", UserID: "owner-1"}
+	reads := 0
+	ag := &Agent{
+		dataStore: db, agentID: "agent-1", ownerUserID: "owner-1",
+		mcpConfigNotify: func(string, string) {},
+	}
+	// The gateway wires the versioned read. Here it resolves from the store the
+	// add writes to, which is the read the use case performs.
+	ag.rcProvider = func(ctx context.Context, scope agentconfig.Scope) (config.ResolvedAgent, error) {
+		reads++
+		servers, err := db.ListMCPServers(ctx, scope.AgentID)
+		if err != nil {
+			return config.ResolvedAgent{}, err
+		}
+		return config.ResolvedAgent{ID: rc.ID, UserID: rc.UserID, MCPServers: servers}, nil
+	}
+	fn := mcpToolFnWithAgent(testToolBootstrap(), rc, "owner-1", ag)
+	t.Setenv("FASTAGENT_OAUTH_CALLBACK_BASE", "https://app.example.com/oauth/mcp")
+
+	if _, err := callToolJSON(t, fn, map[string]any{
+		"action": "add", "serverName": "notion",
+		"url":           "https://mcp.notion.example/mcp",
+		"oauthResource": "https://mcp.notion.example/mcp",
+	}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+
+	out, err := callTool(t, fn, "login", "notion")
+	if err != nil {
+		t.Fatalf("login in the same session after add: %v", err)
+	}
+	if !strings.Contains(out, "https://as.example/oauth/authorize") {
+		t.Fatalf("login did not return an authorization URL: %q", out)
+	}
+	if reads == 0 {
+		t.Fatal("login never read the configuration through the provider; it used the stale snapshot")
+	}
+}
+
+// The boundary the review asked to keep honest: with no provider wired there is
+// no newer source, so the snapshot stands and the old refusal is correct for
+// the CLI and for tests. This is the falsification of the test above.
+func TestMcpLoginWithoutAProviderKeepsTheSnapshotBehavior(t *testing.T) {
+	rc := config.ResolvedAgent{ID: "agent-1", UserID: "owner-1"}
+	fn := mcpToolFnWithAgent(testToolBootstrap(), rc, "owner-1", &Agent{agentID: "agent-1", ownerUserID: "owner-1"})
+	t.Setenv("FASTAGENT_OAUTH_CALLBACK_BASE", "https://app.example.com/oauth/mcp")
+
+	if _, err := callTool(t, fn, "login", "notion"); err == nil || !strings.Contains(err.Error(), "not a configured OAuth MCP server") {
+		t.Fatalf("login with no provider = %v; want the not-configured refusal", err)
+	}
+}
+
+// A provider that fails must not fall back to the snapshot: the caller gets the
+// error, never a value of unknown age (agentconfig I3).
+func TestMcpLoginFailsWhenTheConfigReadFails(t *testing.T) {
+	rc := config.ResolvedAgent{ID: "agent-1", UserID: "owner-1"}
+	ag := &Agent{agentID: "agent-1", ownerUserID: "owner-1"}
+	ag.rcProvider = func(context.Context, agentconfig.Scope) (config.ResolvedAgent, error) {
+		return config.ResolvedAgent{}, errors.New("store is unavailable")
+	}
+	fn := mcpToolFnWithAgent(testToolBootstrap(), rc, "owner-1", ag)
+	t.Setenv("FASTAGENT_OAUTH_CALLBACK_BASE", "https://app.example.com/oauth/mcp")
+
+	_, err := callTool(t, fn, "login", "notion")
+	if err == nil || !strings.Contains(err.Error(), "agent configuration is unavailable") {
+		t.Fatalf("login with a failing provider = %v; want the availability error", err)
+	}
 }

@@ -26,6 +26,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/fastclaw-ai/fastclaw/internal/agent"
+	"github.com/fastclaw-ai/fastclaw/internal/agentconfig"
 	"github.com/fastclaw-ai/fastclaw/internal/bus"
 	"github.com/fastclaw-ai/fastclaw/internal/channels"
 	"github.com/fastclaw-ai/fastclaw/internal/config"
@@ -198,6 +199,13 @@ type Gateway struct {
 	// (per-user rows polled every 30s) — works without Redis and as a
 	// safety net for lost pub/sub messages.
 	reloadEpochs *agentReloadEpochs
+	// rcOnce/rcCache/rcErr hold the resolved-agent read cache
+	// (internal/agentconfig): one use case per process with an in-process memo,
+	// built lazily on first read. Every read compares the config_epoch counter,
+	// which the invalidation choke points bump (noteConfigChange).
+	rcOnce  sync.Once
+	rcCache *agentconfig.Resolve
+	rcErr   error
 	// projectRuntime is the coding-agent runtime manager (live dev server
 	// + preview). Set by SetProjectRuntime after construction; nil keeps
 	// agents as plain assistants. Exposed to the setup server via
@@ -222,6 +230,17 @@ func (g *Gateway) SetProjectRuntime(m *coderuntime.Manager) {
 	if g.users != nil {
 		g.users.setProjectRuntime(m)
 	}
+}
+
+// wireAgentConfigRead hands the versioned configuration read to the user-space
+// registry, so every agent built from now on reads its configuration through
+// the cache (and therefore sees a write made earlier in the same session).
+// Called once at boot. A nil registry is a no-op for embedded uses.
+func (g *Gateway) wireAgentConfigRead() {
+	if g.users == nil {
+		return
+	}
+	g.users.setRCProvider(g.resolvedAgentFor)
 }
 
 // ProjectRuntime returns the coding-agent runtime manager, or nil when
@@ -710,6 +729,10 @@ func New(env *config.EnvConfig) (*Gateway, error) {
 	} else {
 		slog.Warn("agent reload epoch fallback disabled: store is not DB-backed", "type", fmt.Sprintf("%T", st))
 	}
+
+	// Every agent built from here on reads its configuration through the
+	// versioned cache, so `mcp add` and `mcp login` in one session agree.
+	g.wireAgentConfigRead()
 
 	return g, nil
 }
