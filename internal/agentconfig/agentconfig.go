@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 )
@@ -86,20 +87,72 @@ type Resolve struct {
 	hits     atomic.Int64
 	rebuilds atomic.Int64
 	churn    atomic.Int64
+	// staleHits counts the reads that found a memo entry behind the counter:
+	// the version check firing, which is the write becoming visible.
+	staleHits atomic.Int64
+	// checkSeconds and rebuildSeconds keep the recent shape of each kind of
+	// work. A check is one read through For; a rebuild is the Resolve inside it.
+	checkSeconds   sampleRing
+	rebuildSeconds sampleRing
+	// storedAt records when this process cached a scope, so a stale hit can
+	// report how old the entry was. It is an upper bound on the write→notice
+	// delay: the entry was filled before the write, never after.
+	storedAt sync.Map // Scope -> time.Time
+	// versionLagNs is the largest observed age of a stale entry.
+	versionLagNs atomic.Int64
 }
 
 // Stats reports cache behaviour for metrics. The counters are the witnesses the
 // plan asks for: a steady state shows many checks, some hits, and rebuilds only
 // after a write.
 type Stats struct {
-	Checks   int64
-	Hits     int64
-	Rebuilds int64
-	Churn    int64
+	Checks   int64 `json:"checks"`
+	Hits     int64 `json:"hits"`
+	Rebuilds int64 `json:"rebuilds"`
+	Churn    int64 `json:"churn"`
+	// StaleHits counts the reads that found a cached entry behind the counter.
+	// In steady state it stays flat; after a config write it moves by one per
+	// scope that reads again.
+	StaleHits int64 `json:"staleHits"`
+	// RebuildRate is Rebuilds / Checks. The acceptance line is <= 1%.
+	RebuildRate float64 `json:"rebuildRate"`
+	// CheckSeconds and RebuildSeconds describe the recent window.
+	CheckSeconds   LatencyStats `json:"checkSeconds"`
+	RebuildSeconds LatencyStats `json:"rebuildSeconds"`
+	// VersionLagSeconds is the largest age of a cached entry at the moment a
+	// read discovered it was behind the counter. Zero in steady state. A write
+	// that no read notices does not appear here: the reader cannot see a write
+	// the store has not stamped.
+	VersionLagSeconds float64 `json:"versionLagSeconds"`
+}
+
+// LatencyStats is the recent shape of one kind of work, in seconds.
+type LatencyStats struct {
+	P50     float64 `json:"p50"`
+	P99     float64 `json:"p99"`
+	Samples int     `json:"samples"`
 }
 
 func (r *Resolve) Stats() Stats {
-	return Stats{Checks: r.checks.Load(), Hits: r.hits.Load(), Rebuilds: r.rebuilds.Load(), Churn: r.churn.Load()}
+	checks := r.checks.Load()
+	rebuilds := r.rebuilds.Load()
+	checkP50, checkP99, checkSamples := r.checkSeconds.percentiles()
+	rebuildP50, rebuildP99, rebuildSamples := r.rebuildSeconds.percentiles()
+	rate := 0.0
+	if checks > 0 {
+		rate = float64(rebuilds) / float64(checks)
+	}
+	return Stats{
+		Checks:            checks,
+		Hits:              r.hits.Load(),
+		Rebuilds:          rebuilds,
+		Churn:             r.churn.Load(),
+		StaleHits:         r.staleHits.Load(),
+		RebuildRate:       rate,
+		CheckSeconds:      LatencyStats{P50: checkP50, P99: checkP99, Samples: checkSamples},
+		RebuildSeconds:    LatencyStats{P50: rebuildP50, P99: rebuildP99, Samples: rebuildSamples},
+		VersionLagSeconds: time.Duration(r.versionLagNs.Load()).Seconds(),
+	}
 }
 
 // New builds the use case. Both ports are required: a nil memo would rebuild on
@@ -121,6 +174,9 @@ func (r *Resolve) For(ctx context.Context, scope Scope) (config.ResolvedAgent, e
 	if scope.AgentID == "" {
 		return config.ResolvedAgent{}, errors.New("agentconfig: agent ID is required")
 	}
+	started := time.Now()
+	defer func() { r.checkSeconds.observe(time.Since(started)) }()
+
 	lock := r.scopeLock(scope)
 	lock.Lock()
 	defer lock.Unlock()
@@ -131,14 +187,24 @@ func (r *Resolve) For(ctx context.Context, scope Scope) (config.ResolvedAgent, e
 		if err != nil {
 			return config.ResolvedAgent{}, fmt.Errorf("agentconfig: read version: %w", err)
 		}
-		if cfg, version, ok := r.memo.Get(scope); ok && version == before {
-			r.hits.Add(1)
-			return cfg, nil
+		if cfg, version, ok := r.memo.Get(scope); ok {
+			if version == before {
+				r.hits.Add(1)
+				return cfg, nil
+			}
+			// The entry is behind the counter: this is where a write becomes
+			// visible to this process. Record how old the entry was.
+			r.staleHits.Add(1)
+			if cachedAt, ok := r.storedAt.Load(scope); ok {
+				r.observeVersionLag(time.Since(cachedAt.(time.Time)))
+			}
 		}
+		resolveStarted := time.Now()
 		cfg, err := r.store.Resolve(ctx, scope)
 		if err != nil {
 			return config.ResolvedAgent{}, fmt.Errorf("agentconfig: resolve: %w", err)
 		}
+		r.rebuildSeconds.observe(time.Since(resolveStarted))
 		after, err := r.store.CurrentVersion(ctx)
 		if err != nil {
 			return config.ResolvedAgent{}, fmt.Errorf("agentconfig: read version after resolve: %w", err)
@@ -151,10 +217,29 @@ func (r *Resolve) For(ctx context.Context, scope Scope) (config.ResolvedAgent, e
 		}
 		r.rebuilds.Add(1)
 		r.memo.Put(scope, cfg, after)
+		r.storedAt.Store(scope, time.Now())
 		return cfg, nil
 	}
 	r.churn.Add(1)
 	return config.ResolvedAgent{}, ErrConfigChurn
+}
+
+// observeVersionLag keeps the largest lag this process has seen. A smaller
+// reading never lowers it: the number answers "how far behind did we catch
+// ourselves", and hiding the worst case would defeat the metric.
+func (r *Resolve) observeVersionLag(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	for {
+		current := r.versionLagNs.Load()
+		if int64(d) <= current {
+			return
+		}
+		if r.versionLagNs.CompareAndSwap(current, int64(d)) {
+			return
+		}
+	}
 }
 
 func (r *Resolve) scopeLock(scope Scope) *sync.Mutex {

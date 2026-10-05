@@ -92,6 +92,23 @@ func (g *Gateway) resolvedAgentFor(ctx context.Context, scope agentconfig.Scope)
 	return uc.For(ctx, scope)
 }
 
+// AgentConfigCacheStats reports the read cache's behaviour for the ops surface
+// (docs/fastagent/design/15-agent-config-consistency.md §10: check p99, rebuild
+// rate, version lag). The second value is false when the cache cannot be built,
+// which is an unwired or store-less process: zeros would read as a healthy idle
+// pod instead of a missing measurement.
+//
+// It builds the cache if no read has happened yet. That is deliberate: the
+// construction is idempotent, and reading the field directly would race with
+// the sync.Once that fills it.
+func (g *Gateway) AgentConfigCacheStats() (agentconfig.Stats, bool) {
+	uc, err := g.agentConfigCache()
+	if err != nil {
+		return agentconfig.Stats{}, false
+	}
+	return uc.Stats(), true
+}
+
 // noteConfigChange bumps the counter that every read compares against. It is
 // the write side of the protocol, and it lives on the same choke points the
 // cache invalidation already uses: a write that invalidates a cached space also
