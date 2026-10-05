@@ -591,8 +591,11 @@ const mcpToolDescription = "Manage this agent's OAuth-protected MCP servers (fas
 	"Before acting, call status with no serverName to list every configured OAuth MCP server and its state.\n\n" +
 	"Actions:\n" +
 	"- add <serverName> <url> [oauthResource] [scopes]: register an HTTP MCP server on this agent (static-header or " +
-	"OAuth-protected). Persists immediately; tools become available on the next agent build/session. Reversible with remove.\n" +
-	"- remove <serverName>: unregister a server and drop its tools from the next build. Reversible with add.\n" +
+	"OAuth-protected). Persists immediately: login/status/check/refresh/logout can use it in THIS session (they read " +
+	"the stored declaration, not the build snapshot), while the server's own TOOLS appear on the next agent " +
+	"build/session — do not tell the owner to open a new chat just to authorize. Reversible with remove.\n" +
+	"- remove <serverName>: unregister a server; the OAuth actions stop seeing it immediately and its tools drop on the " +
+	"next build. Reversible with add.\n" +
 	"- undo: replay the inverse of the most recent recorded mcp add/remove of the CURRENT chat session from its persisted " +
 	"operation trace (LIFO — call again to undo the next older operation). Ops from other/deleted sessions are not " +
 	"reachable. Only server-declaration operations are auto-replayed; authorization login/logout still needs a human " +
@@ -667,15 +670,15 @@ func mcpToolFnWithAgent(ob *oauth.Bootstrap, rc config.ResolvedAgent, actorUserI
 		}
 		switch in.Action {
 		case "login":
-			return mcpToolLogin(ctx, ob, rc, in.ServerName)
+			return mcpToolLogin(ctx, ob, ag, rc, in.ServerName)
 		case "status":
-			return mcpToolStatus(ctx, ob, rc, in.ServerName)
+			return mcpToolStatus(ctx, ob, ag, rc, in.ServerName)
 		case "check":
-			return mcpToolCheck(ctx, ob, rc, actorUserID, in.ServerName)
+			return mcpToolCheck(ctx, ob, ag, rc, actorUserID, in.ServerName)
 		case "refresh":
-			return mcpToolRefresh(ctx, ob, rc, in.ServerName)
+			return mcpToolRefresh(ctx, ob, ag, rc, in.ServerName)
 		case "logout":
-			return mcpToolLogout(ctx, ob, rc, in.ServerName)
+			return mcpToolLogout(ctx, ob, ag, rc, in.ServerName)
 		case "add":
 			return mcpToolAdd(ctx, ag, rc, mcpAddInput{
 				ServerName: in.ServerName, URL: in.URL,
@@ -691,7 +694,11 @@ func mcpToolFnWithAgent(ob *oauth.Bootstrap, rc config.ResolvedAgent, actorUserI
 	}
 }
 
-func mcpToolLogin(ctx context.Context, ob *oauth.Bootstrap, rc config.ResolvedAgent, serverName string) (string, error) {
+// ag is the running agent (nil on deployments without a relational store): the
+// OAuth actions resolve their server from the STORE through it, so a server this
+// session just added is usable before the rebuild that folds it into rc — see
+// resolveMCPServer.
+func mcpToolLogin(ctx context.Context, ob *oauth.Bootstrap, ag *Agent, rc config.ResolvedAgent, serverName string) (string, error) {
 	if ob == nil {
 		return "", fmt.Errorf("mcp login: MCP OAuth is not configured")
 	}
@@ -701,7 +708,7 @@ func mcpToolLogin(ctx context.Context, ob *oauth.Bootstrap, rc config.ResolvedAg
 	if serverName == "" {
 		return "", fmt.Errorf("mcp login: serverName is required")
 	}
-	cfg, ok := rc.MCPServers[serverName]
+	cfg, ok := resolveMCPServer(ctx, ag, rc, serverName)
 	if !ok || cfg.OAuthResource == "" {
 		return "", fmt.Errorf("mcp login: %q is not a configured OAuth MCP server", serverName)
 	}
@@ -727,15 +734,16 @@ func mcpToolLogin(ctx context.Context, ob *oauth.Bootstrap, rc config.ResolvedAg
 	return "Owner action required — open this URL (the host completes the callback; do NOT paste the redirect back):\n" + out.AuthURL, nil
 }
 
-func mcpToolStatus(ctx context.Context, ob *oauth.Bootstrap, rc config.ResolvedAgent, serverName string) (string, error) {
+func mcpToolStatus(ctx context.Context, ob *oauth.Bootstrap, ag *Agent, rc config.ResolvedAgent, serverName string) (string, error) {
 	if ob == nil {
 		return "", fmt.Errorf("mcp status: MCP OAuth is not configured")
 	}
 	if ob.Status == nil {
 		return "", fmt.Errorf("mcp status: OAuth status store is not configured (incomplete bootstrap)")
 	}
+	servers := resolveMCPServers(ctx, ag, rc)
 	var names []string
-	for name, cfg := range rc.MCPServers {
+	for name, cfg := range servers {
 		if cfg.OAuthResource == "" {
 			continue
 		}
@@ -754,7 +762,7 @@ func mcpToolStatus(ctx context.Context, ob *oauth.Bootstrap, rc config.ResolvedA
 	for _, name := range names {
 		out, err := ob.Status.Execute(ctx, usecase.RefreshInput{
 			UserID: rc.UserID, AgentID: rc.ID, ServerName: name,
-			ServerURL: rc.MCPServers[name].OAuthResource,
+			ServerURL: servers[name].OAuthResource,
 		})
 		if err != nil {
 			sb.WriteString(fmt.Sprintf("%s: error (%v)\n", name, err))
@@ -765,7 +773,7 @@ func mcpToolStatus(ctx context.Context, ob *oauth.Bootstrap, rc config.ResolvedA
 	return strings.TrimRight(sb.String(), "\n"), nil
 }
 
-func mcpToolLogout(ctx context.Context, ob *oauth.Bootstrap, rc config.ResolvedAgent, serverName string) (string, error) {
+func mcpToolLogout(ctx context.Context, ob *oauth.Bootstrap, ag *Agent, rc config.ResolvedAgent, serverName string) (string, error) {
 	if ob == nil {
 		return "", fmt.Errorf("mcp logout: MCP OAuth is not configured")
 	}
@@ -775,7 +783,7 @@ func mcpToolLogout(ctx context.Context, ob *oauth.Bootstrap, rc config.ResolvedA
 	if serverName == "" {
 		return "", fmt.Errorf("mcp logout: serverName is required")
 	}
-	cfg, ok := rc.MCPServers[serverName]
+	cfg, ok := resolveMCPServer(ctx, ag, rc, serverName)
 	if !ok || cfg.OAuthResource == "" {
 		return "", fmt.Errorf("mcp logout: %q is not a configured OAuth MCP server", serverName)
 	}
@@ -795,7 +803,7 @@ func mcpToolLogout(ctx context.Context, ob *oauth.Bootstrap, rc config.ResolvedA
 // "authorized" token can be dead after a server-side revoke or an issuer
 // change, and the 401-triggered single refresh inside the HTTP client is
 // exactly the recovery path a real tool call would take.
-func mcpToolCheck(ctx context.Context, ob *oauth.Bootstrap, rc config.ResolvedAgent, actorUserID, serverName string) (string, error) {
+func mcpToolCheck(ctx context.Context, ob *oauth.Bootstrap, ag *Agent, rc config.ResolvedAgent, actorUserID, serverName string) (string, error) {
 	if ob == nil {
 		return "", fmt.Errorf("mcp check: MCP OAuth is not configured")
 	}
@@ -805,7 +813,7 @@ func mcpToolCheck(ctx context.Context, ob *oauth.Bootstrap, rc config.ResolvedAg
 	if serverName == "" {
 		return "", fmt.Errorf("mcp check: serverName is required")
 	}
-	cfg, ok := rc.MCPServers[serverName]
+	cfg, ok := resolveMCPServer(ctx, ag, rc, serverName)
 	if !ok || cfg.OAuthResource == "" {
 		return "", fmt.Errorf("mcp check: %q is not a configured OAuth MCP server", serverName)
 	}
@@ -849,7 +857,7 @@ func mcpToolCheck(ctx context.Context, ob *oauth.Bootstrap, rc config.ResolvedAg
 // token is still fresh the use case is a no-op and returns the current
 // pair; when stale it rotates the refresh token. Refresh never surfaces
 // token material — only expiry and scope count.
-func mcpToolRefresh(ctx context.Context, ob *oauth.Bootstrap, rc config.ResolvedAgent, serverName string) (string, error) {
+func mcpToolRefresh(ctx context.Context, ob *oauth.Bootstrap, ag *Agent, rc config.ResolvedAgent, serverName string) (string, error) {
 	if ob == nil {
 		return "", fmt.Errorf("mcp refresh: MCP OAuth is not configured")
 	}
@@ -859,7 +867,7 @@ func mcpToolRefresh(ctx context.Context, ob *oauth.Bootstrap, rc config.Resolved
 	if serverName == "" {
 		return "", fmt.Errorf("mcp refresh: serverName is required")
 	}
-	cfg, ok := rc.MCPServers[serverName]
+	cfg, ok := resolveMCPServer(ctx, ag, rc, serverName)
 	if !ok || cfg.OAuthResource == "" {
 		return "", fmt.Errorf("mcp refresh: %q is not a configured OAuth MCP server", serverName)
 	}

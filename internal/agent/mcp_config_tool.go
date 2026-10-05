@@ -5,12 +5,64 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"strings"
 
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 	"github.com/fastclaw-ai/fastclaw/internal/store"
 )
+
+// mcpServersFromStore returns the agent's declared MCP servers exactly as the
+// store holds them right now, or (nil, false) when the store cannot be read
+// (no relational store on this deployment, or a read error). The per-key
+// `agent_mcp_servers` table is AUTHORITATIVE for rc.MCPServers — the gateway
+// assembles the resolved config that way ("Table stays authoritative even if a
+// legacy JSON still carries a stale mcpServers object", gateway.go) — so a
+// successful read is the whole truth for this question, including the ABSENCE
+// of a server.
+func mcpServersFromStore(ctx context.Context, ag *Agent, agentID string) (map[string]config.MCPServerConfig, bool) {
+	if ag == nil || ag.dataStore == nil {
+		return nil, false
+	}
+	servers, err := ag.dataStore.ListMCPServers(ctx, agentID)
+	if err != nil {
+		slog.Warn("mcp: could not read the server table; falling back to this session's snapshot",
+			"agent", agentID, "error", err)
+		return nil, false
+	}
+	return servers, true
+}
+
+// resolveMCPServer resolves one server for the OAuth control plane
+// (login / status / check / refresh / logout).
+//
+// Store-first is the fix for the 2026-10-05 report. `mcp add notion …` writes
+// the row and only QUEUES the reload that would fold it into rc.MCPServers on
+// the next build, so the very next command in the same session — `mcp login
+// notion` — answered "not a configured OAuth MCP server", and the owner had to
+// wait a turn (or open a fresh chat) before an authorization link could even be
+// produced. The OAuth actions do not need a rebuilt snapshot; they need the
+// row, and the row exists. Removal is the same read in the other direction: a
+// deleted row must stop resolving immediately, not one build later.
+func resolveMCPServer(ctx context.Context, ag *Agent, rc config.ResolvedAgent, serverName string) (config.MCPServerConfig, bool) {
+	if servers, ok := mcpServersFromStore(ctx, ag, rc.ID); ok {
+		cfg, found := servers[serverName]
+		return cfg, found
+	}
+	cfg, found := rc.MCPServers[serverName]
+	return cfg, found
+}
+
+// resolveMCPServers is resolveMCPServer for "list them all" (`mcp status` with
+// no serverName): the store's set when it can be read, this session's snapshot
+// otherwise.
+func resolveMCPServers(ctx context.Context, ag *Agent, rc config.ResolvedAgent) map[string]config.MCPServerConfig {
+	if servers, ok := mcpServersFromStore(ctx, ag, rc.ID); ok {
+		return servers
+	}
+	return rc.MCPServers
+}
 
 // mcpAddInput carries the declarative server fields for `mcp add`.
 // Mirrors config.MCPServerConfig so the tool stays a thin adapter over
@@ -141,7 +193,16 @@ func applyMCPAdd(ctx context.Context, ag *Agent, rc config.ResolvedAgent, in mcp
 	if in.OAuthResource != "" {
 		kind = "oauth"
 	}
-	out := fmt.Sprintf("%s: registered (%s). Applies next build.", in.ServerName, kind)
+	// Say what is true now and what still needs the rebuild. Since 2026-10-05 the
+	// OAuth actions read the store (resolveMCPServer), so a server registered
+	// here is usable by them in this same session; the TOOLS are what still needs
+	// the next build, because the registry's tool set is fixed at construction
+	// and this turn's tool list has already been handed to the model.
+	out := fmt.Sprintf("%s: registered (%s).", in.ServerName, kind)
+	if in.OAuthResource != "" {
+		out += " The mcp OAuth actions (login/status/check/refresh/logout) can use it now."
+	}
+	out += " Its tools appear on the next build."
 	if ag.mcpConfigNotify != nil {
 		ag.mcpConfigNotify(rc.UserID, rc.ID)
 		out += " Reload queued."
@@ -196,7 +257,9 @@ func applyMCPRemove(ctx context.Context, ag *Agent, rc config.ResolvedAgent, ser
 		}
 		return "", fmt.Errorf("mcp remove: %w", err)
 	}
-	out := serverName + ": removed. Applies next build."
+	// Mirror of add's wording: the OAuth actions stop resolving it now (the row
+	// is gone from the store), the tools disappear on the next build.
+	out := serverName + ": removed. The mcp OAuth actions stop seeing it now; its tools disappear on the next build."
 	if ag.mcpConfigNotify != nil {
 		ag.mcpConfigNotify(rc.UserID, rc.ID)
 		out += " Reload queued."

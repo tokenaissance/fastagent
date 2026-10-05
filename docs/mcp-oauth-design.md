@@ -6,6 +6,8 @@
 
 > **实施状态（2026-09-01）**：fastagent 侧已按本文落地于 `internal/mcp/oauth/`（domain / port / usecase / adapter / bootstrap）+ 框架接线（config / mcp HTTP 客户端 / agent loop / setup handlers / CLI `mcp login|status|logout`）。已实现并修复评审项 P0/P1/P2：进程级 refresh 锁单例、注册 store 按 (serverName, callbackURL) 键、公开回调路径 `/oauth/mcp/{callbackID}/callback`、refresh 不旋转时保留旧 refresh token、discovery 缓存 TTL 1h、**pending auth 加密持久化**（含 code_verifier 密文存储）。
 >
+> **2026-10-05 修正：声明与快照的读法。** `mcp add` 写的是权威表 `agent_mcp_servers`，而会话里的 `login/status/check/refresh/logout` 原先读**构建时的快照** `rc.MCPServers`，于是同一条会话里"刚 add 完就 login"会被拒成 `"x" is not a configured OAuth MCP server`，只能等下一次 build（或开新会话）——被误当成"配置要等重建"。现在这五个动作**以 store 为准**（`resolveMCPServer` / `resolveMCPServers`，读不到 store 才退回快照），add 之后**当轮即可 login 拿到授权链接**，remove 也**当轮就不再被解析**；真正仍需要下一次 build 的只有**服务端工具本身**（注册表的工具集在构造时固定，且本轮的 tool list 已经发给模型）。`add`/`remove` 的模型可见文案随之改成显式区分这两件事。
+>
 > **多实例共享存储（2026-09-01，部署目标：多租户 + 多实例 + 共享存储）**：
 > - token / pending / registration 三个 store 全部提供 SQL 实现（`mcp_oauth_tokens` / `mcp_oauth_pending` / `mcp_oauth_clients` 三张表）。共享 DB 存储适用于**所有部署形态**：多实例/生产走 Postgres，单实例/本地走 SQLite——两者共用同一套 SQL adapter（按 dialect 生成占位符），**部署不回退文件 store**；bootstrap 通过 `DBProvider`（`*store.DBStore`）选择 SQL 实现，文件 store 仅保留为无 DB 的测试夹具。
 > - pending `Take` 用 `DELETE ... RETURNING` 原子消费，两个实例不可能同时消费同一 state；表含 `user_id` 分区索引。
@@ -403,6 +405,8 @@ fastclaw mcp logout <name>
 ### 5.6 agent 工具 `mcp` action 清单（L2 host 级发起器）
 
 `mcp` 是 agent 侧的管理工具（built-in，注册于 `internal/agent/loop.go`），语义是 **host 级发起器的模型映射**：code exchange 永远由宿主回调 / CLI loopback 完成，code 不进对话；所有动作先过 **owner 门控**（actor ≠ agent owner 直接拒绝，见方案 A）。注册条件与可见性分离：`oauth.Global() != nil`（MCP OAuth 启用）即注册——**即使该 agent 尚无任何 server**（否则模型无法 `mcp add` 第一条）；每轮按 prompt mode 过滤暴露（agent mode 全量 built-in；chatbot/customize 的 allowlist 不含 `mcp`，MCP server 工具本身仍常驻）。server 声明存 **`agent_mcp_servers` per-key 行**（见 §13.2），add/remove 互为逆操作（可逆性设计见 §13）。
+
+**读哪一份状态（2026-10-05）**：`add`/`remove` 写表；`login/status/check/refresh/logout` 解析 server 时**先读表、读不到再退回本会话构建时的快照**（`internal/agent/mcp_config_tool.go` 的 `resolveMCPServer` / `resolveMCPServers`）。所以"注册的可见性"分两层：**OAuth 动作当轮可见**（刚 add 完就能 `login` 拿链接、remove 完当轮就解析不到），**服务端工具要下一次 build**（工具集在构造时固定，本轮的 tool list 已发出）。`add`/`remove` 的结果文案把这两层分开说，免得下一轮再出现"必须等 build 才能授权"这种自造时序。
 
 | action | 参数 | 语义 | 宿主/协议对应 | 状态 |
 |---|---|---|---|---|

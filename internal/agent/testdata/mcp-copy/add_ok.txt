@@ -1,2 +1,2 @@
-OK: quandora: registered (oauth). Applies next build. Reload queued.
+OK: quandora: registered (oauth). The mcp OAuth actions (login/status/check/refresh/logout) can use it now. Its tools appear on the next build. Reload queued.
 <mcp-undo>{"action":"remove","serverName":"quandora"}
