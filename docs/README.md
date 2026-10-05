@@ -41,6 +41,7 @@
 | [dependency-alert-triage.md](./dependency-alert-triage.md) | 一次性分析 | `状态：✅ 已落（09-15/09-16）` | 164 条依赖告警的结论 | —（依赖） | 0 |
 | [webui-lint-cleanup.md](./webui-lint-cleanup.md) | 一次性分析 | `状态：✅ 已落（09-15）` | webui lint 清零记录 | —（前端） | 0 |
 | [agent-commit-checks.md](./agent-commit-checks.md) | 一次性清单 | `状态：已生效` | 提交前检查清单（**当前无人引用**） | —（流程） | 0 |
+| [document-language-gate.md](./document-language-gate.md) | 一次性清单 | `状态：已生效` | 文档语言门禁（**`scripts/ste-check.sh` 的说明来源**） | —（流程） | 0 |
 | [upstream-api.md](./upstream-api.md) | 接口文档 | `状态：接口契约` | 上游 App 集成 API（**当前无人引用**） | —（接口） | 0 |
 | [query_optimization/QUERY_OPTIMIZATION.md](./query_optimization/QUERY_OPTIMIZATION.md) | 参考资料 | 无状态行 | SQL 优化指南 | —（性能） | 0 |
 | [REBRAND/REBRAND_PLAN.md](./REBRAND/REBRAND_PLAN.md) | 历史记录 | 无状态行 | FastClaw → FastAgent 改名记录 | —（历史） | 0 |
@@ -68,7 +69,7 @@ docs/
 ├── README.md                        ← 本文件（L2 索引）
 ├── 文件系统形式化证明/                 ★ 中文 origin（00–12 + README，14 篇）
 ├── fs-formal-proof/                 ★ 上面 14 篇的 1:1 英文镜像
-├── <顶层 19 篇>                      设计/决策/事故/一次性分析（见 §2 表）
+├── <顶层 20 篇>                      设计/决策/事故/一次性分析（见 §2 表）
 ├── issues/                          9 篇：MCP/skills 提案、决策、对照清单
 ├── prompt-inventory/                6 篇 + 同名顶层 md：模型可见文本清单
 ├── query_optimization/              1 篇

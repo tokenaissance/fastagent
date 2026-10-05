@@ -6,10 +6,10 @@
 > F2 observability ([08 §2](./08-state-observability-principle.md)) · F3 delivery ([08 §2.2](./08-state-observability-principle.md)) —
 > the index is [00-formal-systems.md](./00-formal-systems.md).
 > **Change register** (every change ↔ code anchor ↔ UT ↔ live e2e ↔ shipped?): [11-change-register.md](./11-change-register.md).
-> **Parent index (L2)**: [../README.md](../README.md) (every document bucketed, one line each; the formal entry point is 00 as well).
+> **Parent index (L2)**: [../README.md](../README.md) (every document bucketed, one line each. The formal entry point is 00 as well).
 > Subject: the sync mechanism between `fastagent`'s workspace (durable store) and the sandbox's
 > `/workspace` (execution copy).
-> Translation policy: prose is translated 1:1; code, identifiers, paths, symbols and quoted
+> Translation policy: prose is translated 1:1. Code, identifiers, paths, symbols and quoted
 > agent-facing strings are kept verbatim. Section numbering matches the Chinese set so the two
 > can be read side by side.
 
@@ -31,10 +31,10 @@ reviews can cite it.
 |------|---------|--------|
 | [**00-formal-systems.md**](./00-formal-systems.md) | **The index of the three formal systems**: F1 preconditions / zero migration (06/07) · F2 observability (08 §2) · F3 delivery (08 §2.2) — what each answers, how they compose, the symbol table, the document map, obligation ↔ gap ↔ witness, the formal classification of what is still open, and **§7 the full inventory** (formal systems / mechanism layer / subsystem contracts / **single-source family** / models / unformalised) | **anyone** (start here) |
 | [01-current-implementation.md](./01-current-implementation.md) | As-built record: ports, backends, writers, sync paths, observability | Anyone changing this code |
-| [02-semantics-and-architecture.md](./02-semantics-and-architecture.md) | The system semantics decomposed along Clean Architecture's four layers; where responsibility is misplaced | Anyone making design decisions |
+| [02-semantics-and-architecture.md](./02-semantics-and-architecture.md) | The system semantics decomposed along Clean Architecture's four layers. Where responsibility is misplaced | Anyone making design decisions |
 | [03-state-machine-and-timing.md](./03-state-machine-and-timing.md) | Sync from the angle of state change / timing, and why Docker vs E2B differ | Anyone asking "why is Docker fine?" |
 | [04-incident-workspace-2026-09-17.md](./04-incident-workspace-2026-09-17.md) | The incident: evidence chain, root cause, historical attribution (did leases introduce it?) | Triage and post-mortem |
-| [05-remediation-plan.md](./05-remediation-plan.md) | Systematic fix, staged rollout, tests and observability, decision log (**its P0/P2 were corrected by 06**; kept as design history) | Planning and implementation |
+| [05-remediation-plan.md](./05-remediation-plan.md) | Systematic fix, staged rollout, tests and observability, decision log (**its P0/P2 were corrected by 06**. Kept as design history) | Planning and implementation |
 | [06-cordis-review.md](./06-cordis-review.md) | The design re-reviewed with Cordis formal principles (revertible effect / left inverse / preconditions / keyed diff / system boundary), yielding P0′–P3′ | Design and review |
 | [07-formal-rootcause-and-fix.md](./07-formal-rootcause-and-fix.md) | **Empirically closed root cause (including reading a live sandbox)** + the defect described in Cordis's formal language, a constructive proof, and the fix rules with preconditions | Design authority / implementation basis |
 | [08-state-observability-principle.md](./08-state-observability-principle.md) | **The state observability principle**: the formal statement (δ/σ), **delivery stated formally (§2.2: who produces / who places / who takes + O1–O5 + P1 "only the pull shape is reachable")**, three corollaries, a per-item audit of the current harness, a review checklist for new mechanisms, and the architecture decision on a unified exit | Required reading before any harness change |
@@ -45,7 +45,7 @@ reviews can cite it.
 
 ## Conclusions in one line each
 
-> On docker, `/workspace` is a bind mount of the host directory (**one copy**); on e2b / boxlite it
+> On docker, `/workspace` is a bind mount of the host directory (**one copy**). On e2b / boxlite it
 > is an independent copy inside the sandbox (**two copies**). The write-back path `syncSnapshot`
 > decided whether to overwrite by comparing byte sizes, which is only sound with a single writer:
 > once a host tool (`write_file` / `edit_file` / `apply_patch`) has written to the store, the
@@ -61,7 +61,7 @@ Second conclusion (added in the 2026-09-17 re-check):
 Third conclusion (formal re-review, see [06](./06-cordis-review.md)):
 
 > Sync is not a directed copy but a **reconciler**. The right question is "does this migration's
-> precondition hold for this path": if it does, migrate; if not, **fail and migrate nothing**.
+> precondition hold for this path": if it does, migrate. If not, **fail and migrate nothing**.
 > On that basis the "save the loser as a `shadow` file" approach from 05 was ruled invalid (it
 > changes the entry set and does not converge) and dropped.
 
@@ -73,7 +73,7 @@ Fourth conclusion (root cause closed, see [07](./07-formal-rootcause-and-fix.md)
 > a preconditioned reconciler **and** pushing the authoritative content back into the cache after
 > a host write — neither half works alone.
 
-Fifth conclusion (the rule-(3) criterion, see [07 §3.8](./07-formal-rootcause-and-fix.md); **that
+Fifth conclusion (the rule-(3) criterion, see [07 §3.8](./07-formal-rootcause-and-fix.md)). **That
 shape has since been retired**):
 
 > The criterion at the time was a **content digest taken at hydrate time**: the same trace ("the
@@ -97,7 +97,7 @@ Seventh conclusion (divergence is allowed, but must be identifiable and recovera
 
 > **No CAS, no fallback copies**: before overwriting, *observe once*, put "replaced a different
 > version (N bytes)" into the tool result, and write through as asked. The two earlier versions
-> (refuse on mismatch; preserve a `.sandbox-version` copy) were both rejected — the first
+> (refuse on mismatch. Preserve a `.sandbox-version` copy) were both rejected — the first
 > deadlocks, the second duplicates the perception channel. The mechanism therefore converged to
 > four: write-through / memory-free version decision / refuse + signal / exec change signal
 > (07 §3.11.1), with no deadlock.
@@ -113,7 +113,7 @@ Eighth conclusion (the asymmetry of perception, see [07 §3.11.1](./07-formal-ro
 
 Ninth conclusion (**the state observability principle**, see [07 §3.12](./07-formal-rootcause-and-fix.md)):
 
-> **A state change inside the harness must be perceivable by the agent**; otherwise the agent
+> **A state change inside the harness must be perceivable by the agent**. Otherwise the agent
 > reasons about a world that no longer exists. The key distinction is "caused by the agent"
 > (the tool result is the receipt) versus "happened in its world" (invisible by default) — the
 > latter must be signalled explicitly, in a channel the agent actually reads (the tool result),
@@ -127,7 +127,7 @@ It is not a corollary of filesystem sync but a requirement on the whole harness 
 statement is in its §2 (the agent's `Belief` versus the world `World`), the field audit and the
 **review checklist for new mechanisms** are §5/§6. §5 has fully converged: the filesystem-sync
 family (including eviction-time changes) and the "invisible when absent" family (compaction /
-memory / skills / tool set) now all have signals; the latter are carried by **one unified
+memory / skills / tool set) now all have signals. The latter are carried by **one unified
 per-turn environment-change signal** rather than each subsystem inventing its own line.
 
 ## Verification strategy: which claims need a real E2B run
@@ -135,22 +135,22 @@ per-turn environment-change signal** rather than each subsystem inventing its ow
 Not every assertion deserves a cloud sandbox — doubles are fast and deterministic. The criterion
 is a single one:
 
-> **Any assertion containing a "backend physical fact" must be verified on a real backend**;
-> pure logic (orchestration, criteria, convergence) uses doubles.
+> **Any assertion containing a "backend physical fact" must be verified on a real backend**. Pure
+> logic (orchestration, criteria, convergence) uses doubles.
 
 | Assertion type | Example | How it is verified |
 |---------------|---------|--------------------|
-| Backend physical fact | the sandbox and the store are **two** copies; hydrate preserves the store's write time; the in-sandbox path layout | **real E2B** (`TestE2BLive*`) |
+| Backend physical fact | the sandbox and the store are **two** copies. Hydrate preserves the store's write time. The in-sandbox path layout | **real E2B** (`TestE2BLive*`) |
 | Orchestration and criteria | the precondition table, zero migration, convergence, locality, store-only keys | doubles (`lifecycle_sync_contract_test.go`) |
-| Historical fact | the defect was introduced in `950070b`; leases amplified it | `git log` / `git show` (no run needed) |
+| Historical fact | the defect was introduced in `950070b`. Leases amplified it | `git log` / `git show` (no run needed) |
 | Production fact | the incident session's byte counts, logs, object timestamps | frozen into the evidence tables in §1.2 / §2.5 (one-off verification) |
 
 For this directory specifically, the three live-E2B acceptance tests are in
-[07 §3.9](./07-formal-rootcause-and-fix.md); they cover 01 §2/§3.5's comparison table, 07 §1.1's
+[07 §3.9](./07-formal-rootcause-and-fix.md). They cover 01 §2/§3.5's comparison table, 07 §1.1's
 metadata observation and §3.3's fix promise — the claims only a real backend can falsify.
 Everything else rests on doubles and document cross-checks.
 
-How to run them (not part of regular CI; explicitly gated):
+How to run them (not part of regular CI. Explicitly gated):
 
 ```bash
 FASTAGENT_E2B_LIVE=1 E2B_API_KEY=e2b_... \

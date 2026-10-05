@@ -55,7 +55,7 @@ Open `http://localhost:18953` and login with your admin token.
 - **Skills** — Install shared skills from ClawHub or GitHub
 - **Models** — Configure LLM providers (OpenAI, Anthropic, Ollama, OpenRouter, etc.)
 - **API Keys** — Issue programmatic credentials (admin / user / agent tiers)
-- **Settings** — General (theme), Account (profile + password), Runtime (sandbox config; admin only)
+- **Settings** — General (theme), Account (profile + password), Runtime (sandbox config, admin only)
 
 > Non-admin users get scoped access to **Models**, **API Keys**, and
 > **Settings (General + Account)** out of the box. They see admin-shared
@@ -69,14 +69,14 @@ Click an agent to enter its management panel:
 - **Chat** — Talk to the agent (debug/test)
 - **Files** — Edit SOUL.md, IDENTITY.md, MEMORY.md, etc.
 - **Skills** — Agent-private skills
-- **Models** — Agent-specific provider + model overrides (shadow system entries by name; agent-scope `agents.defaults.model` overrides the system default)
+- **Models** — Agent-specific provider + model overrides. They shadow system entries by name. The agent-scope `agents.defaults.model` overrides the system default
 - **Channels** — Connect IM bots (Telegram, Discord, Slack) so end-users can chat with the agent on their platform of choice
-- **Scheduler** — Inspect and manage cron jobs the agent created via `create_cron_job` ("每天 9 点提醒我", "5 分钟后叫我"); pause / delete from the UI
+- **Scheduler** — Inspect and manage cron jobs the agent created via `create_cron_job` ("每天 9 点提醒我", "5 分钟后叫我"). Pause / delete from the UI
 - **Sessions** — Conversation history
 
 **Sharing.** Each agent has a `Public access` toggle in the Edit dialog
 (default off). When on, anyone with the chat URL — `/agents/{id}/chat/`
-— can chat with the agent under their own account; sessions / memory /
+— can chat with the agent under their own account. Sessions / memory /
 USER.md partition per chatter, while SOUL / IDENTITY / skills are
 shared from the owner's row. When off, only the owner (or super_admin)
 can access it.
@@ -93,11 +93,11 @@ can access it.
 ```
 
 The database is the source of truth for everything except skill folders
-on disk. SQLite is the default; point `FASTAGENT_STORAGE_DSN` at Postgres
+on disk. SQLite is the default. Point `FASTAGENT_STORAGE_DSN` at Postgres
 for multi-pod deployments.
 
 **There is no `fastagent.json`.** Bootstrap settings (port, bind, storage
-DSN, sandbox backend) come from `FASTAGENT_*` env vars; everything user-
+DSN, sandbox backend) come from `FASTAGENT_*` env vars. Everything user-
 facing (providers, channels, settings, defaults) lives in the `configs`
 table and is edited through the dashboard or `fastagent agents config`.
 
@@ -129,7 +129,7 @@ turn ─┬─ iteration 1: model → tools → results
 
 - **Closing the tab does not stop the work.** The turn's context is deliberately detached from the
   request (`context.WithoutCancel`), so a refresh, a closed browser or an MCP client that hangs up
-  right after submitting leaves the turn running; its reply still lands in the session and is
+  right after submitting leaves the turn running. Its reply still lands in the session and is
   delivered to whoever reads next.
 - **A stop is cooperative, and it is read at an iteration boundary** — the top of the loop, next to
   "did another turn take this session over". A turn parked inside one long tool call (`sleep 40`)
@@ -144,7 +144,7 @@ turn ─┬─ iteration 1: model → tools → results
   gate and re-tries every couple of seconds, announcing itself as `queued` (holder, expiry,
   position) while it waits.
 - **A live turn is kept alive by renewal, not by a long lease.** The lease's TTL bounds only how
-  long a *dead* holder may look alive; the holder renews it on a timer, so a long turn survives
+  long a *dead* holder may look alive. The holder renews it on a timer, so a long turn survives
   without widening that bound.
 
 ## Features
@@ -187,7 +187,7 @@ turn ─┬─ iteration 1: model → tools → results
 - Per-agent scheduler `/api/agents/{id}/cron` (list / toggle / delete)
 - Provider management `/api/config`
 - Skill install `/api/skills/install` (ClawHub + GitHub)
-- API key management `/api/apikeys` (per-user; tiers: admin / user / agent)
+- API key management `/api/apikeys` (per-user. Tiers: admin / user / agent)
 - User management `/api/users` (admin) — top-level CRUD + nested
   `/api/users/{id}/apikeys` and `/api/users/{id}/agents` for
   admin-driven provisioning. The `agents` endpoint accepts
@@ -197,7 +197,7 @@ turn ─┬─ iteration 1: model → tools → results
   caps how many agents a non-admin can self-create
   (`-1` = unlimited, `0` = admin-provisioned only).
 - App-user provisioning `POST /v1/users` — third-party apps mint a stable fastagent user_id per end-user, idempotent on `(api_key, external_id)`. Or pass `user` on `/v1/chat/completions` (or `X-Fastagent-End-User` header) for lazy mint on first call
-- Usage & quota `GET /v1/usage` + `PUT/GET/DELETE /v1/quota` — per-user billing. Read token consumption (`?user_id=` scopes to an owned app_user), and set a monthly token/request ceiling. **Opt-in**: with no quota row (or a limit ≤ 0) the agent runs unlimited; enforcement only begins once something writes a quota for that user. Checked before every LLM call in the agent loop.
+- Usage & quota `GET /v1/usage` + `PUT/GET/DELETE /v1/quota` — per-user billing. Read token consumption (`?user_id=` scopes to an owned app_user), and set a monthly token/request ceiling. **Opt-in**: with no quota row (or a limit ≤ 0) the agent runs unlimited. Enforcement only begins once something writes a quota for that user. Checked before every LLM call in the agent loop.
 
 ### Billing & token quotas
 
@@ -207,7 +207,7 @@ blocks anyone by default.
 
 - Set/raise/lower a ceiling: `PUT /v1/quota` with
   `{"user_id": "...", "monthly_token_limit": N, "monthly_request_limit": N, "reset_day": 1}`.
-  Same-user PUTs overwrite; `DELETE /v1/quota` reverts to unlimited.
+  Same-user PUTs overwrite. `DELETE /v1/quota` reverts to unlimited.
 - The agent loop checks the quota before every LLM call and rejects the turn
   with an error message until the next `reset_day` billing window.
 - Ownership is enforced via `CanManageUser` (self / owned app_user /
@@ -304,7 +304,7 @@ the CLI falls back to a hint asking you to run `fastagent daemon restart`.
 
 The default owner is the `admin` user. On an empty database
 `agents init` creates that account with a generated password (printed
-once); on a populated database it expects `admin` to exist or
+once). On a populated database it expects `admin` to exist or
 `--username` to point at an existing user.
 
 #### Resolving agents
@@ -378,8 +378,8 @@ Issue and manage programmatic credentials for external integrations.
 | type | Scope | Use case |
 |------|-------|----------|
 | `admin` | Full platform access, all agents | Admin automation, CI/CD |
-| `user` | Owner's agents; supports `X-Fastagent-End-User` for app_user provisioning | SaaS proxy layer, multi-tenant apps |
-| `agent` | Explicit agent list only; cannot create agents | Bots, single-purpose integrations |
+| `user` | Owner's agents. Supports `X-Fastagent-End-User` for app_user provisioning | SaaS proxy layer, multi-tenant apps |
+| `agent` | Explicit agent list only. Cannot create agents | Bots, single-purpose integrations |
 
 #### Commands
 
@@ -400,7 +400,7 @@ fastagent apikey rotate --id <apikey-id>
 **Flags:**
 - `--name` (required): human-readable key name
 - `--type` (default `user`): `admin`, `user`, or `agent`
-- `--owner` (optional): owner user ID; defaults to first super_admin
+- `--owner` (optional): owner user ID. Defaults to first super_admin
 
 #### Multi-tenant app_user flow
 
@@ -460,7 +460,7 @@ nothing below works out of order:
    E2B_API_KEY=... bun deploy/docker/sandbox/build.prod.ts   # -> fastagent-sandbox-prod
    E2B_API_KEY=... bun deploy/docker/sandbox/build.dev.ts    # -> fastagent-sandbox
    ```
-   Both import the `e2b` SDK. `bun` runs these TS files directly (no `tsx` step); this repo has
+   Both import the `e2b` SDK. `bun` runs these TS files directly (no `tsx` step). This repo has
    no root `package.json`, so the SDK has to resolve from a parent directory or a scratch
    install. `e2b.toml.old` / `e2b.Dockerfile.old` are kept for reference only —
    `e2b template build --config e2b.toml` matches nothing in this tree.
@@ -498,7 +498,7 @@ via `-ldflags`. CI uses these targets too — see `.github/workflows/`.
 FastAgent is **source-available** under the [FastAgent Community License](LICENSE),
 based on Apache License 2.0 with additional conditions.
 
-**TL;DR:**
+**In short:**
 - ✅ Use it commercially as a backend for your own product
 - ✅ Internal deployment within your organization
 - ❌ Hosting FastAgent as a multi-tenant SaaS for unrelated organizations

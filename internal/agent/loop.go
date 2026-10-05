@@ -14,6 +14,8 @@ import (
 
 	"github.com/codeany-ai/open-agent-sdk-go/costtracker"
 
+	"sort"
+
 	"github.com/fastclaw-ai/fastclaw/internal/agent/goal"
 	"github.com/fastclaw-ai/fastclaw/internal/agent/tools"
 	"github.com/fastclaw-ai/fastclaw/internal/agentconfig"
@@ -33,7 +35,6 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/toolproviders"
 	"github.com/fastclaw-ai/fastclaw/internal/usage"
 	"github.com/fastclaw-ai/fastclaw/internal/workspace"
-	"sort"
 )
 
 // Agent is the ReAct agent loop.
@@ -145,7 +146,7 @@ type Agent struct {
 	// applies on the next agent build / user-space reload.
 	mcpConfigNotify func(userID, agentID string)
 	// rcProvider answers "what is this agent's configuration now" from the
-	// versioned read cache (internal/agentconfig). The gateway wires it. Nil
+	// versioned read cache (internal/agentconfig); the gateway wires it. Nil
 	// means the built snapshot is the only source (CLI, tests) — not a stale
 	// read, because no newer source exists there.
 	rcProvider func(ctx context.Context, scope agentconfig.Scope) (config.ResolvedAgent, error)
@@ -593,39 +594,41 @@ func (ag *Agent) registerMCPManagementTool(rc config.ResolvedAgent, ob *oauth.Bo
 }
 
 const mcpToolDescription = "Manage this agent's OAuth-protected MCP servers (fastagent MCP capability). " +
-	"Only the agent owner's sessions may call this tool — visitors and shared-session callers are refused. " +
-	"Before acting, call status with no serverName to list every configured OAuth MCP server and its state.\n\n" +
+	"Only the agent owner's sessions may call this tool. The tool refuses visitors and shared-session callers. " +
+	"Before acting, call status with no serverName. That lists every configured OAuth MCP server and its state.\n\n" +
 	"Actions:\n" +
-	"- add <serverName> <url> [oauthResource] [scopes]: register an HTTP MCP server on this agent (static-header or " +
-	"OAuth-protected). Persists immediately; tools become available on the next agent build/session. Reversible with remove.\n" +
-	"- remove <serverName>: unregister a server and drop its tools from the next build. Reversible with add.\n" +
-	"- undo: replay the inverse of the most recent recorded mcp add/remove of the CURRENT chat session from its persisted " +
-	"operation trace (LIFO — call again to undo the next older operation). Ops from other/deleted sessions are not " +
-	"reachable. Only server-declaration operations are auto-replayed; authorization login/logout still needs a human " +
-	"consent step.\n" +
-	"- login <serverName>: start authorization for an unauthenticated or expired server. Returns an authorization URL " +
-	"for the OWNER to open in a browser and approve. The code is exchanged by the host callback — do NOT ask the user " +
-	"to paste the redirected URL back into the chat, and do NOT poll for completion.\n" +
-	"- status [serverName]: read local credential state (none / authorized / expired) without touching the network. " +
-	"With no serverName, lists all configured OAuth servers.\n" +
-	"- check <serverName>: verify end-to-end by actually calling the server with the stored credential. status only " +
-	"proves a local token exists; check proves the credential still works remotely. If check fails, the credential is " +
-	"dead — re-run login.\n" +
-	"- refresh <serverName>: force a token refresh (no-op when the token is still fresh). Use when the credential is " +
-	"expired or about to expire and you need it working now.\n" +
-	"- logout <serverName>: revoke the authorization; re-run login before using the server again."
+	"- add <serverName> <url> [oauthResource] [scopes]: register an HTTP MCP server on this agent. The server may " +
+	"use static headers or OAuth protection. The declaration takes effect at once. Its tools become available on the " +
+	"next agent build or session. Use remove to undo it.\n" +
+	"- remove <serverName>: unregister a server and drop its tools from the next build. Use add to undo it.\n" +
+	"- undo: replay the inverse of the most recent recorded mcp add or remove of the CURRENT chat session. The " +
+	"session keeps the trace, and the order is LIFO — call again to undo the next older operation. Operations from " +
+	"another session, or from a session that no longer exists, are not reachable. Only server declarations replay " +
+	"automatically. " +
+	"An authorization login or logout still needs a human consent step.\n" +
+	"- login <serverName>: start authorization for a server with no credential or an expired credential. The reply " +
+	"carries an authorization URL for the OWNER to open in a browser and approve. The host callback exchanges the " +
+	"code. Do NOT ask the user to paste the redirected URL back into the chat. Do NOT wait for completion.\n" +
+	"- status [serverName]: read the local credential state (none / authorized / expired) without touching the " +
+	"network. With no serverName, it lists all configured OAuth servers.\n" +
+	"- check <serverName>: check the credential end to end by calling the server with the stored credential. " +
+	"status only shows that a local token exists. check proves that the credential still works remotely. " +
+	"If check fails, the credential is dead. Run login again.\n" +
+	"- refresh <serverName>: force a token refresh. It does nothing when the token is still fresh. Use it when the " +
+	"credential is expired or about to expire and you need it now.\n" +
+	"- logout <serverName>: revoke the authorization. Run login again before you use the server."
 
 var mcpToolSchema = map[string]any{
 	"type": "object",
 	"properties": map[string]any{
 		"action": map[string]any{
 			"type":        "string",
-			"description": "Which action to run: add (register a server), remove (unregister a server), undo (replay the inverse of the most recent recorded add/remove from the operation trace, LIFO), login (start authorization; returns the URL to give the owner), status (query state; omit serverName to list all), check (end-to-end verify the credential works), refresh (force a token refresh), logout (revoke).",
+			"description": "Which action to run. add registers a server. remove unregisters a server. undo replays the inverse of the most recent recorded add or remove, in LIFO order. login starts authorization and returns the URL for the owner. status queries the state, and it lists all servers when serverName is absent. check tests the credential end to end. refresh forces a token refresh. logout revokes the authorization.",
 			"enum":        []string{"login", "status", "check", "refresh", "logout", "add", "remove", "undo"},
 		},
 		"serverName": map[string]any{
 			"type":        "string",
-			"description": "Name of an MCP server. Required for add/remove/login/check/refresh/logout; optional for status (omit to list all). If unsure which servers exist, call status without serverName first.",
+			"description": "Name of an MCP server. Required for add, remove, login, check, refresh, and logout. Optional for status, which lists all servers when you omit it. If you are not sure which servers exist, call status without serverName first.",
 		},
 		"url": map[string]any{
 			"type":        "string",
@@ -633,12 +636,12 @@ var mcpToolSchema = map[string]any{
 		},
 		"oauthResource": map[string]any{
 			"type":        "string",
-			"description": "RFC 8707 resource / OAuth discovery URL — only for OAuth-protected servers; usually the same as url. Optional for add.",
+			"description": "RFC 8707 resource identifier, or the OAuth discovery URL. Use it only for OAuth-protected servers. It is usually the same as url. Optional for add.",
 		},
 		"scopes": map[string]any{
 			"type":        "array",
 			"items":       map[string]any{"type": "string"},
-			"description": "OAuth scopes to request on login; optional — when omitted the provider-supported scope set is requested.",
+			"description": "OAuth scopes to request on login. Optional. When you omit it, the request asks for the provider-supported scope set.",
 		},
 	},
 	"required": []string{"action"},
@@ -692,7 +695,7 @@ func mcpToolFnWithAgent(ob *oauth.Bootstrap, rc config.ResolvedAgent, actorUserI
 		// read the current configuration, not the snapshot this agent was built
 		// with: `mcp add` in this session must be visible to `mcp login` in the
 		// same session (docs/fastagent/design/15-agent-config-consistency.md §5).
-		// A read that cannot be verified fails. It never serves the snapshot as
+		// A read that cannot be verified fails; it never serves the snapshot as
 		// if it were current.
 		if ag != nil && in.Action != "add" && in.Action != "remove" && in.Action != "undo" {
 			fresh, err := ag.freshRC(ctx, rc)

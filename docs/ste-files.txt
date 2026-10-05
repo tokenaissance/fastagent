@@ -1,0 +1,20 @@
+# Documents an agent or a human reads to work on this repo.
+# One glob per line, relative to the repo root. `scripts/ste-check.sh` lints
+# every match and compares the hard-violation count with docs/ste-baseline.txt.
+#
+# The scope is authored prose. Two families stay out on purpose, and the reason
+# is that a rewrite there would be wrong, not that the text is good:
+#
+#   docs/prompt-inventory/ — transcriptions of live model prompts. A script
+#                            regenerates them, so a hand edit is undone and the
+#                            regeneration contract breaks.
+#   docs/REBRAND/          — a historical record of the FastClaw rename.
+#
+# The Chinese formal set and the English one are both here: they are the same
+# corpus in two languages, and a reader may land on either.
+README.md
+docs/*.md
+docs/issues/*.md
+docs/fs-formal-proof/*.md
+docs/文件系统形式化证明/*.md
+docs/query_optimization/*.md
