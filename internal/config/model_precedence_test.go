@@ -1,8 +1,9 @@
-package gateway
+package config
 
 import "testing"
 
-// The model precedence contract, as a test instead of a sentence.
+// The model precedence contract, as a test instead of a sentence. Moved
+// here with the rule itself (it used to live in internal/gateway).
 //
 // Why this exists: the settings model page's "switch did nothing" incident came
 // from writing a layer the runtime does not use for that agent. The rule that
@@ -57,7 +58,7 @@ func TestResolveModelPrecedence(t *testing.T) {
 		{
 			// Preserved from EnsureAgent, where the pin is applied unconditionally
 			// (it is empty unless the viewer set a row). Pinned here so the
-			// extraction that introduced resolveModel did not quietly change it.
+			// extraction that introduced ModelFor did not quietly change it.
 			name: "the pin is applied regardless of ownership",
 			base: userChoice, agentRow: agentChoice, pinRow: viewerChoice, want: viewerChoice,
 		},
@@ -68,8 +69,8 @@ func TestResolveModelPrecedence(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := resolveModel(tc.base, tc.ownerRow, tc.agentRow, tc.pinRow); got != tc.want {
-				t.Fatalf("resolveModel(base=%q owner=%q agent=%q pin=%q) = %q, want %q",
+			if got := ModelFor(tc.base, tc.ownerRow, tc.agentRow, tc.pinRow); got != tc.want {
+				t.Fatalf("ModelFor(base=%q owner=%q agent=%q pin=%q) = %q, want %q",
 					tc.base, tc.ownerRow, tc.agentRow, tc.pinRow, got, tc.want)
 			}
 		})

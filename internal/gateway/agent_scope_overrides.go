@@ -24,6 +24,9 @@ import (
 
 // resolveAgentScopeOverrides applies the agent-scope overlay to one resolved agent.
 func resolveAgentScopeOverrides(ctx context.Context, st store.Store, rc *config.ResolvedAgent) {
+	// The rules live in internal/config (entities). This function reads the two
+	// rows and hands them over, so the owner path and the chatter path apply the
+	// same field list by construction.
 	var agentOverride config.AgentDefaults
 	if err := scope.ExactSetting(ctx, st, "agents.defaults", "", rc.ID, &agentOverride); err == nil {
 		// Owner path: base is already system←user (ResolveAgents merged it
@@ -31,49 +34,8 @@ func resolveAgentScopeOverrides(ctx context.Context, st store.Store, rc *config.
 		// space) and no viewer pin. So the agent row is the only overlay the
 		// model can get — and it wins, which is the rule the settings page's
 		// agent-context write depends on.
-		rc.Model = resolveModel(rc.Model, "", agentOverride.Model, "")
-		if agentOverride.MaxTokens > 0 {
-			rc.MaxTokens = agentOverride.MaxTokens
-		}
-		if agentOverride.Temperature > 0 {
-			rc.Temperature = agentOverride.Temperature
-		}
-		if agentOverride.MaxToolIterations > 0 {
-			rc.MaxToolIterations = agentOverride.MaxToolIterations
-		}
-		if agentOverride.MaxToolIterationContinues != nil {
-			rc.MaxToolIterationContinues = *agentOverride.MaxToolIterationContinues
-		}
-		if agentOverride.MaxParallelToolCalls > 0 {
-			rc.MaxParallelToolCalls = agentOverride.MaxParallelToolCalls
-		}
-		if agentOverride.Thinking != "" {
-			rc.Thinking = agentOverride.Thinking
-		}
-		if agentOverride.PolicyPreset != "" {
-			rc.PolicyPreset = agentOverride.PolicyPreset
-		}
-		if agentOverride.PromptMode != "" {
-			rc.PromptMode = agentOverride.PromptMode
-		}
-		// Per-agent WeChat split-replies — pointer semantics so
-		// "absent" (no row, or row without the key) is distinct
-		// from "explicitly false". Non-nil from the row means the
-		// operator made a deliberate choice; nil falls through to
-		// system WeChatCfg.SplitReplies later in NewAgentWithFullCfg.
-		if agentOverride.SplitReplies != nil {
-			v := *agentOverride.SplitReplies
-			rc.SplitReplies = &v
-		}
-		// Per-agent autoPersist — same pointer semantics. Non-nil
-		// here overrides the system/user memory.autoPersist.enabled
-		// for this agent specifically. Used most by chatbot-mode
-		// personas where the LLM can't write_file directly so the
-		// background distill pass is the only persistence path.
-		if agentOverride.AutoPersist != nil {
-			v := *agentOverride.AutoPersist
-			rc.AutoPersist = &v
-		}
+		agentModel := config.ApplyAgentDefaults(rc, agentOverride)
+		rc.Model = config.ModelFor(rc.Model, "", agentModel, "")
 	}
 	// Same story for providers: assembleConfig was called with
 	// agentID="" so cfg.Providers (now in rc.Providers) only
@@ -83,11 +45,6 @@ func resolveAgentScopeOverrides(ctx context.Context, st store.Store, rc *config.
 	// shared provider — chat fires the agent's chosen model id
 	// at the wrong base URL and gets a 400 from the wrong vendor.
 	if agentProvs, err := scope.AgentScopeProviders(ctx, st, rc.ID); err == nil {
-		for k, v := range agentProvs {
-			if rc.Providers == nil {
-				rc.Providers = make(map[string]config.ProviderConfig)
-			}
-			rc.Providers[k] = v
-		}
+		config.MergeAgentProviders(rc, agentProvs)
 	}
 }

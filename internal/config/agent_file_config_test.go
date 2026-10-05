@@ -6,22 +6,24 @@ import (
 	"testing"
 )
 
-// TestAgentFileConfigLoaderIgnoresRetiredAgentJSON locks the agent.json
-// retirement: even when a legacy agent.json exists on disk, the default
-// layer-3 loader must not read it — agent config is DB-only, wired by the
-// composition root (gateway DB-first loader).
-func TestAgentFileConfigLoaderIgnoresRetiredAgentJSON(t *testing.T) {
+// TestNilAgentFileLoaderReadsNoLayerThreeConfig locks the agent.json
+// retirement at the resolution layer: a nil loader means no layer-3 source, and
+// the merge must not look for a file of its own. Even when a legacy agent.json
+// sits next to the agent, the resolved config carries nothing from it. The
+// DB-first loader lives in the gateway, and its own test proves that it ignores
+// the file too.
+func TestNilAgentFileLoaderReadsNoLayerThreeConfig(t *testing.T) {
 	home := t.TempDir()
 	legacy := `{"model":"openai/gpt-4o-mini","mcpServers":{"quandora":{"type":"http","url":"https://mcp.quandora.ai/quant"}}}`
 	if err := os.WriteFile(filepath.Join(home, "agent.json"), []byte(legacy), 0o644); err != nil {
 		t.Fatalf("write legacy agent.json: %v", err)
 	}
 
-	cfg, ok := AgentFileConfigLoader("agent-1", home)
-	if ok {
-		t.Fatalf("default loader read retired agent.json: cfg=%+v", cfg)
+	resolved := (&Config{}).MergedAgentConfig(AgentEntry{ID: "agent-1"}, nil)
+	if resolved.Model == "openai/gpt-4o-mini" {
+		t.Fatalf("merge read retired agent.json: model=%q", resolved.Model)
 	}
-	if cfg.Model != "" || len(cfg.MCPServers) != 0 {
-		t.Fatalf("default loader leaked agent.json content: %+v", cfg)
+	if len(resolved.MCPServers) != 0 {
+		t.Fatalf("merge read retired agent.json: mcpServers=%+v", resolved.MCPServers)
 	}
 }
