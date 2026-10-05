@@ -2141,6 +2141,17 @@ func migrationSQLForDialect(dialect string) []string {
 			PRIMARY KEY (kind, scope, scope_id, name)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_configs_kv_prefix ON configs_kv (kind, scope, scope_id)`,
+		// config_epoch is the single monotone counter behind the resolved-agent
+		// read cache (docs/fastagent/design/15-agent-config-consistency.md §4).
+		// One row, id = 1, bumped by every write that can change a resolved agent.
+		// It is global on purpose: max(scope versions) can alias a change (an
+		// agent-scope bump is invisible while a system-scope version is higher),
+		// and one counter cannot.
+		`CREATE TABLE IF NOT EXISTS config_epoch (
+			id INTEGER PRIMARY KEY CHECK (id = 1),
+			epoch BIGINT NOT NULL DEFAULT 0,
+			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
 		// configs_mirror is the completeness marker for the KV mirror: one row
 		// per legacy configs row, recording that a dual-write emitted every
 		// leaf of that row's mirror and what those leaves hashed to (see

@@ -1,12 +1,14 @@
 package agent
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"sort"
 	"strings"
 
 	"github.com/fastclaw-ai/fastclaw/internal/agent/tools"
+	"github.com/fastclaw-ai/fastclaw/internal/agentconfig"
 	"github.com/fastclaw-ai/fastclaw/internal/bus"
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 	"github.com/fastclaw-ai/fastclaw/internal/provider"
@@ -81,7 +83,12 @@ type managerOpts struct {
 	userID          string
 	globalSkillsCfg config.SkillsCfg
 	mcpConfigNotify func(userID, agentID string)
-	sessionLease    SessionLease
+	// agentConfigProvider answers "what is this agent's configuration now" from
+	// the versioned read cache (internal/agentconfig, wired by the gateway). Nil
+	// keeps the built snapshot as the only source, which is what the CLI and
+	// tests want.
+	agentConfigProvider func(ctx context.Context, scope agentconfig.Scope) (config.ResolvedAgent, error)
+	sessionLease        SessionLease
 	// skillsLearnerCfg is the resolved `skillsLearner` namespace for the user
 	// space this Manager builds agents for. Threaded through the same way as
 	// privacyCfg: without it the row is writable and read by nobody, because
@@ -202,6 +209,14 @@ func WithSessionLease(l SessionLease) ManagerOption {
 // and invalidate caches across replicas.
 func WithMCPConfigNotify(fn func(userID, agentID string)) ManagerOption {
 	return func(o *managerOpts) { o.mcpConfigNotify = fn }
+}
+
+// WithAgentConfigProvider wires the versioned configuration read into every
+// agent this Manager builds. The `mcp` management tool reads through it, so a
+// write this session made is visible to the next read in the same turn — the
+// incident behind docs/fastagent/design/15-agent-config-consistency.md.
+func WithAgentConfigProvider(fn func(ctx context.Context, scope agentconfig.Scope) (config.ResolvedAgent, error)) ManagerOption {
+	return func(o *managerOpts) { o.agentConfigProvider = fn }
 }
 
 // Manager loads and manages all agent instances.
@@ -358,6 +373,7 @@ func (m *Manager) buildAgent(rc config.ResolvedAgent, prov provider.Provider, mb
 		// store directly without re-plumbing through Manager.
 		ag.dataStore = m.opts.dataStore
 		ag.mcpConfigNotify = m.opts.mcpConfigNotify
+		ag.rcProvider = m.opts.agentConfigProvider
 		// Date line in the chatter's timezone — needs dataStore for the
 		// scope-prefs lookup, hence wired here and re-applied by
 		// ReloadWorkspaceFiles after every ctxBuilder rebuild.

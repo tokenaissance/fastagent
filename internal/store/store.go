@@ -122,6 +122,15 @@ type Store interface {
 	DeleteMCPServer(ctx context.Context, agentID, serverName string) error
 	ReplaceMCPServers(ctx context.Context, agentID string, servers map[string]config.MCPServerConfig) error
 
+	// --- Agent-config epoch (the read cache's staleness check) ---
+	// CurrentConfigEpoch and BumpConfigEpoch carry the one monotone counter
+	// that internal/agentconfig compares before it trusts a cached resolved
+	// agent (docs/fastagent/design/15-agent-config-consistency.md §4). Every
+	// write that can change a resolved agent bumps it. Both methods work on a
+	// WithTx handle, so a writer can bump inside its own transaction.
+	CurrentConfigEpoch(ctx context.Context) (int64, error)
+	BumpConfigEpoch(ctx context.Context) (int64, error)
+
 	// --- Sessions (per user, per agent — chat history is private) ---
 	GetSession(ctx context.Context, userID, agentID, sessionKey string) (*SessionRecord, error)
 	// GetSessionByKey loads a session by (agentID, sessionKey) without

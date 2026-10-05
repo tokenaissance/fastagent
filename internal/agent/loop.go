@@ -16,6 +16,7 @@ import (
 
 	"github.com/fastclaw-ai/fastclaw/internal/agent/goal"
 	"github.com/fastclaw-ai/fastclaw/internal/agent/tools"
+	"github.com/fastclaw-ai/fastclaw/internal/agentconfig"
 	"github.com/fastclaw-ai/fastclaw/internal/bus"
 	"github.com/fastclaw-ai/fastclaw/internal/channels"
 	"github.com/fastclaw-ai/fastclaw/internal/config"
@@ -143,6 +144,11 @@ type Agent struct {
 	// Wired by the gateway; nil means config still persists but the change
 	// applies on the next agent build / user-space reload.
 	mcpConfigNotify func(userID, agentID string)
+	// rcProvider answers "what is this agent's configuration now" from the
+	// versioned read cache (internal/agentconfig). The gateway wires it. Nil
+	// means the built snapshot is the only source (CLI, tests) — not a stale
+	// read, because no newer source exists there.
+	rcProvider func(ctx context.Context, scope agentconfig.Scope) (config.ResolvedAgent, error)
 	// workspaceStore is optional; when set, SkillsLoader hydrates per-agent
 	// and global skill dirs from the object store on every turn so skills
 	// uploaded post-boot or on a sibling replica become visible here.
@@ -645,6 +651,23 @@ func mcpToolFn(ob *oauth.Bootstrap, rc config.ResolvedAgent, actorUserID string)
 	return mcpToolFnWithAgent(ob, rc, actorUserID, nil)
 }
 
+// freshRC returns the agent's current configuration for one scope. With a
+// provider wired the read goes through the versioned cache
+// (internal/agentconfig), so a write this session made is visible to the next
+// read in the same turn. With none, snapshot — the value the caller captured at
+// build time — is the only source, which is not a stale read: there is no newer
+// source to be stale against.
+func (a *Agent) freshRC(ctx context.Context, snapshot config.ResolvedAgent) (config.ResolvedAgent, error) {
+	if a.rcProvider == nil {
+		return snapshot, nil
+	}
+	fresh, err := a.rcProvider(ctx, agentconfig.Scope{UserID: a.ownerUserID, AgentID: a.agentID})
+	if err != nil {
+		return config.ResolvedAgent{}, fmt.Errorf("agent configuration is unavailable: %w", err)
+	}
+	return fresh, nil
+}
+
 // mcpToolFnWithAgent builds the `mcp` tool handler. actorUserID is the
 // UserSpace user that built this agent instance; when it differs from the
 // agent owner (rc.UserID), every action is refused before any usecase
@@ -664,6 +687,19 @@ func mcpToolFnWithAgent(ob *oauth.Bootstrap, rc config.ResolvedAgent, actorUserI
 		}
 		if err := json.Unmarshal(raw, &in); err != nil {
 			return "", fmt.Errorf("mcp: %w", err)
+		}
+		// OAuth actions answer questions about the agent's DECLARATION, so they
+		// read the current configuration, not the snapshot this agent was built
+		// with: `mcp add` in this session must be visible to `mcp login` in the
+		// same session (docs/fastagent/design/15-agent-config-consistency.md §5).
+		// A read that cannot be verified fails. It never serves the snapshot as
+		// if it were current.
+		if ag != nil && in.Action != "add" && in.Action != "remove" && in.Action != "undo" {
+			fresh, err := ag.freshRC(ctx, rc)
+			if err != nil {
+				return "", fmt.Errorf("mcp: %w", err)
+			}
+			rc = fresh
 		}
 		switch in.Action {
 		case "login":
