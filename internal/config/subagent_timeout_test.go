@@ -11,7 +11,7 @@ func TestMergedAgentConfigCarriesSubagentTimeout(t *testing.T) {
 	t.Run("system default reaches the agent", func(t *testing.T) {
 		cfg := &Config{}
 		cfg.Agents.Defaults.SubagentTimeoutSec = 1800
-		resolved := cfg.MergedAgentConfig(AgentEntry{ID: "agt-1", Name: "a"})
+		resolved := cfg.MergedAgentConfig(AgentEntry{ID: "agt-1", Name: "a"}, nil)
 		if resolved.SubagentTimeoutSec != 1800 {
 			t.Fatalf("SubagentTimeoutSec = %d, want the system default 1800", resolved.SubagentTimeoutSec)
 		}
@@ -20,7 +20,7 @@ func TestMergedAgentConfigCarriesSubagentTimeout(t *testing.T) {
 	t.Run("per-agent override wins", func(t *testing.T) {
 		cfg := &Config{}
 		cfg.Agents.Defaults.SubagentTimeoutSec = 1800
-		resolved := cfg.MergedAgentConfig(AgentEntry{ID: "agt-1", Name: "a", SubagentTimeoutSec: 600})
+		resolved := cfg.MergedAgentConfig(AgentEntry{ID: "agt-1", Name: "a", SubagentTimeoutSec: 600}, nil)
 		if resolved.SubagentTimeoutSec != 600 {
 			t.Fatalf("SubagentTimeoutSec = %d, want the entry's 600", resolved.SubagentTimeoutSec)
 		}
@@ -28,7 +28,7 @@ func TestMergedAgentConfigCarriesSubagentTimeout(t *testing.T) {
 
 	t.Run("unset leaves zero so the built-in default applies", func(t *testing.T) {
 		cfg := &Config{}
-		resolved := cfg.MergedAgentConfig(AgentEntry{ID: "agt-1", Name: "a"})
+		resolved := cfg.MergedAgentConfig(AgentEntry{ID: "agt-1", Name: "a"}, nil)
 		if resolved.SubagentTimeoutSec != 0 {
 			t.Fatalf("SubagentTimeoutSec = %d, want 0 (agent falls back to its built-in default)", resolved.SubagentTimeoutSec)
 		}

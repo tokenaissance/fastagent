@@ -599,46 +599,6 @@ type UserSpace struct {
 	mu sync.Mutex
 }
 
-// resolveModel answers "which model will this agent actually run", given the
-// layer values a caller has gathered. It exists because this contract is
-// load-bearing and was previously encoded in statement order twice (the
-// owner's own space in loadUserSpace, a foreign viewer's lazy attach in
-// EnsureAgent) plus a prose table in docs/configs-kv-scope-adaptation.md —
-// nothing failed if the order was rearranged.
-//
-// Order, most specific last:
-//
-//	base     system ← the CALLER's user row (already merged by
-//	         assembleConfig/ResolveAgents, so the caller's own choice is in here)
-//	ownerRow the agent OWNER's user-scope model — a foreign viewer with sharing
-//	         on runs with the credentials the owner intended
-//	agentRow the agent-scope model — the agent's own configuration, which wins
-//	         over both user layers for everyone except the case below
-//	pinRow   the VIEWER's own explicit user-scope model, pinned last for a
-//	         foreign viewer ("MY tokens, MY model")
-//
-// An empty string means "this layer has no row"; callers pass "" for layers
-// that do not apply to them (the owner's own space passes no ownerRow and no
-// pinRow — its user row is already the base).
-//
-// Note on the pin: EnsureAgent applies it unconditionally today (it is only
-// non-empty when the viewer set an explicit row), and this function preserves
-// that rather than second-guessing it. Whether a NON-foreign caller should get
-// the same pin is a separate product decision, not a refactor.
-func resolveModel(base, ownerRow, agentRow, pinRow string) string {
-	model := base
-	if ownerRow != "" {
-		model = ownerRow
-	}
-	if agentRow != "" {
-		model = agentRow
-	}
-	if pinRow != "" {
-		model = pinRow
-	}
-	return model
-}
-
 // readUserScopeAgentDefaults reads the (user=X, agent=”) agents.defaults
 // row raw — distinct from assembleConfig, which merges system + user and
 // can't tell apart "user explicitly chose the system value" from "no
@@ -686,7 +646,7 @@ func (sp *UserSpace) EnsureAgent(ctx context.Context, st store.Store, mb *bus.Me
 	if err != nil || rec == nil {
 		return fmt.Errorf("EnsureAgent: agent %q not found", agentID)
 	}
-	resolved := config.ResolveAgents(sp.Config, []config.AgentEntry{{ID: rec.ID, UserID: rec.UserID, Name: rec.Name}})
+	resolved := config.ResolveAgents(sp.Config, []config.AgentEntry{{ID: rec.ID, UserID: rec.UserID, Name: rec.Name}}, makeStoreFirstAgentFileLoader(st))
 	if len(resolved) != 1 {
 		return fmt.Errorf("EnsureAgent: ResolveAgents returned %d entries", len(resolved))
 	}
@@ -735,14 +695,18 @@ func (sp *UserSpace) EnsureAgent(ctx context.Context, st store.Store, mb *bus.Me
 	}
 	applyOwnerOverlays := !isForeign || shareCfg
 	// The model is collected from the three layers that can carry one and
-	// resolved once at the end (resolveModel), because "which layer wins" is a
-	// contract this file keeps in prose in two places and previously in
-	// statement order in both. The other fields stay inline: their unset
-	// semantics differ per field (>0 / non-nil), so folding them into one
-	// function would hide more than it explains.
+	// resolved once at the end (config.ModelFor), because "which layer wins" is
+	// a contract that used to live in statement order in two places.
 	var ownerModel string
 	if isForeign && applyOwnerOverlays {
 		if ownerCfg, err := assembleConfig(ctx, st, rec.UserID, ""); err == nil && ownerCfg != nil {
+			// This is the OWNER's layer, not the agent-scope layer, and it
+			// carries seven knobs: the three fields the agent-scope overlay
+			// also carries (PromptMode, SplitReplies, AutoPersist) stay out of
+			// it. Extending or shrinking that set decides what a foreign viewer
+			// inherits from the owner, which is a product decision. It is
+			// listed in docs/fastagent/design/15-agent-config-consistency.md §6
+			// as P2 work, and no change to it belongs in a refactor.
 			ovr := ownerCfg.Agents.Defaults
 			ownerModel = ovr.Model
 			if ovr.MaxTokens > 0 {
@@ -788,48 +752,16 @@ func (sp *UserSpace) EnsureAgent(ctx context.Context, st store.Store, mb *bus.Me
 		// Agent-scope read through the resolver: blob or mirror, whichever
 		// holds the row, and a disabled row means "no overlay here".
 		if err := scope.ExactSetting(ctx, st, "agents.defaults", "", rc.ID, &ovr); err == nil {
-			agentModel = ovr.Model
-			if ovr.MaxTokens > 0 {
-				rc.MaxTokens = ovr.MaxTokens
-			}
-			if ovr.Temperature > 0 {
-				rc.Temperature = ovr.Temperature
-			}
-			if ovr.MaxToolIterations > 0 {
-				rc.MaxToolIterations = ovr.MaxToolIterations
-			}
-			if ovr.MaxToolIterationContinues != nil {
-				rc.MaxToolIterationContinues = *ovr.MaxToolIterationContinues
-			}
-			if ovr.MaxParallelToolCalls > 0 {
-				rc.MaxParallelToolCalls = ovr.MaxParallelToolCalls
-			}
-			if ovr.Thinking != "" {
-				rc.Thinking = ovr.Thinking
-			}
-			if ovr.PolicyPreset != "" {
-				rc.PolicyPreset = ovr.PolicyPreset
-			}
-			// Keep this overlay aligned with the owner-path equivalent in
-			// loadUserSpace — missing fields silently break per-agent
-			// settings for chatters who lazy-attach the agent via a
-			// channel binding (e.g. wechat multi-bubble hint never fires
-			// because rc.SplitReplies stays nil; chatbot persona renders
-			// in agent-prompt mode because rc.PromptMode stays "").
-			if ovr.PromptMode != "" {
-				rc.PromptMode = ovr.PromptMode
-			}
-			if ovr.SplitReplies != nil {
-				v := *ovr.SplitReplies
-				rc.SplitReplies = &v
-			}
-			if ovr.AutoPersist != nil {
-				v := *ovr.AutoPersist
-				rc.AutoPersist = &v
-			}
+			// The field list lives in config.ApplyAgentDefaults. A chatter can
+			// lazy-attach the agent through a channel binding, and that path
+			// used to carry its own copy: a field added to one copy and not the
+			// other silently broke per-agent settings (the WeChat split-reply
+			// hint never fired, and a chatbot persona rendered in agent-prompt
+			// mode, because rc.PromptMode stayed empty).
+			agentModel = config.ApplyAgentDefaults(&rc, ovr)
 		}
 	}
-	rc.Model = resolveModel(rc.Model, ownerModel, agentModel, chatterPin.Model)
+	rc.Model = config.ModelFor(rc.Model, ownerModel, agentModel, chatterPin.Model)
 	// Overlay agent-scope providers — sp.Config.Providers carries only
 	// system+user rows (assembleConfig in loadUserSpace runs with
 	// agentID=""). Without this overlay, providerForAgent can't see the
@@ -843,12 +775,7 @@ func (sp *UserSpace) EnsureAgent(ctx context.Context, st store.Store, mb *bus.Me
 	// can offer.
 	if applyOwnerOverlays {
 		if agentProvs, err := scope.AgentScopeProviders(ctx, st, rc.ID); err == nil {
-			for k, v := range agentProvs {
-				if rc.Providers == nil {
-					rc.Providers = make(map[string]config.ProviderConfig)
-				}
-				rc.Providers[k] = v
-			}
+			config.MergeAgentProviders(&rc, agentProvs)
 		}
 	}
 	ensureAgentHome(rc)
@@ -928,7 +855,7 @@ func (sp *UserSpace) EnsureAgent(ctx context.Context, st store.Store, mb *bus.Me
 	// attach paths can no longer disagree about which layers count.
 	if ag := sp.Agents.AgentByID(rc.ID); ag != nil {
 		toolCfg := toolConfigForAgent(ctx, st, sp.Config, sp.UserID, rc.ID, rec.UserID, isForeign && applyOwnerOverlays)
-		registerAgentToolChains(toolCfg, []*agent.Agent{ag})
+		registerAgentToolChains(toolCfg, []*agent.Agent{ag}, makeStoreFirstAgentFileLoader(st))
 	}
 	// Wire hook plugins onto the freshly-attached agent. Mirrors what
 	// loadUserSpace does for owner agents — without this, hook
@@ -947,8 +874,8 @@ func (sp *UserSpace) EnsureAgent(ctx context.Context, st store.Store, mb *bus.Me
 
 // managerOptions assembles the Manager options a user space's agents are built
 // with — every rule that reaches an agent from here rather than from its own
-// row. Named rather than inline in loadUserSpace for the same reason
-// resolveModel is: a wiring line that exists only inside a 300-line loader has
+// row. Named rather than inline in loadUserSpace for the same reason the model
+// precedence is a named rule: a wiring line that exists only inside a 300-line loader has
 // no witness, so nobody notices when it goes away. The piiScrubbing entry is
 // the case that made this a function: it was missing entirely (the switch's
 // only reader lived in agent.NewAgentWithFullCfg, a constructor with no
@@ -1043,7 +970,7 @@ func loadUserSpace(ctx context.Context, userID string, mb *bus.MessageBus, st st
 	// table itself — every row whose agent_id == one of this user's
 	// owned agents contributes one Binding per Account in its data.
 	cfg.Bindings = append(cfg.Bindings, bindingsFromChannelRows(ctx, st, userID, agentRecords)...)
-	resolved := config.ResolveAgents(cfg, entries)
+	resolved := config.ResolveAgents(cfg, entries, makeStoreFirstAgentFileLoader(st))
 	for i := range resolved {
 		// Layer the agent-scope agents.defaults on top of the
 		// system→user merge that ResolveAgents already applied. We
@@ -1108,7 +1035,7 @@ func loadUserSpace(ctx context.Context, userID string, mb *bus.MessageBus, st st
 	}
 	agentToolOverlays := toolOverlaysForAgents(ctx, st, userID, agentIDs)
 	for _, ag := range agentMgr.All() {
-		registerAgentToolChains(applyToolOverlay(cfg, agentToolOverlays[ag.Name()]), []*agent.Agent{ag})
+		registerAgentToolChains(applyToolOverlay(cfg, agentToolOverlays[ag.Name()]), []*agent.Agent{ag}, makeStoreFirstAgentFileLoader(st))
 	}
 
 	pool := attachSandboxToAgents(systemSandboxPool, userID, resolved, agentMgr)

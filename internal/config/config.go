@@ -551,14 +551,15 @@ type BindingsPayload struct {
 	List []Binding `json:"list"`
 }
 
-// AgentFileConfigLoader is the indirection point for layer-3 agent config.
-// The per-agent `agent.json` file has been retired: agent config is DB-only
-// (agents.config column + per-key agent_mcp_servers rows). Composition roots
-// (gateway and any other agent execution entrypoint) MUST wire the DB-first
-// loader; the default here is a no-op so an unwired path fails closed (no
-// silent file fallback) instead of reading a stale local file.
-var AgentFileConfigLoader func(agentID, home string) (AgentFileConfig, bool) = func(string, string) (AgentFileConfig, bool) {
-	return AgentFileConfig{}, false
+// AgentFileLoader is the port for layer-3 agent config. The per-agent
+// `agent.json` file has been retired, so agent config is DB-only (the
+// agents.config column plus the per-key agent_mcp_servers rows). Composition
+// roots (the gateway and any other agent execution entrypoint) inject the
+// DB-first loader. A nil loader means "no layer-3 source", which is the
+// fail-closed default: no silent file fallback, and no package-level state that
+// one composition root could set for another.
+type AgentFileLoader interface {
+	Load(agentID, home string) (AgentFileConfig, bool)
 }
 
 // AgentFileConfig is the schema for an agent's per-row override JSON
@@ -757,8 +758,10 @@ func ApplyDefaults(cfg *Config) {
 const DefaultToolIterationContinues = 1
 
 // MergedAgentConfig merges defaults with an agent entry to produce a fully
-// resolved agent config.
-func (cfg *Config) MergedAgentConfig(entry AgentEntry) ResolvedAgent {
+// resolved agent config. loader supplies the layer-3 rows; a nil loader means
+// this caller has no layer-3 source, which is not the same as an agent that has
+// no layer-3 config.
+func (cfg *Config) MergedAgentConfig(entry AgentEntry, loader AgentFileLoader) ResolvedAgent {
 	home, _ := AgentHomeDir(entry.ID)
 	workspace := expandPath(entry.Workspace)
 	if workspace == "" {
@@ -857,72 +860,74 @@ func (cfg *Config) MergedAgentConfig(entry AgentEntry) ResolvedAgent {
 		}
 	}
 
-	if fileCfg, ok := AgentFileConfigLoader(entry.ID, home); ok {
-		if fileCfg.Model != "" {
-			resolved.Model = fileCfg.Model
-		}
-		if fileCfg.MaxTokens > 0 {
-			resolved.MaxTokens = fileCfg.MaxTokens
-		}
-		if fileCfg.Temperature > 0 {
-			resolved.Temperature = fileCfg.Temperature
-		}
-		if fileCfg.MaxToolIterations > 0 {
-			resolved.MaxToolIterations = fileCfg.MaxToolIterations
-		}
-		if fileCfg.MaxToolIterationContinues != nil {
-			resolved.MaxToolIterationContinues = *fileCfg.MaxToolIterationContinues
-			continuesSet = true
-		}
-		if fileCfg.MaxParallelToolCalls > 0 {
-			resolved.MaxParallelToolCalls = fileCfg.MaxParallelToolCalls
-		}
-		if fileCfg.SubagentTimeoutSec > 0 {
-			resolved.SubagentTimeoutSec = fileCfg.SubagentTimeoutSec
-		}
-		resolved.Skills = fileCfg.Skills
-		if len(fileCfg.Admins) > 0 {
-			resolved.Admins = make(map[string][]string, len(fileCfg.Admins))
-			for ch, ids := range fileCfg.Admins {
-				cp := make([]string, len(ids))
-				copy(cp, ids)
-				resolved.Admins[ch] = cp
+	if loader != nil {
+		if fileCfg, ok := loader.Load(entry.ID, home); ok {
+			if fileCfg.Model != "" {
+				resolved.Model = fileCfg.Model
 			}
-		}
-		for k, v := range fileCfg.MCPServers {
-			if resolved.MCPServers == nil {
-				resolved.MCPServers = make(map[string]MCPServerConfig)
+			if fileCfg.MaxTokens > 0 {
+				resolved.MaxTokens = fileCfg.MaxTokens
 			}
-			resolved.MCPServers[k] = v
-		}
-		for k, v := range fileCfg.Providers {
-			if resolved.Providers == nil {
-				resolved.Providers = make(map[string]ProviderConfig)
+			if fileCfg.Temperature > 0 {
+				resolved.Temperature = fileCfg.Temperature
 			}
-			resolved.Providers[k] = v
-		}
-		for k, v := range fileCfg.ToolProviders {
-			if resolved.ToolProviders == nil {
-				resolved.ToolProviders = make(map[string]ToolProviderCfg)
+			if fileCfg.MaxToolIterations > 0 {
+				resolved.MaxToolIterations = fileCfg.MaxToolIterations
 			}
-			resolved.ToolProviders[k] = v
-		}
-		for k, v := range fileCfg.Tools {
-			if resolved.Tools == nil {
-				resolved.Tools = make(map[string]ToolCategoryCfg)
+			if fileCfg.MaxToolIterationContinues != nil {
+				resolved.MaxToolIterationContinues = *fileCfg.MaxToolIterationContinues
+				continuesSet = true
 			}
-			resolved.Tools[k] = v
-		}
-		if fileCfg.PromptMode != "" {
-			resolved.PromptMode = fileCfg.PromptMode
-		}
-		if fileCfg.SplitReplies != nil {
-			v := *fileCfg.SplitReplies
-			resolved.SplitReplies = &v
-		}
-		if fileCfg.AutoPersist != nil {
-			v := *fileCfg.AutoPersist
-			resolved.AutoPersist = &v
+			if fileCfg.MaxParallelToolCalls > 0 {
+				resolved.MaxParallelToolCalls = fileCfg.MaxParallelToolCalls
+			}
+			if fileCfg.SubagentTimeoutSec > 0 {
+				resolved.SubagentTimeoutSec = fileCfg.SubagentTimeoutSec
+			}
+			resolved.Skills = fileCfg.Skills
+			if len(fileCfg.Admins) > 0 {
+				resolved.Admins = make(map[string][]string, len(fileCfg.Admins))
+				for ch, ids := range fileCfg.Admins {
+					cp := make([]string, len(ids))
+					copy(cp, ids)
+					resolved.Admins[ch] = cp
+				}
+			}
+			for k, v := range fileCfg.MCPServers {
+				if resolved.MCPServers == nil {
+					resolved.MCPServers = make(map[string]MCPServerConfig)
+				}
+				resolved.MCPServers[k] = v
+			}
+			for k, v := range fileCfg.Providers {
+				if resolved.Providers == nil {
+					resolved.Providers = make(map[string]ProviderConfig)
+				}
+				resolved.Providers[k] = v
+			}
+			for k, v := range fileCfg.ToolProviders {
+				if resolved.ToolProviders == nil {
+					resolved.ToolProviders = make(map[string]ToolProviderCfg)
+				}
+				resolved.ToolProviders[k] = v
+			}
+			for k, v := range fileCfg.Tools {
+				if resolved.Tools == nil {
+					resolved.Tools = make(map[string]ToolCategoryCfg)
+				}
+				resolved.Tools[k] = v
+			}
+			if fileCfg.PromptMode != "" {
+				resolved.PromptMode = fileCfg.PromptMode
+			}
+			if fileCfg.SplitReplies != nil {
+				v := *fileCfg.SplitReplies
+				resolved.SplitReplies = &v
+			}
+			if fileCfg.AutoPersist != nil {
+				v := *fileCfg.AutoPersist
+				resolved.AutoPersist = &v
+			}
 		}
 	}
 
@@ -948,14 +953,15 @@ func (cfg *Config) MergedAgentConfig(entry AgentEntry) ResolvedAgent {
 
 // ResolveAgents builds resolved agent configs from a list of entries.
 // Source-of-truth lookup happens in the caller (DB ListAgents); this
-// function only does the merge.
-func ResolveAgents(cfg *Config, entries []AgentEntry) []ResolvedAgent {
+// function only does the merge. loader is the layer-3 port; nil means this
+// caller has no layer-3 source.
+func ResolveAgents(cfg *Config, entries []AgentEntry, loader AgentFileLoader) []ResolvedAgent {
 	out := make([]ResolvedAgent, 0, len(entries))
 	for _, e := range entries {
 		if e.ID == "" {
 			continue
 		}
-		out = append(out, cfg.MergedAgentConfig(e))
+		out = append(out, cfg.MergedAgentConfig(e, loader))
 	}
 	return out
 }

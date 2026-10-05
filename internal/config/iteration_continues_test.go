@@ -12,7 +12,7 @@ func TestMergedAgentConfigCarriesIterationContinues(t *testing.T) {
 
 	t.Run("default is one extra segment", func(t *testing.T) {
 		cfg := &Config{}
-		resolved := cfg.MergedAgentConfig(AgentEntry{ID: "agt-1", Name: "a"})
+		resolved := cfg.MergedAgentConfig(AgentEntry{ID: "agt-1", Name: "a"}, nil)
 		if resolved.MaxToolIterationContinues != DefaultToolIterationContinues {
 			t.Fatalf("MaxToolIterationContinues = %d, want %d", resolved.MaxToolIterationContinues, DefaultToolIterationContinues)
 		}
@@ -21,7 +21,7 @@ func TestMergedAgentConfigCarriesIterationContinues(t *testing.T) {
 	t.Run("explicit zero in defaults means never", func(t *testing.T) {
 		cfg := &Config{}
 		cfg.Agents.Defaults.MaxToolIterationContinues = intPtr(0)
-		resolved := cfg.MergedAgentConfig(AgentEntry{ID: "agt-1", Name: "a"})
+		resolved := cfg.MergedAgentConfig(AgentEntry{ID: "agt-1", Name: "a"}, nil)
 		if resolved.MaxToolIterationContinues != 0 {
 			t.Fatalf("MaxToolIterationContinues = %d, want 0 — 0 must be expressible", resolved.MaxToolIterationContinues)
 		}
@@ -30,7 +30,7 @@ func TestMergedAgentConfigCarriesIterationContinues(t *testing.T) {
 	t.Run("per-agent override wins over defaults", func(t *testing.T) {
 		cfg := &Config{}
 		cfg.Agents.Defaults.MaxToolIterationContinues = intPtr(0)
-		resolved := cfg.MergedAgentConfig(AgentEntry{ID: "agt-1", Name: "a", MaxToolIterationContinues: intPtr(3)})
+		resolved := cfg.MergedAgentConfig(AgentEntry{ID: "agt-1", Name: "a", MaxToolIterationContinues: intPtr(3)}, nil)
 		if resolved.MaxToolIterationContinues != 3 {
 			t.Fatalf("MaxToolIterationContinues = %d, want the entry's 3", resolved.MaxToolIterationContinues)
 		}
@@ -39,7 +39,7 @@ func TestMergedAgentConfigCarriesIterationContinues(t *testing.T) {
 	t.Run("per-agent zero turns it off too", func(t *testing.T) {
 		cfg := &Config{}
 		cfg.Agents.Defaults.MaxToolIterationContinues = intPtr(2)
-		resolved := cfg.MergedAgentConfig(AgentEntry{ID: "agt-1", Name: "a", MaxToolIterationContinues: intPtr(0)})
+		resolved := cfg.MergedAgentConfig(AgentEntry{ID: "agt-1", Name: "a", MaxToolIterationContinues: intPtr(0)}, nil)
 		if resolved.MaxToolIterationContinues != 0 {
 			t.Fatalf("MaxToolIterationContinues = %d, want 0", resolved.MaxToolIterationContinues)
 		}
@@ -47,7 +47,7 @@ func TestMergedAgentConfigCarriesIterationContinues(t *testing.T) {
 
 	t.Run("chatbot mode does not extend itself", func(t *testing.T) {
 		cfg := &Config{}
-		resolved := cfg.MergedAgentConfig(AgentEntry{ID: "agt-1", Name: "a", PromptMode: PromptModeChatbot})
+		resolved := cfg.MergedAgentConfig(AgentEntry{ID: "agt-1", Name: "a", PromptMode: PromptModeChatbot}, nil)
 		if resolved.MaxToolIterationContinues != 0 {
 			t.Fatalf("MaxToolIterationContinues = %d, want 0 in chatbot mode (same reasoning as the 5-round clamp)", resolved.MaxToolIterationContinues)
 		}
@@ -55,7 +55,7 @@ func TestMergedAgentConfigCarriesIterationContinues(t *testing.T) {
 
 	t.Run("chatbot mode still honors an explicit setting", func(t *testing.T) {
 		cfg := &Config{}
-		resolved := cfg.MergedAgentConfig(AgentEntry{ID: "agt-1", Name: "a", PromptMode: PromptModeChatbot, MaxToolIterationContinues: intPtr(1)})
+		resolved := cfg.MergedAgentConfig(AgentEntry{ID: "agt-1", Name: "a", PromptMode: PromptModeChatbot, MaxToolIterationContinues: intPtr(1)}, nil)
 		if resolved.MaxToolIterationContinues != 1 {
 			t.Fatalf("MaxToolIterationContinues = %d, want the explicit 1", resolved.MaxToolIterationContinues)
 		}

@@ -39,7 +39,7 @@ func TestStoreFirstAgentFileLoaderReadsMCPServersFromTable(t *testing.T) {
 	}
 
 	loader := makeStoreFirstAgentFileLoader(db)
-	cfg, ok := loader(agentID, "")
+	cfg, ok := loader.Load(agentID, "")
 	if !ok {
 		t.Fatal("loader returned nothing for a seeded agent")
 	}
@@ -79,7 +79,7 @@ func TestStoreFirstAgentFileLoaderEmptyJSONConfigStillReadsTable(t *testing.T) {
 	}
 
 	loader := makeStoreFirstAgentFileLoader(db)
-	cfg, ok := loader(agentID, "")
+	cfg, ok := loader.Load(agentID, "")
 	if !ok {
 		t.Fatal("loader returned nothing for an agent with only table rows")
 	}

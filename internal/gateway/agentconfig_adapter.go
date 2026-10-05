@@ -61,7 +61,7 @@ func (g *Gateway) resolveOneAgentConfig(ctx context.Context, scope agentconfig.S
 	if err != nil {
 		return config.ResolvedAgent{}, fmt.Errorf("resolve agent config: load agent %s: %w", scope.AgentID, err)
 	}
-	resolved := config.ResolveAgents(cfg, []config.AgentEntry{{ID: rec.ID, UserID: rec.UserID, Name: rec.Name}})
+	resolved := config.ResolveAgents(cfg, []config.AgentEntry{{ID: rec.ID, UserID: rec.UserID, Name: rec.Name}}, makeStoreFirstAgentFileLoader(g.store))
 	if len(resolved) == 0 {
 		return config.ResolvedAgent{}, fmt.Errorf("resolve agent config: agent %s did not resolve", scope.AgentID)
 	}

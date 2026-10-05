@@ -135,7 +135,10 @@ func buildAgentList(space *UserSpaceView, ident auth.Identity) []map[string]stri
 	all := space.Agents.All()
 	modelMap := make(map[string]string)
 	if space.Config != nil {
-		for _, ra := range config.ResolveAgents(space.Config, nil) {
+		// No entries and no layer-3 loader: this call site resolves nothing
+		// today. The loader belongs to the composition root that built the
+		// space, and this view does not carry it.
+		for _, ra := range config.ResolveAgents(space.Config, nil, nil) {
 			modelMap[ra.ID] = ra.Model
 		}
 	}

@@ -65,11 +65,13 @@ func ToolProviderRegistry() *toolproviders.Registry { return toolProviderRegistr
 
 // registerAgentToolChains wires every provider-backed tool category onto
 // the given agents using their merged config view (system + user + agent
-// scopes overlaid by the resolver).
-func registerAgentToolChains(cfg *config.Config, agents []*agent.Agent) {
+// scopes overlaid by the resolver). files is the layer-3 port: the merged view
+// must see the agent's own rows, or the chain is built from the wrong provider
+// set.
+func registerAgentToolChains(cfg *config.Config, agents []*agent.Agent, files config.AgentFileLoader) {
 	envSearxNG := strings.TrimSpace(os.Getenv("FASTAGENT_SEARXNG_ENDPOINT"))
 	for _, ag := range agents {
-		resolved := cfg.MergedAgentConfig(config.AgentEntry{ID: ag.Name()})
+		resolved := cfg.MergedAgentConfig(config.AgentEntry{ID: ag.Name()}, files)
 		chain := buildToolChainFromResolved(resolved, "web_search")
 		// Fallback: if no web_search chain is configured AND
 		// FASTAGENT_SEARXNG_ENDPOINT is set in the environment,
@@ -385,9 +387,6 @@ func New(env *config.EnvConfig) (*Gateway, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open store: %w", err)
 	}
-
-	// Wire layer-3 agent config (per-agent overrides) to read from the DB.
-	config.AgentFileConfigLoader = makeStoreFirstAgentFileLoader(st)
 
 	// Object store for agent-produced artifacts. Object store config lives
 	// in system_settings for runtime-edited fields and FASTAGENT_OBJECT_STORE_*
@@ -934,47 +933,57 @@ func (g *Gateway) Run() error {
 	return nil
 }
 
-// makeStoreFirstAgentFileLoader returns a loader that reads per-agent
-// config from the agents.config column.
-func makeStoreFirstAgentFileLoader(st store.Store) func(string, string) (config.AgentFileConfig, bool) {
-	return func(agentID, _ string) (config.AgentFileConfig, bool) {
-		if st == nil || agentID == "" {
-			return config.AgentFileConfig{}, false
+// storeAgentFileLoader is the DB-first implementation of the layer-3 port
+// (config.AgentFileLoader). It is a struct rather than a package variable, so
+// each composition root passes the loader it built and no root can configure
+// another's resolution.
+type storeAgentFileLoader struct{ st store.Store }
+
+// makeStoreFirstAgentFileLoader builds the layer-3 loader for one composition
+// root. The home argument is ignored on purpose: agent config lives in the
+// database, and a retired agent.json on disk must not be read.
+func makeStoreFirstAgentFileLoader(st store.Store) config.AgentFileLoader {
+	return storeAgentFileLoader{st: st}
+}
+
+func (l storeAgentFileLoader) Load(agentID, _ string) (config.AgentFileConfig, bool) {
+	st := l.st
+	if st == nil || agentID == "" {
+		return config.AgentFileConfig{}, false
+	}
+	// We need user_id for GetAgent now; iterate every user is
+	// expensive. Instead use ListAllAgents and pick.
+	all, err := st.ListAllAgents(context.Background())
+	if err != nil {
+		return config.AgentFileConfig{}, false
+	}
+	for _, ar := range all {
+		if ar.ID != agentID {
+			continue
 		}
-		// We need user_id for GetAgent now; iterate every user is
-		// expensive. Instead use ListAllAgents and pick.
-		all, err := st.ListAllAgents(context.Background())
+		// mcpServers no longer lives in agents.config: the per-key
+		// agent_mcp_servers table is authoritative. Fetch it FIRST so
+		// an agent whose JSON config is empty but that has server rows
+		// (e.g. created and populated purely via `mcp add`) still gets
+		// rc.MCPServers on the next build.
+		servers, err := st.ListMCPServers(context.Background(), agentID)
 		if err != nil {
 			return config.AgentFileConfig{}, false
 		}
-		for _, ar := range all {
-			if ar.ID != agentID {
-				continue
-			}
-			// mcpServers no longer lives in agents.config: the per-key
-			// agent_mcp_servers table is authoritative. Fetch it FIRST so
-			// an agent whose JSON config is empty but that has server rows
-			// (e.g. created and populated purely via `mcp add`) still gets
-			// rc.MCPServers on the next build.
-			servers, err := st.ListMCPServers(context.Background(), agentID)
-			if err != nil {
-				return config.AgentFileConfig{}, false
-			}
-			cfg := config.AgentFileConfig{}
-			if len(ar.Config) > 0 {
-				blob, _ := json.Marshal(ar.Config)
-				_ = json.Unmarshal(blob, &cfg)
-			}
-			// Table stays authoritative even if a legacy JSON still
-			// carries a stale mcpServers object.
-			cfg.MCPServers = servers
-			if len(ar.Config) > 0 || len(cfg.MCPServers) > 0 {
-				return cfg, true
-			}
-			return config.AgentFileConfig{}, false
+		cfg := config.AgentFileConfig{}
+		if len(ar.Config) > 0 {
+			blob, _ := json.Marshal(ar.Config)
+			_ = json.Unmarshal(blob, &cfg)
+		}
+		// Table stays authoritative even if a legacy JSON still
+		// carries a stale mcpServers object.
+		cfg.MCPServers = servers
+		if len(ar.Config) > 0 || len(cfg.MCPServers) > 0 {
+			return cfg, true
 		}
 		return config.AgentFileConfig{}, false
 	}
+	return config.AgentFileConfig{}, false
 }
 
 func defaultStr(v, fallback string) string {
