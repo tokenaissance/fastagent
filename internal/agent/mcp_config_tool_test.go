@@ -180,8 +180,15 @@ func TestMcpAddThenOAuthActionsInTheSameSession(t *testing.T) {
 	}
 
 	// The session's snapshot, as a build would have produced it BEFORE the add:
-	// the server is not in it, and nothing rebuilds it this turn.
-	rc := config.ResolvedAgent{ID: "agent-1", UserID: "owner-1"}
+	// `notion` is not in it and nothing rebuilds it this turn. `fromfile` is —
+	// an agent's FILE config can declare servers that never lived in the table,
+	// and those must keep resolving while the table answers for its own names.
+	rc := config.ResolvedAgent{
+		ID: "agent-1", UserID: "owner-1",
+		MCPServers: map[string]config.MCPServerConfig{
+			"fromfile": {Type: "http", URL: "https://file.example/mcp", OAuthResource: "https://file.example/mcp"},
+		},
+	}
 	ag := &Agent{dataStore: db, mcpConfigNotify: func(string, string) {}}
 	fn := mcpToolFnWithAgent(testToolBootstrap(), rc, "owner-1", ag)
 	t.Setenv("FASTAGENT_OAUTH_CALLBACK_BASE", "https://app.example.com/oauth/mcp")
@@ -224,6 +231,12 @@ func TestMcpAddThenOAuthActionsInTheSameSession(t *testing.T) {
 	}
 	if _, err := callTool(t, fn, "login", "notion"); err == nil || !strings.Contains(err.Error(), "not a configured OAuth MCP server") {
 		t.Fatalf("login after remove = %v, want the not-configured refusal", err)
+	}
+
+	// A file-declared server is not in the table at all and must keep working:
+	// the store answers for its own names, the snapshot for the rest.
+	if out, err := callTool(t, fn, "login", "fromfile"); err != nil || !strings.Contains(out, "https://as.example/oauth/authorize") {
+		t.Fatalf("login on a file-declared server = (%q, %v), want an authorization URL", out, err)
 	}
 }
 

@@ -35,33 +35,59 @@ func mcpServersFromStore(ctx context.Context, ag *Agent, agentID string) (map[st
 }
 
 // resolveMCPServer resolves one server for the OAuth control plane
-// (login / status / check / refresh / logout).
+// (login / status / check / refresh / logout), in this order:
 //
-// Store-first is the fix for the 2026-10-05 report. `mcp add notion …` writes
-// the row and only QUEUES the reload that would fold it into rc.MCPServers on
-// the next build, so the very next command in the same session — `mcp login
-// notion` — answered "not a configured OAuth MCP server", and the owner had to
-// wait a turn (or open a fresh chat) before an authorization link could even be
-// produced. The OAuth actions do not need a rebuilt snapshot; they need the
-// row, and the row exists. Removal is the same read in the other direction: a
-// deleted row must stop resolving immediately, not one build later.
+//  1. the STORE table — the row `mcp add` just wrote. This is the fix for the
+//     2026-10-05 report: add writes the row and only QUEUES the reload that
+//     would fold it into rc.MCPServers on the next build, so the very next
+//     command in the same session — `mcp login notion` — answered "not a
+//     configured OAuth MCP server" and the owner had to wait a turn (or open a
+//     fresh chat) before a link could exist. The OAuth actions do not need a
+//     rebuilt snapshot; they need the row, and the row exists.
+//  2. a name this session REMOVED — refused immediately. Without this the rc
+//     fallback below would keep resolving a server the owner just unregistered
+//     (the row is gone; the snapshot still names it).
+//  3. rc.MCPServers — the build-time snapshot. It is not only "the store as of
+//     the last build": an agent's file config can declare servers that never
+//     lived in the table, and those must keep working. The table wins where it
+//     speaks; the snapshot answers where the table is silent.
 func resolveMCPServer(ctx context.Context, ag *Agent, rc config.ResolvedAgent, serverName string) (config.MCPServerConfig, bool) {
 	if servers, ok := mcpServersFromStore(ctx, ag, rc.ID); ok {
-		cfg, found := servers[serverName]
-		return cfg, found
+		if cfg, found := servers[serverName]; found {
+			return cfg, true
+		}
+		if ag != nil {
+			if _, removed := ag.mcpRemovedThisSession.Load(serverName); removed {
+				return config.MCPServerConfig{}, false
+			}
+		}
 	}
 	cfg, found := rc.MCPServers[serverName]
 	return cfg, found
 }
 
 // resolveMCPServers is resolveMCPServer for "list them all" (`mcp status` with
-// no serverName): the store's set when it can be read, this session's snapshot
-// otherwise.
+// no serverName): the snapshot (file-config declarations included), overlaid
+// with the store's rows, minus anything this session removed.
 func resolveMCPServers(ctx context.Context, ag *Agent, rc config.ResolvedAgent) map[string]config.MCPServerConfig {
-	if servers, ok := mcpServersFromStore(ctx, ag, rc.ID); ok {
-		return servers
+	out := make(map[string]config.MCPServerConfig, len(rc.MCPServers))
+	for name, cfg := range rc.MCPServers {
+		out[name] = cfg
 	}
-	return rc.MCPServers
+	if servers, ok := mcpServersFromStore(ctx, ag, rc.ID); ok {
+		for name, cfg := range servers {
+			out[name] = cfg
+		}
+		if ag != nil {
+			ag.mcpRemovedThisSession.Range(func(key, _ any) bool {
+				if name, isString := key.(string); isString {
+					delete(out, name)
+				}
+				return true
+			})
+		}
+	}
+	return out
 }
 
 // mcpAddInput carries the declarative server fields for `mcp add`.
@@ -189,6 +215,9 @@ func applyMCPAdd(ctx context.Context, ag *Agent, rc config.ResolvedAgent, in mcp
 		}
 		return "", fmt.Errorf("mcp add: %w", err)
 	}
+	// A re-add in this session undoes this session's removal (see
+	// resolveMCPServer's step 2).
+	ag.mcpRemovedThisSession.Delete(in.ServerName)
 	kind := "http"
 	if in.OAuthResource != "" {
 		kind = "oauth"
@@ -257,6 +286,10 @@ func applyMCPRemove(ctx context.Context, ag *Agent, rc config.ResolvedAgent, ser
 		}
 		return "", fmt.Errorf("mcp remove: %w", err)
 	}
+	// Remembered for the rest of this session: the row is gone, but rc.MCPServers
+	// still names it until the next build, and the OAuth actions must stop
+	// resolving it NOW (resolveMCPServer step 2).
+	ag.mcpRemovedThisSession.Store(serverName, true)
 	// Mirror of add's wording: the OAuth actions stop resolving it now (the row
 	// is gone from the store), the tools disappear on the next build.
 	out := serverName + ": removed. The mcp OAuth actions stop seeing it now; its tools disappear on the next build."

@@ -143,6 +143,11 @@ type Agent struct {
 	// Wired by the gateway; nil means config still persists but the change
 	// applies on the next agent build / user-space reload.
 	mcpConfigNotify func(userID, agentID string)
+	// mcpRemovedThisSession remembers the servers this Agent instance removed, so
+	// the `mcp` OAuth actions stop resolving them immediately even though the
+	// build-time snapshot (rc.MCPServers) still names them until the next build.
+	// Read/written through resolveMCPServer / applyMCPAdd / applyMCPRemove.
+	mcpRemovedThisSession sync.Map
 	// workspaceStore is optional; when set, SkillsLoader hydrates per-agent
 	// and global skill dirs from the object store on every turn so skills
 	// uploaded post-boot or on a sibling replica become visible here.
