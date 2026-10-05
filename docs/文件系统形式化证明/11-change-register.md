@@ -981,7 +981,13 @@ cloud 比对的是一份列表；pod 不知道令牌的受众与 scope。这里�
 | --- | --- | --- | --- | --- | --- | --- |
 | 99 | **读缓存的计数进了运维面。** P2 第 4 条。设计的 §10 点了指标名，也定了验收线：check p99 3 ms、rebuild 率不超过 turn 的 1%、跨副本可见不超过 1 s。之前没有任何东西报告它们。`internal/agentconfig` 现在把 check 与 rebuild 的耗时采进固定的 512 样本窗口，统计 stale 命中次数，并跟踪最大版本落后。`Stats` 带上计数、两个延迟窗口、派生的 rebuild 率、以及落后值。`Gateway.AgentConfigCacheStats` 暴露它们，`GET /api/admin/config-cache`（super admin 限）以 JSON 返回。没接线的 reader 回 503，因为一串零会被读成一台健康的空闲 pod。两个定义值得记下。stale 命中是"一次读发现 memo 落后于计数器"，也就是写入对这个进程**变得可见**的那一刻。版本落后量从本进程缓存条目那刻算起，到一次读发现它落后为止。所以它是 write→notice 延迟的**上界**，稳态为 0 | `—`（可观测性：指标是 §10 验收线的见证） | `internal/agentconfig/{agentconfig.go,samples.go}`（samples.go 新增）、`internal/gateway/agentconfig_adapter.go`（`AgentConfigCacheStats`）、`internal/setup/{server.go,handlers_admin.go}`（路由与处理器）、`cmd/fastclaw/main.go`（接线） | 绿：`TestStatsCountStaleHitsAndVersionLag`、`TestStatsKeepTheRecentShape`、`TestAdminConfigCacheReportsStats`，以及 `TestResolvedAgentReadFeedsTheCacheStats`（网关适配器经真实 sqlite 存储把计数喂进去）。**反证已跑**：去掉 `Put` 里的 `storedAt` 写入，落后测试读到 `versionLagSeconds = 0`。**现场实跑**：本地网关监听 18999，无会话打 `GET /api/admin/config-cache` 得 401。用 super admin 走 `POST /api/login` 后重打，得 200 与完整 stats。`go test ./internal/...` 全绿 | —（上面的现场实跑就是这个端点唯一的运行期路径） | ❌ 下一次 fastagent 构建带上它。端点是新的，所以要有运维去读才有数据 |
 
-### 13.19 真正把代码发出去的那次发布（第 90 行）
+### 13.20 每条 agent 配置写路径的端到端一遍（第 100 行）
+
+| # | 变更 | 形式化（职责） | 代码锚点 | UT | 现场 e2e | 已发布 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 100 | **把 agent 配置的每条写路径都走一遍，每写一次就紧跟一次运行时读。** 新增 `internal/gateway/agent_config_paths_e2e_test.go`。它用真实 sqlite 存储与真实网关，先把缓存捂热，再按解析顺序做六次写。system 的 `agents.defaults` 走 `NotifySystemReload`。user 的 `agents.defaults` 走 `InvalidateUser`。agent 行的 `agents.config`（层三加载器）与 agent 作用域的 `agents.defaults` 行走 `InvalidateAgent`。agent 作用域那一行带 model、maxTokens、promptMode、splitReplies、autoPersist，正好是本次重构合二为一的那个覆盖。另两次写覆盖 agent 作用域 provider 与 MCP server 行。每一步都断言解析出来的值。也断言计数器前进过。没有让计数器前进的写，就是缓存看不见的写。另有两个见证。稳态再加两次读，重建数不动。反面用例直接往存储写一行，缓存读在咽喉跑之前看不见它。这就是写协议换来代价的那一面。`TestMcpLoginSeesAServerAddedInTheSameSession` 不再用手搓的 provider 闭包，改用真实 `agentconfig` 缓存压在真实存储上。于是事故现场跑的就是生产读路径，测试也断言出现 stale 命中 | I1（每次写都让计数器严格前进） + I2（一次读不会返回比"它可能见过的"更新值更旧的版本） | `internal/gateway/agent_config_paths_e2e_test.go`（新增）、`internal/agent/mcp_config_tool_test.go`（升级）。本行没有改生产代码 | 绿：`go test ./internal/...`，含上面六个子测试、反面用例、以及升级后的事故测试。**反证**：哪条写路径不再 bump，反面用例就红。覆盖顺序一变，解析值断言就红 | **现场实跑**：真实网关监听 18991，super admin 会话，`POST /api/agents`，再用 `PUT /api/agents/{id}` 写 `{"model":"openai/e2e-model","promptMode":"chatbot","splitReplies":true,"autoPersist":true}`，然后 `GET /api/agents/{id}`。读回来四个字段都在。`GET /api/admin/config-cache` 回 200，`checks: 0`。这是对的。运行时的缓存读发生在真正跑 turn 的 agent 上，而那个冷进程里没有 turn | ❌ 只有测试与文档。本行不带任何要进镜像的东西 |
+
+### 13.21 真正把代码发出去的那次发布（第 90 行）
 
 | # | 变更 | 形式化（职责） | 代码锚点 | UT | 现场 e2e | 已发布 |
 | --- | --- | --- | --- | --- | --- | --- |
