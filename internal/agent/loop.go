@@ -136,7 +136,7 @@ type Agent struct {
 	// counting (chatter, agent) user-message rows so the cadence
 	// survives daemon restarts / UserSpace invalidations / idle
 	// evictions that all reset the in-memory turnCount.
-	dataStore store.Store
+	dataStore Store
 	// mcpConfigNotify is invoked after an in-session write that changes the
 	// agent's resolved runtime config — `mcp add/remove` and `/model`, which
 	// both persist to configs rows the dashboards also write. It drops the

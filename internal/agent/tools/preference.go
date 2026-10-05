@@ -6,7 +6,6 @@ import (
 	"fmt"
 
 	"github.com/fastclaw-ai/fastclaw/internal/scope"
-	"github.com/fastclaw-ai/fastclaw/internal/store"
 )
 
 type setPreferenceArgs struct {
@@ -24,7 +23,7 @@ type setPreferenceArgs struct {
 // the same namespace as timezone. The scope precedence (system →
 // user → agent → user-agent) means a user-agent pref overrides
 // agent-level and system defaults.
-func RegisterPreferenceTool(r *Registry, st store.Store) {
+func RegisterPreferenceTool(r *Registry, st ConfigToolStore) {
 	r.Register("set_preference",
 		"Save a personal preference or API key for the current chatter on this agent. "+
 			"Use this when the user wants to configure something that should persist across conversations — "+
@@ -48,7 +47,7 @@ func RegisterPreferenceTool(r *Registry, st store.Store) {
 	)
 }
 
-func makeSetPreference(st store.Store, r *Registry) ToolFunc {
+func makeSetPreference(st ConfigToolStore, r *Registry) ToolFunc {
 	return func(ctx context.Context, rawArgs json.RawMessage) (string, error) {
 		var args setPreferenceArgs
 		if err := json.Unmarshal(rawArgs, &args); err != nil {
