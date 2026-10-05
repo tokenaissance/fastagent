@@ -24,6 +24,15 @@ set -e
 
 cd "$(git rev-parse --show-toplevel)"
 
+# --- documents: the mechanical half of the ASD-STE100 gate -----------------
+# Deterministic and cheap, so it belongs in the same slot as the lint: the
+# linter reads only the staged documents, so a commit that touches none costs
+# nothing, and no autofix rewrites staged prose. The baseline in
+# docs/ste-baseline.txt can only go down; scripts/ste-check.sh holds the rule
+# and docs/ste-files.txt names what is under it.
+./scripts/ste-check.sh --staged
+
+# --- web: eslint on the staged TypeScript/JavaScript ------------------------
 # Added/copied/modified/renamed, not deleted, and only what ESLint handles.
 files=$(git diff --cached --name-only --diff-filter=ACMR -- \
   'web/**/*.ts' 'web/**/*.tsx' 'web/**/*.mts' 'web/**/*.cts' \
