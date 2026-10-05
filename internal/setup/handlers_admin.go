@@ -567,6 +567,25 @@ func (s *Server) respondAllAgents(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, map[string]any{"agents": out})
 }
 
+// handleAdminConfigCache reports the resolved-agent read cache's behaviour: how
+// many reads it served, how often it rebuilt, the recent check and rebuild
+// latency, and the largest version lag a read caught. It is the ops half of
+// docs/fastagent/design/15-agent-config-consistency.md §10, whose acceptance
+// line is a check p99 of 3 ms and a rebuild rate of 1% of turns.
+func (s *Server) handleAdminConfigCache(w http.ResponseWriter, r *http.Request) {
+	if s.configCacheStats == nil {
+		jsonResponse(w, http.StatusServiceUnavailable, map[string]any{
+			"error": "the config cache stats reader is not wired on this server",
+		})
+		return
+	}
+	stats, built := s.configCacheStats()
+	jsonResponse(w, http.StatusOK, map[string]any{
+		"built": built,
+		"stats": stats,
+	})
+}
+
 // handleAdminChats returns every chat session across every (user, agent)
 // pair, enriched with the owning user's username and the agent's name so
 // the platform-wide admin Chats page can render one flat table without
@@ -582,6 +601,7 @@ func (s *Server) respondAllAgents(w http.ResponseWriter, r *http.Request) {
 // "Owner" column then reflects the chat's actual user, so the actAs
 // link in the dashboard can impersonate the real session owner instead
 // of the agent owner (who may have no read access to the session).
+
 func (s *Server) handleAdminChats(w http.ResponseWriter, r *http.Request) {
 	if s.dataStore == nil {
 		jsonResponse(w, http.StatusServiceUnavailable, map[string]any{"error": "no data store"})

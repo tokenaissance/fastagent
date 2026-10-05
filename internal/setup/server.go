@@ -13,6 +13,7 @@ import (
 
 	"github.com/fastclaw-ai/fastclaw/internal/agent"
 	"github.com/fastclaw-ai/fastclaw/internal/agent/tools"
+	"github.com/fastclaw-ai/fastclaw/internal/agentconfig"
 	"github.com/fastclaw-ai/fastclaw/internal/api"
 	"github.com/fastclaw-ai/fastclaw/internal/auth"
 	"github.com/fastclaw-ai/fastclaw/internal/bus"
@@ -96,6 +97,11 @@ type Server struct {
 	chatEvents *agent.EventHub
 	usage      usage.Meter
 	startedAt  time.Time
+	// configCacheStats reports the resolved-agent read cache's behaviour
+	// (internal/agentconfig): check latency, rebuild rate, version lag. Wired by
+	// the composition root; nil keeps the admin endpoint at 503 rather than
+	// reporting zeros for a cache nobody built.
+	configCacheStats func() (agentconfig.Stats, bool)
 	// pendingTurns tracks dashboard chat POSTs whose turn has not started yet
 	// (queued behind another turn on the same session) so the client can
 	// withdraw them. Keyed by uid|agent|session|turnID — see
@@ -161,6 +167,12 @@ func (s *Server) SetAPIServer(apiSrv *api.Server) {
 // SetUserResolver sets the per-user agent routing resolver.
 func (s *Server) SetUserResolver(resolver api.UserResolver) {
 	s.userResolver = resolver
+}
+
+// SetConfigCacheStats wires the resolved-agent read cache's stats reader. The
+// ops surface reads it for check latency, rebuild rate, and version lag.
+func (s *Server) SetConfigCacheStats(fn func() (agentconfig.Stats, bool)) {
+	s.configCacheStats = fn
 }
 
 // SetStore sets the storage backend.
@@ -283,6 +295,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("GET /api/public/agents", s.handlePublicAgents)
 	mux.HandleFunc("GET /api/public/skills", s.handlePublicSkills)
 	mux.HandleFunc("GET /api/admin/registration", admin(s.handleGetRegistration))
+	mux.HandleFunc("GET /api/admin/config-cache", admin(s.handleAdminConfigCache))
 	mux.HandleFunc("PUT /api/admin/registration", admin(s.handleSetRegistration))
 	mux.HandleFunc("GET /api/admin/chats", admin(s.handleAdminChats))
 
