@@ -27,7 +27,6 @@ func (g *Gateway) InvalidateUser(userID string) {
 		return
 	}
 	g.users.invalidate(userID)
-	g.noteConfigChange("InvalidateUser")
 	slog.Info("user space invalidated; will reload on next access", "user", userID)
 }
 
@@ -49,7 +48,6 @@ func (g *Gateway) InvalidateAgent(agentID string) {
 			g.users.invalidate(sp.UserID)
 		}
 	}
-	g.noteConfigChange("InvalidateAgent")
 	slog.Info("agent invalidated; affected user spaces dropped", "agent", agentID)
 }
 
@@ -65,7 +63,6 @@ func (g *Gateway) ReloadAgents() error {
 	for _, sp := range g.users.all() {
 		g.users.invalidate(sp.UserID)
 	}
-	g.noteConfigChange("ReloadAgents")
 	slog.Info("hot-reload: invalidated all loaded user spaces")
 	return nil
 }

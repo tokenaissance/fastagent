@@ -195,9 +195,9 @@ func TestMcpLoginSeesAServerAddedInTheSameSession(t *testing.T) {
 	}
 	ag := &Agent{
 		dataStore: db, agentID: "agent-1", ownerUserID: "owner-1",
-		// The gateway wires NotifyAgentReload here, whose local half is
-		// InvalidateAgent → noteConfigChange → BumpConfigEpoch.
-		mcpConfigNotify: func(string, string) { _, _ = db.BumpConfigEpoch(context.Background()) },
+		// The store write stamps itself (P0b), so the notify below only has to
+		// invalidate caches. The gateway wires NotifyAgentReload here.
+		mcpConfigNotify: func(string, string) {},
 	}
 	ag.rcProvider = cache.For
 	fn := mcpToolFnWithAgent(testToolBootstrap(), rc, "owner-1", ag)

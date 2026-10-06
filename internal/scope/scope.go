@@ -874,7 +874,7 @@ func SaveSettingState(ctx context.Context, st store.ConfigStore, userID, agentID
 	// half-applied pair is exactly the state the readers then
 	// have to defend against (blob authoritative, mirror fallback). Failing
 	// loudly here is what keeps "both or neither" true.
-	return store.WithConfigTx(ctx, st, func(tx store.ConfigStore) error {
+	return store.WithConfigTx(ctx, st, func(tx store.ConfigTxStore) error {
 		if err := dualWriteSettingKV(ctx, tx, userID, agentID, namespace, data, enabled); err != nil {
 			return err
 		}
@@ -888,9 +888,14 @@ func SaveSettingState(ctx context.Context, st store.ConfigStore, userID, agentID
 				return err
 			}
 			if rec, err := tx.GetConfigByName(ctx, store.KindSetting, userID, agentID, namespace); err == nil && rec != nil {
-				return tx.DeleteConfig(ctx, rec.ID)
+				if err := tx.DeleteConfig(ctx, rec.ID); err != nil {
+					return err
+				}
 			}
-			return nil
+			// The row is gone (or never existed). Stamp anyway: a read that
+			// cached the old row must rebuild, and "this namespace is empty" is
+			// itself a value the reader has to see.
+			return stampConfigWrite(ctx, tx)
 		}
 		rec := &store.ConfigRecord{
 			Kind:    store.KindSetting,
@@ -905,8 +910,23 @@ func SaveSettingState(ctx context.Context, st store.ConfigStore, userID, agentID
 			Enabled: enabled,
 			Data:    data,
 		}
-		return tx.SaveConfig(ctx, rec)
+		if err := tx.SaveConfig(ctx, rec); err != nil {
+			return err
+		}
+		return stampConfigWrite(ctx, tx)
 	})
+}
+
+// stampConfigWrite moves the one counter every config read compares against,
+// inside the caller's transaction. Content and version commit together, so a
+// reader can never see the new version without the new content (C5), and a
+// writer cannot save content without moving the version (C1). The counter is
+// monotone, so stamping after an idempotent write costs at most one rebuild.
+func stampConfigWrite(ctx context.Context, tx store.ConfigTxStore) error {
+	if _, err := tx.BumpConfigEpoch(ctx); err != nil {
+		return fmt.Errorf("scope: stamp config write: %w", err)
+	}
+	return nil
 }
 
 // PluginEnabledNamespace is the row name that holds a per-agent plugin
@@ -988,25 +1008,30 @@ func SaveAgentPluginEnabled(ctx context.Context, st store.ConfigStore, agentID s
 		data[k] = v
 	}
 	// Both tables in one transaction — see SaveSetting.
-	return store.WithConfigTx(ctx, st, func(tx store.ConfigStore) error {
+	return store.WithConfigTx(ctx, st, func(tx store.ConfigTxStore) error {
 		if err := dualWritePluginEnabledKV(ctx, tx, agentID, data); err != nil {
 			return err
 		}
 		if len(data) == 0 {
 			// Idempotent: missing row is a no-op, so "reset" can be replayed.
 			if rec, err := tx.GetConfigByName(ctx, store.KindPluginEnabled, "", agentID, PluginEnabledNamespace); err == nil && rec != nil {
-				return tx.DeleteConfig(ctx, rec.ID)
+				if err := tx.DeleteConfig(ctx, rec.ID); err != nil {
+					return err
+				}
 			}
-			return nil
+			return stampConfigWrite(ctx, tx)
 		}
-		return tx.SaveConfig(ctx, &store.ConfigRecord{
+		if err := tx.SaveConfig(ctx, &store.ConfigRecord{
 			Kind:    store.KindPluginEnabled,
 			UserID:  "",
 			AgentID: agentID,
 			Name:    PluginEnabledNamespace,
 			Enabled: true,
 			Data:    data,
-		})
+		}); err != nil {
+			return err
+		}
+		return stampConfigWrite(ctx, tx)
 	})
 }
 
@@ -1090,8 +1115,9 @@ func SaveProviderState(ctx context.Context, st store.ConfigStore, userID, agentI
 	if err := ValidateProviderName(name); err != nil {
 		return err
 	}
-	// Both tables in one transaction — see SaveSetting.
-	return store.WithConfigTx(ctx, st, func(tx store.ConfigStore) error {
+	// Both tables in one transaction, and the stamp commits with them — see
+	// SaveSetting.
+	return store.WithConfigTx(ctx, st, func(tx store.ConfigTxStore) error {
 		if err := dualWriteProviderKV(ctx, tx, userID, agentID, name, p, enabled); err != nil {
 			return err
 		}
@@ -1103,7 +1129,41 @@ func SaveProviderState(ctx context.Context, st store.ConfigStore, userID, agentI
 			Enabled: enabled,
 			Data:    providerToData(p),
 		}
-		return tx.SaveConfig(ctx, rec)
+		if err := tx.SaveConfig(ctx, rec); err != nil {
+			return err
+		}
+		return stampConfigWrite(ctx, tx)
+	})
+}
+
+// DeleteProvider removes a provider row and its configs_kv mirror in one
+// transaction, and stamps the counter with them. The delete used to be two
+// statements from the handler (mirror, then row) with no transaction at all, so
+// a reader could see the row gone and the mirror still present — or, worse for
+// the read cache, neither change announced.
+func DeleteProvider(ctx context.Context, st store.ConfigStore, rec *store.ConfigRecord) error {
+	if st == nil {
+		return errors.New("scope.DeleteProvider: store is required")
+	}
+	if rec == nil || rec.ID == "" {
+		return errors.New("scope.DeleteProvider: record is required")
+	}
+	return store.WithConfigTx(ctx, st, func(tx store.ConfigTxStore) error {
+		// Checked inline rather than through DualDeleteProviderKV, which
+		// swallows its errors: inside a transaction a swallowed failure commits
+		// the row delete and leaves the mirror behind.
+		sc, sid := kvScopeFromOwnership(rec.UserID, rec.AgentID)
+		if err := tx.DeleteConfigPrefix(ctx, store.KindProvider, sc, sid,
+			store.ConfigsKVPrefixFor(store.KindProvider, rec.Name)); err != nil {
+			return fmt.Errorf("scope.DeleteProvider: drop mirror values: %w", err)
+		}
+		if err := tx.DeleteConfigMirror(ctx, store.KindProvider, sc, sid, rec.Name); err != nil {
+			return fmt.Errorf("scope.DeleteProvider: drop mirror marker: %w", err)
+		}
+		if err := tx.DeleteConfig(ctx, rec.ID); err != nil {
+			return err
+		}
+		return stampConfigWrite(ctx, tx)
 	})
 }
 

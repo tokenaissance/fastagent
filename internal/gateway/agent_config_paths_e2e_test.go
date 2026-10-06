@@ -154,6 +154,22 @@ func TestAgentConfigWritePathsAreVisibleToTheRuntimeRead(t *testing.T) {
 			},
 		},
 		{
+			name: "provider delete (the dashboard's remove button)",
+			write: func(t *testing.T) {
+				rec, err := db.GetConfigByName(ctx, store.KindProvider, "", agentID, "e2e")
+				if err != nil || rec == nil {
+					t.Fatalf("load the provider row: %v", err)
+				}
+				must(t, scope.DeleteProvider(ctx, db, rec))
+				g.InvalidateAgent(agentID)
+			},
+			check: func(t *testing.T, rc config.ResolvedAgent) {
+				if _, still := rc.Providers["e2e"]; still {
+					t.Fatalf("a deleted provider still resolves: %v", rc.Providers)
+				}
+			},
+		},
+		{
 			name: "MCP server row (the per-key table)",
 			write: func(t *testing.T) {
 				must(t, db.AddMCPServer(ctx, agentID, "e2e-mcp",
@@ -202,37 +218,30 @@ func TestAgentConfigWritePathsAreVisibleToTheRuntimeRead(t *testing.T) {
 		}
 	})
 
-	t.Run("a write that skips the choke point is invisible, which is why it exists", func(t *testing.T) {
-		// The counter is the only thing the reader compares against. A row
-		// written straight to the store leaves it where it was, so the cached
-		// value is still "current" by the only definition the reader has. This
-		// is the cost the write protocol buys: it is not a bug in the cache, it
-		// is the reason every writer must call an invalidation choke point.
-		//
-		// The write targets the agent-scope row, which is the layer that wins
-		// here, so the only thing holding the old value back is the counter.
+	t.Run("a write cannot land without moving the version, choke point or not", func(t *testing.T) {
+		// Before P0b this case was the opposite: a row written straight to the
+		// store left the counter alone, so the cached read kept the old value
+		// until someone called an invalidation choke point. The choke point is
+		// no longer part of the correctness argument — the write stamps inside
+		// its own transaction — so the value is visible with no notification at
+		// all. The choke point still matters for the OTHER cache (the built
+		// UserSpace) and for other replicas.
 		must(t, scope.SaveSettingByScope(ctx, db, scope.Agent, agentID, "agents.defaults",
-			map[string]interface{}{"model": "sneaky/model"}))
+			map[string]interface{}{"model": "no-notify/model"}))
 
-		if got := read(t); got.Model == "sneaky/model" {
-			t.Fatal("the cached read saw a write that never bumped the counter")
-		}
-
-		// Through the choke point, the same row becomes visible at once.
-		g.InvalidateAgent(agentID)
-		if got := read(t); got.Model != "sneaky/model" {
-			t.Fatalf("after InvalidateAgent model = %q; want the new row", got.Model)
+		if got := read(t); got.Model != "no-notify/model" {
+			t.Fatalf("model = %q; the write did not stamp its own version", got.Model)
 		}
 	})
 }
 
 func (g *Gateway) mustStats(t *testing.T) agentconfig.Stats {
 	t.Helper()
-	stats, ok := g.AgentConfigCacheStats()
+	snapshot, ok := g.AgentConfigCacheSnapshot(context.Background())
 	if !ok {
-		t.Fatal("AgentConfigCacheStats reported no cache")
+		t.Fatal("AgentConfigCacheSnapshot reported no cache")
 	}
-	return stats
+	return snapshot.Stats
 }
 
 func must(t *testing.T, err error) {

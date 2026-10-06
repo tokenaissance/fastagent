@@ -46,6 +46,24 @@ func (d *DBStore) ListMCPServers(ctx context.Context, agentID string) (map[strin
 // precondition "cannot provide twice" (k ∉ dom) is enforced by the
 // primary key: a duplicate returns ErrMCPServerExists and no row changes.
 func (d *DBStore) AddMCPServer(ctx context.Context, agentID, serverName string, cfg config.MCPServerConfig) error {
+	// The row and the config version commit together. The MCP control plane
+	// reads through the versioned cache, so a row that lands without moving the
+	// counter is a row the same session will not see (C1/C5 in
+	// docs/fastagent/design/15-agent-config-consistency.md §11.3).
+	return d.WithTx(ctx, func(s Store) error {
+		inner, err := txDBStore(s)
+		if err != nil {
+			return err
+		}
+		if err := inner.addMCPServerRow(ctx, agentID, serverName, cfg); err != nil {
+			return err
+		}
+		_, err = s.BumpConfigEpoch(ctx)
+		return err
+	})
+}
+
+func (d *DBStore) addMCPServerRow(ctx context.Context, agentID, serverName string, cfg config.MCPServerConfig) error {
 	if agentID == "" || serverName == "" {
 		return errors.New("store: agentID and serverName are required")
 	}
@@ -73,6 +91,22 @@ func (d *DBStore) AddMCPServer(ctx context.Context, agentID, serverName string, 
 // precondition (k ∈ dom) is enforced: deleting an absent server returns
 // ErrNotFound and no row changes.
 func (d *DBStore) DeleteMCPServer(ctx context.Context, agentID, serverName string) error {
+	// Same rule as AddMCPServer: the delete and the version commit together, or
+	// a reader keeps serving the server that was just removed.
+	return d.WithTx(ctx, func(s Store) error {
+		inner, err := txDBStore(s)
+		if err != nil {
+			return err
+		}
+		if err := inner.deleteMCPServerRow(ctx, agentID, serverName); err != nil {
+			return err
+		}
+		_, err = s.BumpConfigEpoch(ctx)
+		return err
+	})
+}
+
+func (d *DBStore) deleteMCPServerRow(ctx context.Context, agentID, serverName string) error {
 	if agentID == "" || serverName == "" {
 		return errors.New("store: agentID and serverName are required")
 	}

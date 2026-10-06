@@ -1,6 +1,7 @@
 package setup
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -25,8 +26,8 @@ func TestAdminConfigCacheReportsStats(t *testing.T) {
 		t.Fatalf("unwired status = %d; want 503 so a missing measurement cannot read as healthy", w.Code)
 	}
 
-	s.SetConfigCacheStats(func() (agentconfig.Stats, bool) {
-		return agentconfig.Stats{
+	s.SetConfigCacheStats(func(context.Context) (agentconfig.Snapshot, bool) {
+		return agentconfig.Snapshot{Counter: 42, Stats: agentconfig.Stats{
 			Checks:            1000,
 			Hits:              990,
 			Rebuilds:          10,
@@ -35,7 +36,7 @@ func TestAdminConfigCacheReportsStats(t *testing.T) {
 			CheckSeconds:      agentconfig.LatencyStats{P50: 0.0011, P99: 0.0029, Samples: 512},
 			RebuildSeconds:    agentconfig.LatencyStats{P50: 0.02, P99: 0.08, Samples: 10},
 			VersionLagSeconds: 0.4,
-		}, true
+		}}, true
 	})
 
 	w := get()
@@ -43,14 +44,18 @@ func TestAdminConfigCacheReportsStats(t *testing.T) {
 		t.Fatalf("status = %d; body = %s", w.Code, w.Body.String())
 	}
 	var body struct {
-		Built bool              `json:"built"`
-		Stats agentconfig.Stats `json:"stats"`
+		Built   bool              `json:"built"`
+		Counter int64             `json:"counter"`
+		Stats   agentconfig.Stats `json:"stats"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	if !body.Built {
 		t.Fatal("built = false; want true when the reader answers")
+	}
+	if body.Counter != 42 {
+		t.Fatalf("counter = %d; want the live counter the snapshot carries", body.Counter)
 	}
 	if body.Stats.Checks != 1000 || body.Stats.Rebuilds != 10 {
 		t.Fatalf("counters lost: %+v", body.Stats)

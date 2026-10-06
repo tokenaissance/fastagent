@@ -2736,6 +2736,24 @@ func (d *DBStore) GetAgent(ctx context.Context, agentID string) (*AgentRecord, e
 }
 
 func (d *DBStore) SaveAgent(ctx context.Context, agent *AgentRecord) error {
+	// One transaction for the row and the version: every config read compares
+	// the counter, so a saved agent row that does not move it is a row the
+	// cache keeps ignoring (docs/fastagent/design/15-agent-config-consistency.md
+	// §4.2, C1 and C5).
+	return d.WithTx(ctx, func(s Store) error {
+		inner, err := txDBStore(s)
+		if err != nil {
+			return err
+		}
+		if err := inner.saveAgentRow(ctx, agent); err != nil {
+			return err
+		}
+		_, err = s.BumpConfigEpoch(ctx)
+		return err
+	})
+}
+
+func (d *DBStore) saveAgentRow(ctx context.Context, agent *AgentRecord) error {
 	if agent.ID == "" {
 		return errors.New("store: agent.id is required")
 	}
@@ -2831,6 +2849,11 @@ func (d *DBStore) DeleteAgent(ctx context.Context, agentID string) error {
 	}
 	if _, err := tx.ExecContext(ctx,
 		fmt.Sprintf(`DELETE FROM agents WHERE id = %s`, d.ph(1)), agentID); err != nil {
+		return err
+	}
+	// The row sweep and the stamp commit together: a reader that cached this
+	// agent's config must not keep serving it after the agent is gone.
+	if _, err := d.bumpConfigEpochOn(ctx, tx); err != nil {
 		return err
 	}
 	return tx.Commit()
