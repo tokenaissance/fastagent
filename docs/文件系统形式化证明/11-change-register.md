@@ -1013,7 +1013,13 @@ cloud 比对的是一份列表；pod 不知道令牌的受众与 scope。这里�
 | --- | --- | --- | --- | --- | --- | --- |
 | 104 | **网关 HPA 在两个环境都从 1 个副本起步。** dev 为 helm rev 119，prod 为 helm rev 41，两边都是 `minReplicas=1` / `maxReplicas=10` / CPU 60%。prod 的镜像没变（这次升级只带了扩缩值）。chart 的 `values.yaml` 记下意图，也记下两个坑：这个文件是意图不是效果，因为 build-image.sh 用 `--reuse-values` 升级，而已有的 release 保留自己存下来的 values。**而且跨副本路径在单副本上根本测不了。** min 为 1 时，Redis 失效广播与跨副本 reload epoch 都不会被走到，「pod A 写、pod B 读」那条见证也跑不起来。它们既红不了，也绿不了。验之前先把 min 调上去，验完调回来，这就是操作步骤 | —（运维取舍：空闲一个 pod 够用，HPA 仍会按负载扩到 10） | `deploy/helm/fastagent/values.yaml`（`autoscaling`，含操作说明）、`deploy/helm/fastagent/templates/gateway.yaml`（HPA 模板，未改） | —（没有代码改动。chart 从 values 渲染 `minReplicas`） | dev `kubectl -n development get hpa fastagent-gateway` → MIN 1 / MAX 10。prod `kubectl -n production get hpa fastagent-gateway` → MIN 1 / MAX 10，prod 镜像仍是 `…:20261001063606-fastagent-4417902` | ✅ dev（helm rev 119）与 prod（helm rev 41），2026-10-06 |
 
-### 13.25 真正把代码发出去的那次发布（第 90 行）
+### 13.25 2026-10-06 的 dev 与 prod 发布（第 105 行）
+
+| # | 变更 | 形式化（职责） | 代码锚点 | UT | 现场 e2e | 已发布 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 105 | **cloud 与 fastagent 同时滚到 dev 与 prod。** fastagent dev `…:20261006100902-fastagent-fd6e855`（helm rev 120），prod `…:20261006101145-fastagent-fd6e855`（helm rev 42）。cloud dev `135c58a8-db4b-4e65-a7d0-4b202d4d2654`，prod `6f1cea62-6b4d-4af6-820c-59b8a2b754ed`。prod 之前跑的是 10-01 那份镜像（`…4417902`）。所以这是版本化配置协议、收窄后的存储端口、自己盖章的写、缓存指标、以及那个管理端点**第一次跑在生产**。prod cloud 之前是 `8e932838`（10-01），因此这次带上了 MCP 任务会话 id 那笔改动 | F2（改动要跑在调用方所在的地方才算交付） | fastagent `build-image.sh` 与 `deploy/helm/fastagent`。cloud `package.json`（`cf:deploy:dev`、`cf:deploy:prod`，各自先跑迁移） | —（本行是一次发布。它带的代码由第 97–104 行钉住） | **上线前核对。** 旧 prod 镜像与 HEAD 之间唯一的新增 DDL 是 `CREATE TABLE IF NOT EXISTS config_epoch`。它可重入。表里没有行时，读到的计数器是 0。**回滚目标**：fastagent `…:20261001063606-fastagent-4417902`，cloud `8e932838-0681-4665-9e2b-a5dbd49476fd`。**滚动之后**：prod 的 pod 日志先 `running database migrations` 再 `gateway started`，两者之间没有报错。sandbox 模板仍是 `fastagent-sandbox-prod`。两边站点 200（`https://tokenaissance.com/`、`https://dev.tokenaissance.com/`）。未鉴权的 `POST /mcp` 两边都回 401。`https://fastagent.tokenaissance.com/healthz` 回 200。`GET /api/admin/config-cache` 无凭证回 401，带 prod admin key 回 200。响应体带 `counter: 0`，这也是新建的计数器表可读的见证。**是冷启动，不是回归。** 滚动后头几次认证调用要 4–6 秒。同样的调用热了之后是 0.6–1.0 秒。单看 healthz 是 0.6 秒，所以那部分是链路。新端点在 prod 上是 0.7–1.0 秒。记下来，免得下一个读者把第一个数当成缺陷 | ✅ dev（fastagent helm rev 120，cloud `135c58a8`）与 prod（fastagent helm rev 42，cloud `6f1cea62`），2026-10-06 |
+
+### 13.26 真正把代码发出去的那次发布（第 90 行）
 
 | # | 变更 | 形式化（职责） | 代码锚点 | UT | 现场 e2e | 已发布 |
 | --- | --- | --- | --- | --- | --- | --- |
