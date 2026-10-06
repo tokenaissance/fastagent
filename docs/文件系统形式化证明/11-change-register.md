@@ -1007,7 +1007,13 @@ cloud 比对的是一份列表；pod 不知道令牌的受众与 scope。这里�
 
 这次实跑还顺带记下两件事。**第一，dev 上有 HPA**（`fastagent-gateway`，min 2，max 10）。它把副本扩到 5 又缩回来，这正是第 101 行解释不了的那次 pod 替换：缩容会删 pod，而删 pod 不会留下容器重启记录。**第二，API 路径的 turn 没有对话日志。** `emitEventChecked` 于是返回负序号，因为 `internal/agent/events.go` 要求有 stream 与 sink。这条路径上每次 `mcp add` 都会附上工具自己声明的那条 undo 日志警告。两件事都早于本次改动，也都不是本行引入的缺陷。
 
-### 13.24 真正把代码发出去的那次发布（第 90 行）
+### 13.24 空闲一个副本，以及跨副本测试的规矩（第 104 行）
+
+| # | 变更 | 形式化（职责） | 代码锚点 | UT | 现场 e2e | 已发布 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 104 | **网关 HPA 在两个环境都从 1 个副本起步。** dev 为 helm rev 119，prod 为 helm rev 41，两边都是 `minReplicas=1` / `maxReplicas=10` / CPU 60%。prod 的镜像没变（这次升级只带了扩缩值）。chart 的 `values.yaml` 记下意图，也记下两个坑：这个文件是意图不是效果，因为 build-image.sh 用 `--reuse-values` 升级，而已有的 release 保留自己存下来的 values。**而且跨副本路径在单副本上根本测不了。** min 为 1 时，Redis 失效广播与跨副本 reload epoch 都不会被走到，「pod A 写、pod B 读」那条见证也跑不起来。它们既红不了，也绿不了。验之前先把 min 调上去，验完调回来，这就是操作步骤 | —（运维取舍：空闲一个 pod 够用，HPA 仍会按负载扩到 10） | `deploy/helm/fastagent/values.yaml`（`autoscaling`，含操作说明）、`deploy/helm/fastagent/templates/gateway.yaml`（HPA 模板，未改） | —（没有代码改动。chart 从 values 渲染 `minReplicas`） | dev `kubectl -n development get hpa fastagent-gateway` → MIN 1 / MAX 10。prod `kubectl -n production get hpa fastagent-gateway` → MIN 1 / MAX 10，prod 镜像仍是 `…:20261001063606-fastagent-4417902` | ✅ dev（helm rev 119）与 prod（helm rev 41），2026-10-06 |
+
+### 13.25 真正把代码发出去的那次发布（第 90 行）
 
 | # | 变更 | 形式化（职责） | 代码锚点 | UT | 现场 e2e | 已发布 |
 | --- | --- | --- | --- | --- | --- | --- |

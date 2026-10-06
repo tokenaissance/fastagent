@@ -1168,7 +1168,13 @@ Two rules, both about **who the transcript says spoke** — and each with its bo
 
 Two things this run found that are worth recording. **First, dev has an HPA** (`fastagent-gateway`, min 2, max 10). It scaled the deployment to 5 and back. That is what replaced the pod row 101 could not explain. A scale-down deletes a pod, and a deletion leaves no container restart behind. **Second, an API-path turn has no chat journal.** `emitEventChecked` then returns a negative sequence, because `internal/agent/events.go` requires a stream with a sink. Every `mcp add` on that path appends the tool's documented undo-journal warning. Both predate this change. Neither is a defect this row introduced.
 
-### 13.24 The release that finally shipped the code (row 90)
+### 13.24 One replica at idle, and the rule for testing cross-replica (row 104)
+
+| # | Change | Formal (duty) | Code anchor | UT | Live e2e | Deployed |
+| --- | --- | --- | --- | --- | --- | --- |
+| 104 | **The gateway HPA now starts at one replica in both environments.** dev helm revision 119 and prod helm revision 41, both `minReplicas=1` / `maxReplicas=10` / CPU 60%. Prod's image did not change (the upgrade carried only the scaling value). The chart's `values.yaml` records the intent, and it also records the two traps. This file is intent rather than effect: build-image.sh upgrades with `--reuse-values`, and an existing release keeps its own stored values. **And a cross-replica path cannot be tested on one replica.** At min 1 nothing exercises the Redis invalidator or the cross-replica reload epoch. The "pod A writes, pod B reads" witness cannot run either. They can neither fail nor pass. Raising min for that test and lowering it afterwards is the procedure for it | —（运维取舍：空闲一个 pod 够用，HPA 仍会按负载扩到 10） | `deploy/helm/fastagent/values.yaml`（`autoscaling`，含操作说明）, `deploy/helm/fastagent/templates/gateway.yaml`（HPA 模板，未改） | — (no code change. the chart renders `minReplicas` from values) | dev `kubectl -n development get hpa fastagent-gateway` → MIN 1 / MAX 10。prod `kubectl -n production get hpa fastagent-gateway` → MIN 1 / MAX 10，prod 镜像仍是 `…:20261001063606-fastagent-4417902` | ✅ dev (helm rev 119) and prod (helm rev 41), 2026-10-06 |
+
+
 
 
 | # | Change | Formal (duty) | Code anchor | UT | Live e2e | Deployed |

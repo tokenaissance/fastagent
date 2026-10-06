@@ -37,7 +37,31 @@ gateway:
 ## HPA
 autoscaling:
   enabled: true
-  minReplicas: 2
+  # 1 in both environments (2026-10-06): one pod is enough at idle, and the
+  # HPA still scales out to maxReplicas under load.
+  #
+  # Two operational notes that belong next to this knob:
+  #
+  #   * This file is the intent, not the effect. An existing release keeps the
+  #     value stored in its own history, and build-image.sh upgrades with
+  #     --reuse-values, which does not re-read this file. Changing the number
+  #     here reaches a running environment only through an explicit
+  #     `--set autoscaling.minReplicas=<n>`.
+  #
+  #   * **Testing a cross-replica path needs more than one replica.** At min 1
+  #     a single pod serves everything, so the Redis invalidator, the
+  #     cross-replica reload epoch, and "pod A writes, pod B reads" are not
+  #     exercised at all. Raise it for the test and put it back:
+  #
+  #       helm upgrade fastagent ./deploy/helm/fastagent -n development \
+  #         --reuse-values --set autoscaling.minReplicas=2
+  #       ...run the multi-replica test...
+  #       helm upgrade fastagent ./deploy/helm/fastagent -n development \
+  #         --reuse-values --set autoscaling.minReplicas=1
+  #
+  #     (Same command with -n production. Never leave an environment above 1
+  #     without a reason; the cost is not the point, the surprise is.)
+  minReplicas: 1
   maxReplicas: 10
   targetCPUUtilizationPercentage: 60
 
