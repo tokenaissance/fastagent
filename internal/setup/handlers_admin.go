@@ -579,10 +579,11 @@ func (s *Server) handleAdminConfigCache(w http.ResponseWriter, r *http.Request) 
 		})
 		return
 	}
-	stats, built := s.configCacheStats()
+	snapshot, built := s.configCacheStats(r.Context())
 	jsonResponse(w, http.StatusOK, map[string]any{
-		"built": built,
-		"stats": stats,
+		"built":   built,
+		"counter": snapshot.Counter,
+		"stats":   snapshot.Stats,
 	})
 }
 

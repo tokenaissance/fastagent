@@ -19,7 +19,6 @@ package gateway
 import (
 	"context"
 	"fmt"
-	"log/slog"
 
 	"github.com/fastclaw-ai/fastclaw/internal/agentconfig"
 	"github.com/fastclaw-ai/fastclaw/internal/config"
@@ -92,7 +91,7 @@ func (g *Gateway) resolvedAgentFor(ctx context.Context, scope agentconfig.Scope)
 	return uc.For(ctx, scope)
 }
 
-// AgentConfigCacheStats reports the read cache's behaviour for the ops surface
+// AgentConfigCacheSnapshot reports the read cache's behaviour for the ops surface
 // (docs/fastagent/design/15-agent-config-consistency.md §10: check p99, rebuild
 // rate, version lag). The second value is false when the cache cannot be built,
 // which is an unwired or store-less process: zeros would read as a healthy idle
@@ -101,29 +100,14 @@ func (g *Gateway) resolvedAgentFor(ctx context.Context, scope agentconfig.Scope)
 // It builds the cache if no read has happened yet. That is deliberate: the
 // construction is idempotent, and reading the field directly would race with
 // the sync.Once that fills it.
-func (g *Gateway) AgentConfigCacheStats() (agentconfig.Stats, bool) {
+func (g *Gateway) AgentConfigCacheSnapshot(ctx context.Context) (agentconfig.Snapshot, bool) {
 	uc, err := g.agentConfigCache()
 	if err != nil {
-		return agentconfig.Stats{}, false
+		return agentconfig.Snapshot{}, false
 	}
-	return uc.Stats(), true
-}
-
-// noteConfigChange bumps the counter that every read compares against. It is
-// the write side of the protocol, and it lives on the same choke points the
-// cache invalidation already uses: a write that invalidates a cached space also
-// makes every other replica's next read rebuild. Errors are logged, not
-// swallowed: a bump that fails leaves readers trusting an entry the writer just
-// replaced, which is the failure this protocol exists to remove.
-func (g *Gateway) noteConfigChange(what string) {
-	if g.store == nil {
-		return
-	}
-	version, err := g.store.BumpConfigEpoch(context.Background())
+	snapshot, err := uc.Snapshot(ctx)
 	if err != nil {
-		slog.Warn("config change was not stamped; readers may keep an older entry until the next write",
-			"what", what, "error", err)
-		return
+		return agentconfig.Snapshot{}, false
 	}
-	slog.Debug("config epoch bumped", "what", what, "epoch", version)
+	return snapshot, true
 }

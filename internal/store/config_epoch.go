@@ -44,12 +44,33 @@ func (d *DBStore) CurrentConfigEpoch(ctx context.Context) (int64, error) {
 // form of the write protocol: a reader must never see the new counter before it
 // can see the new content.
 func (d *DBStore) BumpConfigEpoch(ctx context.Context) (int64, error) {
+	return d.bumpConfigEpochOn(ctx, d.handle())
+}
+
+// bumpConfigEpochOn runs the bump on one handle, so a writer that already holds
+// a transaction can stamp inside it (DeleteAgent sweeps many tables in its own
+// tx; its content and its version must commit together like every other
+// config-content write).
+func (d *DBStore) bumpConfigEpochOn(ctx context.Context, h dbHandle) (int64, error) {
 	var epoch int64
-	err := d.handle().QueryRowContext(ctx, "INSERT INTO config_epoch (id, epoch, updated_at) VALUES (1, 1, CURRENT_TIMESTAMP) "+
+	err := h.QueryRowContext(ctx, "INSERT INTO config_epoch (id, epoch, updated_at) VALUES (1, 1, CURRENT_TIMESTAMP) "+
 		"ON CONFLICT (id) DO UPDATE SET epoch = config_epoch.epoch + 1, updated_at = CURRENT_TIMESTAMP "+
 		"RETURNING epoch").Scan(&epoch)
 	if err != nil {
 		return 0, err
 	}
 	return epoch, nil
+}
+
+// txDBStore returns the concrete store behind a handle that WithTx produced.
+// Every such handle is a *DBStore — either the receiver (already inside a
+// transaction) or a new one that writes through the open transaction — so this
+// asserts a requirement rather than guarding a real case. It exists so a
+// stamped write can call the unexported row helper on the transaction handle
+// instead of on the pool.
+func txDBStore(s Store) (*DBStore, error) {
+	if inner, ok := s.(*DBStore); ok {
+		return inner, nil
+	}
+	return nil, errors.New("store: this write needs a database-backed store")
 }

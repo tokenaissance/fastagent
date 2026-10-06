@@ -204,7 +204,8 @@ type Gateway struct {
 	// rcOnce/rcCache/rcErr hold the resolved-agent read cache
 	// (internal/agentconfig): one use case per process with an in-process memo,
 	// built lazily on first read. Every read compares the config_epoch counter,
-	// which the invalidation choke points bump (noteConfigChange).
+	// which the writes themselves stamp inside their own transaction (P0b, so
+	// there is no writer that can forget it).
 	rcOnce  sync.Once
 	rcCache *agentconfig.Resolve
 	rcErr   error

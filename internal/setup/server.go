@@ -101,7 +101,7 @@ type Server struct {
 	// (internal/agentconfig): check latency, rebuild rate, version lag. Wired by
 	// the composition root; nil keeps the admin endpoint at 503 rather than
 	// reporting zeros for a cache nobody built.
-	configCacheStats func() (agentconfig.Stats, bool)
+	configCacheStats func(context.Context) (agentconfig.Snapshot, bool)
 	// pendingTurns tracks dashboard chat POSTs whose turn has not started yet
 	// (queued behind another turn on the same session) so the client can
 	// withdraw them. Keyed by uid|agent|session|turnID — see
@@ -171,7 +171,7 @@ func (s *Server) SetUserResolver(resolver api.UserResolver) {
 
 // SetConfigCacheStats wires the resolved-agent read cache's stats reader. The
 // ops surface reads it for check latency, rebuild rate, and version lag.
-func (s *Server) SetConfigCacheStats(fn func() (agentconfig.Stats, bool)) {
+func (s *Server) SetConfigCacheStats(fn func(context.Context) (agentconfig.Snapshot, bool)) {
 	s.configCacheStats = fn
 }
 

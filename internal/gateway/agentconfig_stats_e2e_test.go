@@ -31,8 +31,11 @@ func TestResolvedAgentReadFeedsTheCacheStats(t *testing.T) {
 		t.Fatalf("first read: %v", err)
 	}
 
-	// A config write through the same choke point every writer uses.
-	g.noteConfigChange("test")
+	// A real config write. The write itself stamps now (P0b): the row and the
+	// counter commit together, so no caller has to remember the bump.
+	if err := db.SaveAgent(ctx, &store.AgentRecord{ID: agentID, UserID: userID, Name: "stats-renamed"}); err != nil {
+		t.Fatalf("write agent row: %v", err)
+	}
 
 	second, err := g.resolvedAgentFor(ctx, scope)
 	if err != nil {
@@ -42,10 +45,11 @@ func TestResolvedAgentReadFeedsTheCacheStats(t *testing.T) {
 		t.Fatalf("scope drifted: %q then %q", first.ID, second.ID)
 	}
 
-	stats, ok := g.AgentConfigCacheStats()
+	snapshot, ok := g.AgentConfigCacheSnapshot(ctx)
 	if !ok {
-		t.Fatal("AgentConfigCacheStats reported no cache after two reads")
+		t.Fatal("AgentConfigCacheSnapshot reported no cache after two reads")
 	}
+	stats := snapshot.Stats
 	if stats.Checks < 2 {
 		t.Fatalf("checks = %d; want one per read", stats.Checks)
 	}

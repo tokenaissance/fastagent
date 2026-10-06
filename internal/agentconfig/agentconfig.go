@@ -133,6 +133,26 @@ type LatencyStats struct {
 	Samples int     `json:"samples"`
 }
 
+// Snapshot is what the ops surface reports: the cache's behaviour, plus the
+// counter the store holds right now. The counter is read live rather than taken
+// from the last check, because a writer's stamp is exactly the thing an
+// operator wants to see confirmed: after a config write the number must have
+// moved, whether or not any read has happened since.
+type Snapshot struct {
+	Counter int64 `json:"counter"`
+	Stats   Stats `json:"stats"`
+}
+
+// Snapshot reads the counter and the cache counters. One extra point query on
+// an ops call, and only on an ops call.
+func (r *Resolve) Snapshot(ctx context.Context) (Snapshot, error) {
+	counter, err := r.store.CurrentVersion(ctx)
+	if err != nil {
+		return Snapshot{}, fmt.Errorf("agentconfig: read version for the snapshot: %w", err)
+	}
+	return Snapshot{Counter: counter, Stats: r.Stats()}, nil
+}
+
 func (r *Resolve) Stats() Stats {
 	checks := r.checks.Load()
 	rebuilds := r.rebuilds.Load()

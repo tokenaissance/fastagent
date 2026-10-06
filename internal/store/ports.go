@@ -25,6 +25,7 @@ package store
 
 import (
 	"context"
+	"errors"
 
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 )
@@ -102,6 +103,24 @@ type ConfigRowWriter interface {
 }
 
 // ConfigMirrorStore is the completeness-marker capability for the configs_kv
+// ConfigEpochWriter is the stamping half of the version protocol: move the one
+// counter that every config read compares against. It is a separate capability
+// because it is not part of the configs domain — the counter is its own table —
+// and because the writers that stamp hold it next to the rows they write, in
+// the same transaction (docs/fastagent/design/15-agent-config-consistency.md
+// §4.2 and §6, P0b).
+type ConfigEpochWriter interface {
+	BumpConfigEpoch(ctx context.Context) (int64, error)
+}
+
+// ConfigTxStore is what a configs-domain transaction handle can do: the whole
+// configs domain plus the stamp that must commit with it.
+type ConfigTxStore interface {
+	ConfigStore
+	ConfigEpochWriter
+}
+
+// ConfigMirrorStore is the completeness-marker capability for the configs_kv
 // mirror (see ConfigMirror). It is its own port because a marker is metadata
 // about the mirroring rather than a leaf of it: a consumer that only reads or
 // writes mirror rows has no business deciding whether the mirror is certified,
@@ -168,6 +187,8 @@ var (
 	_ ChatterCounter         = (Store)(nil)
 	_ SessionEventReader     = (Store)(nil)
 	_ ConfigValueReader      = (Store)(nil)
+	_ ConfigEpochWriter      = (Store)(nil)
+	_ ConfigTxStore          = (Store)(nil)
 	_ AgentRuntimeStore      = (Store)(nil)
 )
 
@@ -259,13 +280,23 @@ type AgentRuntimeStore interface {
 	ConfigMirrorStore
 }
 
-// WithConfigTx is store.WithTx for a caller that typed its store as a port
-// rather than as Store: the transaction handle is handed back as a
-// ConfigStore, which is all such a caller can use anyway. Stores without
-// transaction support get the same no-atomicity fallback as WithTx.
-func WithConfigTx(ctx context.Context, st ConfigStore, fn func(ConfigStore) error) error {
+// WithConfigTx is store.WithTx for a caller that typed its store as a configs
+// port rather than as Store. The handle it hands back is a ConfigTxStore, so
+// the closure can write the content and move the counter in one commit — which
+// is the whole point of the strict write protocol: a reader must never see the
+// new counter without the new content.
+//
+// A store with no transaction support still has to stamp, so the fallback
+// requires the capability rather than skipping it. A store that cannot stamp
+// cannot serve this protocol, and saying so here is better than a silent
+// version that never moves.
+func WithConfigTx(ctx context.Context, st ConfigStore, fn func(ConfigTxStore) error) error {
 	if txer, ok := st.(Txer); ok {
 		return txer.WithTx(ctx, func(s Store) error { return fn(s) })
 	}
-	return fn(st)
+	stamped, ok := st.(ConfigTxStore)
+	if !ok {
+		return errors.New("store: this store cannot stamp a config write (no BumpConfigEpoch)")
+	}
+	return fn(stamped)
 }
