@@ -999,7 +999,15 @@ cloud 比对的是一份列表；pod 不知道令牌的受众与 scope。这里�
 | --- | --- | --- | --- | --- | --- | --- |
 | 102 | **P0b 落地：写配置内容的存储原语，在同一个事务里盖章。** 之前写与版本是两条语句。`AddMCPServer` 先提交，网关的咽喉随后才 bump。落在这两步之间的读者会继续用旧配置。绕开咽喉的写者则对缓存永远不可见。现在写本身就 bump。不存在「写了内容却不移动版本」的入口（C1）。版本也不可能先于内容可见（C5）。覆盖面：MCP 行、agent 行、settings 与 plugin 开关、providers、以及 provider 删除。那个删除是新函数 `scope.DeleteProvider`。它还顺带把「镜像 + 行」的删除做成一个事务。之前 handler 用两条语句删，没有事务。`InvalidateAgent` / `InvalidateUser` / `ReloadAgents` 不再 bump，只剩失效与通知：它们仍会丢掉缓存的 UserSpace，并盖跨副本标记。运维面新增 `counter`，实时读，所以确认盖章不必等任何一次读 | I1（每次写都让计数器严格前进） + I2（不服务未声明的陈旧值） + C1/C5 结构性消除 | `internal/store/{agent_mcp_servers.go,database.go,config_epoch.go,ports.go}`（`ConfigEpochWriter`、`ConfigTxStore`、`txDBStore`、`bumpConfigEpochOn`）、`internal/scope/scope.go`（`stampConfigWrite`、`DeleteProvider`）、`internal/gateway/{reload.go,agentconfig_adapter.go,gateway.go}`、`internal/setup/{handlers_scoped.go,server.go,handlers_admin.go}`、`internal/agentconfig/agentconfig.go`（`Snapshot`）、`cmd/fastclaw/main.go` | 绿：`TestAWriteThatFailsLeavesTheCounterAlone`、`TestDeleteAlsoStamps`、`TestSaveAgentStamps`，以及 `TestAgentConfigWritePathsAreVisibleToTheRuntimeRead`（现在走九次写：第 100 行的六次，加 provider 删除，加「不需要通知」那次）。**反证已跑**：去掉 `AddMCPServer` 的盖章，回滚测试读到 `counter did not move on a successful write`，对应的 e2e 那一步也红。`go test ./internal/...` 全绿 | **dev 上**：跑着的 pod 上做一次 `mcp add`，`counter` 从 5 变 6，同一会话的 `mcp status` 列出新 server（第 103 行记这次实跑） | ❌ 下一次 fastagent 构建带上它 |
 
-### 13.23 真正把代码发出去的那次发布（第 90 行）
+### 13.23 2026-10-06 的第二次 dev 发布，以及现场看到的写路径（第 103 行）
+
+| # | 变更 | 形式化（职责） | 代码锚点 | UT | 现场 e2e | 已发布 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 103 | **P0b 发到 dev，并且用一次真 turn 看到「写自己盖章」。** fastagent `…:20261006085220-fastagent-d9cb320`（dev，helm rev 118）。cloud 仍是 `66861854-767b-4a75-b069-7dcaed7042d3`：此后 cloud 的提交只有本文档，worker 没有变化 | F2（改动要跑在调用方所在的地方才算交付） | fastagent `build-image.sh`、`deploy/helm/fastagent` | —（本行是一次发布。它带的代码由第 102 行钉住） | **事故现场的形状，在 dev 上。** port-forward 钉住一个副本。一次 turn 里先 `mcp add e2e-vis-probe … oauthResource=…`，然后**同一个 turn、同一个会话**里 `mcp status e2e-vis-probe`。工具回的是 `e2e-vis-probe: none`，即它刚读到的那条声明的凭据状态。若那次读看不见声明，它会回事故原句 `"e2e-vis-probe" is not a configured OAuth MCP server`。**一次写一个版本**：`counter` 在这次 turn 里 39 → 40，随后的 `remove` 40 → 41，更早两次 `add` 是 15 → 16 与 36 → 37，两次 `remove` 是 37 → 39。每次写都恰好 +1，说明通知路径不再重复盖章。**清理**：两个探测 server 已删除，探测会话也已删除（管理端列表读到的总数前后都是 227） | ✅ dev（fastagent helm rev 118），2026-10-06 |
+
+这次实跑还顺带记下两件事。**第一，dev 上有 HPA**（`fastagent-gateway`，min 2，max 10）。它把副本扩到 5 又缩回来，这正是第 101 行解释不了的那次 pod 替换：缩容会删 pod，而删 pod 不会留下容器重启记录。**第二，API 路径的 turn 没有对话日志。** `emitEventChecked` 于是返回负序号，因为 `internal/agent/events.go` 要求有 stream 与 sink。这条路径上每次 `mcp add` 都会附上工具自己声明的那条 undo 日志警告。两件事都早于本次改动，也都不是本行引入的缺陷。
+
+### 13.24 真正把代码发出去的那次发布（第 90 行）
 
 | # | 变更 | 形式化（职责） | 代码锚点 | UT | 现场 e2e | 已发布 |
 | --- | --- | --- | --- | --- | --- | --- |
