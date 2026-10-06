@@ -84,3 +84,39 @@ func TestStatsKeepTheRecentShape(t *testing.T) {
 		t.Fatalf("rebuild samples = %d; want one per rebuild", stats.RebuildSeconds.Samples)
 	}
 }
+
+// TestStatsSeparateTheCheckFromTheRebuild pins the two metrics apart. A live dev
+// read made the difference visible: with the whole call measured as a "check",
+// one cold read reported a check p99 of 0.196 s against a rebuild p99 of
+// 0.188 s, which makes the 3 ms acceptance line unreachable by construction and
+// hides what a cache HIT costs.
+func TestStatsSeparateTheCheckFromTheRebuild(t *testing.T) {
+	store := &fakeStore{
+		version:      1,
+		servers:      map[string]config.MCPServerConfig{},
+		resolveDelay: 60 * time.Millisecond,
+	}
+	uc, err := New(store, NewMemoryMemo(0))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	scope := Scope{UserID: "u_1", AgentID: "agt_1"}
+
+	if _, err := uc.For(context.Background(), scope); err != nil { // rebuild
+		t.Fatalf("first read: %v", err)
+	}
+	if _, err := uc.For(context.Background(), scope); err != nil { // hit
+		t.Fatalf("second read: %v", err)
+	}
+
+	stats := uc.Stats()
+	if stats.RebuildSeconds.P99 < 0.05 {
+		t.Fatalf("rebuild p99 = %v; want at least the 60 ms the store spent", stats.RebuildSeconds.P99)
+	}
+	if stats.CheckSeconds.P99 > 0.03 {
+		t.Fatalf("check p99 = %v; the check absorbed the rebuild", stats.CheckSeconds.P99)
+	}
+	if stats.CheckSeconds.Samples != 2 {
+		t.Fatalf("check samples = %d; want one per read", stats.CheckSeconds.Samples)
+	}
+}

@@ -174,23 +174,30 @@ func (r *Resolve) For(ctx context.Context, scope Scope) (config.ResolvedAgent, e
 	if scope.AgentID == "" {
 		return config.ResolvedAgent{}, errors.New("agentconfig: agent ID is required")
 	}
-	started := time.Now()
-	defer func() { r.checkSeconds.observe(time.Since(started)) }()
-
 	lock := r.scopeLock(scope)
 	lock.Lock()
 	defer lock.Unlock()
 
 	for attempt := 0; attempt < readRepairAttempts; attempt++ {
 		r.checks.Add(1)
+		// The check is the part every read pays: the counter read plus the memo
+		// decision. The rebuild is measured on its own, because a hit costs only
+		// this and a rebuild is the rare half the acceptance line does not cap.
+		// Measuring the whole call here made checkSeconds follow the rebuild,
+		// which a live dev run showed: one cold read reported a check p99 of
+		// 0.196 s against a rebuild p99 of 0.188 s.
+		checkStarted := time.Now()
 		before, err := r.store.CurrentVersion(ctx)
 		if err != nil {
+			r.checkSeconds.observe(time.Since(checkStarted))
 			return config.ResolvedAgent{}, fmt.Errorf("agentconfig: read version: %w", err)
 		}
-		if cfg, version, ok := r.memo.Get(scope); ok {
-			if version == before {
+		cached, entryVersion, ok := r.memo.Get(scope)
+		r.checkSeconds.observe(time.Since(checkStarted))
+		if ok {
+			if entryVersion == before {
 				r.hits.Add(1)
-				return cfg, nil
+				return cached, nil
 			}
 			// The entry is behind the counter: this is where a write becomes
 			// visible to this process. Record how old the entry was.
