@@ -987,7 +987,13 @@ cloud 比对的是一份列表；pod 不知道令牌的受众与 scope。这里�
 | --- | --- | --- | --- | --- | --- | --- |
 | 100 | **把 agent 配置的每条写路径都走一遍，每写一次就紧跟一次运行时读。** 新增 `internal/gateway/agent_config_paths_e2e_test.go`。它用真实 sqlite 存储与真实网关，先把缓存捂热，再按解析顺序做六次写。system 的 `agents.defaults` 走 `NotifySystemReload`。user 的 `agents.defaults` 走 `InvalidateUser`。agent 行的 `agents.config`（层三加载器）与 agent 作用域的 `agents.defaults` 行走 `InvalidateAgent`。agent 作用域那一行带 model、maxTokens、promptMode、splitReplies、autoPersist，正好是本次重构合二为一的那个覆盖。另两次写覆盖 agent 作用域 provider 与 MCP server 行。每一步都断言解析出来的值。也断言计数器前进过。没有让计数器前进的写，就是缓存看不见的写。另有两个见证。稳态再加两次读，重建数不动。反面用例直接往存储写一行，缓存读在咽喉跑之前看不见它。这就是写协议换来代价的那一面。`TestMcpLoginSeesAServerAddedInTheSameSession` 不再用手搓的 provider 闭包，改用真实 `agentconfig` 缓存压在真实存储上。于是事故现场跑的就是生产读路径，测试也断言出现 stale 命中 | I1（每次写都让计数器严格前进） + I2（一次读不会返回比"它可能见过的"更新值更旧的版本） | `internal/gateway/agent_config_paths_e2e_test.go`（新增）、`internal/agent/mcp_config_tool_test.go`（升级）。本行没有改生产代码 | 绿：`go test ./internal/...`，含上面六个子测试、反面用例、以及升级后的事故测试。**反证**：哪条写路径不再 bump，反面用例就红。覆盖顺序一变，解析值断言就红 | **现场实跑**：真实网关监听 18991，super admin 会话，`POST /api/agents`，再用 `PUT /api/agents/{id}` 写 `{"model":"openai/e2e-model","promptMode":"chatbot","splitReplies":true,"autoPersist":true}`，然后 `GET /api/agents/{id}`。读回来四个字段都在。`GET /api/admin/config-cache` 回 200，`checks: 0`。这是对的。运行时的缓存读发生在真正跑 turn 的 agent 上，而那个冷进程里没有 turn | ❌ 只有测试与文档。本行不带任何要进镜像的东西 |
 
-### 13.21 真正把代码发出去的那次发布（第 90 行）
+### 13.21 2026-10-06 的 dev 发布（第 101 行）
+
+| # | 变更 | 形式化（职责） | 代码锚点 | UT | 现场 e2e | 已发布 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 101 | **cloud 与 fastagent 一起滚到 dev。网关发了两次，因为第一次现场跑就发现一处指标缺陷（第 99 行）。** 第一版：fastagent `…:20261006010415-fastagent-03e6d3f`（dev，helm rev 116）。check/rebuild 拆分落地后：`…:20261006013143-fastagent-ae3e283`（dev，helm rev 117）。cloud `tokenaissance-cloud-dev` 先是版本 `0fdc486d-f947-4cc9-b3a1-4069d0d59061`，之后是 `66861854-767b-4a75-b069-7dcaed7042d3`，来自 develop HEAD `b405c42f`，所以跑着的 worker 与推上去的树一致。prod 没动 | F2（改动要跑在调用方所在的地方才算交付） | fastagent `build-image.sh`（build + push + `helm upgrade --reuse-values --set image.tag`）、`deploy/helm/fastagent`。cloud `package.json`（`cf:deploy:dev`） | —（本行是一次发布。它带的代码由第 97–100 行钉住） | 滚动之后 `rollout status` 完成，deployment 镜像为 `…:20261006013143-fastagent-ae3e283`，helm revision 117。站点 200（`https://dev.tokenaissance.com/`）。未鉴权的 `POST https://dev.tokenaissance.com/mcp` 回 401。`GET https://dev-fastagent.tokenaissance.com/api/admin/config-cache` 无凭证回 401，带 dev admin key 回 200。**这条路由只存在于本次发布，所以那个 401 就证明新镜像在服务。** 缓存指标取自跑着的 pod。用 port-forward 钉住一个副本，一次 turn 调了 `mcp` 工具。计数从全零变成 `checks=1, hits=0, rebuilds=1`。读数是 `checkSeconds.p99=2.58 ms`，同刻 `rebuildSeconds.p99=539 ms`。第二次 turn 给出 `checks=2, hits=1, rebuilds=1`，check 不变，说明命中只付 check 那一半 | ✅ dev（fastagent helm rev 117，cloud `66861854-767b-4a75-b069-7dcaed7042d3`），2026-10-06 |
+
+### 13.22 真正把代码发出去的那次发布（第 90 行）
 
 | # | 变更 | 形式化（职责） | 代码锚点 | UT | 现场 e2e | 已发布 |
 | --- | --- | --- | --- | --- | --- | --- |
