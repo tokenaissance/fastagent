@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 )
@@ -19,6 +20,9 @@ type fakeStore struct {
 	// versionReads lets a test make the counter move between the two reads of
 	// one read-repair attempt (the torn-pair case).
 	versionReads []Version
+	// resolveDelay makes a rebuild slow, so a test can tell the check metric
+	// from the rebuild metric.
+	resolveDelay time.Duration
 }
 
 func (f *fakeStore) CurrentVersion(context.Context) (Version, error) {
@@ -33,6 +37,12 @@ func (f *fakeStore) CurrentVersion(context.Context) (Version, error) {
 }
 
 func (f *fakeStore) Resolve(context.Context, Scope) (config.ResolvedAgent, error) {
+	f.mu.Lock()
+	delay := f.resolveDelay
+	f.mu.Unlock()
+	if delay > 0 {
+		time.Sleep(delay)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.resolves++
