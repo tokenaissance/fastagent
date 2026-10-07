@@ -198,7 +198,7 @@ type DiscoveryMetadata struct {
 
 > 领域层不碰网络、不碰存储、不碰浏览器。所有规则可单测（纯函数，表驱动测试）。
 
-**RFC 8707（Resource Indicators for OAuth 2.0）**：所有与受保护资源相关的 OAuth 请求都携带 `resource=<MCP server URL>`（绝对 URI，取自该 server 的 `oauthResource`/连接 URL）——**authorize、token exchange、refresh、revoke 一律带**。这是标准扩展而非供应商私有参数：Quandora 的 AS 在 authorize 缺 `resource` 时返回 422，在 token endpoint 缺 `resource` 时返回 `invalid_request: missing token request field`（2026-09-04 实测）；不支持该参数的 AS 按 OAuth 约定忽略未识别参数。早期"资源在授权阶段已绑定、token/refresh 不携带"的假设已被实测推翻，实现按 RFC 8707 全程透传。发现阶段若根 `.well-known` 缺失，回退解析资源 401 的 `WWW-Authenticate`（`auth-issuer`，后续可扩展 RFC 9728 `resource_metadata`）。`IssuerBound` 模式（AS 声明 `authorization_response_iss_parameter_supported`）下 authorize 请求额外回带 `iss`（RFC 9207 混淆防护）。
+**RFC 8707（Resource Indicators for OAuth 2.0）**：所有与受保护资源相关的 OAuth 请求都携带 `resource=<MCP server URL>`（绝对 URI，取自该 server 的 `oauthResource`/连接 URL）——**authorize、token exchange、refresh、revoke 一律带**。这是标准扩展而非供应商私有参数：Quandora 的 AS 在 authorize 缺 `resource` 时返回 422，在 token endpoint 缺 `resource` 时返回 `invalid_request: missing token request field`（2026-09-04 实测）；不支持该参数的 AS 按 OAuth 约定忽略未识别参数。早期"资源在授权阶段已绑定、token/refresh 不携带"的假设已被实测推翻，实现按 RFC 8707 全程透传。发现阶段优先读 RFC 9728 protected-resource 元数据（well-known 段按 §4 适配器表所述插在 host 与 path 之间），据此定位 AS。再退到 `{serverUrl}` 自身的 RFC 8414，最后才回退解析资源 401 的 `WWW-Authenticate`（先 `resource_metadata` 指针，再 `auth-issuer`）。`IssuerBound` 模式（AS 声明 `authorization_response_iss_parameter_supported`）下 authorize 请求额外回带 `iss`（RFC 9207 混淆防护）。
 
 ---
 
@@ -286,7 +286,7 @@ type KeyFunc interface {   // 派生加密密钥（Adapter 提供，由 config s
 | 适配器 | 实现 | 备注 |
 |---|---|---|
 | `http_exchange.go` | `AuthorizationCodeExchanger` | `POST {token_endpoint}`，`Content-Type: application/x-www-form-urlencoded`，解析 `access_token/refresh_token/expires_in/scope` |
-| `metadata_fetcher.go` | `MetadataFetcher` | `GET {issuer}/.well-known/oauth-authorization-server`；失败回退从 `WWW-Authenticate: Bearer auth-issuer=…` 取 issuer 再 fetch |
+| `metadata_fetcher.go` | `MetadataFetcher` | 候选链，依次尝试、任一步失败只前进不中止：① RFC 9728 `/.well-known/oauth-protected-resource[/{path}]` → 其 `authorization_servers[0]` 的 RFC 8414 文档。② 对 `{serverUrl}` 自身取 RFC 8414（path-aware 优先，origin root 兜底）。③ 资源 401 的 `WWW-Authenticate`（先 `resource_metadata` 指针，再 `auth-issuer`）。well-known 段按 RFC 8414 §3.1 / RFC 9728 §3 插在 host 与 path **之间**，不替换 path |
 | `token_store.go` | `TokenStore` | 密文落盘 `~/.fastagent/oauth/{userID}/{agentID}/{serverName}.json`，用 KeyFunc 加密；原子写（tmp+rename）；权限 0600 |
 | `pending_store.go` | `PendingAuthStore` | 内存 TTL 缓存 + DB 兜底；`Take` 读即删保证一次性 |
 | `registration_store.go` | `ClientRegistrationStore` | 首次注册后持久化 client_id，避免重复注册 |
@@ -1355,6 +1355,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/fastclaw-ai/fastclaw/internal/mcp/oauth/domain"
@@ -1367,7 +1368,14 @@ func (f *HTTPMetadataFetcher) Fetch(ctx context.Context, serverURL string) (*dom
 	if err != nil {
 		return nil, err
 	}
-	u.Path = "/.well-known/oauth-authorization-server"
+	// RFC 8414 §3.1 / RFC 9728 §3：well-known 段插在 host 与 path 之间，不替换 path。
+	// 完整候选链（RFC 9728 protected-resource → 本节 RFC 8414 的 path-aware → origin root
+	// → WWW-Authenticate 提示）见 metadata.go 的 Fetch。
+	resourcePath := strings.TrimSuffix(u.Path, "/")
+	if resourcePath == "/" {
+		resourcePath = ""
+	}
+	u.Path = "/.well-known/" + wellKnownAuthServer + resourcePath
 	u.RawQuery, u.Fragment = "", ""
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	resp, err := f.Client.Do(req)
