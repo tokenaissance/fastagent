@@ -32,8 +32,32 @@ FastAgent is an **Agent Factory** — it creates, manages, and runs AI agents. E
 
 ```bash
 # Install (drops the binary into ~/.local/bin and adds it to PATH)
-curl -fsSL https://raw.githubusercontent.com/tokenaissance/fastagent/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/tokenaissance/fastagent/fastagent/install.sh | bash
 ```
+
+### Upstream: FastClaw
+
+FastAgent grew out of **FastClaw**, the multi-agent framework. The upstream
+source repository is
+[github.com/fastclaw-ai/fastclaw](https://github.com/fastclaw-ai/fastclaw). It is
+public, and it is not itself a fork.
+
+| Remote | URL | Role |
+|---|---|---|
+| `fastagent` | [tokenaissance/fastagent](https://github.com/tokenaissance/fastagent) | the canonical repository for this code |
+| `origin` | [tokenaissance/fastclaw](https://github.com/tokenaissance/fastclaw) | this organization's fork of the upstream |
+| upstream | [fastclaw-ai/fastclaw](https://github.com/fastclaw-ai/fastclaw) | the source project |
+
+Two consequences are worth knowing:
+
+- The Go module path is still `github.com/fastclaw-ai/fastclaw`. Import paths did
+  not move when the project was renamed, so an import statement still names the
+  upstream module.
+- A checkout of this repository carries two remotes. `git remote -v` shows them,
+  and `fastagent` is the canonical one.
+
+The rename, and what it touched, is recorded in
+[docs/REBRAND/REBRAND_PLAN.md](./docs/REBRAND/REBRAND_PLAN.md).
 
 ## Quick Start
 
