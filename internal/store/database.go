@@ -3311,6 +3311,40 @@ func (d *DBStore) ListSessionsPaginated(ctx context.Context, agentIDs []string, 
 	return metas, total, rows.Err()
 }
 
+// LookupSessionLocation returns the owning user/agent/project of a
+// session_key, restricted to agentIDs (nil = any agent). session_key is
+// globally unique (see GetSessionByKey), so this selects one row.
+// agentIDs == [] means the caller sees nothing and short-circuits.
+func (d *DBStore) LookupSessionLocation(ctx context.Context, agentIDs []string, sessionKey string) (SessionLocation, bool, error) {
+	var loc SessionLocation
+	if sessionKey == "" {
+		return loc, false, nil
+	}
+	args := []any{sessionKey}
+	where := `WHERE session_key = ` + d.ph(1)
+	if agentIDs != nil {
+		if len(agentIDs) == 0 {
+			return loc, false, nil
+		}
+		phs := make([]string, len(agentIDs))
+		for i, id := range agentIDs {
+			phs[i] = d.ph(i + 2)
+			args = append(args, id)
+		}
+		where += ` AND agent_id IN (` + strings.Join(phs, ",") + `)`
+	}
+	row := d.handle().QueryRowContext(ctx,
+		fmt.Sprintf(`SELECT user_id, agent_id, COALESCE(project_id,'') FROM sessions %s LIMIT 1`, where),
+		args...)
+	if err := row.Scan(&loc.UserID, &loc.AgentID, &loc.ProjectID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return loc, false, nil
+		}
+		return loc, false, err
+	}
+	return loc, true, nil
+}
+
 // LookupSessionTriple is ResolveActiveSessionKey's inverse: given a
 // session_key (the canonical row id), return the (channel, accountID,
 // chatID) it belongs to. Used by handlers that take a session_key from

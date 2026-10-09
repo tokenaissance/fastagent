@@ -180,6 +180,12 @@ type Store interface {
 	// updated_at DESC. When agentIDs is nil every agent is included (admin
 	// view); otherwise only the listed agents. Returns (rows, totalCount, err).
 	ListSessionsPaginated(ctx context.Context, agentIDs []string, offset, limit int) ([]SessionMeta, int, error)
+	// LookupSessionLocation returns the owning user/agent/project of a
+	// session_key, restricted to agentIDs (nil = any agent). The boolean
+	// is false when no visible session carries that key. This reads one
+	// indexed row, so a deep link resolves without building a preview
+	// per session the way ListSessionsPaginated does.
+	LookupSessionLocation(ctx context.Context, agentIDs []string, sessionKey string) (SessionLocation, bool, error)
 	DeleteSession(ctx context.Context, userID, agentID, sessionKey string) error
 	RenameSession(ctx context.Context, userID, agentID, sessionKey, title string) error
 	// MoveSession reassigns a session to a different project (or
@@ -685,6 +691,16 @@ type SessionMeta struct {
 	MessageCount  int       `json:"messageCount"`
 	UpdatedAt     time.Time `json:"updatedAt"`
 	ChatterUserID string    `json:"chatterUserId,omitempty"`
+}
+
+// SessionLocation identifies the owning user and agent of a session_key,
+// plus the project folder it belongs to. The cloud deep-link resolver
+// (/app/<sid>) reads this so it can resolve one session without paging
+// the whole chat list (see LookupSessionLocation).
+type SessionLocation struct {
+	UserID    string `json:"userId"`
+	AgentID   string `json:"agentId"`
+	ProjectID string `json:"projectId,omitempty"`
 }
 
 // ProjectRecord is a per-(user, agent) named workspace folder. Sessions
