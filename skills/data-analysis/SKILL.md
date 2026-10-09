@@ -29,22 +29,24 @@ print(f"\nColumns: {list(df.columns)}")
 print(f"\nFirst 5 rows:\n{df.head()}")
 ```
 
-### Create visualization from data
+### Create a chart from data
+Save the chart as a real file. Reference the file with a relative path.
 ```python
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import pandas as pd
-import base64
 
 df = pd.read_csv('data.csv')
 df.plot(kind='bar', x='category', y='value', figsize=(10, 6))
 plt.title('Data Overview')
 plt.tight_layout()
-plt.savefig('/tmp/chart.png', dpi=150)
-
-with open('/tmp/chart.png', 'rb') as f:
-    print(f'![chart](data:image/png;base64,{base64.b64encode(f.read()).decode()})')
+plt.savefig('chart.png', dpi=150)
+print('Wrote chart.png')
+```
+Point the report at the file:
+```markdown
+![Data overview](chart.png)
 ```
 
 ### JSON processing
@@ -56,8 +58,11 @@ with open('data.json') as f:
 ```
 
 ## Guidelines
-- Always execute the analysis — don't just show code
-- Show key statistics: shape, dtypes, describe(), null counts
-- For large datasets, show head/tail and summary stats
-- Generate charts when it helps explain the data
-- Use base64 inline images for any visualizations
+- Run the analysis and show the result. Do not show code alone.
+- Show these statistics: shape, dtypes, describe(), and null counts.
+- For a large dataset, show head, tail, and summary statistics.
+- Make a chart when a chart explains the data.
+- Save each chart as a real file in the workspace. Use a relative path, for example `chart.png`.
+- Reference a chart with a relative path, for example `![chart](chart.png)`. In HTML, use `<img src="chart.png">`.
+- Put the chart file in the same directory as the report. The reader resolves a relative path against the report directory.
+- Do not put base64 image data in the report. One chart can add hundreds of kilobytes. The reader must decode that full string before the page shows.
