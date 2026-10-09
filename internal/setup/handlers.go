@@ -1964,6 +1964,81 @@ func (s *Server) handleChatSessions(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, map[string]any{"sessions": ag.WebChatSessions()})
 }
 
+// visibleAgentIDs returns the agent IDs the caller may read:
+//   - admin key: nil (every agent)
+//   - agent key: the key's explicit ACL
+//   - user key or browser session: every agent the user owns
+//
+// A []string (non-nil, possibly empty) means "only these agents". The
+// error is non-nil only when ListAgents fails for the user-key branch.
+func (s *Server) visibleAgentIDs(r *http.Request, ident auth.Identity) ([]string, error) {
+	switch {
+	case ident.AuthMethod == "apikey" && ident.APIKeyType == users.APIKeyTypeAdmin:
+		return nil, nil // admin sees everything
+	case ident.AuthMethod == "apikey" && ident.APIKeyType == users.APIKeyTypeAgent:
+		return ident.APIKeyAgents, nil
+	default:
+		agents, err := s.dataStore.ListAgents(r.Context(), ident.EffectiveUserID())
+		if err != nil {
+			return nil, err
+		}
+		ids := make([]string, len(agents))
+		for i, a := range agents {
+			ids[i] = a.ID
+		}
+		return ids, nil
+	}
+}
+
+// handleLocateSession resolves the owning agent and project of one
+// session key without paging the chat list. Cloud deep links
+// (/app/<sid>) carry no agent, so they call this before GET /chats.
+// Scope matches handleChats: the caller sees only agents its key may
+// see. A missing or out-of-scope key returns 404 {"found": false}. The
+// caller reads that JSON body to tell a definitive miss from a pod that
+// has no such route (an older build answers 404 with a plain-text body).
+func (s *Server) handleLocateSession(w http.ResponseWriter, r *http.Request) {
+	if s.dataStore == nil {
+		jsonResponse(w, http.StatusServiceUnavailable, map[string]any{"error": "no data store"})
+		return
+	}
+	ident, ok := auth.FromContext(r.Context())
+	if !ok {
+		jsonResponse(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	sessionKey := r.URL.Query().Get("sessionId")
+	if sessionKey == "" {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "sessionId is required"})
+		return
+	}
+	agentIDs, err := s.visibleAgentIDs(r, ident)
+	if err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	loc, found, err := s.dataStore.LookupSessionLocation(r.Context(), agentIDs, sessionKey)
+	if err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	if !found {
+		jsonResponse(w, http.StatusNotFound, map[string]any{"found": false})
+		return
+	}
+	agentName := ""
+	if ag, agErr := s.dataStore.GetAgent(r.Context(), loc.AgentID); agErr == nil && ag != nil {
+		agentName = ag.Name
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{
+		"found":     true,
+		"sessionId": sessionKey,
+		"agentId":   loc.AgentID,
+		"agentName": agentName,
+		"projectId": loc.ProjectID,
+	})
+}
+
 // handleChats returns chat sessions scoped by the caller's API key type:
 //   - admin key: all sessions across all users and agents
 //   - user key:  all sessions for agents owned by the key's user
@@ -1992,23 +2067,10 @@ func (s *Server) handleChats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Resolve which agent IDs the caller may see.
-	var agentIDs []string // nil = all (admin)
-	switch {
-	case ident.AuthMethod == "apikey" && ident.APIKeyType == users.APIKeyTypeAdmin:
-		agentIDs = nil // admin sees everything
-	case ident.AuthMethod == "apikey" && ident.APIKeyType == users.APIKeyTypeAgent:
-		agentIDs = ident.APIKeyAgents
-	default:
-		uid := ident.EffectiveUserID()
-		agents, agentsErr := s.dataStore.ListAgents(r.Context(), uid)
-		if agentsErr != nil {
-			jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": agentsErr.Error()})
-			return
-		}
-		agentIDs = make([]string, len(agents))
-		for i, a := range agents {
-			agentIDs[i] = a.ID
-		}
+	agentIDs, agentsErr := s.visibleAgentIDs(r, ident)
+	if agentsErr != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": agentsErr.Error()})
+		return
 	}
 
 	offset := (page - 1) * pageSize

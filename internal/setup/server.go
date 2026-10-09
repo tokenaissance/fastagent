@@ -326,6 +326,9 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("GET /api/chat/history", auth(s.handleChatHistory))
 	mux.HandleFunc("GET /api/chat/todo", auth(s.handleChatTodo))
 	mux.HandleFunc("GET /api/chat/sessions", auth(s.handleChatSessions))
+	// Cross-agent deep-link resolver: /app/<sid> carries no agent, so
+	// the cloud resolves one session without walking the paged /chats list.
+	mux.HandleFunc("GET /api/chat/sessions/locate", auth(s.handleLocateSession))
 	mux.HandleFunc("PUT /api/chat/sessions/{key}", auth(s.handleRenameSession))
 	mux.HandleFunc("DELETE /api/chat/sessions/{key}", auth(s.handleDeleteSession))
 	mux.HandleFunc("PATCH /api/chat/sessions/{key}/project", auth(s.handleMoveSessionProject))
