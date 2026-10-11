@@ -244,3 +244,86 @@ func withFormField(req *http.Request, key, value string) *http.Request {
 	}
 	return req
 }
+
+// ---------------------------------------------------------------------------
+// Test: the optional "path" field writes into a subdirectory
+// ---------------------------------------------------------------------------
+
+// The panel sends the destination in a separate form field, because
+// mime/multipart strips every directory from Content-Disposition's filename —
+// a client that sends "AI4F_调研/index.md" as the part filename still lands
+// "index.md" at the scope root.
+//
+// Falsification: drop the uploadPath branch and the assertion below finds
+// index.md at the scope root instead of under AI4F_调研/.
+func TestFileUpload_PathFieldWritesIntoASubdirectory(t *testing.T) {
+	s, uid, aid := setupFileUploadTest(t)
+	sessionKey := "path-field-1"
+
+	req := multipartRequest(t, fmt.Sprintf("/?sessionId=%s", sessionKey), "index.md", "# index")
+	req = withFormField(req, "path", "AI4F_调研/index.md")
+	req.SetPathValue("id", aid)
+	req = stampAuthAndUserID(req, uid)
+
+	w := httptest.NewRecorder()
+	s.handleAgentFileUpload(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", w.Code, w.Body.String())
+	}
+
+	ctx := context.Background()
+	if _, err := s.workspaceStore.Get(ctx, aid, "", sessionKey, "AI4F_调研/index.md"); err != nil {
+		t.Errorf("file not found at AI4F_调研/index.md: %v", err)
+	}
+	if _, err := s.workspaceStore.Get(ctx, aid, "", sessionKey, "index.md"); err == nil {
+		t.Error("file also found at the scope root — the path field did not move it")
+	}
+}
+
+// A destination must stay inside the scope. Each of these names something
+// outside it, so the request is refused before any write.
+func TestFileUpload_PathFieldRefusesEscapes(t *testing.T) {
+	s, uid, aid := setupFileUploadTest(t)
+	for _, bad := range []string{"/etc/passwd", "../secrets.md", "a/../../b.md"} {
+		req := multipartRequest(t, "/?sessionId=escape-1", "x.md", "x")
+		req = withFormField(req, "path", bad)
+		req.SetPathValue("id", aid)
+		req = stampAuthAndUserID(req, uid)
+
+		w := httptest.NewRecorder()
+		s.handleAgentFileUpload(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("path %q: status = %d, want 400; body = %s", bad, w.Code, w.Body.String())
+		}
+	}
+}
+
+// One path names one destination, so it cannot describe several files.
+func TestFileUpload_PathFieldRejectsMultipleFiles(t *testing.T) {
+	s, uid, aid := setupFileUploadTest(t)
+
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	for _, name := range []string{"a.txt", "b.txt"} {
+		fw, err := mw.CreateFormFile("file", name)
+		if err != nil {
+			t.Fatalf("create form file: %v", err)
+		}
+		if _, err := io.WriteString(fw, name); err != nil {
+			t.Fatalf("write form file: %v", err)
+		}
+	}
+	mw.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/?sessionId=multi-1", &buf)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req = withFormField(req, "path", "dir/one.txt")
+	req.SetPathValue("id", aid)
+	req = stampAuthAndUserID(req, uid)
+
+	w := httptest.NewRecorder()
+	s.handleAgentFileUpload(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", w.Code, w.Body.String())
+	}
+}

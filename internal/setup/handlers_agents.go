@@ -1558,6 +1558,29 @@ func (s *Server) handleAgentFileUpload(w http.ResponseWriter, r *http.Request) {
 		// this path is identical to the DB-backed path once the row exists.
 		sessionID = sessionKey
 	}
+	// Optional "path" form field: the destination inside the scope, for a
+	// caller that needs a subdirectory. The multipart filename cannot carry
+	// one: mime/multipart strips every directory from Content-Disposition's
+	// filename parameter, so a client that sends "notes/today.md" as the part
+	// filename still lands "today.md" at the scope root. The value is
+	// scope-relative, exactly like the filename it replaces — this handler
+	// still prefixes the resolved session/project segment. One path names one
+	// destination, so it carries exactly one file, the rule the replace form
+	// of expectedVersion already follows.
+	uploadPath := ""
+	if raw := r.MultipartForm.Value["path"]; len(raw) > 0 {
+		uploadPath = strings.TrimSpace(raw[0])
+	}
+	if uploadPath != "" && len(headers) != 1 {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "path applies to a single file"})
+		return
+	}
+	if uploadPath != "" {
+		if err := validateUploadPath(uploadPath); err != nil {
+			jsonResponse(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+	}
 	// Optional "expectedVersion" form field: the version the panel listed for
 	// this name. With it the upload means *replace the version I saw* — the
 	// industry's explicit replace path (Dropbox's mode=update + rev, GitHub's
@@ -1595,11 +1618,15 @@ func (s *Server) handleAgentFileUpload(w http.ResponseWriter, r *http.Request) {
 		if replaceExpected != "" {
 			expected = workspace.Version(replaceExpected)
 		}
-		err = s.workspaceStore.PutIfVersion(r.Context(), id, projectID, sessionID, h.Filename,
+		dest := h.Filename
+		if uploadPath != "" {
+			dest = uploadPath
+		}
+		err = s.workspaceStore.PutIfVersion(r.Context(), id, projectID, sessionID, dest,
 			strings.NewReader(string(data)), int64(len(data)), "", expected)
 		if errors.Is(err, workspace.ErrVersionConflict) {
-			current := map[string]any{"name": h.Filename}
-			if info, statErr := s.workspaceStore.Stat(r.Context(), id, projectID, sessionID, h.Filename); statErr == nil && info != nil {
+			current := map[string]any{"name": dest}
+			if info, statErr := s.workspaceStore.Stat(r.Context(), id, projectID, sessionID, dest); statErr == nil && info != nil {
 				current["version"] = string(info.Version)
 				current["size"] = info.Size
 				current["modified_at"] = info.ModTime.UTC().Format(time.RFC3339)
@@ -1614,9 +1641,27 @@ func (s *Server) handleAgentFileUpload(w http.ResponseWriter, r *http.Request) {
 			jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 			return
 		}
-		saved = append(saved, map[string]any{"name": h.Filename, "size": len(data), "version": ""})
+		saved = append(saved, map[string]any{"name": dest, "size": len(data), "version": ""})
 	}
 	jsonResponse(w, http.StatusOK, map[string]any{"ok": true, "files": saved})
+}
+
+// validateUploadPath rejects a destination that names nothing or leaves the
+// scope root. The store already contains traversal on its own — resolvePath
+// anchors a cleaned path under the scope directory — so this is not the fence;
+// it is the difference between a caller's mistake and a path the server
+// silently rewrites into a different file.
+func validateUploadPath(p string) error {
+	slashed := filepath.ToSlash(p)
+	if strings.HasPrefix(slashed, "/") || filepath.IsAbs(p) || filepath.VolumeName(p) != "" {
+		return errors.New("path must be relative")
+	}
+	for _, seg := range strings.Split(slashed, "/") {
+		if seg == ".." {
+			return errors.New("path must not contain ..")
+		}
+	}
+	return nil
 }
 
 func (s *Server) handleAgentFileDelete(w http.ResponseWriter, r *http.Request) {
