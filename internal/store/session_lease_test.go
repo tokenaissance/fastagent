@@ -244,3 +244,51 @@ func TestSessionCancelTargetsOnlyTheLivePossession(t *testing.T) {
 		t.Fatalf("the next possession inherited a cancel request (%d) from the previous one", rec3.CancelRequested)
 	}
 }
+
+// A stop request must not survive into the next possession when the row is
+// taken over after a LAPSE. The release path deletes the row, so the next
+// acquisition starts from 0 there; the claim path updates the same row, so
+// without the reset clause the new holder inherits the old stamp and stops at
+// its first iteration boundary — a turn nobody asked to stop (the 10-11
+// incident's row outlived its holder).
+//
+// Falsification: drop `cancel_requested = 0` from AcquireSessionLease's upsert
+// and the final assertion fails with the stamp of the previous possession.
+func TestSessionCancelDoesNotLeakAcrossAnExpiredTakeover(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	defer db.Close()
+	const user, agent, session = "u1", "agt1", "sess-cancel-lapse"
+
+	// A possession that lapses instead of releasing: the row stays in place.
+	epoch, ok, err := db.AcquireSessionLease(ctx, user, agent, session, "pod-a/1", 30*time.Millisecond)
+	if err != nil || !ok {
+		t.Fatalf("acquire: ok=%v err=%v", ok, err)
+	}
+	if ok, err := db.RequestSessionCancel(ctx, user, agent, session); err != nil || !ok {
+		t.Fatalf("cancel on the live lease: ok=%v err=%v; want true/nil", ok, err)
+	}
+	time.Sleep(60 * time.Millisecond) // the row is now expired and still present
+	if ok, err := db.RequestSessionCancel(ctx, user, agent, session); err != nil || ok {
+		t.Fatalf("cancel on the lapsed lease: ok=%v err=%v; want false/nil", ok, err)
+	}
+
+	// A new holder claims the SAME row (not a delete + insert).
+	newEpoch, ok, err := db.AcquireSessionLease(ctx, user, agent, session, "pod-b/2", time.Minute)
+	if err != nil || !ok {
+		t.Fatalf("takeover of the lapsed row: ok=%v err=%v", ok, err)
+	}
+	if newEpoch <= epoch {
+		t.Fatalf("takeover epoch = %d, want > %d (the epoch never resets)", newEpoch, epoch)
+	}
+	rec, err := db.GetSessionLease(ctx, user, agent, session)
+	if err != nil || rec == nil {
+		t.Fatalf("get after the takeover: rec=%v err=%v", rec, err)
+	}
+	if rec.HolderID != "pod-b/2" || rec.Epoch != newEpoch {
+		t.Fatalf("the takeover row is not the new possession: %+v", rec)
+	}
+	if rec.CancelRequested != 0 {
+		t.Fatalf("the new possession inherited cancel_requested=%d from the lapsed one", rec.CancelRequested)
+	}
+}

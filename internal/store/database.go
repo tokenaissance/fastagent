@@ -5398,6 +5398,14 @@ func (d *DBStore) GetSessionLease(ctx context.Context, userID, agentID, sessionK
 // life of the row — a reset made a delayed release from an earlier possession
 // match a newer one in the sandbox lease (G25, measured 2026-09-19), and the
 // turn lease is where that would cost a transcript.
+//
+// A successful acquisition also clears cancel_requested. The row outlives its
+// holder: a lapse leaves the row in place and the next acquisition takes it
+// over in the same statement (there is no DELETE). Without this clause a stop
+// request aimed at the previous possession would reach the new one at its first
+// iteration boundary and stop a turn nobody asked to stop. The release path
+// already starts the next possession from 0, because it deletes the row; this
+// clause is what makes the claim path do the same.
 func (d *DBStore) AcquireSessionLease(ctx context.Context, userID, agentID, sessionKey, holderID string, ttl time.Duration) (int64, bool, error) {
 	if userID == "" || agentID == "" || sessionKey == "" || holderID == "" {
 		return 0, false, errors.New("store: AcquireSessionLease requires user_id/agent_id/session_key/holder_id")
@@ -5414,7 +5422,8 @@ func (d *DBStore) AcquireSessionLease(ctx context.Context, userID, agentID, sess
 				SET holder_id = EXCLUDED.holder_id,
 				    epoch = session_turns.epoch + 1,
 				    acquired_at = EXCLUDED.acquired_at,
-				    expires_at = EXCLUDED.expires_at
+				    expires_at = EXCLUDED.expires_at,
+				    cancel_requested = 0
 				WHERE session_turns.expires_at < $5 OR session_turns.holder_id = $4
 				RETURNING epoch`,
 			userID, agentID, sessionKey, holderID, now, expires).Scan(&epoch)
@@ -5426,7 +5435,8 @@ func (d *DBStore) AcquireSessionLease(ctx context.Context, userID, agentID, sess
 				SET holder_id = excluded.holder_id,
 				    epoch = session_turns.epoch + 1,
 				    acquired_at = excluded.acquired_at,
-				    expires_at = excluded.expires_at
+				    expires_at = excluded.expires_at,
+				    cancel_requested = 0
 				WHERE session_turns.expires_at < ? OR session_turns.holder_id = ?
 				RETURNING epoch`,
 			userID, agentID, sessionKey, holderID, now, expires, now, holderID).Scan(&epoch)
