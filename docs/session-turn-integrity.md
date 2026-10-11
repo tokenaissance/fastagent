@@ -1771,7 +1771,38 @@ mapping fails the second.
   the fence only when the turn still owns the session; after a takeover the stale
   pair stays on the cached `Session` so every later write — including whatever the
   loop emits after it notices — is refused by the store rather than landing in the
-  peer's history. The next turn overwrites it at admission.
+  peer's history. The next turn overwrites it at admission. The guarded release
+  runs after a takeover as well (2026-10-11): the delete carries this guard's own
+  pair, so it frees the row when this turn still owns it and it deletes nothing
+  when a peer owns it (L5). The shipped `Stop` returned early on a loss, and the
+  row then survived for its full TTL — the next caller read "a live turn" that had
+  already died.
+* **A refused renewal is classified from the row, never inferred from the refusal
+  (2026-10-11).** The renewal CAS refuses for two different reasons: a peer took
+  the row, or this turn's own row lapsed. The shipped code read both as a takeover
+  and emitted "another turn took this session over" for a peer that did not exist.
+  The verdict now comes from the row. `turnLeaseGuard.classify` reads it and
+  answers one of three facts. A live row with another `(holder, epoch)` is a
+  supersession: the turn stops and the σ goes out. A free row is a lapse with no
+  other holder: the guard takes the row again, and the turn keeps running. An
+  unreadable row proves nothing: the guard keeps the possession and retries at the
+  next tick, and the write fence still refuses every append while the row is not
+  live, so a store hiccup cannot produce a second writer. Falsification: read every
+  refusal as a loss (the shipped rule) and a lapse delivers the false notice and
+  dies with it.
+* **A stop request reaches a turn parked inside a tool call (2026-10-11).** The
+  loop reads the stop request and the loss at its iteration boundary, and a tool
+  call has no boundary. On 10-11 a turn parked on an unreachable sandbox read
+  neither, so `stop_task` answered `{stopped:true}` while nothing moved and the row
+  stayed live until its TTL. `turnLeaseGuard.watchCancel` polls the lease row while
+  the tools run and cancels their context. The request rides the row, so the poll
+  is the route that crosses replicas. A tool that ignores its context still holds
+  the round: the watch bounds the wait on a tool that obeys, and nothing more.
+* **A possession starts with no stop request.** `AcquireSessionLease` clears
+  `cancel_requested` in the same statement that takes the row. The row outlives its
+  holder across a lapse, so without this clause a request aimed at the previous
+  possession reaches the new one at its first boundary and stops a turn that
+  nobody asked to stop.
 * **Waiting**: `Acquire` failure ⇒ the existing `queued{position}` event
   (`internal/agent/loop.go:2330-2336`). `position` counts this pod's waiters only
   — best effort, stated as such — and there is no cross-pod waiter registry
