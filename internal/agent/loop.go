@@ -51,6 +51,9 @@ type Agent struct {
 	turnLeaseTTLOverride time.Duration
 	// turnLeaseRetryOverride pins the queued re-try interval for tests.
 	turnLeaseRetryOverride time.Duration
+	// turnLeaseWatchOverride pins the in-flight-tool cancel poll interval for
+	// tests (0 = turnLeaseWatchDefault).
+	turnLeaseWatchOverride time.Duration
 	// sessionWaiters counts the turns waiting for each session on this pod — the number the
 	// history read publishes as `queued`. See session_waiters.go for why it is counted here and
 	// not at the session slot.
@@ -3038,6 +3041,10 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		// sizes its own work (delegate_task) has to know when the turn ends even
 		// though this context outlives it on purpose.
 		toolCtx = withTurnDeadline(toolCtx, ctx)
+		// A tool call has no iteration boundary, so a stop request and a loss
+		// are read on a timer while the tools run: a turn parked inside one
+		// call is still reachable (the 10-11 incident).
+		toolCtx, endToolWatch := lease.watchCancel(toolCtx, a.turnLeaseWatchInterval())
 		tcByID := make(map[string]provider.ToolCall, len(resp.ToolCalls))
 		for _, tc := range resp.ToolCalls {
 			tcByID[tc.ID] = tc
@@ -3076,6 +3083,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		}
 
 		results := a.engine.executeToolsConcurrently(toolCtx, a.registry, executeCalls, a.workspacePath, onResult)
+		endToolWatch()
 		endToolGrace()
 		// Append synthetic deferred results so every original tool_use
 		// id has a paired tool_result. The deferred message tells the
@@ -3873,10 +3881,15 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 		toolCtx, endToolGrace := toolGraceContext(ctx, a.graceWindow())
 		// See the note in HandleMessage: the turn's deadline travels as a value.
 		toolCtx = withTurnDeadline(toolCtx, ctx)
+		// Same reason as the non-streaming loop: a tool call has no boundary,
+		// so the stop request and the loss are read on a timer while the
+		// tools run.
+		toolCtx, endToolWatch := lease.watchCancel(toolCtx, a.turnLeaseWatchInterval())
 		// The streaming endpoint emits no tool_call/tool_result events (its
 		// consumers read the stream, not the chat-event fan-out), so it passes
 		// no per-call callback — see executeToolsConcurrently.
 		results := a.engine.executeToolsConcurrently(toolCtx, a.registry, resp.ToolCalls, a.workspacePath, nil)
+		endToolWatch()
 		endToolGrace()
 		totalToolCalls += len(results)
 

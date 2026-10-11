@@ -14,15 +14,17 @@ import (
 // fakeLease is the port's test double: it can be told to report a live peer,
 // to refuse the first N acquisitions, and to fail a renewal (a takeover).
 type fakeLease struct {
-	mu       sync.Mutex
-	holder   string
-	epoch    int64
-	peer     *Turn // what Live reports; also the facts of a refused Acquire
-	busyFor  int
-	renewErr error
-	liveErr  error
-	cancel   bool
-	releases int
+	mu           sync.Mutex
+	holder       string
+	epoch        int64
+	peer         *Turn // what Live reports; also the facts of a refused Acquire
+	busyFor      int
+	acquires     int
+	renewErr     error
+	liveErr      error
+	cancel       bool
+	releases     int
+	releasedWith []Turn
 }
 
 func (f *fakeLease) setCancel(v bool) {
@@ -49,6 +51,7 @@ func (f *fakeLease) CancelRequested(_ context.Context, _ SessionKey, held *Turn)
 func (f *fakeLease) Acquire(context.Context, SessionKey, time.Duration) (*Turn, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.acquires++
 	if f.busyFor > 0 {
 		f.busyFor--
 		busy := &SessionTurnBusy{}
@@ -71,9 +74,10 @@ func (f *fakeLease) Renew(_ context.Context, _ SessionKey, held *Turn, _ time.Du
 	return &Turn{Holder: held.Holder, Epoch: f.epoch, ExpiresAt: time.Now().Add(time.Minute)}, nil
 }
 
-func (f *fakeLease) Release(context.Context, SessionKey, *Turn) error {
+func (f *fakeLease) Release(_ context.Context, _ SessionKey, held *Turn) error {
 	f.mu.Lock()
 	f.releases++
+	f.releasedWith = append(f.releasedWith, *held)
 	f.mu.Unlock()
 	return nil
 }
@@ -164,7 +168,12 @@ func TestAutomaticTurnDefersWhenAPeerHoldsTheLease(t *testing.T) {
 func TestSupersededTurnStopsAndSignals(t *testing.T) {
 	a, _ := newGateAgent(t)
 	lease := &fakeLease{}
+	// A genuine supersession needs both halves of the fact: the renewal CAS
+	// refuses, AND the row names a different (holder, epoch). The row is the
+	// witness that tells this apart from a lapse of the turn's own row — the
+	// false notice of 2026-10-11.
 	lease.renewErr = &SessionTurnBusy{Holder: "pod-b/2", ExpiresAt: time.Now().Add(time.Minute)}
+	lease.peer = &Turn{Holder: "pod-b/2", Epoch: 9, ExpiresAt: time.Now().Add(time.Minute)}
 	a.sessionLease = lease
 	a.turnLeaseTTLOverride = 60 * time.Millisecond // renew tick = 20 ms
 
@@ -226,8 +235,15 @@ func TestSupersededTurnStopsAndSignals(t *testing.T) {
 	if sess.Fence() == nil {
 		t.Fatal("the fence was cleared on loss; later writes would land unfenced")
 	}
-	if lease.releases != 0 {
-		t.Fatal("a superseded guard released the peer's lease")
+	// The guarded release runs after a loss, and it carries THIS guard's own
+	// pair: it frees the row when this turn still owns it, and deletes nothing
+	// when a peer owns it (obligation L5). The assertion is on the pair, not on
+	// the call count — the fake accepts any pair.
+	if len(lease.releasedWith) != 1 {
+		t.Fatalf("releases = %v, want exactly one guarded release after the loss", lease.releasedWith)
+	}
+	if got := lease.releasedWith[0]; got.Holder == "pod-b/2" {
+		t.Fatalf("the release carried the peer's pair (%+v); a stale pair must not touch the peer's row", got)
 	}
 	sess.ClearTurnFence()
 }
@@ -248,6 +264,7 @@ func TestStopWaitsForTheNoticeItStarted(t *testing.T) {
 	a, _ := newGateAgent(t)
 	lease := &fakeLease{}
 	lease.renewErr = &SessionTurnBusy{Holder: "pod-b/2", ExpiresAt: time.Now().Add(time.Minute)}
+	lease.peer = &Turn{Holder: "pod-b/2", Epoch: 9, ExpiresAt: time.Now().Add(time.Minute)}
 	a.sessionLease = lease
 	a.turnLeaseTTLOverride = 60 * time.Millisecond // renew tick = 20 ms
 
@@ -509,5 +526,199 @@ func TestCancelledTurnStreamsNothingAndSignalsOnce(t *testing.T) {
 	}
 	if rounds := prov.rounds.Load(); rounds != 1 {
 		t.Fatalf("provider rounds = %d, want 1: a round started after the cancel", rounds)
+	}
+}
+
+// A refused renewal is not a supersession by itself (the 10-11 false notice).
+// The row is the only witness, and it says three different things:
+//
+//   - a live row with another (holder, epoch) — a real supersession;
+//   - a free row — this turn's row lapsed, and nobody took it: take it again;
+//   - an unreadable row — nothing is proven: keep the possession and retry.
+//
+// Falsification: restore the shipped renewLoop (every error is a loss) and the
+// first two cases below go red — the lapse emits "another turn took this
+// session over" for a peer that does not exist, and the turn dies with it.
+func TestALapseWithNoOtherHolderIsRetakenAndClaimsNothing(t *testing.T) {
+	a, _ := newGateAgent(t)
+	lease := &fakeLease{}
+	// The renewal fails, and Live answers "no row": this turn's own row lapsed
+	// and nobody else took it.
+	lease.renewErr = errors.New("store: connection reset by peer")
+	a.sessionLease = lease
+	a.turnLeaseTTLOverride = 60 * time.Millisecond // renew tick = 20 ms
+
+	events := make(chan ChatEvent, 8)
+	ctx := ContextWithChatEvents(context.Background(), events)
+	msg := bus.InboundMessage{Channel: "web", UserID: "u_owner", ChatID: "chat-lease-lapse", Text: "hi"}
+	sess := a.sessions.Get(sessionTriple(msg, msg.ProjectID))
+	g, ok := a.beginTurnLease(ctx, sess, func(evt ChatEvent) { emitEvent(ctx, evt) })
+	if !ok {
+		t.Fatal("beginTurnLease refused on a fresh session")
+	}
+	first := g.possession()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if time.Now().After(deadline) {
+			t.Fatal("the guard never re-took the lapsed row")
+		}
+		if cur := g.possession(); cur != nil && cur.Epoch != first.Epoch {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if g.Lost() {
+		t.Fatal("a lapsed row with no other holder was reported as a loss")
+	}
+	if g.Current() == nil {
+		t.Fatal("the guard stopped presenting a possession after re-taking the row")
+	}
+	g.Stop()
+	close(events)
+	for evt := range events {
+		if evt.Type == lostNoticeEvent {
+			t.Fatalf("a notice was delivered for a lapse with no peer: %v", evt.Data)
+		}
+	}
+	sess.ClearTurnFence()
+}
+
+func TestAnUnreadableRenewalKeepsThePossessionAndClaimsNothing(t *testing.T) {
+	a, _ := newGateAgent(t)
+	lease := &fakeLease{}
+	// Both the renewal and the row read fail. A store hiccup is not a verdict:
+	// the write fence still refuses every append while the row is not live, so
+	// keeping the possession cannot produce a second writer.
+	lease.renewErr = errors.New("store: dial tcp: i/o timeout")
+	lease.liveErr = errors.New("store: dial tcp: i/o timeout")
+	a.sessionLease = lease
+	a.turnLeaseTTLOverride = 60 * time.Millisecond // renew tick = 20 ms
+
+	events := make(chan ChatEvent, 8)
+	ctx := ContextWithChatEvents(context.Background(), events)
+	msg := bus.InboundMessage{Channel: "web", UserID: "u_owner", ChatID: "chat-lease-unknown", Text: "hi"}
+	sess := a.sessions.Get(sessionTriple(msg, msg.ProjectID))
+	g, ok := a.beginTurnLease(ctx, sess, func(evt ChatEvent) { emitEvent(ctx, evt) })
+	if !ok {
+		t.Fatal("beginTurnLease refused on a fresh session")
+	}
+	held := g.possession()
+	time.Sleep(200 * time.Millisecond) // several renew ticks
+	if g.Lost() {
+		t.Fatal("an unreadable renewal was reported as a loss")
+	}
+	if cur := g.possession(); cur == nil || cur.Epoch != held.Epoch {
+		t.Fatalf("the possession changed on an unreadable renewal: %+v, want %+v", cur, held)
+	}
+	if n := lease.acquires; n != 1 {
+		t.Fatalf("acquires = %d, want 1 (only admission): a re-take needs a readable row", n)
+	}
+	g.Stop()
+	close(events)
+	for evt := range events {
+		if evt.Type == lostNoticeEvent {
+			t.Fatalf("a notice was delivered for an unreadable renewal: %v", evt.Data)
+		}
+	}
+	sess.ClearTurnFence()
+}
+
+// The stop request must reach a turn parked INSIDE a tool call. The loop reads
+// the request at its iteration boundary, and a tool call has no boundary: on
+// 2026-10-11 a turn parked on an unreachable sandbox read nothing and waited
+// for its TTL. The watch polls the lease row, because the request can be
+// written on another replica — an in-process signal cannot cross one.
+func TestAStopRequestCancelsAWatchOverAnInFlightTool(t *testing.T) {
+	a, _ := newGateAgent(t)
+	lease := &fakeLease{}
+	a.sessionLease = lease
+	msg := bus.InboundMessage{Channel: "web", UserID: "u_owner", ChatID: "chat-lease-watch", Text: "hi"}
+	sess := a.sessions.Get(sessionTriple(msg, msg.ProjectID))
+	g, ok := a.beginTurnLease(context.Background(), sess, nil)
+	if !ok {
+		t.Fatal("beginTurnLease refused on a fresh session")
+	}
+	defer g.Stop()
+
+	parent, cancelParent := context.WithCancel(context.Background())
+	defer cancelParent()
+	wctx, endWatch := g.watchCancel(parent, 20*time.Millisecond)
+	defer endWatch()
+
+	// The watch must not fire before the request lands.
+	select {
+	case <-wctx.Done():
+		t.Fatal("the watch fired before any stop request")
+	case <-time.After(80 * time.Millisecond):
+	}
+	lease.setCancel(true) // what store.RequestSessionCancel stamps for a peer
+	select {
+	case <-wctx.Done():
+	case <-time.After(3 * time.Second):
+		t.Fatal("the stop request never reached the in-flight tool context")
+	}
+}
+
+// The end-to-end shape of the same fix: the tool is broken out of its block by
+// the watch alone. This test never calls the tool's release, and the turn still
+// ends with one "stopped at your request" σ and one model round.
+func TestAStopRequestReachesATurnParkedInAToolCall(t *testing.T) {
+	a, _ := newGateAgent(t)
+	lease := &fakeLease{}
+	a.sessionLease = lease
+	a.turnLeaseWatchOverride = 20 * time.Millisecond
+	prov := &toolRoundProvider{toolName: "slow_tool"}
+	a.provider = prov
+	started, _ := blockingTool(t, a, "slow_tool")
+
+	events := make(chan ChatEvent, 16)
+	ctx := ContextWithChatEvents(context.Background(), events)
+	msg := bus.InboundMessage{Channel: "web", UserID: "u_owner", ChatID: "chat-cancel-watch", Text: "hi"}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		a.HandleMessage(ctx, msg)
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the turn never reached the slow tool")
+	}
+	// No release(): the watch has to break the tool out by cancelling its
+	// context, exactly as a stop request from another replica would.
+	lease.setCancel(true)
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the turn stayed parked in the tool call after the stop request")
+	}
+	close(events)
+	var notices []string
+	var endings, reasons []string
+	for evt := range events {
+		if evt.Type != lostNoticeEvent {
+			continue
+		}
+		if e, _ := evt.Data["ending"].(string); e != "" {
+			endings = append(endings, e)
+		}
+		if r, _ := evt.Data["reason"].(string); r != "" {
+			reasons = append(reasons, r)
+		}
+		if m, _ := evt.Data["message"].(string); m != "" {
+			notices = append(notices, m)
+		}
+	}
+	if len(notices) != 1 || notices[0] != turnCancelledNotice {
+		t.Fatalf("notices = %v, want exactly one %q", notices, turnCancelledNotice)
+	}
+	if len(endings) != 1 || endings[0] != EndingStopped || reasons[0] != "cancelled" {
+		t.Fatalf("notice carried endings=%v reasons=%v; want one stopped/cancelled", endings, reasons)
+	}
+	if rounds := prov.rounds.Load(); rounds != 1 {
+		t.Fatalf("provider rounds = %d, want 1: a round started after the stop", rounds)
 	}
 }

@@ -38,6 +38,11 @@ const (
 	// turn's return — the emit respects the turn's context, so it ends on its
 	// own once that context does.
 	turnLeaseStopJoin = 2 * time.Second
+	// turnLeaseWatchDefault is how often a turn parked inside a tool call
+	// re-reads the two boundary verdicts — the user's stop request and the loss
+	// to a peer. One indexed row read per interval while tools run, against a
+	// stop that reaches the tool in seconds instead of at the turn's TTL.
+	turnLeaseWatchDefault = 5 * time.Second
 )
 
 // turnLeaseGuard owns one possession: it renews on a timer, records a loss,
@@ -112,6 +117,26 @@ func (g *turnLeaseGuard) Lost() bool {
 	return g.lost
 }
 
+// possession returns the lease facts this guard holds, even after a loss.
+// Stop needs them to present the guarded release: the delete carries this
+// guard's own (holder, epoch), so it frees the row when this turn still owns it
+// and it is a no-op when a peer owns it (obligation L5). Current() cannot be
+// used for that, because it answers nil after a loss by design.
+func (g *turnLeaseGuard) possession() *Turn {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.turn
+}
+
+// adopt records a possession this guard just proved it holds, and re-binds the
+// session's write fence to it.
+func (g *turnLeaseGuard) adopt(t *Turn) {
+	g.mu.Lock()
+	g.turn = t
+	g.mu.Unlock()
+	g.sess.SetTurnFence(t.Holder, t.Epoch)
+}
+
 // Stop cancels the renewer, waits for it to leave, and frees the lease. The
 // wait is part of the contract rather than a politeness: the loss notice is
 // emitted from the renewer, Stop is the turn's last statement, and callers
@@ -124,6 +149,12 @@ func (g *turnLeaseGuard) Lost() bool {
 // every later write of the superseded turn be refused by the store (A1.4 —
 // "it never keeps writing"), including anything the loop emits after it
 // notices the loss. The next turn overwrites it at admission.
+//
+// The release runs after a loss as well. The guarded delete is a no-op when a
+// peer owns the row, and it is the only statement that frees the row when this
+// turn still owns it — the shape the 10-11 incident left behind, where the row
+// survived for its full TTL and the next caller then read "a live turn" that
+// had already died.
 func (g *turnLeaseGuard) Stop() {
 	close(g.stop)
 	select {
@@ -132,18 +163,134 @@ func (g *turnLeaseGuard) Stop() {
 		slog.Warn("turn lease: the renewer is still busy after Stop; it stops when the turn's context ends",
 			"agent", g.key.AgentID, "session", g.key.SessionKey)
 	}
-	if g.Lost() {
-		return
+	if !g.Lost() {
+		g.sess.ClearTurnFence()
 	}
-	g.sess.ClearTurnFence()
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(context.Background()), 5*time.Second)
 	defer cancel()
-	if cur := g.Current(); cur != nil {
+	if cur := g.possession(); cur != nil {
 		if err := g.lease.Release(ctx, g.key, cur); err != nil {
 			slog.Warn("turn lease: release failed; a peer waits for the TTL",
 				"agent", g.key.AgentID, "session", g.key.SessionKey, "err", err)
 		}
 	}
+}
+
+// renewVerdict is what a refused renewal proves about the possession. The row
+// is the only witness: the refusal alone cannot say "a peer took it" and "my
+// own row lapsed" apart, and reporting the second as the first is the false
+// notice of 2026-10-11.
+type renewVerdict int
+
+const (
+	// renewUnknown: the row cannot be read, so nothing is proven. Keep the
+	// possession and retry. The write fence still refuses every append while
+	// the row is not live, so a store hiccup cannot produce a second writer.
+	renewUnknown renewVerdict = iota
+	// renewSuperseded: a live row names a different (holder, epoch). The peer
+	// owns the session and the turn must stop.
+	renewSuperseded
+	// renewRetake: the row is free — it lapsed, or it is gone — and nobody
+	// took it. Take it again instead of dying with a claim that is not true.
+	renewRetake
+)
+
+// classify reads the lease row and reports which fact the refusal proved,
+// together with the row it read (nil when the read failed, or when the row is
+// free).
+func (g *turnLeaseGuard) classify(held *Turn) (renewVerdict, *Turn) {
+	live, err := g.lease.Live(context.Background(), g.key)
+	if err != nil {
+		return renewUnknown, nil
+	}
+	if live == nil {
+		return renewRetake, nil
+	}
+	if live.Holder != held.Holder || live.Epoch != held.Epoch {
+		return renewSuperseded, live
+	}
+	// The row is live and still ours, so the refusal was not a verdict at all
+	// (a store error, not a CAS miss). Nothing is proven.
+	return renewUnknown, live
+}
+
+// declareLost records the supersession and delivers its σ. The fence stays
+// stale on purpose: that is what refuses every later write of the superseded
+// turn (A1.4 — "it never keeps writing").
+func (g *turnLeaseGuard) declareLost(peer string) {
+	slog.Warn("turn lease: lost; the turn must stop writing",
+		"agent", g.key.AgentID, "session", g.key.SessionKey, "superseded_by", peer)
+	g.mu.Lock()
+	g.lost = true
+	g.mu.Unlock()
+	if g.emit == nil {
+		return
+	}
+	data := map[string]any{
+		"message": turnSupersededNotice,
+		// Same ending as a user's stop — the turn did not finish — with the
+		// diagnosis kept apart: `reason` says a peer took the session.
+		"ending": EndingStopped,
+		"reason": "superseded",
+	}
+	if peer != "" {
+		data["holder"] = peer
+	}
+	g.emit(ChatEvent{Type: lostNoticeEvent, Data: data})
+}
+
+// watchCancel cancels the returned context as soon as this possession learns
+// that the user asked it to stop, or that a peer took the session over, while a
+// tool call is in flight.
+//
+// The loop reads both boundary verdicts at its iteration boundary. A tool call
+// has no boundary of its own: on 2026-10-11 a turn parked on an unreachable
+// sandbox read neither, so a stop request could not reach it and its row stayed
+// live until the TTL. The request rides the lease row, so this watch polls that
+// row — an in-process signal cannot cross replicas.
+//
+// A tool that ignores its context still holds the round. This bounds how long a
+// stop waits on a tool that obeys its context, and nothing more.
+func (g *turnLeaseGuard) watchCancel(ctx context.Context, every time.Duration) (context.Context, func()) {
+	if every <= 0 {
+		return ctx, func() {}
+	}
+	wctx, cancel := context.WithCancel(ctx)
+	var once sync.Once
+	stop := func() { once.Do(cancel) }
+	go func() {
+		ticker := time.NewTicker(every)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-wctx.Done():
+				return
+			case <-ticker.C:
+				if g.Lost() {
+					slog.Info("turn lease: the loss reached an in-flight tool call",
+						"agent", g.key.AgentID, "session", g.key.SessionKey)
+					cancel()
+					return
+				}
+				if g.Cancelled(wctx) {
+					slog.Info("turn lease: the stop request reached an in-flight tool call",
+						"agent", g.key.AgentID, "session", g.key.SessionKey)
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	return wctx, stop
+}
+
+// turnLeaseWatchInterval is the poll cadence of watchCancel: the configured
+// value, or the default when unset.
+func (a *Agent) turnLeaseWatchInterval() time.Duration {
+	if a != nil && a.turnLeaseWatchOverride > 0 {
+		return a.turnLeaseWatchOverride
+	}
+	return turnLeaseWatchDefault
 }
 
 // beginTurnLease acquires the session's turn lease, waiting (and reporting
@@ -235,48 +382,46 @@ func (g *turnLeaseGuard) renewLoop() {
 			g.mu.Unlock()
 			next, err := g.lease.Renew(context.Background(), g.key, cur, g.ttl)
 			if err != nil {
-				var busy *SessionTurnBusy
-				slog.Warn("turn lease: lost; the turn must stop writing",
-					"agent", g.key.AgentID, "session", g.key.SessionKey,
-					"superseded_by", busyHolder(busy, err), "err", err)
-				g.mu.Lock()
-				g.lost = true
-				g.mu.Unlock()
-				// The fence STAYS (stale) so every later append is refused by
-				// the store (L4a) even if the loop has not noticed yet. It is
-				// not cleared here: clearing would un-fence the very writes the
-				// loss is supposed to stop.
-				if g.emit != nil {
-					g.emit(ChatEvent{Type: lostNoticeEvent, Data: map[string]any{
-						"message": turnSupersededNotice,
-						"holder":  busyHolderOnLoss(err),
-						// Same ending as a user's stop — the turn did not finish — with the
-						// diagnosis kept apart: `reason` says a peer took the session.
-						"ending": EndingStopped,
-						"reason": "superseded",
-					}})
+				// A refused renewal is not by itself a loss. Two different
+				// facts produce the same refusal — a peer took the row, or
+				// this row lapsed — and only the row can tell them apart. The
+				// verdict is therefore read from the row, never inferred from
+				// the refusal: on 2026-10-11 a transient failure was reported
+				// as "another turn took this session over", and the notice was
+				// false.
+				verdict, live := g.classify(cur)
+				switch verdict {
+				case renewSuperseded:
+					g.declareLost(live.Holder)
+					return
+				case renewRetake:
+					retaken, rerr := g.lease.Acquire(context.Background(), g.key, g.ttl)
+					if rerr != nil {
+						var busy *SessionTurnBusy
+						if errors.As(rerr, &busy) {
+							// The row was free when the renewal was read, and
+							// a peer owns it by the time this acquire runs:
+							// that IS a supersession.
+							g.declareLost(busy.Holder)
+							return
+						}
+						slog.Warn("turn lease: the row had lapsed and the re-take failed; the turn keeps its possession and retries",
+							"agent", g.key.AgentID, "session", g.key.SessionKey, "err", rerr)
+						continue
+					}
+					slog.Info("turn lease: the row had lapsed with no other holder; the possession is re-taken",
+						"agent", g.key.AgentID, "session", g.key.SessionKey, "epoch", retaken.Epoch)
+					g.adopt(retaken)
+					continue
+				default:
+					slog.Warn("turn lease: the renewal failed and the row cannot say why; the turn keeps its possession and retries",
+						"agent", g.key.AgentID, "session", g.key.SessionKey, "err", err)
 				}
-				return
+				continue
 			}
-			g.mu.Lock()
-			g.turn = next
-			g.mu.Unlock()
-			g.sess.SetTurnFence(next.Holder, next.Epoch)
+			g.adopt(next)
 		}
 	}
-}
-
-func busyHolder(busy *SessionTurnBusy, err error) string {
-	if errors.As(err, &busy) {
-		return busy.Holder
-	}
-	return ""
-}
-
-// busyHolderOnLoss names the peer that took over, when the error carries it.
-func busyHolderOnLoss(err error) string {
-	var busy *SessionTurnBusy
-	return busyHolder(busy, err)
 }
 
 // openCallAnswer chooses the sentence the projection uses for tool calls
