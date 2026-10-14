@@ -1,9 +1,9 @@
 module github.com/fastclaw-ai/fastclaw
 
-go 1.25.0
+go 1.26.0
 
 require (
-	github.com/alicebob/miniredis/v2 v2.39.0
+	github.com/alicebob/miniredis/v2 v2.40.0
 	github.com/bwmarrin/discordgo v0.29.0
 	github.com/codeany-ai/open-agent-sdk-go v0.5.0
 	github.com/go-telegram-bot-api/telegram-bot-api/v5 v5.5.1
@@ -12,12 +12,12 @@ require (
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/larksuite/oapi-sdk-go/v3 v3.12.0
 	github.com/minio/minio-go/v7 v7.3.0
-	github.com/redis/go-redis/v9 v9.22.0
-	github.com/slack-go/slack v0.29.0
+	github.com/redis/go-redis/v9 v9.23.0
+	github.com/slack-go/slack v0.30.1
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/crypto v0.55.0
 	gopkg.in/yaml.v3 v3.0.1
-	modernc.org/sqlite v1.58.0
+	modernc.org/sqlite v1.60.1
 )
 
 require (
@@ -44,14 +44,14 @@ require (
 	github.com/tinylib/msgp v1.6.4 // indirect
 	github.com/yuin/gopher-lua v1.1.1 // indirect
 	github.com/zeebo/xxh3 v1.1.0 // indirect
-	go.uber.org/atomic v1.11.0 // indirect
+	go.uber.org/atomic v1.12.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	golang.org/x/net v0.58.0 // indirect
-	golang.org/x/sync v0.22.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
+	golang.org/x/sync v0.23.0 // indirect
+	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
 	gopkg.in/ini.v1 v1.67.3 // indirect
-	modernc.org/libc v1.75.6 // indirect
+	modernc.org/libc v1.77.1 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.12.1 // indirect
 )
