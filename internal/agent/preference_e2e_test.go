@@ -47,11 +47,11 @@ func TestPreference_CloudPathE2E(t *testing.T) {
 	// bindSession stamps the per-turn chatter for a real turn.
 	r.SetChatterUserID(chatter)
 
-	fn := r.GetFunc("set_preference")
-	if fn == nil {
+	tool := r.GetTool("set_preference")
+	if tool == nil {
 		t.Fatalf("set_preference not registered on agent registry")
 	}
-	out, err := fn(ctx, json.RawMessage(`{"key":"`+prefKey+`","value":"`+prefVal+`"}`))
+	out, err := tool.Call(ctx, json.RawMessage(`{"key":"`+prefKey+`","value":"`+prefVal+`"}`))
 	if err != nil {
 		t.Fatalf("set_preference: %v", err)
 	}

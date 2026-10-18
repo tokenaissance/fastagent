@@ -194,7 +194,7 @@ func TestSetPreferenceMalformedArgs(t *testing.T) {
 // expected name.
 func TestSetPreferenceRegistered(t *testing.T) {
 	r, _ := prefFixture(t)
-	if r.GetFunc("set_preference") == nil {
+	if r.GetTool("set_preference") == nil {
 		t.Error("set_preference not registered")
 	}
 }

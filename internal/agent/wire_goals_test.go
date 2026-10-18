@@ -30,7 +30,7 @@ func TestWireGoalsNilStoreIsNoOp(t *testing.T) {
 	if a.goalStore != nil {
 		t.Error("goalStore should remain nil after WireGoals(nil)")
 	}
-	if a.registry.GetFunc("update_goal") != nil {
+	if a.registry.GetTool("update_goal") != nil {
 		t.Error("update_goal should not be registered when store is nil")
 	}
 }
@@ -46,7 +46,7 @@ func TestWireGoalsRegistersToolAndHook(t *testing.T) {
 	if a.goalStore != st {
 		t.Errorf("goalStore = %v, want %v", a.goalStore, st)
 	}
-	if a.registry.GetFunc("update_goal") == nil {
+	if a.registry.GetTool("update_goal") == nil {
 		t.Error("update_goal not registered")
 	}
 	if len(a.hooks.hooks[AfterModelCall]) < 1 {

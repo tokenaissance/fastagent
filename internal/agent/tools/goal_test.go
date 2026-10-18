@@ -74,11 +74,11 @@ func fixture(t *testing.T) (*Registry, *memGoalStore) {
 // (result, err).
 func callTool(t *testing.T, r *Registry, name, argsJSON string) (string, error) {
 	t.Helper()
-	fn := r.GetFunc(name)
-	if fn == nil {
+	tool := r.GetTool(name)
+	if tool == nil {
 		t.Fatalf("tool %q not registered", name)
 	}
-	return fn(context.Background(), json.RawMessage(argsJSON))
+	return tool.Call(context.Background(), json.RawMessage(argsJSON))
 }
 
 // seedGoal directly inserts an Active goal into the store, bypassing
@@ -163,7 +163,7 @@ func TestUpdateGoalOnlyTransitionsFromActive(t *testing.T) {
 // stays registered under its expected name.
 func TestUpdateGoalRegistered(t *testing.T) {
 	r, _ := fixture(t)
-	if r.GetFunc("update_goal") == nil {
+	if r.GetTool("update_goal") == nil {
 		t.Error("update_goal not registered")
 	}
 }

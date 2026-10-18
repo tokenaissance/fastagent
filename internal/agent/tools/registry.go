@@ -185,8 +185,19 @@ func (r *Registry) skillManifestBlocked(path string) bool {
 	return !r.callerIsAdmin && r.isProtectedSkillManifestPath(path)
 }
 
-// ToolFunc is a function that executes a tool with JSON arguments and returns a result string.
+// Tool is one callable tool body. The registry stores this port, so a tool can
+// be a plain function (ToolFunc) or a struct that owns dispatch or state.
+type Tool interface {
+	Call(ctx context.Context, args json.RawMessage) (string, error)
+}
+
+// ToolFunc is a function-shaped Tool.
 type ToolFunc func(ctx context.Context, args json.RawMessage) (string, error)
+
+// Call implements Tool.
+func (f ToolFunc) Call(ctx context.Context, args json.RawMessage) (string, error) {
+	return f(ctx, args)
+}
 
 // ToolSource indicates where a tool was registered from.
 type ToolSource int
@@ -199,6 +210,9 @@ const (
 
 // Registry holds all registered tools.
 type Registry struct {
+	// toolsMu guards the tool table. Hot reload can register a tool while a
+	// turn reads the table; an unguarded map would panic.
+	toolsMu     sync.RWMutex
 	tools       map[string]registeredTool
 	sandboxRoot string           // if non-empty, file tools reject paths outside this dir
 	executor    sandbox.Executor // if non-nil, all file+exec tools route through this
@@ -724,7 +738,7 @@ func (r *Registry) GoalSessionKey() string { return r.goalSessionKey }
 
 type registeredTool struct {
 	def    provider.Tool
-	fn     ToolFunc
+	tool   Tool
 	source ToolSource
 }
 
@@ -772,6 +786,25 @@ func (r *Registry) Register(name, description string, parameters interface{}, fn
 // RegisterFrom adds a tool to the registry with an explicit source.
 // Plugin-sourced tools can override built-in tools with the same name.
 func (r *Registry) RegisterFrom(name, description string, parameters interface{}, fn ToolFunc, source ToolSource) {
+	r.RegisterToolFrom(name, description, parameters, fn, source)
+}
+
+// RegisterTool adds a non-function tool to the registry as a built-in tool.
+// Use it when the body owns state or dispatch and a ToolFunc would only wrap
+// that state in another closure.
+func (r *Registry) RegisterTool(name, description string, parameters interface{}, tool Tool) {
+	r.RegisterToolFrom(name, description, parameters, tool, SourceBuiltin)
+}
+
+// RegisterToolFrom is the single registration funnel. It installs the
+// workspace signal decorator once, at the composition root, so GetTool never
+// allocates and every caller observes the same wrapper.
+func (r *Registry) RegisterToolFrom(name, description string, parameters interface{}, tool Tool, source ToolSource) {
+	if isWorkspaceTool(name) {
+		tool = signalTool{registry: r, inner: tool}
+	}
+	r.toolsMu.Lock()
+	defer r.toolsMu.Unlock()
 	r.tools[name] = registeredTool{
 		def: provider.Tool{
 			Type: "function",
@@ -781,7 +814,7 @@ func (r *Registry) RegisterFrom(name, description string, parameters interface{}
 				Parameters:  parameters,
 			},
 		},
-		fn:     fn,
+		tool:   tool,
 		source: source,
 	}
 }
@@ -805,8 +838,31 @@ func (r *Registry) RegisterSerial(name, description string, parameters interface
 	r.RegisterSerialFrom(name, description, parameters, fn, SourceBuiltin)
 }
 
+// RegisterSerialTool adds a non-function tool that must never run two calls at
+// the same time.
+func (r *Registry) RegisterSerialTool(name, description string, parameters interface{}, tool Tool) {
+	r.RegisterSerialFrom(name, description, parameters, tool, SourceBuiltin)
+}
+
 // RegisterSerialFrom is RegisterSerial with an explicit source.
-func (r *Registry) RegisterSerialFrom(name, description string, parameters interface{}, fn ToolFunc, source ToolSource) {
+func (r *Registry) RegisterSerialFrom(name, description string, parameters interface{}, tool Tool, source ToolSource) {
+	r.RegisterToolFrom(name, description, parameters, serialTool{
+		name:  name,
+		slot:  make(chan struct{}, 1),
+		inner: tool,
+	}, source)
+}
+
+// serialTool serializes calls to one tool. The slot lives in the registered
+// value, so every call shares it and the wait is still abandonable.
+type serialTool struct {
+	name  string
+	slot  chan struct{}
+	inner Tool
+}
+
+// Call waits for this tool's slot, then runs the inner tool.
+func (t serialTool) Call(ctx context.Context, args json.RawMessage) (string, error) {
 	// A slot rather than a mutex: the wait has to be abandonable. A queued
 	// delegate_task is waiting on the turn's clock too, and when that clock runs
 	// out the call must return something the loop can render — not hold a
@@ -814,37 +870,33 @@ func (r *Registry) RegisterSerialFrom(name, description string, parameters inter
 	// with an already-dead ctx. That is the turn of 2026-09-14 that ended with
 	// delegate_task still showing "Queued (waiting on prior sub-agent)…" and a
 	// result nobody was waiting for.
-	slot := make(chan struct{}, 1)
-	wrapped := func(ctx context.Context, args json.RawMessage) (string, error) {
-		// Checked before the select: with a dead ctx and a free slot both cases
-		// are ready and select picks at random, so the dead-ctx answer has to be
-		// decided first.
-		if err := ctx.Err(); err != nil {
-			return "", err
-		}
-		// The wait ends with the TURN, not with the tool's grace window. The loop
-		// hands tools a context that outlives its turn on purpose (so an in-flight
-		// tool can land its result), which means this context's Done fires ~60s
-		// after nobody is waiting for a call that never started. The turn's own
-		// deadline travels as a value (see turn_deadline.go).
-		waitCtx, cancelWait := ctx, context.CancelFunc(func() {})
-		if deadline, ok := TurnDeadline(ctx); ok {
-			waitCtx, cancelWait = context.WithDeadline(ctx, deadline)
-		}
-		defer cancelWait()
-		select {
-		case slot <- struct{}{}:
-			defer func() { <-slot }()
-		case <-waitCtx.Done():
-			// Name what happened. A bare "context deadline exceeded" reads like a
-			// provider fault; for a call that never started, the actionable fact
-			// is that its turn ended while it waited.
-			return "", fmt.Errorf("%s never started: its turn ended while it waited behind another invocation — re-issue it in a fresh turn (%w)",
-				name, waitCtx.Err())
-		}
-		return fn(ctx, args)
+	// Checked before the select: with a dead ctx and a free slot both cases
+	// are ready and select picks at random, so the dead-ctx answer has to be
+	// decided first.
+	if err := ctx.Err(); err != nil {
+		return "", err
 	}
-	r.RegisterFrom(name, description, parameters, wrapped, source)
+	// The wait ends with the TURN, not with the tool's grace window. The loop
+	// hands tools a context that outlives its turn on purpose (so an in-flight
+	// tool can land its result), which means this context's Done fires ~60s
+	// after nobody is waiting for a call that never started. The turn's own
+	// deadline travels as a value (see turn_deadline.go).
+	waitCtx, cancelWait := ctx, context.CancelFunc(func() {})
+	if deadline, ok := TurnDeadline(ctx); ok {
+		waitCtx, cancelWait = context.WithDeadline(ctx, deadline)
+	}
+	defer cancelWait()
+	select {
+	case t.slot <- struct{}{}:
+		defer func() { <-t.slot }()
+	case <-waitCtx.Done():
+		// Name what happened. A bare "context deadline exceeded" reads like a
+		// provider fault; for a call that never started, the actionable fact
+		// is that its turn ended while it waited.
+		return "", fmt.Errorf("%s never started: its turn ended while it waited behind another invocation — re-issue it in a fresh turn (%w)",
+			t.name, waitCtx.Err())
+	}
+	return t.inner.Call(ctx, args)
 }
 
 // ToolNames returns the sorted names of every registered tool.
@@ -855,6 +907,8 @@ func (r *Registry) RegisterSerialFrom(name, description string, parameters inter
 // memory. Sorted so the caller can diff two snapshots without being fooled by
 // map iteration order.
 func (r *Registry) ToolNames() []string {
+	r.toolsMu.RLock()
+	defer r.toolsMu.RUnlock()
 	out := make([]string, 0, len(r.tools))
 	for name := range r.tools {
 		out = append(out, name)
@@ -865,21 +919,54 @@ func (r *Registry) ToolNames() []string {
 
 // HasBuiltin returns true if a built-in tool with the given name exists.
 func (r *Registry) HasBuiltin(name string) bool {
+	r.toolsMu.RLock()
 	t, ok := r.tools[name]
+	r.toolsMu.RUnlock()
 	return ok && t.source == SourceBuiltin
 }
 
-// GetFunc returns the ToolFunc for a tool by name, or nil if not found.
-func (r *Registry) GetFunc(name string) ToolFunc {
+// GetTool returns the Tool registered under name, or nil if not found.
+// Workspace tools were already wrapped at registration, so this is a pure
+// lookup with no allocation and no per-call decoration.
+func (r *Registry) GetTool(name string) Tool {
+	r.toolsMu.RLock()
 	t, ok := r.tools[name]
+	r.toolsMu.RUnlock()
 	if !ok {
 		return nil
 	}
-	return t.fn
+	return t.tool
+}
+
+// signalTool routes a workspace tool's result through the package's single
+// signal exit. The registry installs it once in RegisterToolFrom; the inner
+// tool reads the executor from the call context, so registration order does
+// not matter.
+type signalTool struct {
+	registry *Registry
+	inner    Tool
+}
+
+// Call runs the inner tool and appends the call's collected signals.
+func (t signalTool) Call(ctx context.Context, args json.RawMessage) (string, error) {
+	ctx, col := withSignalCollector(ctx)
+	out, err := t.inner.Call(ctx, args)
+	return t.registry.workspaceSignalExit(out, col.signals), err
+}
+
+func isWorkspaceTool(name string) bool {
+	for _, n := range workspaceTools {
+		if n == name {
+			return true
+		}
+	}
+	return false
 }
 
 // Definitions returns all tool definitions for the LLM.
 func (r *Registry) Definitions() []provider.Tool {
+	r.toolsMu.RLock()
+	defer r.toolsMu.RUnlock()
 	defs := make([]provider.Tool, 0, len(r.tools))
 	for _, t := range r.tools {
 		defs = append(defs, t.def)
@@ -920,6 +1007,8 @@ func toolSourceName(s ToolSource) string {
 // dashboard checkbox list would reshuffle on every fetch, which is
 // disorienting.
 func (r *Registry) RegisteredTools() []ToolInfo {
+	r.toolsMu.RLock()
+	defer r.toolsMu.RUnlock()
 	out := make([]ToolInfo, 0, len(r.tools))
 	for name, t := range r.tools {
 		out = append(out, ToolInfo{
@@ -973,6 +1062,8 @@ func (r *Registry) DefinitionsForMode(builtinAllow []string) []provider.Tool {
 			}
 		}
 	}
+	r.toolsMu.RLock()
+	defer r.toolsMu.RUnlock()
 	defs := make([]provider.Tool, 0, len(r.tools))
 	for name, t := range r.tools {
 		if t.source != SourceBuiltin {
@@ -993,12 +1084,12 @@ func (r *Registry) DefinitionsForMode(builtinAllow []string) []provider.Tool {
 
 // Execute runs a tool by name with the given arguments.
 func (r *Registry) Execute(ctx context.Context, name string, args string) (string, error) {
-	tool, ok := r.tools[name]
-	if !ok {
+	tool := r.GetTool(name)
+	if tool == nil {
 		return "", fmt.Errorf("unknown tool: %s", name)
 	}
 
-	result, err := tool.fn(ctx, json.RawMessage(args))
+	result, err := tool.Call(ctx, json.RawMessage(args))
 	if err != nil {
 		return result + "\n[Analyze the error above and try a different approach.]", err
 	}
@@ -1038,11 +1129,6 @@ func (r *Registry) SetExecutor(ex sandbox.Executor) {
 	registerSandboxedFile(r, ex)
 	registerSandboxedApplyPatch(r, ex)
 	registerSandboxedExec(r, ex)
-	// Policy C (docs/sandbox-scope-leak.md §9.5): a sandbox whose /workspace
-	// never got filled says so on the results the model would otherwise read as
-	// "the file is gone". Attached after the sandboxed tools are registered so
-	// it wraps the closures that actually reach the sandbox.
-	r.declareUnhydratedWorkspace()
 	if buildinfo.IsHostExecAllowed() {
 		registerHostExec(r, r.envProvider, r.skillDirs)
 	}
@@ -1076,28 +1162,6 @@ var workspaceTools = []string{"exec", "read_file", "write_file", "edit_file", "l
 //     neither concludes they were deleted nor treats unrelated absences as
 //     explained by it.
 const workspaceUnhydratedSignal = "[workspace not hydrated: the file store could not list this agent's files (the listing timed out after retries). Files may be missing for this reason only — do not conclude they were deleted.]"
-
-// declareUnhydratedWorkspace wraps the workspace-touching tools so their
-// results carry the declaration when the sandbox in use reports an unfilled
-// /workspace. Wrapping the closures (rather than the call sites inside each
-// tool) keeps the rule in one place: every return path of exec, read_file,
-// write_file, edit_file, list_dir and apply_patch is covered, including the
-// error paths, which on this failure look like `No such file or directory`.
-func (r *Registry) declareUnhydratedWorkspace() {
-	for _, name := range workspaceTools {
-		t, ok := r.tools[name]
-		if !ok {
-			continue
-		}
-		inner := t.fn
-		t.fn = func(ctx context.Context, args json.RawMessage) (string, error) {
-			ctx, col := withSignalCollector(ctx)
-			out, err := inner(ctx, args)
-			return r.workspaceSignalExit(out, col.signals), err
-		}
-		r.tools[name] = t
-	}
-}
 
 // workspaceSignalExit is the tools package's SINGLE signal exit: every
 // delta a workspace tool wants the agent to perceive passes through here.

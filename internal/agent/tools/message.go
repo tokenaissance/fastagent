@@ -21,9 +21,13 @@ type messageArgs struct {
 // caller doesn't care (e.g. tests, non-WeChat-bound deployments) —
 // AllowSplit defaults to false in that case.
 func RegisterMessage(r *Registry, mb *bus.MessageBus, allowSplitFn func() bool) {
+	r.toolsMu.Lock()
+	defer r.toolsMu.Unlock()
+	prev := r.tools["message"]
 	r.tools["message"] = registeredTool{
-		def: r.tools["message"].def,
-		fn:  makeMessageTool(mb, allowSplitFn),
+		def:    prev.def,
+		tool:   makeMessageTool(mb, allowSplitFn),
+		source: prev.source,
 	}
 }
 
