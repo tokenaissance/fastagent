@@ -146,8 +146,8 @@ func (a *Agent) WriteSessionAttachments(ctx context.Context, sessionID, projectI
 		// 3. Live sandbox (covers E2B mid-session). Best-effort; missing
 		// pool / get failure just means the next exec will pull from the
 		// store via hydrate-on-create.
-		if a.sandboxPool != nil {
-			if ex, gErr := a.sandboxPool.Get(ctx, a.name, projectID, sessionID); gErr == nil && ex != nil {
+		if pool := a.runtimeFor(ctx).sandboxPool; pool != nil {
+			if ex, gErr := pool.Get(ctx, a.name, projectID, sessionID); gErr == nil && ex != nil {
 				if _, wErr := ex.WriteFile(ctx, "/workspace/"+name, string(data)); wErr != nil {
 					slog.Warn("attachment sandbox write failed", "agent", a.name, "session", sessionID, "path", name, "error", wErr)
 				}

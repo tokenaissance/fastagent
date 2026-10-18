@@ -30,9 +30,9 @@ func (e *mirrorRemovingExec) RemoveLiveWorkspaceFile(_ context.Context, storePat
 // Falsification: delete the `LiveWorkspaceFileRemover` block in
 // deleteForPatchSandbox and this fails — the sandbox half is never asked.
 func TestApplyPatchDeleteReachesTheLiveSandboxCopy(t *testing.T) {
-	ctx := context.Background()
 	ex := &mirrorRemovingExec{}
 	r := newStoreOnlyRegistry(t, &ex.sandboxListingExec, map[string]string{"notes.md": "old version"})
+	ctx := testTurnCtx(r)
 
 	if err := r.deleteForPatchSandbox(ctx, ex, "notes.md"); err != nil {
 		t.Fatalf("delete: %v", err)
@@ -42,8 +42,8 @@ func TestApplyPatchDeleteReachesTheLiveSandboxCopy(t *testing.T) {
 		t.Fatalf("the sandbox copy was asked to delete %d times, want exactly 1", len(ex.removed))
 	}
 	// The capability takes the STORE key, not the sandbox path (executor.go:102).
-	if ex.removed[0] != r.wsPath("notes.md") {
-		t.Fatalf("mirror delete got %q, want the store key %q", ex.removed[0], r.wsPath("notes.md"))
+	if ex.removed[0] != r.wsPath(ctx, "notes.md") {
+		t.Fatalf("mirror delete got %q, want the store key %q", ex.removed[0], r.wsPath(ctx, "notes.md"))
 	}
 	if _, err := r.workspaceStore.Get(ctx, "a", "", "s1", "notes.md"); !errors.Is(err, workspace.ErrNotFound) {
 		t.Fatalf("the store half did not happen: %v", err)
@@ -55,9 +55,9 @@ func TestApplyPatchDeleteReachesTheLiveSandboxCopy(t *testing.T) {
 // effect. Same posture as the panel's `sandboxRemoved:false` — succeed, and say
 // what did not happen (the signal is attached through the existing exit).
 func TestApplyPatchDeleteSurvivesAFailedMirrorWithoutLying(t *testing.T) {
-	ctx := context.Background()
 	ex := &mirrorRemovingExec{err: errors.New("sandbox unreachable")}
 	r := newStoreOnlyRegistry(t, &ex.sandboxListingExec, map[string]string{"notes.md": "old version"})
+	ctx := testTurnCtx(r)
 
 	if err := r.deleteForPatchSandbox(ctx, ex, "notes.md"); err != nil {
 		t.Fatalf("a mirror failure must not fail the call: %v", err)
@@ -74,9 +74,9 @@ func TestApplyPatchDeleteSurvivesAFailedMirrorWithoutLying(t *testing.T) {
 // the capability — the assertion fails and nothing is owed. Asserting this is
 // the point: "no-op here" is the design, not a gap somebody should close later.
 func TestApplyPatchDeleteIsANoOpWhenTheBackendHasNoSecondCopy(t *testing.T) {
-	ctx := context.Background()
 	ex := &sandboxListingExec{} // no RemoveLiveWorkspaceFile
 	r := newStoreOnlyRegistry(t, ex, map[string]string{"notes.md": "old version"})
+	ctx := testTurnCtx(r)
 
 	if err := r.deleteForPatchSandbox(ctx, ex, "notes.md"); err != nil {
 		t.Fatalf("delete on a shared backend: %v", err)

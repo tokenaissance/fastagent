@@ -39,8 +39,9 @@ func TestIdentityFileBlockedRespectsCallerFlag(t *testing.T) {
 		{"", false, false},
 	}
 	for _, c := range cases {
-		r := &Registry{callerIsAdmin: c.admin}
-		got := r.identityFileBlocked(c.path)
+		r := &Registry{}
+		ctx := scopedCtx(&TurnScope{CallerIsAdmin: c.admin})
+		got := r.identityFileBlocked(ctx, c.path)
 		if got != c.want {
 			t.Errorf("identityFileBlocked(%q) admin=%v = %v, want %v",
 				c.path, c.admin, got, c.want)
@@ -49,15 +50,17 @@ func TestIdentityFileBlockedRespectsCallerFlag(t *testing.T) {
 }
 
 func TestOwnerManagedFileWriteBlocked(t *testing.T) {
-	regular := &Registry{callerIsAdmin: false}
-	if !regular.ownerManagedFileWriteBlocked("KNOWLEDGE.md") {
+	regular := &Registry{}
+	regularCtx := scopedCtx(&TurnScope{CallerIsAdmin: false})
+	if !regular.ownerManagedFileWriteBlocked(regularCtx, "KNOWLEDGE.md") {
 		t.Fatalf("regular chatter should not be allowed to write KNOWLEDGE.md")
 	}
-	if regular.ownerManagedFileWriteBlocked("notes/KNOWLEDGE.md") {
+	if regular.ownerManagedFileWriteBlocked(regularCtx, "notes/KNOWLEDGE.md") {
 		t.Fatalf("nested workspace file named KNOWLEDGE.md should not be owner-managed")
 	}
-	admin := &Registry{callerIsAdmin: true}
-	if admin.ownerManagedFileWriteBlocked("KNOWLEDGE.md") {
+	admin := &Registry{}
+	adminCtx := scopedCtx(&TurnScope{CallerIsAdmin: true})
+	if admin.ownerManagedFileWriteBlocked(adminCtx, "KNOWLEDGE.md") {
 		t.Fatalf("agent owner/admin should be allowed to write KNOWLEDGE.md")
 	}
 }
@@ -81,8 +84,9 @@ func TestNestedIdentityNameIsNotBlocked(t *testing.T) {
 	// "notes/SOUL.md" is a workspace artifact named like an identity
 	// file — it's the chatter's own note, not the agent's persona. The
 	// gate must not block it.
-	r := &Registry{callerIsAdmin: false}
-	if r.identityFileBlocked("notes/SOUL.md") {
+	r := &Registry{}
+	ctx := scopedCtx(&TurnScope{CallerIsAdmin: false})
+	if r.identityFileBlocked(ctx, "notes/SOUL.md") {
 		t.Errorf("nested SOUL.md must not be gated as the agent's identity")
 	}
 }

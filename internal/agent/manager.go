@@ -376,7 +376,7 @@ func (m *Manager) buildAgent(rc config.ResolvedAgent, prov provider.Provider, mb
 		// Date line in the chatter's timezone — needs dataStore for the
 		// scope-prefs lookup, hence wired here and re-applied by
 		// ReloadWorkspaceFiles after every ctxBuilder rebuild.
-		ag.ctxBuilder.SetTimezoneResolver(ag.chatterLocation)
+		ag.EnableChatterTimezone()
 	}
 	// Stamp agentID even when no workspaceStore is wired (single-user
 	// local mode), so usage metering can record per-agent rollups.

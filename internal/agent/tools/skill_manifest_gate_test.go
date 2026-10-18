@@ -37,8 +37,9 @@ func TestSkillManifestBlockedRespectsCallerFlag(t *testing.T) {
 		{"empty", "", false, "", false},
 	}
 	for _, c := range cases {
-		r := &Registry{callerIsAdmin: c.admin, userSkillsRoot: c.userSkillsRoot}
-		if got := r.skillManifestBlocked(c.path); got != c.want {
+		r := &Registry{userSkillsRoot: c.userSkillsRoot}
+		ctx := scopedCtx(&TurnScope{CallerIsAdmin: c.admin})
+		if got := r.skillManifestBlocked(ctx, c.path); got != c.want {
 			t.Errorf("%s: skillManifestBlocked(%q) admin=%v userRoot=%q = %v, want %v",
 				c.name, c.path, c.admin, c.userSkillsRoot, got, c.want)
 		}

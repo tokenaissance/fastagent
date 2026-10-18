@@ -28,15 +28,15 @@ Run {baseDir}/scripts/render.py with JSON input.`
 	r := NewRegistry(t.TempDir(), t.TempDir())
 	RegisterLoadSkill(r, []string{filepath.Join(home, "skills")})
 
-	fn := r.GetFunc("load_skill")
-	if fn == nil {
+	tool := r.GetTool("load_skill")
+	if tool == nil {
 		t.Fatal("load_skill was not registered")
 	}
 	rawArgs, err := json.Marshal(map[string]string{"name": "chart-maker"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := fn(context.Background(), rawArgs)
+	got, err := tool.Call(context.Background(), rawArgs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +70,7 @@ func TestLoadSkillUsesDirectoryPrecedence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := r.GetFunc("load_skill")(context.Background(), rawArgs)
+	got, err := r.GetTool("load_skill").Call(context.Background(), rawArgs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +109,7 @@ Authenticated instructions.`
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := r.GetFunc("load_skill")(context.Background(), rawArgs)
+	got, err := r.GetTool("load_skill").Call(context.Background(), rawArgs)
 	if err != nil {
 		t.Fatal(err)
 	}

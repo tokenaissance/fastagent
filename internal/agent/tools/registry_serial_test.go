@@ -36,8 +36,8 @@ func TestRegisterSerial_BlocksConcurrentSelfCalls(t *testing.T) {
 		return "ok", nil
 	})
 
-	fn := r.GetFunc("slow_tool")
-	if fn == nil {
+	tool := r.GetTool("slow_tool")
+	if tool == nil {
 		t.Fatal("tool not registered")
 	}
 
@@ -46,7 +46,7 @@ func TestRegisterSerial_BlocksConcurrentSelfCalls(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, _ = fn(context.Background(), nil)
+			_, _ = tool.Call(context.Background(), nil)
 		}()
 	}
 	wg.Wait()
@@ -75,13 +75,13 @@ func TestRegisterSerial_DoesNotBlockOtherTools(t *testing.T) {
 	// Start the slow serial call; it'll block until we release it.
 	slowDone := make(chan string)
 	go func() {
-		out, _ := r.GetFunc("slow_serial")(context.Background(), nil)
+		out, _ := r.GetTool("slow_serial").Call(context.Background(), nil)
 		slowDone <- out
 	}()
 
 	// Other tool must complete immediately — the serial mutex is per
 	// tool, not a global gate.
-	fastOut, _ := r.GetFunc("fast_other")(context.Background(), nil)
+	fastOut, _ := r.GetTool("fast_other").Call(context.Background(), nil)
 	if fastOut != "fast_done" {
 		t.Fatalf("other tool didn't run: got %q", fastOut)
 	}
@@ -109,9 +109,9 @@ func TestRegisterSerialQueuedCallIsReleasedByItsContext(t *testing.T) {
 		}
 		return "ok", nil
 	})
-	fn := r.GetFunc("serial_tool")
+	tool := r.GetTool("serial_tool")
 
-	go func() { _, _ = fn(context.Background(), json.RawMessage(`"first"`)) }()
+	go func() { _, _ = tool.Call(context.Background(), json.RawMessage(`"first"`)) }()
 	if got := <-entered; got != `"first"` {
 		t.Fatalf("first call did not enter the body, got %s", got)
 	}
@@ -119,7 +119,7 @@ func TestRegisterSerialQueuedCallIsReleasedByItsContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		_, err := fn(ctx, json.RawMessage(`"queued"`))
+		_, err := tool.Call(ctx, json.RawMessage(`"queued"`))
 		done <- err
 	}()
 
@@ -156,7 +156,7 @@ func TestRegisterSerialAlreadyCancelledCallNeverEnters(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	out, err := r.GetFunc("serial_tool")(ctx, json.RawMessage(`{}`))
+	out, err := r.GetTool("serial_tool").Call(ctx, json.RawMessage(`{}`))
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled (out=%q)", err, out)
 	}

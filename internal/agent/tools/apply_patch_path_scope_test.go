@@ -27,13 +27,14 @@ func newPathScopeRegistry(t *testing.T, subdir string, inProject bool) (*Registr
 	r := NewRegistry(t.TempDir(), t.TempDir())
 	t.Cleanup(r.Close)
 	r.SetWorkspaceStore(st, "agt_scope")
-	r.SetSessionID("sess-1")
+	scope := &TurnScope{SessionID: "sess-1"}
 	if subdir != "" {
-		r.SetCodingSubdir(subdir)
+		scope.SetCodingSubdir(subdir)
 	}
 	if inProject {
-		r.SetProjectID("proj-1")
+		scope.ProjectID = "proj-1"
 	}
+	bindTestTurn(r, scope)
 	return r, st
 }
 
@@ -58,7 +59,7 @@ func storeKeys(t *testing.T, st *workspace.LocalFS, agentID, projectID, sessionI
 func TestApplyPatchUsesTheSameStoreKeyAsWriteFile(t *testing.T) {
 	r, st := newPathScopeRegistry(t, "app", true)
 
-	if _, err := r.Execute(context.Background(), "write_file",
+	if _, err := r.Execute(testTurnCtx(r), "write_file",
 		`{"path":"notes.md","content":"one\n"}`); err != nil {
 		t.Fatalf("write_file: %v", err)
 	}
@@ -67,7 +68,7 @@ func TestApplyPatchUsesTheSameStoreKeyAsWriteFile(t *testing.T) {
 	}
 
 	// apply_patch's Update reads, then writes, the same logical path.
-	if _, err := r.Execute(context.Background(), "apply_patch",
+	if _, err := r.Execute(testTurnCtx(r), "apply_patch",
 		"{\"input\":\"*** Begin Patch\\n*** Update File: notes.md\\n@@\\n-one\\n+two\\n*** End Patch\\n\"}"); err != nil {
 		t.Fatalf("apply_patch: %v", err)
 	}
@@ -76,7 +77,7 @@ func TestApplyPatchUsesTheSameStoreKeyAsWriteFile(t *testing.T) {
 	}
 
 	// And the read side agrees: read_file sees what the patch wrote.
-	out, err := r.Execute(context.Background(), "read_file", `{"path":"notes.md"}`)
+	out, err := r.Execute(testTurnCtx(r), "read_file", `{"path":"notes.md"}`)
 	if err != nil {
 		t.Fatalf("read_file: %v", err)
 	}
@@ -89,11 +90,11 @@ func TestApplyPatchUsesTheSameStoreKeyAsWriteFile(t *testing.T) {
 // other tools use, not leave it behind under a second spelling.
 func TestApplyPatchDeleteUsesTheSameStoreKey(t *testing.T) {
 	r, st := newPathScopeRegistry(t, "app", true)
-	if _, err := r.Execute(context.Background(), "write_file",
+	if _, err := r.Execute(testTurnCtx(r), "write_file",
 		`{"path":"notes.md","content":"x\n"}`); err != nil {
 		t.Fatalf("write_file: %v", err)
 	}
-	if _, err := r.Execute(context.Background(), "apply_patch",
+	if _, err := r.Execute(testTurnCtx(r), "apply_patch",
 		"{\"input\":\"*** Begin Patch\\n*** Delete File: notes.md\\n*** End Patch\\n\"}"); err != nil {
 		t.Fatalf("apply_patch delete: %v", err)
 	}
@@ -106,11 +107,11 @@ func TestApplyPatchDeleteUsesTheSameStoreKey(t *testing.T) {
 // the plain key — the mapping is the same function, just with an empty subdir.
 func TestApplyPatchKeyInANonCodingSession(t *testing.T) {
 	r, st := newPathScopeRegistry(t, "", false)
-	if _, err := r.Execute(context.Background(), "write_file",
+	if _, err := r.Execute(testTurnCtx(r), "write_file",
 		`{"path":"notes.md","content":"one\n"}`); err != nil {
 		t.Fatalf("write_file: %v", err)
 	}
-	if _, err := r.Execute(context.Background(), "apply_patch",
+	if _, err := r.Execute(testTurnCtx(r), "apply_patch",
 		"{\"input\":\"*** Begin Patch\\n*** Update File: notes.md\\n@@\\n-one\\n+two\\n*** End Patch\\n\"}"); err != nil {
 		t.Fatalf("apply_patch: %v", err)
 	}

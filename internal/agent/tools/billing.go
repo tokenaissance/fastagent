@@ -31,13 +31,13 @@ func makeGetBillingUsage(meter usage.Meter, quotaStore usage.QuotaStore, r *Regi
 	return func(ctx context.Context, _ json.RawMessage) (string, error) {
 		billingUserID := r.OwnerUserID()
 		if billingUserID == "" {
-			billingUserID = r.EffectiveUserID()
+			billingUserID = r.EffectiveUserID(ctx)
 		}
 		if billingUserID == "" {
 			return "", fmt.Errorf("billing user is not available in this chat context")
 		}
 
-		chatterUserID := r.ChatterUserID()
+		chatterUserID := r.ChatterUserID(ctx)
 		out := map[string]any{
 			"billingUserId": billingUserID,
 			"chatterUserId": chatterUserID,

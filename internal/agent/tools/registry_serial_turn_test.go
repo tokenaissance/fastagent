@@ -27,9 +27,9 @@ func TestRegisterSerialWaitEndsWithTheTurnDeadline(t *testing.T) {
 		}
 		return "ok", nil
 	})
-	fn := r.GetFunc("serial_tool")
+	tool := r.GetTool("serial_tool")
 
-	go func() { _, _ = fn(context.Background(), json.RawMessage(`"first"`)) }()
+	go func() { _, _ = tool.Call(context.Background(), json.RawMessage(`"first"`)) }()
 	<-inside
 
 	// The waiting call's context: no deadline of its own (the grace window), and
@@ -38,7 +38,7 @@ func TestRegisterSerialWaitEndsWithTheTurnDeadline(t *testing.T) {
 	start := time.Now()
 	done := make(chan error, 1)
 	go func() {
-		_, err := fn(waitCtx, json.RawMessage(`"second"`))
+		_, err := tool.Call(waitCtx, json.RawMessage(`"second"`))
 		done <- err
 	}()
 

@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -68,7 +69,7 @@ const (
 // host-with-care) live here, so every tool that needs to dispatch a
 // path-like arg should call this rather than inventing its own
 // classification.
-func (r *Registry) routeFor(path string, op Operation) RouteTarget {
+func (r *Registry) routeFor(ctx context.Context, path string, op Operation) RouteTarget {
 	// Stored-artifact patterns always route to their dedicated store
 	// regardless of deployment mode — these are persistence concerns,
 	// not "where does this command run" concerns.
@@ -82,7 +83,7 @@ func (r *Registry) routeFor(path string, op Operation) RouteTarget {
 		return RouteSkillStore
 	}
 
-	sandboxOK := r.executor != nil
+	sandboxOK := r.executorFor(ctx) != nil
 
 	// Rule 1: cloud / hosted deploy → sandbox is mandatory for everything
 	// that doesn't fall under the stored-artifact routes above. If the

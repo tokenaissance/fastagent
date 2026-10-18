@@ -68,8 +68,8 @@ func TestSecurityTools_EditFileRefusesBundledSkillManifest(t *testing.T) {
 // an os error, never a gate refusal.
 func TestSecurityTools_AdminSkipsSkillManifestGate(t *testing.T) {
 	r := NewRegistry(t.TempDir(), t.TempDir())
-	r.SetCallerIsAdmin(true)
-	res, err := r.Execute(context.Background(), "read_file", `{"path":"/skills/foo/SKILL.md"}`)
+	bindTestTurn(r, &TurnScope{CallerIsAdmin: true})
+	res, err := r.Execute(testTurnCtx(r), "read_file", `{"path":"/skills/foo/SKILL.md"}`)
 	if err == nil {
 		t.Fatalf("admin read of a missing manifest = %q, want an os error (file absent, gate must stay silent)", res)
 	}

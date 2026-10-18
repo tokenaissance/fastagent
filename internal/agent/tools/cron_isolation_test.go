@@ -36,6 +36,8 @@ func TestCronJobsAreScopedToTheirCreator(t *testing.T) {
 	reg.SetOwnerUserID("u_owner")
 	reg.SetAgentOwnerUserID("u_owner")
 	RegisterCronTools(reg, db, agentID)
+	scope := bindTestTurn(reg, &TurnScope{ChatterUserID: "u_owner"})
+	ctx = WithTurnScope(ctx, scope)
 
 	jobID := func(name string) string {
 		t.Helper()
@@ -54,8 +56,9 @@ func TestCronJobsAreScopedToTheirCreator(t *testing.T) {
 
 	createAs := func(chatter, name, chatID string) {
 		t.Helper()
-		reg.SetChatterUserID(chatter)
-		reg.SetMessageContext("web", "", chatID)
+		scope.ChatterUserID = chatter
+		scope.MessageChannel = "web"
+		scope.MessageChatID = chatID
 		args, _ := json.Marshal(createCronJobArgs{
 			Name: name, Type: "once",
 			Schedule: time.Now().Add(time.Hour).Format(time.RFC3339),
@@ -71,7 +74,7 @@ func TestCronJobsAreScopedToTheirCreator(t *testing.T) {
 	aliceJob := jobID("alice reminder")
 
 	// Bob's own session: he sees his job, not Alice's.
-	reg.SetChatterUserID("u_bob")
+	scope.ChatterUserID = "u_bob"
 	out, err := reg.Execute(ctx, "list_cron_jobs", "{}")
 	if err != nil {
 		t.Fatalf("list as bob: %v", err)
@@ -84,7 +87,7 @@ func TestCronJobsAreScopedToTheirCreator(t *testing.T) {
 	}
 
 	// Bob naming Alice's job id must not cancel it.
-	reg.SetChatterUserID("u_bob")
+	scope.ChatterUserID = "u_bob"
 	args, _ := json.Marshal(deleteCronJobArgs{ID: aliceJob})
 	if _, err := reg.Execute(ctx, "delete_cron_job", string(args)); err == nil {
 		t.Errorf("bob deleted alice's job %s without error", aliceJob)
@@ -94,7 +97,7 @@ func TestCronJobsAreScopedToTheirCreator(t *testing.T) {
 	}
 
 	// Alice still sees and can cancel her own.
-	reg.SetChatterUserID("u_alice")
+	scope.ChatterUserID = "u_alice"
 	out, err = reg.Execute(ctx, "list_cron_jobs", "{}")
 	if err != nil {
 		t.Fatalf("list as alice: %v", err)
@@ -108,8 +111,8 @@ func TestCronJobsAreScopedToTheirCreator(t *testing.T) {
 
 	// The owner sitting in their own turn sees every job of the agent.
 	createAs("u_alice", "alice reminder 2", "chat-alice")
-	reg.SetChatterUserID("u_owner")
-	reg.SetCallerIsAdmin(true)
+	scope.ChatterUserID = "u_owner"
+	scope.CallerIsAdmin = true
 	out, err = reg.Execute(ctx, "list_cron_jobs", "{}")
 	if err != nil {
 		t.Fatalf("list as owner: %v", err)

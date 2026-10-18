@@ -61,7 +61,7 @@ func makeUpdateGoal(st goal.Store, r *Registry, agentID string) ToolFunc {
 				"update_goal: status must be \"complete\"; pause / resume / budget_limited are user- or runtime-controlled, not model-controlled")
 		}
 
-		sessionKey := r.GoalSessionKey()
+		sessionKey := r.GoalSessionKey(ctx)
 		if sessionKey == "" {
 			return "", errors.New("update_goal: no active session context")
 		}

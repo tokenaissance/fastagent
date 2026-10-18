@@ -48,11 +48,11 @@ func (e *bgRecordingExecutor) commands() []string {
 }
 
 func TestExecRunInBackgroundInSandboxMode(t *testing.T) {
-	ctx := context.Background()
 	ex := &bgRecordingExecutor{replies: []string{"fcbg 4242 1\n"}}
 	r := NewRegistry(t.TempDir(), t.TempDir())
 	defer r.Close()
-	r.SetExecutor(ex)
+	bindTestTurn(r, &TurnScope{Executor: ex})
+	ctx := testTurnCtx(r)
 
 	started, err := r.Execute(ctx, "exec",
 		`{"command":"bash /workspace/kronos_crypto_daily_cron.sh","run_in_background":true}`)
@@ -118,19 +118,17 @@ func TestExecRunInBackgroundInSandboxMode(t *testing.T) {
 // injects — otherwise a backgrounded skill (image generation, long scrape)
 // silently runs without its API keys.
 func TestExecRunInBackgroundInSandboxModeInjectsSkillEnv(t *testing.T) {
-	ctx := context.Background()
 	ex := &bgRecordingExecutor{replies: []string{"fcbg 7 1\n"}}
 	r := NewRegistry(t.TempDir(), t.TempDir())
 	defer r.Close()
-	r.SetExecutor(ex)
-	r.envProvider = func(skill string) map[string]string {
+	bindTestTurn(r, &TurnScope{Executor: ex})
+	RegisterExecWithSkillEnv(r, nil, func(skill string) map[string]string {
 		if skill == "image-tool" {
 			return map[string]string{"FAL_KEY": "sk-test"}
 		}
 		return nil
-	}
-	r.skillDirs = []string{"/skills"}
-	registerSandboxedExec(r, ex)
+	})
+	ctx := testTurnCtx(r)
 
 	if _, err := r.Execute(ctx, "exec",
 		`{"command":"python /skills/image-tool/main.py --out ./x.webp","run_in_background":true}`); err != nil {

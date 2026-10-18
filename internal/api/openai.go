@@ -314,8 +314,9 @@ func (s *Server) HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		s.streamResponseFromAgent(w, r, ag, msg, chatID, model, now)
 	} else {
 		// Get reply from agent
-		reply := ag.HandleMessage(r.Context(), msg)
-		usage := ag.LastUsage()
+		capture := &agent.UsageCapture{}
+		reply := ag.HandleMessage(agent.WithUsageCapture(r.Context(), capture), msg)
+		usage, _ := capture.Snapshot()
 		s.fullResponse(w, reply, chatID, model, now, usage)
 	}
 }

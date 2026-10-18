@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/fastclaw-ai/fastclaw/internal/agent/tools"
 	"github.com/fastclaw-ai/fastclaw/internal/bus"
 )
 
@@ -41,7 +42,7 @@ func TestCronTurnWritesTheCreatorsMemory_CloudPathE2E(t *testing.T) {
 
 	reg := newCronE2ERegistry(t, db)
 	a := &Agent{ownerUserID: cronE2EOwnerID}
-	reg.SetChatterUserID(a.chatterUserID(msg))
+	ctx = tools.WithTurnScope(ctx, &tools.TurnScope{ChatterUserID: a.chatterUserID(msg)})
 
 	if _, err := reg.Execute(ctx, "write_file", toolArgs(t, map[string]any{
 		"path":    "MEMORY.md",

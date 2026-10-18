@@ -293,7 +293,7 @@ def registers(rel_glob):
     found = []
     for rel in files:
         src = join_lines(read(rel))
-        for m in re.finditer(r"r\.Register(?:Serial)?\(\s*(\"(?:\\.|[^\"])*\")\s*,\s*", src):
+        for m in re.finditer(r"r\.Register(?:Serial(?:Tool)?|Tool)?\(\s*(\"(?:\\.|[^\"])*\")\s*,\s*", src):
             name = unescape(m.group(1)[1:-1])
             i = m.end()
             depth = 0

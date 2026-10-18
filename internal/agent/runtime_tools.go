@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/fastclaw-ai/fastclaw/internal/agent/tools"
 	coderuntime "github.com/fastclaw-ai/fastclaw/internal/runtime"
 )
 
@@ -57,15 +58,15 @@ func (a *Agent) registerProjectRuntimeTools() {
 			if a.projectRuntime == nil {
 				return "App preview is not enabled on this deployment.", nil
 			}
-			userID := reg.EffectiveUserID()
+			userID := reg.EffectiveUserID(ctx)
 			if userID == "" {
 				return "", fmt.Errorf("start_app_preview: no user resolved for this turn")
 			}
 			// Home the app in the project when there is one, else in this
 			// chat's own session workspace — so a preview works without a
 			// pre-created project.
-			projectID := reg.ProjectID()
-			sessionID := reg.SessionID()
+			projectID := reg.ProjectID(ctx)
+			sessionID := reg.SessionID(ctx)
 			if projectID == "" && sessionID == "" {
 				return "", fmt.Errorf("start_app_preview: no project or chat session to home the app in")
 			}
@@ -84,7 +85,7 @@ func (a *Agent) registerProjectRuntimeTools() {
 			// Redirect this turn's file tools into the app subfolder so the
 			// agent's edits land where the dev server serves (subsequent
 			// turns get this from bindSession).
-			reg.SetCodingSubdir(coderuntime.AppSubdir)
+			tools.TurnScopeFrom(ctx).SetCodingSubdir(coderuntime.AppSubdir)
 			return fmt.Sprintf(
 				"Preview is live: %s (status: %s, template: %s).\n"+
 					"The app lives in the `%s/` folder of the workspace. Your file tools are already "+
@@ -113,9 +114,9 @@ func (a *Agent) registerProjectRuntimeTools() {
 			if a.projectRuntime == nil {
 				return "App preview is not enabled on this deployment.", nil
 			}
-			userID := reg.EffectiveUserID()
-			projectID := reg.ProjectID()
-			sessionID := reg.SessionID()
+			userID := reg.EffectiveUserID(ctx)
+			projectID := reg.ProjectID(ctx)
+			sessionID := reg.SessionID(ctx)
 			if projectID == "" && sessionID == "" {
 				return "No project or chat session, so there's no preview to read logs from.", nil
 			}

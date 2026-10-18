@@ -94,9 +94,9 @@ func TestEditFileRefusesAnIdentityFileThatMovedUnderIt(t *testing.T) {
 	st := newCompetingStore(map[string]string{"u_owner/MEMORY.md": "## 事实\n- 原来那条\n"})
 	st.onRead = func() { st.rows["u_owner/MEMORY.md"] = competitor }
 	r := newSystemFileRegistry(st, t.TempDir())
-	r.chatterUserID = "u_owner" // the agent's own account: per-user file reads use its row
+	testTurnScopeFor(r).ChatterUserID = "u_owner" // the agent's own account: per-user file reads use its row
 
-	out, err := r.Execute(context.Background(), "edit_file",
+	out, err := r.Execute(testTurnCtx(r), "edit_file",
 		editArgs(t, "MEMORY.md", "原来那条", "我改的那条"))
 	if err == nil {
 		t.Fatalf("the edit reported success over somebody else's version: %q", out)
@@ -120,9 +120,9 @@ func TestEditFileRefusesAnIdentityFileThatMovedUnderIt(t *testing.T) {
 func TestEditFileStillLandsWhenNobodyElseWrote(t *testing.T) {
 	st := newCompetingStore(map[string]string{"u_owner/MEMORY.md": "## 事实\n- 原来那条\n"})
 	r := newSystemFileRegistry(st, t.TempDir())
-	r.chatterUserID = "u_owner"
+	testTurnScopeFor(r).ChatterUserID = "u_owner"
 
-	out, err := r.Execute(context.Background(), "edit_file",
+	out, err := r.Execute(testTurnCtx(r), "edit_file",
 		editArgs(t, "MEMORY.md", "原来那条", "我改的那条"))
 	if err != nil {
 		t.Fatalf("a lone edit was refused: %v", err)
@@ -142,11 +142,11 @@ func TestApplyPatchRefusesAnIdentityFileThatMovedUnderIt(t *testing.T) {
 	st := newCompetingStore(map[string]string{"u_owner/MEMORY.md": "## 事实\n- 原来那条\n"})
 	st.onRead = func() { st.rows["u_owner/MEMORY.md"] = competitor }
 	r := newSystemFileRegistry(st, t.TempDir())
-	r.chatterUserID = "u_owner"
+	testTurnScopeFor(r).ChatterUserID = "u_owner"
 
 	patch := "*** Begin Patch\n*** Update File: MEMORY.md\n@@\n-## 事实\n-- 原来那条\n+## 事实\n+- 我改的那条\n*** End Patch\n"
 	args, _ := json.Marshal(map[string]any{"input": patch})
-	out, err := r.Execute(context.Background(), "apply_patch", string(args))
+	out, err := r.Execute(testTurnCtx(r), "apply_patch", string(args))
 	if err == nil && !strings.Contains(out, "another writer changed") {
 		t.Fatalf("the patch reported success over somebody else's version: %q", out)
 	}
@@ -163,9 +163,9 @@ func TestApplyPatchRefusesAnIdentityFileThatMovedUnderIt(t *testing.T) {
 func TestWriteFileStillReplacesAnIdentityFile(t *testing.T) {
 	st := newCompetingStore(map[string]string{"u_owner/MEMORY.md": "## 事实\n- 原来那条\n"})
 	r := newSystemFileRegistry(st, t.TempDir())
-	r.chatterUserID = "u_owner"
+	testTurnScopeFor(r).ChatterUserID = "u_owner"
 
-	out, err := r.Execute(context.Background(), "write_file",
+	out, err := r.Execute(testTurnCtx(r), "write_file",
 		writeArgs(t, "MEMORY.md", "## 事实\n- 整份替换\n"))
 	if err != nil {
 		t.Fatalf("write_file was refused: %v (out=%q)", err, out)

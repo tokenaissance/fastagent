@@ -32,7 +32,7 @@ type toolAdapter struct {
 	name        string
 	description string
 	params      interface{}
-	fn          tools.ToolFunc
+	tool        tools.Tool
 }
 
 func (t *toolAdapter) Name() string        { return t.name }
@@ -70,7 +70,7 @@ func (t *toolAdapter) Call(ctx context.Context, input map[string]interface{}, tC
 		return &sdktypes.ToolResult{IsError: true, Error: err.Error()}, nil
 	}
 
-	result, err := t.fn(ctx, json.RawMessage(argsJSON))
+	result, err := t.tool.Call(ctx, json.RawMessage(argsJSON))
 	if err != nil {
 		errText := result
 		if errText != "" {
@@ -121,15 +121,15 @@ func newSDKEngine(sessionID string) *sdkEngine {
 func buildSDKRegistry(fcRegistry *tools.Registry) *sdktools.Registry {
 	sdkReg := sdktools.NewRegistry()
 	for _, def := range fcRegistry.Definitions() {
-		fn := fcRegistry.GetFunc(def.Function.Name)
-		if fn == nil {
+		tool := fcRegistry.GetTool(def.Function.Name)
+		if tool == nil {
 			continue
 		}
 		sdkReg.Register(&toolAdapter{
 			name:        def.Function.Name,
 			description: def.Function.Description,
 			params:      def.Function.Parameters,
-			fn:          fn,
+			tool:        tool,
 		})
 	}
 	return sdkReg

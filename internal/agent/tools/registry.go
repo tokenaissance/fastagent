@@ -2,7 +2,6 @@ package tools
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -11,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/fastclaw-ai/fastclaw/internal/buildinfo"
 	"github.com/fastclaw-ai/fastclaw/internal/provider"
@@ -107,12 +107,12 @@ const OwnerManagedFileWriteRefusal = "[refused: KNOWLEDGE.md is managed by the a
 // per-turn caller flag says the chatter is not the owner / admin.
 // Callers should `return IdentityFileRefusal, nil` so the model sees
 // a tool-shaped, model-readable refusal instead of an opaque error.
-func (r *Registry) identityFileBlocked(path string) bool {
-	return !r.callerIsAdmin && isIdentityFilePath(path)
+func (r *Registry) identityFileBlocked(ctx context.Context, path string) bool {
+	return !r.callerIsAdmin(ctx) && isIdentityFilePath(path)
 }
 
-func (r *Registry) ownerManagedFileWriteBlocked(path string) bool {
-	if r.callerIsAdmin {
+func (r *Registry) ownerManagedFileWriteBlocked(ctx context.Context, path string) bool {
+	if r.callerIsAdmin(ctx) {
 		return false
 	}
 	clean := filepath.Clean(path)
@@ -181,12 +181,23 @@ func (r *Registry) isProtectedSkillManifestPath(path string) bool {
 // left open so a chatter can still author their OWN skills via the
 // skill-creator flow (those land in the per-user bucket, and writes to
 // the agent's bundled `/skills` mount fail anyway — it's read-only).
-func (r *Registry) skillManifestBlocked(path string) bool {
-	return !r.callerIsAdmin && r.isProtectedSkillManifestPath(path)
+func (r *Registry) skillManifestBlocked(ctx context.Context, path string) bool {
+	return !r.callerIsAdmin(ctx) && r.isProtectedSkillManifestPath(path)
 }
 
-// ToolFunc is a function that executes a tool with JSON arguments and returns a result string.
+// Tool is one callable tool body. The registry stores this port, so a tool can
+// be a plain function (ToolFunc) or a struct that owns dispatch or state.
+type Tool interface {
+	Call(ctx context.Context, args json.RawMessage) (string, error)
+}
+
+// ToolFunc is a function-shaped Tool.
 type ToolFunc func(ctx context.Context, args json.RawMessage) (string, error)
+
+// Call implements Tool.
+func (f ToolFunc) Call(ctx context.Context, args json.RawMessage) (string, error) {
+	return f(ctx, args)
+}
 
 // ToolSource indicates where a tool was registered from.
 type ToolSource int
@@ -199,9 +210,11 @@ const (
 
 // Registry holds all registered tools.
 type Registry struct {
+	// toolsMu guards the tool table. Hot reload can register a tool while a
+	// turn reads the table; an unguarded map would panic.
+	toolsMu     sync.RWMutex
 	tools       map[string]registeredTool
-	sandboxRoot string           // if non-empty, file tools reject paths outside this dir
-	executor    sandbox.Executor // if non-nil, all file+exec tools route through this
+	sandboxRoot string // if non-empty, file tools reject paths outside this dir
 	// File tool roots. systemRoot is the agent metadata dir (SOUL.md etc.);
 	// userRoot is where user-facing artifacts go. A relative path whose base
 	// matches a known system filename routes to systemRoot; everything else
@@ -215,37 +228,6 @@ type Registry struct {
 	// builder still reads them via the separate small-state Store.
 	workspaceStore workspace.Store
 	agentID        string
-	// sessionID scopes workspace.Store reads/writes so concurrent sessions
-	// of the same agent don't collide on `report.md` etc. Set per-turn by
-	// the agent loop via SetSessionID; an empty value falls back to
-	// agent-shared scope (admin uploads, fixtures, tests).
-	sessionID string
-	// projectID, when set, overrides sessionID-based scoping so all
-	// tool calls land in workspaces/<agent>/projects/<pid>/. That's
-	// the whole value of "project": notes/files persist across the
-	// project's chats. Set per-turn alongside sessionID.
-	projectID string
-	// codingSubdir, when set, redirects file-tool paths into this
-	// subfolder of the scope workspace (the folder a project runtime
-	// scaffolds its app into). See SetCodingSubdir / wsPath.
-	codingSubdir string
-	// messageChannel + messageAccountID + messageChatID name the bus address of the chat
-	// that's currently in flight. Set per-turn by bindSession so tools
-	// that schedule asynchronous work (e.g. create_cron_job) can stamp
-	// the originating address onto persisted rows — when the cron
-	// scheduler later fires, it routes the synthesized inbound message
-	// back to the same channel/accountID/chatID the user was talking on, so the
-	// reminder lands in the right web/Telegram/Discord thread.
-	messageChannel   string
-	messageAccountID string
-	messageChatID    string
-	// goalSessionKey is the persistent session_key (session.Session's
-	// opaque identifier) for the in-flight turn — distinct from
-	// sessionID above, which is just the channel's chatID. Goal tools
-	// look up the active goal by (agentID, goalSessionKey), so an
-	// empty value means "no goal context plumbed; tools error out".
-	// Set per-turn by the agent loop via SetGoalSessionKey.
-	goalSessionKey string
 	// systemFileStore is the optional durable store for identity files
 	// (SOUL.md, IDENTITY.md, USER.md, MEMORY.md, ...). In cloud/K8s
 	// deployments Server.readIdentityFile / writeIdentityFile go through
@@ -267,14 +249,6 @@ type Registry struct {
 	// is just the boot-time default / web-direct case where chatter ==
 	// owner.
 	userID string
-	// chatterUserID, when non-empty, overrides userID for per-user file
-	// routing (USER.md / MEMORY.md). Set per-turn by the agent loop
-	// from the resolved chatter so an IM message from a per-sender
-	// app_user lands writes in that sender's row rather than the
-	// channel-owner row. Reset implicitly each turn (overwritten by the
-	// next SetChatterUserID call). Empty means "no per-turn override,
-	// fall back to userID."
-	chatterUserID string
 	// agentOwnerUserID is agent.user_id (the human/account that owns
 	// this agent definition). Identity files write here so the
 	// canonical "shared template" everyone reads via owner-row fallback
@@ -309,32 +283,19 @@ type Registry struct {
 	// silently falls through to host execution and the user sees a
 	// confusing "sh: python: command not found" instead of a clear
 	// "sandbox required but unavailable" error.
-	sandboxRequired bool
-	// callerIsAdmin marks the chatter driving the current turn as the
-	// agent owner / per-channel admin. Set per-turn by the agent loop
-	// via SetCallerIsAdmin from isAdminChatter(msg); the file tools
-	// gate identity-file ops on it. Defaults to false — i.e. tools
-	// must explicitly receive the admin signal to expose internal
-	// configuration. Without that fail-closed default, a missed wire
-	// silently makes every chatter an admin.
-	callerIsAdmin bool
-	// envProvider + skillDirs cache the skill-env injection wiring set
-	// at agent boot via RegisterExecWithSkillEnv so a later
-	// SetExecutor (per-session) can re-register the sandboxed exec
-	// closure WITH env injection. Without this, the sandboxed exec
-	// runs every skill in a bare env and FAL_KEY / REPLICATE_API_TOKEN
-	// never reach the container — skills always think no provider is
-	// configured.
+	sandboxRequired atomic.Bool
+	// envProvider caches the boot-time skill-env mapping set via
+	// RegisterExecWithSkillEnv. It is the fallback for calls outside an
+	// admitted turn; inside a turn exec reads TurnScope.SkillEnv, which
+	// carries the chatter's personal layer, so two chats cannot overwrite
+	// each other's keys. Without the fallback, the sandboxed path runs every
+	// skill in a bare env and FAL_KEY / REPLICATE_API_TOKEN never reach the
+	// container.
 	envProvider SkillEnvProvider
-	skillDirs   []string
-	// turnFailures records (toolName, argsHash) → previous error
-	// summary for tool calls that already failed earlier in the
-	// current turn. StartTurn resets this map; tool implementations
-	// can consult PriorFailure to short-circuit a guaranteed-fail
-	// retry. The hash keying matches the agent loop's loop-detection
-	// hash so both layers agree on what "the same call" means.
-	turnFailMu sync.Mutex
-	turnFails  map[turnFailKey]string
+	// loadSkillDirs is the fallback search list for the load_skill tool.
+	// ReloadWorkspaceFiles swaps it atomically instead of re-registering the
+	// tool, so a running turn never observes a half-written tool table.
+	loadSkillDirs atomic.Pointer[[]string]
 	// shellMgr owns every `exec(run_in_background=true)` shell so the
 	// agent can later read their output via bash_output and terminate
 	// them via kill_shell. Sessions outlive individual turns; they die
@@ -408,7 +369,7 @@ func (r *Registry) SetSystemFileStore(s SystemFileStore, agentID string) {
 // user file routing target. Identity files route via SetAgentOwnerUserID
 // instead. Set once at agent boot from the UserSpace's owner. The
 // per-turn chatter (different from the owner on IM multi-sender
-// channels) is plumbed via SetChatterUserID and takes precedence at
+// channels) is carried by TurnScope.ChatterUserID and takes precedence at
 // systemFileUserID time.
 func (r *Registry) SetOwnerUserID(userID string) {
 	r.userID = userID
@@ -421,26 +382,10 @@ func (r *Registry) OwnerUserID() string {
 	return r.userID
 }
 
-// SetChatterUserID overrides the per-user file routing target for the
-// in-flight turn. Called by the agent loop at the top of HandleMessage /
-// HandleMessageStream with the resolved chatterUID so per-sender USER.md
-// / MEMORY.md writes (and reads, via the same systemFileUserID path)
-// land in the right row even when the UserSpace is owned by a channel
-// binder rather than the actual chatter. Pass "" to clear.
-func (r *Registry) SetChatterUserID(uid string) {
-	r.chatterUserID = uid
-}
-
-// ChatterUserID returns the per-turn chatter set by SetChatterUserID,
-// falling back to the UserSpace owner when no per-turn override is in
-// effect (single-user / legacy case). Tools that persist per-person
-// state (set_timezone, cron jobs) use this so the row keys on the
-// actual participant, not the channel binder.
-func (r *Registry) ChatterUserID() string {
-	if r.chatterUserID != "" {
-		return r.chatterUserID
-	}
-	return r.userID
+// ChatterUserID returns the per-turn chatter, falling back to the
+// UserSpace owner when the turn did not resolve one.
+func (r *Registry) ChatterUserID(ctx context.Context) string {
+	return r.chatterUserID(ctx)
 }
 
 // AgentID returns the agent_id this registry belongs to.
@@ -474,14 +419,11 @@ func (r *Registry) SetUserSkillsRoot(dir string) {
 // UserSpace owner userID). Falls back to userID when the agent owner
 // isn't set — that's the single-user / legacy case where they coincide
 // anyway.
-func (r *Registry) systemFileUserID(filename string) string {
+func (r *Registry) systemFileUserID(ctx context.Context, filename string) string {
 	if r.agentOwnerUserID != "" && ownerScopedSystemFiles[filepath.Base(filepath.Clean(filename))] {
 		return r.agentOwnerUserID
 	}
-	if r.chatterUserID != "" {
-		return r.chatterUserID
-	}
-	return r.userID
+	return r.chatterUserID(ctx)
 }
 
 // isPerUserSystemFile reports whether a system filename should be read
@@ -588,143 +530,49 @@ func (r *Registry) mirrorToAgentHome(userID, name string, body []byte) {
 // sbCfg=nil, so a missing executor surfaces as an explicit error
 // instead of leaking onto the host shell.
 func (r *Registry) SetSandboxRequired(required bool) {
-	r.sandboxRequired = required
-}
-
-// SetSessionID scopes the registry's workspace.Store calls (write_file /
-// read_file / list_dir) to a single chat session. The agent loop calls
-// this at the top of each turn with msg.ChatID. An empty session falls
-// back to the agent-shared scope (no session isolation).
-func (r *Registry) SetSessionID(sessionID string) {
-	r.sessionID = sessionID
-}
-
-// SetCallerIsAdmin records whether the chatter driving this turn is
-// the agent owner or a per-channel admin. The agent loop sets this
-// per-turn (right after bindSession) from agent.isAdminChatter(msg).
-//
-// File tools consult this to gate identity-file reads/writes
-// (SOUL.md, IDENTITY.md, BOOTSTRAP.md, AGENTS.md, TOOLS.md,
-// HEARTBEAT.md). Without the gate, a chatter who asks
-// "send me your SOUL.md" gets the verbatim persona spec — that
-// happened in production. Owners using the Customize UI / CLI still
-// need read+write, hence the per-turn flag rather than a blanket
-// deny.
-func (r *Registry) SetCallerIsAdmin(v bool) {
-	r.callerIsAdmin = v
-}
-
-// SetProjectID scopes the registry's workspace.Store calls to a project
-// folder when non-empty, taking priority over the session scope so all
-// chats inside a project share files. Pair with SetSessionID at the top
-// of every turn.
-func (r *Registry) SetProjectID(projectID string) {
-	r.projectID = projectID
+	r.sandboxRequired.Store(required)
 }
 
 // ProjectID returns the project scope of the in-flight turn, or "" when
-// the chat isn't bound to a project. Used by the coding-agent runtime
-// tools to address the project whose dev server they boot.
-func (r *Registry) ProjectID() string {
-	return r.projectID
+// the chat isn't bound to a project.
+func (r *Registry) ProjectID(ctx context.Context) string {
+	return r.projectID(ctx)
 }
 
-// SessionID returns the chat session of the in-flight turn. The coding-
-// agent runtime tools fall back to it when there's no project, so a
-// preview can be homed in the chat's own workspace without first
-// creating a project.
-func (r *Registry) SessionID() string {
-	return r.sessionID
+// SessionID returns the chat session of the in-flight turn.
+func (r *Registry) SessionID(ctx context.Context) string {
+	return r.sessionID(ctx)
+}
+
+// GoalSessionKey returns the persistent session_key of the in-flight turn.
+func (r *Registry) GoalSessionKey(ctx context.Context) string {
+	return r.goalSessionKey(ctx)
+}
+
+// MessageChannel returns the channel of the in-flight turn.
+func (r *Registry) MessageChannel(ctx context.Context) string {
+	return r.messageChannel(ctx)
+}
+
+// MessageAccountID returns the account/bot id of the in-flight turn.
+func (r *Registry) MessageAccountID(ctx context.Context) string {
+	return r.messageAccountID(ctx)
+}
+
+// MessageChatID returns the chat/session id of the in-flight turn.
+func (r *Registry) MessageChatID(ctx context.Context) string {
+	return r.messageChatID(ctx)
 }
 
 // EffectiveUserID returns the user the in-flight turn acts as: the
-// per-turn chatter when resolved, else the boot-time owner. Mirrors the
-// fallback systemFileUserID uses for per-user files. The coding-agent
-// runtime tools use it to key the project runtime to the same user the
-// project (and its workspace files) belong to.
-func (r *Registry) EffectiveUserID() string {
-	if r.chatterUserID != "" {
-		return r.chatterUserID
-	}
-	return r.userID
+// per-turn chatter when resolved, else the boot-time owner.
+func (r *Registry) EffectiveUserID(ctx context.Context) string {
+	return r.effectiveUserID(ctx)
 }
-
-// scopeSessionID is the session segment the file tools pass to the workspace
-// store. It is not decided here: workspace.WriteScope is the one expression of
-// "a project is one tree", so inside a project the segment is empty and every
-// write lands at the project root the dev server serves. There used to be a
-// separate flag for this, flipped by the agent loop only when a project runtime
-// was wired — which made the file tools and the sandbox agree by wiring rather
-// than by rule (docs 10 §4 G23).
-func (r *Registry) scopeSessionID() string {
-	return workspace.WriteScope(r.projectID, r.sessionID).SessionID
-}
-
-// SetCodingSubdir redirects the file tools into a subfolder of the scope
-// workspace — the folder a project runtime scaffolds its app into, so the
-// template doesn't litter the workspace root AND the agent's edits land
-// where the dev server serves. Empty disables the redirect. Set per-turn
-// by the agent loop (live when start_app_preview runs, and on subsequent
-// turns when a runtime exists for the scope).
-func (r *Registry) SetCodingSubdir(dir string) {
-	r.codingSubdir = dir
-}
-
-// CodingSubdir returns the active app subfolder, or "" when not in a
-// runtime-backed scope.
-func (r *Registry) CodingSubdir() string { return r.codingSubdir }
-
-// wsPath maps a tool-supplied path into the active coding subdir. It is
-// idempotent: a path already under the subdir (e.g. one the agent copied
-// from a list_dir result) is returned unchanged, so the agent can use
-// either "src/x" or "app/src/x" and both resolve to the same file.
-func (r *Registry) wsPath(p string) string {
-	if r.codingSubdir == "" {
-		return p
-	}
-	clean := strings.TrimLeft(filepath.ToSlash(p), "/")
-	if clean == r.codingSubdir || strings.HasPrefix(clean, r.codingSubdir+"/") {
-		return clean
-	}
-	return r.codingSubdir + "/" + clean
-}
-
-// SetMessageContext records the bus address of the in-flight turn so
-// tools that persist deferred work (cron jobs) can capture it for
-// later replay. Channel is e.g. "web" / "telegram" / "discord";
-// accountID names the bot/account within that channel;
-// chatID is the thread/session identifier within that channel.
-func (r *Registry) SetMessageContext(channel, accountID, chatID string) {
-	r.messageChannel = channel
-	r.messageAccountID = accountID
-	r.messageChatID = chatID
-}
-
-// MessageChannel returns the channel of the in-flight turn, or "" if
-// not set (e.g. a tool invocation outside a chat context).
-func (r *Registry) MessageChannel() string { return r.messageChannel }
-
-// MessageAccountID returns the account/bot id of the in-flight turn, or "" if
-// not set.
-func (r *Registry) MessageAccountID() string { return r.messageAccountID }
-
-// MessageChatID returns the chat/session id of the in-flight turn,
-// or "" if not set.
-func (r *Registry) MessageChatID() string { return r.messageChatID }
-
-// SetGoalSessionKey records the persistent session_key for the
-// in-flight turn so update_goal can address the right row. Called by
-// the agent loop right after resolving the session.
-func (r *Registry) SetGoalSessionKey(key string) { r.goalSessionKey = key }
-
-// GoalSessionKey returns the persistent session_key of the in-flight
-// turn. Empty when the turn happened outside a chat context (e.g.
-// agent boot) — goal tools treat that as "no goal can exist here".
-func (r *Registry) GoalSessionKey() string { return r.goalSessionKey }
 
 type registeredTool struct {
 	def    provider.Tool
-	fn     ToolFunc
+	tool   Tool
 	source ToolSource
 }
 
@@ -772,6 +620,25 @@ func (r *Registry) Register(name, description string, parameters interface{}, fn
 // RegisterFrom adds a tool to the registry with an explicit source.
 // Plugin-sourced tools can override built-in tools with the same name.
 func (r *Registry) RegisterFrom(name, description string, parameters interface{}, fn ToolFunc, source ToolSource) {
+	r.RegisterToolFrom(name, description, parameters, fn, source)
+}
+
+// RegisterTool adds a non-function tool to the registry as a built-in tool.
+// Use it when the body owns state or dispatch and a ToolFunc would only wrap
+// that state in another closure.
+func (r *Registry) RegisterTool(name, description string, parameters interface{}, tool Tool) {
+	r.RegisterToolFrom(name, description, parameters, tool, SourceBuiltin)
+}
+
+// RegisterToolFrom is the single registration funnel. It installs the
+// workspace signal decorator once, at the composition root, so GetTool never
+// allocates and every caller observes the same wrapper.
+func (r *Registry) RegisterToolFrom(name, description string, parameters interface{}, tool Tool, source ToolSource) {
+	if isWorkspaceTool(name) {
+		tool = signalTool{registry: r, inner: tool}
+	}
+	r.toolsMu.Lock()
+	defer r.toolsMu.Unlock()
 	r.tools[name] = registeredTool{
 		def: provider.Tool{
 			Type: "function",
@@ -781,7 +648,7 @@ func (r *Registry) RegisterFrom(name, description string, parameters interface{}
 				Parameters:  parameters,
 			},
 		},
-		fn:     fn,
+		tool:   tool,
 		source: source,
 	}
 }
@@ -805,8 +672,31 @@ func (r *Registry) RegisterSerial(name, description string, parameters interface
 	r.RegisterSerialFrom(name, description, parameters, fn, SourceBuiltin)
 }
 
+// RegisterSerialTool adds a non-function tool that must never run two calls at
+// the same time.
+func (r *Registry) RegisterSerialTool(name, description string, parameters interface{}, tool Tool) {
+	r.RegisterSerialFrom(name, description, parameters, tool, SourceBuiltin)
+}
+
 // RegisterSerialFrom is RegisterSerial with an explicit source.
-func (r *Registry) RegisterSerialFrom(name, description string, parameters interface{}, fn ToolFunc, source ToolSource) {
+func (r *Registry) RegisterSerialFrom(name, description string, parameters interface{}, tool Tool, source ToolSource) {
+	r.RegisterToolFrom(name, description, parameters, serialTool{
+		name:  name,
+		slot:  make(chan struct{}, 1),
+		inner: tool,
+	}, source)
+}
+
+// serialTool serializes calls to one tool. The slot lives in the registered
+// value, so every call shares it and the wait is still abandonable.
+type serialTool struct {
+	name  string
+	slot  chan struct{}
+	inner Tool
+}
+
+// Call waits for this tool's slot, then runs the inner tool.
+func (t serialTool) Call(ctx context.Context, args json.RawMessage) (string, error) {
 	// A slot rather than a mutex: the wait has to be abandonable. A queued
 	// delegate_task is waiting on the turn's clock too, and when that clock runs
 	// out the call must return something the loop can render — not hold a
@@ -814,37 +704,33 @@ func (r *Registry) RegisterSerialFrom(name, description string, parameters inter
 	// with an already-dead ctx. That is the turn of 2026-09-14 that ended with
 	// delegate_task still showing "Queued (waiting on prior sub-agent)…" and a
 	// result nobody was waiting for.
-	slot := make(chan struct{}, 1)
-	wrapped := func(ctx context.Context, args json.RawMessage) (string, error) {
-		// Checked before the select: with a dead ctx and a free slot both cases
-		// are ready and select picks at random, so the dead-ctx answer has to be
-		// decided first.
-		if err := ctx.Err(); err != nil {
-			return "", err
-		}
-		// The wait ends with the TURN, not with the tool's grace window. The loop
-		// hands tools a context that outlives its turn on purpose (so an in-flight
-		// tool can land its result), which means this context's Done fires ~60s
-		// after nobody is waiting for a call that never started. The turn's own
-		// deadline travels as a value (see turn_deadline.go).
-		waitCtx, cancelWait := ctx, context.CancelFunc(func() {})
-		if deadline, ok := TurnDeadline(ctx); ok {
-			waitCtx, cancelWait = context.WithDeadline(ctx, deadline)
-		}
-		defer cancelWait()
-		select {
-		case slot <- struct{}{}:
-			defer func() { <-slot }()
-		case <-waitCtx.Done():
-			// Name what happened. A bare "context deadline exceeded" reads like a
-			// provider fault; for a call that never started, the actionable fact
-			// is that its turn ended while it waited.
-			return "", fmt.Errorf("%s never started: its turn ended while it waited behind another invocation — re-issue it in a fresh turn (%w)",
-				name, waitCtx.Err())
-		}
-		return fn(ctx, args)
+	// Checked before the select: with a dead ctx and a free slot both cases
+	// are ready and select picks at random, so the dead-ctx answer has to be
+	// decided first.
+	if err := ctx.Err(); err != nil {
+		return "", err
 	}
-	r.RegisterFrom(name, description, parameters, wrapped, source)
+	// The wait ends with the TURN, not with the tool's grace window. The loop
+	// hands tools a context that outlives its turn on purpose (so an in-flight
+	// tool can land its result), which means this context's Done fires ~60s
+	// after nobody is waiting for a call that never started. The turn's own
+	// deadline travels as a value (see turn_deadline.go).
+	waitCtx, cancelWait := ctx, context.CancelFunc(func() {})
+	if deadline, ok := TurnDeadline(ctx); ok {
+		waitCtx, cancelWait = context.WithDeadline(ctx, deadline)
+	}
+	defer cancelWait()
+	select {
+	case t.slot <- struct{}{}:
+		defer func() { <-t.slot }()
+	case <-waitCtx.Done():
+		// Name what happened. A bare "context deadline exceeded" reads like a
+		// provider fault; for a call that never started, the actionable fact
+		// is that its turn ended while it waited.
+		return "", fmt.Errorf("%s never started: its turn ended while it waited behind another invocation — re-issue it in a fresh turn (%w)",
+			t.name, waitCtx.Err())
+	}
+	return t.inner.Call(ctx, args)
 }
 
 // ToolNames returns the sorted names of every registered tool.
@@ -855,6 +741,8 @@ func (r *Registry) RegisterSerialFrom(name, description string, parameters inter
 // memory. Sorted so the caller can diff two snapshots without being fooled by
 // map iteration order.
 func (r *Registry) ToolNames() []string {
+	r.toolsMu.RLock()
+	defer r.toolsMu.RUnlock()
 	out := make([]string, 0, len(r.tools))
 	for name := range r.tools {
 		out = append(out, name)
@@ -865,21 +753,54 @@ func (r *Registry) ToolNames() []string {
 
 // HasBuiltin returns true if a built-in tool with the given name exists.
 func (r *Registry) HasBuiltin(name string) bool {
+	r.toolsMu.RLock()
 	t, ok := r.tools[name]
+	r.toolsMu.RUnlock()
 	return ok && t.source == SourceBuiltin
 }
 
-// GetFunc returns the ToolFunc for a tool by name, or nil if not found.
-func (r *Registry) GetFunc(name string) ToolFunc {
+// GetTool returns the Tool registered under name, or nil if not found.
+// Workspace tools were already wrapped at registration, so this is a pure
+// lookup with no allocation and no per-call decoration.
+func (r *Registry) GetTool(name string) Tool {
+	r.toolsMu.RLock()
 	t, ok := r.tools[name]
+	r.toolsMu.RUnlock()
 	if !ok {
 		return nil
 	}
-	return t.fn
+	return t.tool
+}
+
+// signalTool routes a workspace tool's result through the package's single
+// signal exit. The registry installs it once in RegisterToolFrom; the inner
+// tool reads the executor from the call context, so registration order does
+// not matter.
+type signalTool struct {
+	registry *Registry
+	inner    Tool
+}
+
+// Call runs the inner tool and appends the call's collected signals.
+func (t signalTool) Call(ctx context.Context, args json.RawMessage) (string, error) {
+	ctx, col := withSignalCollector(ctx)
+	out, err := t.inner.Call(ctx, args)
+	return t.registry.workspaceSignalExit(ctx, out, col.signals), err
+}
+
+func isWorkspaceTool(name string) bool {
+	for _, n := range workspaceTools {
+		if n == name {
+			return true
+		}
+	}
+	return false
 }
 
 // Definitions returns all tool definitions for the LLM.
 func (r *Registry) Definitions() []provider.Tool {
+	r.toolsMu.RLock()
+	defer r.toolsMu.RUnlock()
 	defs := make([]provider.Tool, 0, len(r.tools))
 	for _, t := range r.tools {
 		defs = append(defs, t.def)
@@ -920,6 +841,8 @@ func toolSourceName(s ToolSource) string {
 // dashboard checkbox list would reshuffle on every fetch, which is
 // disorienting.
 func (r *Registry) RegisteredTools() []ToolInfo {
+	r.toolsMu.RLock()
+	defer r.toolsMu.RUnlock()
 	out := make([]ToolInfo, 0, len(r.tools))
 	for name, t := range r.tools {
 		out = append(out, ToolInfo{
@@ -973,6 +896,8 @@ func (r *Registry) DefinitionsForMode(builtinAllow []string) []provider.Tool {
 			}
 		}
 	}
+	r.toolsMu.RLock()
+	defer r.toolsMu.RUnlock()
 	defs := make([]provider.Tool, 0, len(r.tools))
 	for name, t := range r.tools {
 		if t.source != SourceBuiltin {
@@ -993,12 +918,11 @@ func (r *Registry) DefinitionsForMode(builtinAllow []string) []provider.Tool {
 
 // Execute runs a tool by name with the given arguments.
 func (r *Registry) Execute(ctx context.Context, name string, args string) (string, error) {
-	tool, ok := r.tools[name]
-	if !ok {
+	tool := r.GetTool(name)
+	if tool == nil {
 		return "", fmt.Errorf("unknown tool: %s", name)
 	}
-
-	result, err := tool.fn(ctx, json.RawMessage(args))
+	result, err := tool.Call(ctx, json.RawMessage(args))
 	if err != nil {
 		return result + "\n[Analyze the error above and try a different approach.]", err
 	}
@@ -1020,31 +944,13 @@ func (r *Registry) SetSandboxRoot(root string) {
 	r.sandboxRoot = root
 }
 
-// SetExecutor attaches a sandbox Executor. When set, read_file, write_file,
-// list_dir, and exec are ALL forwarded to the executor instead of operating
-// on the host filesystem. This is the mode used for cloud deployments where
-// each user gets an isolated container/VM with their own runtime + files.
-//
-// Installs that explicitly opt in with FASTAGENT_ALLOW_HOST_EXEC=1
-// additionally get a `host_exec` escape hatch so the agent can help
-// with operator-environment tasks (fastagent upgrade, ~/Downloads
-// access, system tools) without losing the sandbox default for
-// everything else. Default OFF — host_exec exposed to a chatter who
-// can prompt-inject is a privilege-escalation surface, so the gate
-// requires the operator to acknowledge the risk.
-func (r *Registry) SetExecutor(ex sandbox.Executor) {
-	r.executor = ex
-	// Re-register built-in tools to use the executor.
-	registerSandboxedFile(r, ex)
-	registerSandboxedApplyPatch(r, ex)
-	registerSandboxedExec(r, ex)
-	// Policy C (docs/sandbox-scope-leak.md §9.5): a sandbox whose /workspace
-	// never got filled says so on the results the model would otherwise read as
-	// "the file is gone". Attached after the sandboxed tools are registered so
-	// it wraps the closures that actually reach the sandbox.
-	r.declareUnhydratedWorkspace()
+// EnableHostExecEscapeHatch exposes `host_exec` when the operator opted in
+// with FASTAGENT_ALLOW_HOST_EXEC=1. Host_exec runs on the operator's machine
+// and is OFF by default: a chatter who can prompt-inject must not reach it.
+// Called once at agent boot; it is not per-turn state.
+func (r *Registry) EnableHostExecEscapeHatch() {
 	if buildinfo.IsHostExecAllowed() {
-		registerHostExec(r, r.envProvider, r.skillDirs)
+		registerHostExec(r, r.envProvider)
 	}
 }
 
@@ -1077,28 +983,6 @@ var workspaceTools = []string{"exec", "read_file", "write_file", "edit_file", "l
 //     explained by it.
 const workspaceUnhydratedSignal = "[workspace not hydrated: the file store could not list this agent's files (the listing timed out after retries). Files may be missing for this reason only — do not conclude they were deleted.]"
 
-// declareUnhydratedWorkspace wraps the workspace-touching tools so their
-// results carry the declaration when the sandbox in use reports an unfilled
-// /workspace. Wrapping the closures (rather than the call sites inside each
-// tool) keeps the rule in one place: every return path of exec, read_file,
-// write_file, edit_file, list_dir and apply_patch is covered, including the
-// error paths, which on this failure look like `No such file or directory`.
-func (r *Registry) declareUnhydratedWorkspace() {
-	for _, name := range workspaceTools {
-		t, ok := r.tools[name]
-		if !ok {
-			continue
-		}
-		inner := t.fn
-		t.fn = func(ctx context.Context, args json.RawMessage) (string, error) {
-			ctx, col := withSignalCollector(ctx)
-			out, err := inner(ctx, args)
-			return r.workspaceSignalExit(out, col.signals), err
-		}
-		r.tools[name] = t
-	}
-}
-
 // workspaceSignalExit is the tools package's SINGLE signal exit: every
 // delta a workspace tool wants the agent to perceive passes through here.
 //
@@ -1118,8 +1002,8 @@ func (r *Registry) declareUnhydratedWorkspace() {
 // first line, so a signal placed on line 1 would silently cost the frontend its
 // "ran in a sandbox" badge. The model still reads the declaration first, because
 // the marker is gone before the result reaches the provider.
-func (r *Registry) workspaceSignalExit(out string, callSignals []string) string {
-	if unhydrated, ok := r.executor.(sandbox.UnhydratedWorkspace); ok && unhydrated.WorkspaceUnhydrated() {
+func (r *Registry) workspaceSignalExit(ctx context.Context, out string, callSignals []string) string {
+	if unhydrated, ok := r.executorFor(ctx).(sandbox.UnhydratedWorkspace); ok && unhydrated.WorkspaceUnhydrated() {
 		out = r.attachUnhydratedSignal(out)
 	}
 	for _, n := range callSignals {
@@ -1133,53 +1017,12 @@ func (r *Registry) workspaceSignalExit(out string, callSignals []string) string 
 func (r *Registry) attachUnhydratedSignal(out string) string {
 	rest, hasMeta := strings.CutPrefix(out, MetaSandboxPrefix)
 	if strings.HasPrefix(rest, workspaceUnhydratedSignal) {
-		return out // already declared — SetExecutor runs on every bind
+		return out
 	}
 	if hasMeta {
 		return MetaSandboxPrefix + workspaceUnhydratedSignal + "\n" + rest
 	}
 	return workspaceUnhydratedSignal + "\n" + out
-}
-
-// StartTurn resets per-turn tool-call state. Called by the agent loop
-// at the top of HandleMessage so each new user turn starts with a
-// blank failure map — failures from a prior turn shouldn't poison
-// retries that legitimately want to revisit a URL after the user
-// nudges the agent ("try again", "use a different source").
-func (r *Registry) StartTurn() {
-	r.turnFailMu.Lock()
-	defer r.turnFailMu.Unlock()
-	r.turnFails = nil
-}
-
-// RecordToolFailure stashes a short error summary keyed by (toolName,
-// args). Called by the agent loop after every failed tool execution.
-// Subsequent PriorFailure lookups within the same turn return this
-// summary so the tool can short-circuit instead of re-attempting the
-// same dead URL / endpoint.
-func (r *Registry) RecordToolFailure(toolName string, rawArgs string, errSummary string) {
-	if errSummary == "" {
-		return
-	}
-	r.turnFailMu.Lock()
-	defer r.turnFailMu.Unlock()
-	if r.turnFails == nil {
-		r.turnFails = map[turnFailKey]string{}
-	}
-	r.turnFails[turnFailKey{tool: toolName, hash: sha256.Sum256([]byte(rawArgs))}] = errSummary
-}
-
-// PriorFailure returns a short summary of the previous failure for
-// (toolName, args) within the current turn, or "" if not seen. Tool
-// implementations can use this to refuse a guaranteed-fail retry with
-// a stronger message than the underlying error.
-func (r *Registry) PriorFailure(toolName string, rawArgs string) string {
-	r.turnFailMu.Lock()
-	defer r.turnFailMu.Unlock()
-	if r.turnFails == nil {
-		return ""
-	}
-	return r.turnFails[turnFailKey{tool: toolName, hash: sha256.Sum256([]byte(rawArgs))}]
 }
 
 // signalCollector is how a tool call hands its deltas to the package's single

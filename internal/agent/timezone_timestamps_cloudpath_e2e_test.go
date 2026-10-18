@@ -25,6 +25,7 @@ package agent
 // spinning up a full Manager/loop for a pure-rendering path.
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -82,8 +83,8 @@ func TestTimezoneTimestamps_MessagePrefix_PerChatterZone(t *testing.T) {
 	// 08:09 PDT (June, DST active). A shared/registry-based renderer
 	// could only produce one of these for the whole session; the fix
 	// renders per per-turn chatter.
-	gotSH := a.withMessageTimestampsForChatter(msgs, chatterUID)
-	gotLA := a.withMessageTimestampsForChatter(msgs, "la_chatter")
+	gotSH := a.withMessageTimestampsForChatter(context.Background(), msgs, chatterUID)
+	gotLA := a.withMessageTimestampsForChatter(context.Background(), msgs, "la_chatter")
 
 	if !strings.HasPrefix(gotSH[0].Content, "[2026-06-21 23:09 Sun] ") {
 		t.Errorf("Asia/Shanghai chatter: prefix %q, want [2026-06-21 23:09 Sun]", gotSH[0].Content)
@@ -116,7 +117,7 @@ func TestTimezoneTimestamps_RuntimeAndMessages_Agree(t *testing.T) {
 	if !strings.Contains(rc, "Timezone: Asia/Shanghai") {
 		t.Errorf("runtime context: %q, want Asia/Shanghai", rc)
 	}
-	got := a.withMessageTimestampsForChatter([]provider.Message{{
+	got := a.withMessageTimestampsForChatter(context.Background(), []provider.Message{{
 		Role:      "user",
 		Content:   "hi",
 		Timestamp: time.Date(2026, 6, 21, 15, 9, 0, 0, time.UTC).UnixMilli(),

@@ -80,11 +80,11 @@ func liveToolSandbox(t *testing.T, agent, sessionID string, seed func(store *wor
 	r := NewRegistry(t.TempDir(), t.TempDir())
 	t.Cleanup(r.Close)
 	r.SetWorkspaceStore(store, agent)
-	r.SetSessionID(sessionID)
-	r.SetExecutor(ex)
 	// The coding shape: the app lives in a subdir, so every tool path is
-	// prefixed with it on its way to the store (scopeSessionID + wsPath).
-	r.SetCodingSubdir("app")
+	// prefixed with it on its way to the store (ScopeSessionID + WSPath).
+	scope := &TurnScope{SessionID: sessionID, Executor: ex}
+	scope.SetCodingSubdir("app")
+	bindTestTurn(r, scope)
 	return r, store, lp, ex
 }
 
@@ -107,7 +107,7 @@ func TestE2BLiveOnePathIsOneKey(t *testing.T) {
 	}
 
 	// 1. write_file → store key "app/notes.md" + the mirror reaches the sandbox.
-	if _, err := r.Execute(ctx, "write_file", `{"path":"notes.md","content":"two\n"}`); err != nil {
+	if _, err := r.Execute(testTurnCtx(r), "write_file", `{"path":"notes.md","content":"two\n"}`); err != nil {
 		t.Fatalf("write_file: %v", err)
 	}
 	if got := liveStoreKeys(t, ctx, store, agent, sessionID); !equalKeys(got, []string{"app/notes.md"}) {
@@ -118,7 +118,7 @@ func TestE2BLiveOnePathIsOneKey(t *testing.T) {
 	}
 
 	// 2. apply_patch on the same logical path: same key, same sandbox path.
-	out, err := r.Execute(ctx, "apply_patch",
+	out, err := r.Execute(testTurnCtx(r), "apply_patch",
 		"{\"input\":\"*** Begin Patch\\n*** Update File: notes.md\\n@@\\n-two\\n+three\\n*** End Patch\\n\"}")
 	if err != nil {
 		t.Fatalf("apply_patch: %v", err)
@@ -144,7 +144,7 @@ func TestE2BLiveOnePathIsOneKey(t *testing.T) {
 	} else if strings.Contains(out, "yes") {
 		t.Errorf("a root-level /workspace/notes.md exists — the patch and the mirror disagree about the path again")
 	}
-	got, err := r.Execute(ctx, "read_file", `{"path":"notes.md"}`)
+	got, err := r.Execute(testTurnCtx(r), "read_file", `{"path":"notes.md"}`)
 	if err != nil {
 		t.Fatalf("read_file: %v", err)
 	}
@@ -274,10 +274,9 @@ func TestE2BLiveProjectSessionKeepsOneTree(t *testing.T) {
 	r := NewRegistry(t.TempDir(), t.TempDir())
 	defer r.Close()
 	r.SetWorkspaceStore(store, agent)
-	r.SetProjectID(projectID)
-	r.SetSessionID(chatID)
-	r.SetExecutor(ex)
-	r.SetCodingSubdir("app")
+	scope := &TurnScope{ProjectID: projectID, SessionID: chatID, Executor: ex}
+	scope.SetCodingSubdir("app")
+	bindTestTurn(r, scope)
 
 	// ① hydrate still collapses (it always did): the project root's object is in
 	// the sandbox at the path its key maps to.
@@ -303,7 +302,7 @@ func TestE2BLiveProjectSessionKeepsOneTree(t *testing.T) {
 		t.Fatalf("chat scope = %v; want nothing — the sync must not fork the project tree per chat (decision A)", chatKeys)
 	}
 	// And the tools see what the sandbox produced (this is what A bought).
-	if got, err := r.Execute(ctx, "read_file", `{"path":"from_exec.txt"}`); err != nil {
+	if got, err := r.Execute(testTurnCtx(r), "read_file", `{"path":"from_exec.txt"}`); err != nil {
 		t.Fatalf("read_file of the exec artefact: %v", err)
 	} else if !strings.Contains(got, "artefact") {
 		t.Fatalf("read_file returned %q; want the sandbox's file — that is the point of A", got)
