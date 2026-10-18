@@ -4,7 +4,7 @@
 
 A lightweight AI Agent runtime written in Go.
 
-[![Go](https://img.shields.io/badge/Go-1.25+-00ADD8?style=flat&logo=go)](https://go.dev)
+[![Go](https://img.shields.io/badge/Go-1.26+-00ADD8?style=flat&logo=go)](https://go.dev)
 
 **Single binary - Any LLM - Multi-agent - Sandbox - Cloud-ready**
 
