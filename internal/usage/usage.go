@@ -402,7 +402,38 @@ func (s *SQLMeter) dayParam(t time.Time) any {
 	return t
 }
 
+type sqlExecer interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
 func (s *SQLMeter) RecordTokens(ctx context.Context, userID, agentID, sessionKey, provider, model string, t Tokens) error {
+	return s.recordTokens(ctx, s.db, userID, agentID, sessionKey, provider, model, t)
+}
+
+// RecordTokensAndEnqueue writes the daily aggregate and the outbox row in one
+// transaction. A crash cannot leave a locally counted call without a durable
+// billing report.
+func (s *SQLMeter) RecordTokensAndEnqueue(ctx context.Context, userID, agentID, sessionKey, provider, model string, t Tokens, reportID string, payload []byte) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := s.recordTokens(ctx, tx, userID, agentID, sessionKey, provider, model, t); err != nil {
+		return err
+	}
+	q := rebindQuery(`
+		INSERT INTO usage_outbox (id, payload, status, attempts, next_attempt_at)
+		VALUES (?, ?, 'pending', 0, ?)
+		ON CONFLICT (id) DO NOTHING`, s.dialect)
+	if _, err := tx.ExecContext(ctx, q, reportID, string(payload), timeParam(s.dialect, time.Now())); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *SQLMeter) recordTokens(ctx context.Context, ex sqlExecer, userID, agentID, sessionKey, provider, model string, t Tokens) error {
 	day := s.dayParam(dayBucket(time.Now()))
 	channel := store.ChannelFromContext(ctx)
 	chatterUID := store.ChatterUserIDFromContext(ctx)
@@ -423,7 +454,7 @@ func (s *SQLMeter) RecordTokens(ctx context.Context, userID, agentID, sessionKey
 			request_count        = token_usage_daily.request_count        + 1,
 			channel              = EXCLUDED.channel,
 			chatter_user_id      = EXCLUDED.chatter_user_id`)
-	_, err := s.db.ExecContext(ctx, q,
+	_, err := ex.ExecContext(ctx, q,
 		day, userID, agentID, sessionKey, provider, model,
 		t.Input, t.Output, t.CacheRead, t.CacheCreation,
 		channel, chatterUID,

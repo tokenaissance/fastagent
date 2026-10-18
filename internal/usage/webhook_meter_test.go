@@ -6,11 +6,14 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/fastclaw-ai/fastclaw/internal/config"
+	"github.com/fastclaw-ai/fastclaw/internal/store"
 )
 
 func TestCalculateTokenCost(t *testing.T) {
@@ -305,6 +308,7 @@ func TestWebhookMeter_RecordTokens(t *testing.T) {
 			localMeter := NewMemMeter()
 			getCostFunc := func(provider, model string) *config.ModelCost { return tt.cost }
 			webhookMeter := NewWebhookMeter(localMeter, server.URL, tt.webhookToken, getCostFunc)
+			t.Cleanup(func() { _ = webhookMeter.Close() })
 
 			ctx := context.Background()
 			err := webhookMeter.RecordTokens(ctx, "test-user", "test-agent", "test-session", "openai", "gpt-4o", tt.tokens)
@@ -351,6 +355,7 @@ func TestWebhookMeter_Integration(t *testing.T) {
 		return &config.ModelCost{Input: 15, Output: 75, CacheRead: 1.5, CacheWrite: 18.75}
 	}
 	meter := NewWebhookMeter(localMeter, server.URL, "integration-test-token", getCostFunc)
+	t.Cleanup(func() { _ = meter.Close() })
 
 	ctx := context.Background()
 	testCases := []struct {
@@ -435,6 +440,7 @@ func TestWebhookMeter_DelegatingMethods(t *testing.T) {
 		return &config.ModelCost{Input: 15, Output: 75}
 	}
 	meter := NewWebhookMeter(localMeter, server.URL, "tok", getCostFunc)
+	t.Cleanup(func() { _ = meter.Close() })
 
 	ctx := context.Background()
 	if err := localMeter.RecordTokens(ctx, "alice", "agentA", "sess1", "anthropic-messages", "sonnet-4-6",
@@ -510,6 +516,7 @@ func TestWebhookMeter_ErrorHandling(t *testing.T) {
 				return &config.ModelCost{Input: 15, Output: 75}
 			}
 			meter := NewWebhookMeter(localMeter, server.URL, "test-token", getCostFunc)
+			t.Cleanup(func() { _ = meter.Close() })
 
 			ctx := context.Background()
 			err := meter.RecordTokens(ctx, "test-user", "test-agent", "test-session", "openai", "gpt-4o", Tokens{Input: 1000, Output: 500})
@@ -524,5 +531,166 @@ func TestWebhookMeter_ErrorHandling(t *testing.T) {
 				t.Errorf("Local meter should still record: Input = %v, want 1000", totals.Input)
 			}
 		})
+	}
+}
+
+func TestWebhookMeterRetriesWithTheSameReportID(t *testing.T) {
+	var mu sync.Mutex
+	var reportIDs []string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var report UsageReport
+		if err := json.NewDecoder(r.Body).Decode(&report); err != nil {
+			t.Errorf("decode report: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		reportIDs = append(reportIDs, report.ReportID)
+		attempt := len(reportIDs)
+		mu.Unlock()
+
+		if attempt == 1 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	outbox := NewMemOutbox()
+	meter := NewWebhookMeterWithOutbox(NewMemMeter(), outbox, server.URL, "token", func(string, string) *config.ModelCost {
+		return &config.ModelCost{Input: 15, Output: 75}
+	})
+	meter.retryBase = 10 * time.Millisecond
+	meter.retryMax = 20 * time.Millisecond
+	t.Cleanup(func() { _ = meter.Close() })
+
+	if err := meter.RecordTokens(context.Background(), "u1", "a1", "s1", "openai", "gpt", Tokens{Input: 1000, Output: 500}); err != nil {
+		t.Fatalf("RecordTokens: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		mu.Lock()
+		n := len(reportIDs)
+		mu.Unlock()
+		if n >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("webhook attempts = %d, want at least 2", n)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if reportIDs[0] == "" || reportIDs[0] != reportIDs[1] {
+		t.Fatalf("report IDs = %q, want one non-empty ID reused across retries", reportIDs)
+	}
+}
+
+func TestWebhookMeterMarksPermanentRejectionDead(t *testing.T) {
+	var calls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"ok":false,"error":"invalid payload"}`))
+	}))
+	defer server.Close()
+
+	outbox := NewMemOutbox()
+	meter := NewWebhookMeterWithOutbox(NewMemMeter(), outbox, server.URL, "token", func(string, string) *config.ModelCost {
+		return &config.ModelCost{Input: 15, Output: 75}
+	})
+	meter.retryBase = 10 * time.Millisecond
+	meter.retryMax = 20 * time.Millisecond
+	t.Cleanup(func() { _ = meter.Close() })
+
+	if err := meter.RecordTokens(context.Background(), "u1", "a1", "s1", "openai", "gpt", Tokens{Input: 1000, Output: 500}); err != nil {
+		t.Fatalf("RecordTokens: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		outbox.mu.Lock()
+		var dead int
+		for _, entry := range outbox.entries {
+			if entry.status == "dead" {
+				dead++
+			}
+		}
+		outbox.mu.Unlock()
+		if dead == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("permanent rejection did not mark the outbox row dead")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("webhook calls = %d, want 1 (permanent rejection must not retry)", got)
+	}
+}
+
+func TestSQLOutboxPersistsPendingRows(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.NewDBStore("sqlite", "file:"+filepath.Join(dir, "outbox.db")+"?_pragma=foreign_keys(1)")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	if err := st.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	first := NewSQLOutbox(st.DB(), "sqlite")
+	if err := first.Enqueue(ctx, "report-1", []byte(`{"reportId":"report-1"}`)); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	second := NewSQLOutbox(st.DB(), "sqlite")
+	pending, err := second.Pending(ctx, time.Now().Add(time.Second), 10)
+	if err != nil {
+		t.Fatalf("pending: %v", err)
+	}
+	if len(pending) != 1 || pending[0].ID != "report-1" {
+		t.Fatalf("pending = %+v, want report-1", pending)
+	}
+}
+
+func TestSQLMeterRecordTokensAndEnqueueRollsBackWhenOutboxWriteFails(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.NewDBStore("sqlite", "file:"+filepath.Join(dir, "atomic.db")+"?_pragma=foreign_keys(1)")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	if err := st.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if _, err := st.DB().ExecContext(ctx, `DROP TABLE usage_outbox`); err != nil {
+		t.Fatalf("drop outbox: %v", err)
+	}
+
+	meter := NewSQLMeter(st.DB(), "sqlite")
+	err = meter.RecordTokensAndEnqueue(ctx, "u1", "a1", "s1", "openai", "gpt", Tokens{Input: 100}, "report-1", []byte(`{}`))
+	if err == nil {
+		t.Fatal("RecordTokensAndEnqueue succeeded without an outbox table")
+	}
+
+	var count int
+	if err := st.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM token_usage_daily`).Scan(&count); err != nil {
+		t.Fatalf("count daily rows: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("token_usage_daily rows = %d, want 0 after rollback", count)
 	}
 }

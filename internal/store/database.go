@@ -2048,6 +2048,22 @@ func migrationSQLForDialect(dialect string) []string {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_token_usage_log_user ON token_usage_log (user_id, created_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_token_usage_log_session ON token_usage_log (user_id, agent_id, session_key)`,
+		// usage_outbox is the durability boundary for billing webhooks. A usage
+		// report is written here in the same transaction as token_usage_daily,
+		// then delivered with retry until Cloud accepts it. The report ID is the
+		// idempotency key: delivery is at-least-once and Cloud dedupes retries.
+		// status: pending -> sent, or pending -> dead after a permanent 4xx.
+		`CREATE TABLE IF NOT EXISTS usage_outbox (
+			id TEXT PRIMARY KEY,
+			payload TEXT NOT NULL,
+			status TEXT NOT NULL DEFAULT 'pending',
+			attempts INTEGER NOT NULL DEFAULT 0,
+			next_attempt_at TIMESTAMP NOT NULL,
+			last_error TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			sent_at TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_usage_outbox_pending ON usage_outbox (status, next_attempt_at)`,
 		// channel_leases gates polling / persistent-connection channel
 		// adapters (WeChat, Telegram, Discord, Slack, Feishu long-conn)
 		// to one process at a time. Without it, two cloud replicas

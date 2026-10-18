@@ -419,8 +419,10 @@ func New(env *config.EnvConfig) (*Gateway, error) {
 	// happen in real installs — only an embedded test double would).
 	var localMeter usage.Meter = usage.NewMemMeter()
 	var quotaStore usage.QuotaStore = usage.NewMemQuotaStore()
+	var outbox usage.Outbox = usage.NewMemOutbox()
 	if dbs, ok := st.(*store.DBStore); ok {
 		localMeter = usage.NewSQLMeter(dbs.DB(), dbs.Dialect())
+		outbox = usage.NewSQLOutbox(dbs.DB(), dbs.Dialect())
 		quotaStore = usage.NewSQLQuotaStore(dbs.DB(), dbs.Dialect())
 	}
 
@@ -434,8 +436,9 @@ func New(env *config.EnvConfig) (*Gateway, error) {
 		costCache := newModelCostCache(st)
 
 		// Wrap local meter with webhook billing
-		meter = usage.NewWebhookMeter(
+		meter = usage.NewWebhookMeterWithOutbox(
 			localMeter,
+			outbox,
 			webhookURL,
 			webhookToken,
 			costCache.getModelCost,
