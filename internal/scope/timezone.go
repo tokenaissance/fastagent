@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/fastclaw-ai/fastclaw/internal/store"
+	storeport "github.com/fastclaw-ai/fastclaw/internal/store/port"
 )
 
 // PrefsNamespace is the kind=setting namespace for per-chatter
@@ -44,7 +45,7 @@ const prefsTimezoneKey = "timezone"
 // falls back to the blob like every other read, and a KV-only prefs writer (none
 // exists today; SaveUserTimezone → SaveSetting dual-writes) would owe the blob
 // row rather than get served by widening this loop.
-func Timezone(ctx context.Context, st store.ConfigReadStore, chatterUID, agentID string) string {
+func Timezone(ctx context.Context, st storeport.ConfigReadStore, chatterUID, agentID string) string {
 	if st == nil {
 		return ""
 	}
@@ -93,11 +94,11 @@ func LoadLocationOrLocal(name string) *time.Location {
 }
 
 // SaveUserTimezone records tz as userID's personal timezone at user
-// scope (agent_id='') so it follows the chatter across every agent
+// scope (agent_id=”) so it follows the chatter across every agent
 // they talk to. Other keys already present in the user's prefs row are
 // preserved. tz must be a valid IANA name — validate with
 // time.LoadLocation before calling.
-func SaveUserTimezone(ctx context.Context, st store.ConfigStore, userID, tz string) error {
+func SaveUserTimezone(ctx context.Context, st storeport.ConfigStore, userID, tz string) error {
 	if st == nil {
 		return errors.New("scope.SaveUserTimezone: store is required")
 	}

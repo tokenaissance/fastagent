@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"reflect"
 	"strconv"
-	"strings"
 )
 
 // A configs_kv value is stored as TEXT, which cannot say whether the text
@@ -25,30 +24,8 @@ import (
 // The tag is a decoding hint, never a constraint. A row whose text doesn't
 // match its tag is still returned — see ConfigValue.Decode. Rejecting a value
 // loses data, which is the failure this mechanism exists to stop.
-const (
-	ValueKindString = "string"
-	ValueKindNumber = "number"
-	ValueKindBool   = "bool"
-	ValueKindNull   = "null"
-	ValueKindObject = "object"
-	ValueKindArray  = "array"
-)
-
-// ConfigValue is one configs_kv row payload: the stored text plus the tag
-// naming its JSON type.
-//
-// Kind == "" means the row carries no tag — it was written before value_kind
-// existed, by hand, or by an older build. Readers must treat that as unknown
-// and fall back to the legacy heuristic, which is why Decode is a method
-// rather than a bare switch at each call site.
-//
-// Rows are always written with a tag: the Store KV methods take a ConfigValue
-// rather than a bare string, so a writer cannot silently produce another
-// untagged row.
-type ConfigValue struct {
-	Value string
-	Kind  string
-}
+// ValueKind* and ConfigValue live in internal/store/model. The aliases in
+// store.go keep the adapter's public names stable.
 
 // EncodeConfigValue maps a JSON-decoded Go value onto the (text, tag) pair
 // that reproduces it exactly.
@@ -184,81 +161,3 @@ func configValueFromJSON(blob []byte) ConfigValue {
 // so rows written before value_kind keep reading exactly as they did. An
 // unknown tag (a newer build wrote it) does the same — the text is still the
 // source of truth, and guessing beats failing.
-func (v ConfigValue) Decode() interface{} {
-	switch v.Kind {
-	case ValueKindString:
-		return v.Value
-	case ValueKindNumber:
-		return json.Number(v.Value)
-	case ValueKindBool:
-		return v.Value == "true"
-	case ValueKindNull:
-		return nil
-	case ValueKindObject, ValueKindArray:
-		// UseNumber so nested numbers keep the digits the row holds. Plain
-		// Unmarshal would hand back float64 for every one of them, and a
-		// 19-digit id inside {"id": …} would come back rounded even though
-		// the text on disk was exact.
-		dec := json.NewDecoder(strings.NewReader(v.Value))
-		dec.UseNumber()
-		var out interface{}
-		if err := dec.Decode(&out); err != nil {
-			// A malformed tagged row is a write bug, not a read
-			// instruction: hand back the text instead of dropping it.
-			return v.Value
-		}
-		return out
-	default:
-		return decodeLegacyValue(v.Value)
-	}
-}
-
-// DecodeLegacyStructure is the conservative read for an untagged row, kept
-// for the callers that must not guess scalars: object/array text comes back
-// as a map/slice, everything else stays the literal text that was stored.
-//
-// There is nothing to guess about structure — the text starts with { or [ and
-// either parses as JSON or does not — while guessing a scalar is exactly what
-// loses data (an all-digit api_key became a number and vanished on
-// mirror). Decode's legacy branch guesses scalars too, and that is the
-// rule the settings mirror has always used; the two are separate
-// operations because the two readers made opposite choices before value_kind
-// existed, and untagged rows have to keep the reading they were written for.
-func (v ConfigValue) DecodeLegacyStructure() interface{} {
-	if len(v.Value) > 0 && (v.Value[0] == '{' || v.Value[0] == '[') {
-		return decodeLegacyValue(v.Value)
-	}
-	return v.Value
-}
-
-// decodeLegacyValue is the pre-value_kind guesser, kept byte-for-byte so
-// untagged rows behave exactly as they always have. It is a guess: the column
-// alone cannot tell the string "123" from the number 123, so it gets some
-// rows wrong (an all-digit api_key became a number and then failed to
-// unmarshal into a string field, dropping the field). New rows carry a tag
-// precisely so this function stops being consulted.
-func decodeLegacyValue(s string) interface{} {
-	if s == "true" {
-		return true
-	}
-	if s == "false" {
-		return false
-	}
-	// Try JSON array/object.
-	if len(s) > 0 && (s[0] == '[' || s[0] == '{') {
-		var v interface{}
-		if json.Unmarshal([]byte(s), &v) == nil {
-			return v
-		}
-	}
-	// Try number — only if the entire string is numeric.
-	var f float64
-	if _, err := fmt.Sscanf(s, "%g", &f); err == nil {
-		// Verify the scan consumed the whole string.
-		check := fmt.Sprintf("%g", f)
-		if check == s {
-			return f
-		}
-	}
-	return s
-}

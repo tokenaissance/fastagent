@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/fastclaw-ai/fastclaw/internal/workspace"
+	workspace "github.com/fastclaw-ai/fastclaw/internal/workspace/port"
 )
 
 // bytesReader wraps a byte slice as an io.Reader — inlined helper so flush

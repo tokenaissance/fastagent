@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/fastclaw-ai/fastclaw/internal/config"
+	"github.com/fastclaw-ai/fastclaw/internal/store/model"
 )
 
 // ErrNotFound is returned by Get* methods when the row does not exist. Use
@@ -37,17 +38,20 @@ var ErrMCPServerExists = errors.New("store: mcp server already exists")
 // to the bytes the caller saw is indistinguishable from one that never moved.
 // That case makes the write a no-op rather than a lost update, so it is declared
 // rather than defended against — §13.2 of docs/fs-formal-proof/11-change-register.md.
-type AgentFileVersion struct {
-	// Absent is the precondition "this row must not exist yet" — a create-only
-	// write. It is distinct from "the row exists and is empty": with version =
-	// content, an empty string alone cannot tell those two apart, and a create
-	// that silently matched an existing empty row would not be create-only at all.
-	Absent bool
+type AgentFileVersion = model.AgentFileVersion
+type ConfigValue = model.ConfigValue
+type ConfigMirror = model.ConfigMirror
+type ConfigMirrorGap = model.ConfigMirrorGap
+type ConfigMirrorReconcile = model.ConfigMirrorReconcile
 
-	// Content is the exact bytes the caller read, compared as the precondition
-	// when Absent is false.
-	Content []byte
-}
+const (
+	ValueKindString = model.ValueKindString
+	ValueKindNumber = model.ValueKindNumber
+	ValueKindBool   = model.ValueKindBool
+	ValueKindNull   = model.ValueKindNull
+	ValueKindObject = model.ValueKindObject
+	ValueKindArray  = model.ValueKindArray
+)
 
 // AgentFileVersionAbsent is the create-only precondition for SaveAgentFileIfVersion.
 var AgentFileVersionAbsent = AgentFileVersion{Absent: true}
@@ -570,36 +574,15 @@ type APIKeyRecord struct {
 // resolveAgent let any authenticated session lazy-attach the agent
 // into their own UserSpace; sessions/memory/agent_files still
 // partition per chatter, so only the agent identity is shared.
-type AgentRecord struct {
-	ID        string                 `json:"id"`
-	UserID    string                 `json:"userId"`
-	Name      string                 `json:"name"`
-	Config    map[string]interface{} `json:"config,omitempty"`
-	IsPublic  bool                   `json:"isPublic"`
-	CreatedAt time.Time              `json:"createdAt"`
-	UpdatedAt time.Time              `json:"updatedAt"`
-}
+type AgentRecord = model.AgentRecord
 
 // KnowledgeDoc is one raw owner-uploaded knowledge source file
 // (an agent_files row under the knowledge/ prefix).
-type KnowledgeDoc struct {
-	Path    string `json:"path"`
-	Content string `json:"content"`
-}
+type KnowledgeDoc = model.KnowledgeDoc
 
 // KnowledgeChunkRecord is one searchable slice of an owner-uploaded
 // knowledge source file. Path points back to the source row in agent_files.
-type KnowledgeChunkRecord struct {
-	AgentID    string    `json:"agentId"`
-	UserID     string    `json:"userId"`
-	Path       string    `json:"path"`
-	Hash       string    `json:"hash"`
-	ChunkIndex int       `json:"chunkIndex"`
-	Content    string    `json:"content"`
-	Score      int       `json:"score,omitempty"`
-	CreatedAt  time.Time `json:"createdAt"`
-	UpdatedAt  time.Time `json:"updatedAt"`
-}
+type KnowledgeChunkRecord = model.KnowledgeChunkRecord
 
 // SessionRecord holds a conversation session.
 //
@@ -649,15 +632,7 @@ type SessionMessage struct {
 // SessionEventRecord is one row of session_events — a single delta the
 // agent emitted during a turn. Data is opaque JSON whose shape depends
 // on Type ("content", "tool_call", "error", "done", ...).
-type SessionEventRecord struct {
-	UserID     string    `json:"userId,omitempty"`
-	AgentID    string    `json:"agentId,omitempty"`
-	SessionKey string    `json:"sessionKey,omitempty"`
-	Seq        int64     `json:"seq"`
-	Type       string    `json:"type"`
-	Data       []byte    `json:"data,omitempty"`
-	CreatedAt  time.Time `json:"createdAt"`
-}
+type SessionEventRecord = model.SessionEventRecord
 
 // SessionOwnerPair is one (user_id, agent_id) tuple returned by
 // ListSessionOwnerPairs — represents "this user has at least one
@@ -819,26 +794,7 @@ const (
 //
 // CredentialKey is only meaningful for kind="channel" — see
 // LookupChannelByCredential.
-type ConfigRecord struct {
-	ID   string `json:"id"`
-	Kind string `json:"kind"`
-	// Scope is a denormalized label derived from (UserID, AgentID).
-	// "system" / "user" / "agent" / "user-agent". The storage layer is
-	// the single writer — SaveConfig always recomputes and overwrites
-	// whatever the caller passed, so the column can't drift out of
-	// sync with the (user_id, agent_id) source of truth. Kept so DB
-	// dumps and ad-hoc queries (`WHERE scope='system'`) stay readable
-	// without parsing the empty/non-empty pattern of the id columns.
-	Scope         string                 `json:"scope,omitempty"`
-	UserID        string                 `json:"userId,omitempty"`
-	AgentID       string                 `json:"agentId,omitempty"`
-	Name          string                 `json:"name"`
-	Enabled       bool                   `json:"enabled"`
-	CredentialKey string                 `json:"credentialKey,omitempty"`
-	Data          map[string]interface{} `json:"data,omitempty"`
-	CreatedAt     time.Time              `json:"createdAt"`
-	UpdatedAt     time.Time              `json:"updatedAt"`
-}
+type ConfigRecord = model.ConfigRecord
 
 // ChannelRecord is one row of the channels table — a bound IM bot.
 type ChannelRecord struct {
@@ -915,29 +871,6 @@ func KVUserAgentScopeID(userID, agentID string) string {
 // (scope, scopeId) JSON shape. Reads the persisted column when set;
 // falls back to recomputing for rows that pre-date the column-add
 // migration / are constructed in tests via raw INSERT.
-func (r ConfigRecord) LegacyScope() string {
-	if r.Scope != "" {
-		return r.Scope
-	}
-	return computeConfigScope(r.UserID, r.AgentID)
-}
-
-// LegacyScopeID is the scopeID half of LegacyScope. For per-(user,
-// agent) rows it returns "user_id/agent_id" so the JSON consumer has
-// enough to round-trip.
-func (r ConfigRecord) LegacyScopeID() string {
-	switch {
-	case r.UserID != "" && r.AgentID != "":
-		return r.UserID + "/" + r.AgentID
-	case r.UserID != "":
-		return r.UserID
-	case r.AgentID != "":
-		return r.AgentID
-	default:
-		return ""
-	}
-}
-
 // GoalRecord is the persisted shape of a /goal target. One per
 // (agent, session) — UNIQUE index enforces it. See
 // internal/agent/goal for the domain type and rationale.
@@ -978,41 +911,7 @@ type GoalRecord struct {
 // by callers that don't set it (the pre-2026-09-27 backfill copies
 // user_id, i.e. the owner) — the tool treats the owner as the creator in
 // that case so legacy jobs stay reachable by their owner alone.
-type CronJobRecord struct {
-	ID            string     `json:"id"`
-	UserID        string     `json:"userId,omitempty"`
-	CreatorUserID string     `json:"creatorUserId,omitempty"`
-	AgentID       string     `json:"agentId"`
-	Name          string     `json:"name"`
-	Type          string     `json:"type"`
-	Schedule      string     `json:"schedule"`
-	Message       string     `json:"message"`
-	Channel       string     `json:"channel"`
-	ChatID        string     `json:"chatId"`
-	AccountID     string     `json:"accountId"`
-	Timezone      string     `json:"timezone"`
-	Enabled       bool       `json:"enabled"`
-	LastRun       *time.Time `json:"lastRun,omitempty"`
-	NextRun       *time.Time `json:"nextRun,omitempty"`
-	// FailureCount is the number of consecutive fire-attempts whose
-	// destination channel was missing/unreachable. UpdateCronJobRun
-	// resets it to 0; IncrementCronJobFailure bumps it. The scheduler
-	// deletes the row once it crosses an internal threshold.
-	FailureCount int       `json:"failureCount,omitempty"`
-	CreatedAt    time.Time `json:"createdAt"`
-}
-
-// Creator names the account this job belongs to in chat: the explicit
-// creator when one was recorded, otherwise user_id — which SaveCronJob
-// fills from the agent owner, so a row written before the column existed
-// stays the owner's. Never empty for a row saved through SaveCronJob
-// against a real agent, so it cannot accidentally open a job to everyone.
-func (j CronJobRecord) Creator() string {
-	if j.CreatorUserID != "" {
-		return j.CreatorUserID
-	}
-	return j.UserID
-}
+type CronJobRecord = model.CronJobRecord
 
 // StorageType identifies the storage backend.
 type StorageType string

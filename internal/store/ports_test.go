@@ -1,9 +1,12 @@
-package store
+package store_test
 
 import (
 	"reflect"
 	"sort"
 	"testing"
+
+	st "github.com/fastclaw-ai/fastclaw/internal/store"
+	storeport "github.com/fastclaw-ai/fastclaw/internal/store/port"
 )
 
 // TestPortMethodSets pins what each capability port is allowed to contain.
@@ -18,21 +21,21 @@ func TestPortMethodSets(t *testing.T) {
 		port interface{}
 		want []string
 	}{
-		{(*ConfigReader)(nil), []string{
+		{(*storeport.ConfigReader)(nil), []string{
 			"BatchGetConfigsByAgentIDs", "GetConfigByName", "ListConfigs", "ListConfigValues",
 		}},
-		{(*ConfigReadStore)(nil), []string{
+		{(*storeport.ConfigReadStore)(nil), []string{
 			"BatchGetConfigsByAgentIDs",
 			"GetConfigByName", "GetConfigMirror",
 			"ListConfigMirrors", "ListConfigs", "ListConfigValues",
 		}},
-		{(*MirrorReader)(nil), []string{"GetConfigMirror", "ListConfigMirrors"}},
-		{(*ConfigRowWriter)(nil), []string{"SaveConfig"}},
-		{(*ConfigWriter)(nil), []string{
+		{(*storeport.MirrorReader)(nil), []string{"GetConfigMirror", "ListConfigMirrors"}},
+		{(*storeport.ConfigRowWriter)(nil), []string{"SaveConfig"}},
+		{(*storeport.ConfigWriter)(nil), []string{
 			"DeleteConfig", "DeleteConfigPrefix", "DeleteConfigValue",
 			"SaveConfig", "SetConfigValue",
 		}},
-		{(*ConfigStore)(nil), []string{
+		{(*storeport.ConfigStore)(nil), []string{
 			"BatchGetConfigsByAgentIDs",
 			"DeleteConfig", "DeleteConfigPrefix", "DeleteConfigValue",
 			"DeleteConfigMirror",
@@ -40,11 +43,11 @@ func TestPortMethodSets(t *testing.T) {
 			"GetConfigMirror",
 			"SaveConfig", "SaveConfigMirror", "SetConfigValue",
 		}},
-		{(*ConfigMirrorStore)(nil), []string{
+		{(*storeport.ConfigMirrorStore)(nil), []string{
 			"DeleteConfigMirror", "GetConfigMirror", "SaveConfigMirror",
 		}},
-		{(*ConfigMirrorReconciler)(nil), []string{"ReconcileConfigMirrors"}},
-		{(*KVStore)(nil), []string{
+		{(*storeport.ConfigMirrorReconciler)(nil), []string{"ReconcileConfigMirrors"}},
+		{(*storeport.KVStore)(nil), []string{
 			"DeleteConfigMirror", "DeleteConfigPrefix", "DeleteConfigValue",
 			"GetConfigMirror", "ListConfigValues",
 			"SaveConfigMirror", "SetConfigValue",
@@ -68,11 +71,11 @@ func TestPortMethodSets(t *testing.T) {
 // consumer that takes a port is not taking Store. If these ever become equal
 // the narrowing has been undone.
 func TestStoreIsWiderThanItsPorts(t *testing.T) {
-	store := reflect.TypeOf((*Store)(nil)).Elem()
-	config := reflect.TypeOf((*ConfigStore)(nil)).Elem()
-	if store.NumMethod() <= config.NumMethod() {
-		t.Fatalf("Store has %d methods, ConfigStore has %d — the configs port must be a strict subset",
-			store.NumMethod(), config.NumMethod())
+	storeType := reflect.TypeOf((*st.Store)(nil)).Elem()
+	config := reflect.TypeOf((*storeport.ConfigStore)(nil)).Elem()
+	if storeType.NumMethod() <= config.NumMethod() {
+		t.Fatalf("Store has %d methods, storeport.ConfigStore has %d — the configs port must be a strict subset",
+			storeType.NumMethod(), config.NumMethod())
 	}
 }
 
@@ -85,7 +88,7 @@ func TestPortsExcludeOtherDomains(t *testing.T) {
 	// Every Store method outside the configs domain, derived from the
 	// interface itself rather than a hand-kept list: a port may only contain
 	// methods whose names the configs domain owns.
-	store := reflect.TypeOf((*Store)(nil)).Elem()
+	storeType := reflect.TypeOf((*st.Store)(nil)).Elem()
 	allowed := map[string]bool{
 		"BatchGetConfigsByAgentIDs": true,
 		"GetConfigByName":           true, "ListConfigs": true, "ListConfigValues": true,
@@ -96,22 +99,22 @@ func TestPortsExcludeOtherDomains(t *testing.T) {
 		"ReconcileConfigMirrors": true,
 	}
 	for _, port := range []reflect.Type{
-		reflect.TypeOf((*ConfigReader)(nil)).Elem(),
-		reflect.TypeOf((*ConfigReadStore)(nil)).Elem(),
-		reflect.TypeOf((*MirrorReader)(nil)).Elem(),
-		reflect.TypeOf((*ConfigWriter)(nil)).Elem(),
-		reflect.TypeOf((*ConfigRowWriter)(nil)).Elem(),
-		reflect.TypeOf((*ConfigStore)(nil)).Elem(),
-		reflect.TypeOf((*KVStore)(nil)).Elem(),
-		reflect.TypeOf((*ConfigMirrorStore)(nil)).Elem(),
-		reflect.TypeOf((*ConfigMirrorReconciler)(nil)).Elem(),
+		reflect.TypeOf((*storeport.ConfigReader)(nil)).Elem(),
+		reflect.TypeOf((*storeport.ConfigReadStore)(nil)).Elem(),
+		reflect.TypeOf((*storeport.MirrorReader)(nil)).Elem(),
+		reflect.TypeOf((*storeport.ConfigWriter)(nil)).Elem(),
+		reflect.TypeOf((*storeport.ConfigRowWriter)(nil)).Elem(),
+		reflect.TypeOf((*storeport.ConfigStore)(nil)).Elem(),
+		reflect.TypeOf((*storeport.KVStore)(nil)).Elem(),
+		reflect.TypeOf((*storeport.ConfigMirrorStore)(nil)).Elem(),
+		reflect.TypeOf((*storeport.ConfigMirrorReconciler)(nil)).Elem(),
 	} {
 		for i := 0; i < port.NumMethod(); i++ {
 			name := port.Method(i).Name
 			if !allowed[name] {
 				t.Errorf("%s.%s is outside the configs domain", port.Name(), name)
 			}
-			if _, ok := store.MethodByName(name); !ok {
+			if _, ok := storeType.MethodByName(name); !ok {
 				t.Errorf("%s.%s is not a Store method", port.Name(), name)
 			}
 		}
@@ -119,7 +122,7 @@ func TestPortsExcludeOtherDomains(t *testing.T) {
 	// Guard the allow-list itself: every entry has to be a real Store method,
 	// or the test would silently accept a renamed port method.
 	for name := range allowed {
-		if _, ok := store.MethodByName(name); !ok {
+		if _, ok := storeType.MethodByName(name); !ok {
 			t.Errorf("allow-list names %s, which Store does not have", name)
 		}
 	}

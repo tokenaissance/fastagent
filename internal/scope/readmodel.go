@@ -1,9 +1,9 @@
 /**
- * [INPUT]: the settable/providable resolvers get a store.ConfigReadStore from
+ * [INPUT]: the settable/providable resolvers get a storeport.ConfigReadStore from
  *   the caller (ConfigReader plus the mirror marker, MirrorReader), and so now
  *   does AgentScopeRows, because a mirror-first batch must certify each lane it
  *   answers. Only the two views that never certify (SettingNamesAt / RowsAt)
- *   still take store.ConfigReader. Uses store.ConfigsKVPrefixFor,
+ *   still take storeport.ConfigReader. Uses store.ConfigsKVPrefixFor,
  *   store.ListConfigValues and store.GetConfigMirror. Imports config (provider
  *   shapes) and kvkeys indirectly through scope's own mirror helpers.
  * [OUTPUT]: the per-scope read models adapters resolve through instead of
@@ -32,6 +32,7 @@ import (
 
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 	"github.com/fastclaw-ai/fastclaw/internal/store"
+	storeport "github.com/fastclaw-ai/fastclaw/internal/store/port"
 )
 
 // readAuthority selects which table a configs read resolves through, and it is
@@ -80,7 +81,7 @@ var configsReadAuthority = configsKVFirst
 // read-path half of store.VerifyConfigMirror: the reconciler compares the
 // marker against the blob, a reader compares it against the leaves it just
 // loaded and never needs the blob to do so.
-func certifiedMirror(ctx context.Context, st store.ConfigReadStore, kind, sc, sid, name string, leaves map[string]store.ConfigValue) (store.ConfigMirror, bool) {
+func certifiedMirror(ctx context.Context, st storeport.ConfigReadStore, kind, sc, sid, name string, leaves map[string]store.ConfigValue) (store.ConfigMirror, bool) {
 	m, ok, err := st.GetConfigMirror(ctx, kind, sc, sid, name)
 	if err != nil || !ok {
 		return store.ConfigMirror{}, false
@@ -113,7 +114,7 @@ func certifiedMirrorIn(markers map[string]store.ConfigMirror, name string, leave
 // return a nil map, which is what lets the callers keep their old behaviour
 // (a disabled row is this layer's decision that the namespace has no value,
 // and it must not be undone by the mirror).
-func settingAtRaw(ctx context.Context, st store.ConfigReadStore, namespace, userID, agentID string) (map[string]interface{}, error) {
+func settingAtRaw(ctx context.Context, st storeport.ConfigReadStore, namespace, userID, agentID string) (map[string]interface{}, error) {
 	if configsReadAuthority == configsKVFirst {
 		if m, served, err := settingFromCertifiedMirror(ctx, st, namespace, userID, agentID); err != nil {
 			return nil, err
@@ -130,7 +131,7 @@ func settingAtRaw(ctx context.Context, st store.ConfigReadStore, namespace, user
 // leaves, or a read error — and the caller falls back to the blob. served=true
 // means the mirror is the answer, including the case where it answers "nothing"
 // because the row is switched off.
-func settingFromCertifiedMirror(ctx context.Context, st store.ConfigReadStore, namespace, userID, agentID string) (map[string]interface{}, bool, error) {
+func settingFromCertifiedMirror(ctx context.Context, st storeport.ConfigReadStore, namespace, userID, agentID string) (map[string]interface{}, bool, error) {
 	data, enabled, ok := certifiedSettingLayer(ctx, st, namespace, userID, agentID)
 	if !ok {
 		return nil, false, nil
@@ -149,7 +150,7 @@ func settingFromCertifiedMirror(ctx context.Context, st store.ConfigReadStore, n
 // back to the blob row for this layer". The payload of a disabled row is still
 // returned (the veto is in the bool), so a merged walk can tell "off" from
 // "absent".
-func certifiedSettingLayer(ctx context.Context, st store.ConfigReadStore, namespace, userID, agentID string) (map[string]interface{}, bool, bool) {
+func certifiedSettingLayer(ctx context.Context, st storeport.ConfigReadStore, namespace, userID, agentID string) (map[string]interface{}, bool, bool) {
 	sc, sid := kvScopeFromOwnership(userID, agentID)
 	m, ok, err := st.GetConfigMirror(ctx, store.KindSetting, sc, sid, namespace)
 	if err != nil || !ok {
@@ -169,7 +170,7 @@ func certifiedSettingLayer(ctx context.Context, st store.ConfigReadStore, namesp
 // settingFromBlob is the migration-period order: the legacy blob is
 // authoritative — exact JSON types, the complete key set, and the enabled veto
 // — with the configs_kv mirror consulted only when no blob row exists at all.
-func settingFromBlob(ctx context.Context, st store.ConfigReadStore, namespace, userID, agentID string) (map[string]interface{}, error) {
+func settingFromBlob(ctx context.Context, st storeport.ConfigReadStore, namespace, userID, agentID string) (map[string]interface{}, error) {
 	rec, err := st.GetConfigByName(ctx, store.KindSetting, userID, agentID, namespace)
 	if err != nil {
 		if !errors.Is(err, store.ErrNotFound) {
@@ -201,7 +202,7 @@ func settingFromBlob(ctx context.Context, st store.ConfigReadStore, namespace, u
 // owns nothing here — the merged walk's last-resort fallback is where a
 // blob-less, marker-less row is served). present=false is "this layer owns
 // nothing", which is distinct from a present row that is switched off.
-func settingLayerAt(ctx context.Context, st store.ConfigReadStore, namespace, userID, agentID string) (data map[string]interface{}, enabled, present bool, err error) {
+func settingLayerAt(ctx context.Context, st storeport.ConfigReadStore, namespace, userID, agentID string) (data map[string]interface{}, enabled, present bool, err error) {
 	if configsReadAuthority == configsKVFirst {
 		if d, e, ok := certifiedSettingLayer(ctx, st, namespace, userID, agentID); ok {
 			return d, e, true, nil
@@ -298,7 +299,7 @@ func leavesUnderPrefix(leaves map[string]store.ConfigValue, prefix string) map[s
 // patches one key and saves the result) cannot write back through the map the
 // store just handed out. Nested values are shared, which is what the callers
 // that mutate a single top-level key need.
-func SettingAt(ctx context.Context, st store.ConfigReadStore, namespace, userID, agentID string) (map[string]interface{}, error) {
+func SettingAt(ctx context.Context, st storeport.ConfigReadStore, namespace, userID, agentID string) (map[string]interface{}, error) {
 	if st == nil {
 		return nil, errors.New("scope.SettingAt: store is required")
 	}
@@ -323,7 +324,7 @@ func SettingAt(ctx context.Context, st store.ConfigReadStore, namespace, userID,
 //
 // A disabled row is skipped: it carries no payload, and listing it would report
 // a namespace the runtime resolves to nothing.
-func SettingNamesAt(ctx context.Context, st store.ConfigReader, userID, agentID string) (map[string]map[string]interface{}, error) {
+func SettingNamesAt(ctx context.Context, st storeport.ConfigReader, userID, agentID string) (map[string]map[string]interface{}, error) {
 	if st == nil {
 		return nil, errors.New("scope.SettingNamesAt: store is required")
 	}
@@ -353,7 +354,7 @@ func SettingNamesAt(ctx context.Context, st store.ConfigReader, userID, agentID 
 // that the name is not here: it is absent from the result, and callers that
 // overlay the result on an already-merged view get the erase-the-outer-entry
 // behaviour for free, because "not present" is exactly what they overwrite with.
-func ProvidersAt(ctx context.Context, st store.ConfigReadStore, userID, agentID string) (map[string]config.ProviderConfig, error) {
+func ProvidersAt(ctx context.Context, st storeport.ConfigReadStore, userID, agentID string) (map[string]config.ProviderConfig, error) {
 	if st == nil {
 		return nil, errors.New("scope.ProvidersAt: store is required")
 	}
@@ -423,7 +424,7 @@ func ProvidersAt(ctx context.Context, st store.ConfigReadStore, userID, agentID 
 // about to save the row back (the CLI setting one field) wants the payload,
 // which still exists while the row is switched off; collapsing the two would
 // make editing a disabled provider silently reset it to the preset defaults.
-func ProviderStateAt(ctx context.Context, st store.ConfigReadStore, name, userID, agentID string) (pc config.ProviderConfig, present, enabled bool, err error) {
+func ProviderStateAt(ctx context.Context, st storeport.ConfigReadStore, name, userID, agentID string) (pc config.ProviderConfig, present, enabled bool, err error) {
 	if st == nil {
 		return config.ProviderConfig{}, false, false, errors.New("scope.ProviderStateAt: store is required")
 	}
@@ -472,7 +473,7 @@ func ProviderStateAt(ctx context.Context, st store.ConfigReadStore, name, userID
 // It exists so that "which table" stays a decision of this package: an adapter
 // asks for the rows of a scope, and the fact that they currently live in the
 // blob is not its business.
-func RowsAt(ctx context.Context, st store.ConfigReader, kind, userID, agentID string) ([]store.ConfigRecord, error) {
+func RowsAt(ctx context.Context, st storeport.ConfigReader, kind, userID, agentID string) ([]store.ConfigRecord, error) {
 	if st == nil {
 		return nil, errors.New("scope.RowsAt: store is required")
 	}
@@ -524,7 +525,7 @@ func RowsAt(ctx context.Context, st store.ConfigReader, kind, userID, agentID st
 // The per-row certification is not optional (see configsReadAuthority): serving
 // an uncertified leaf set is the web_search shape — a partial mirror answered as
 // if it were the whole namespace.
-func AgentScopeRows(ctx context.Context, st store.ConfigReadStore, namespace string, agentIDs []string) ([]store.ConfigRecord, error) {
+func AgentScopeRows(ctx context.Context, st storeport.ConfigReadStore, namespace string, agentIDs []string) ([]store.ConfigRecord, error) {
 	if st == nil {
 		return nil, errors.New("scope.AgentScopeRows: store is required")
 	}
@@ -548,7 +549,7 @@ func AgentScopeRows(ctx context.Context, st store.ConfigReadStore, namespace str
 // That is the batch cost the flip buys: the point of the mirror-first order is
 // correct data, and ListConfigValues/ListConfigMirrors are the batched shapes
 // that keep it from being two queries per *row*.
-func agentScopeRowsCertified(ctx context.Context, st store.ConfigReadStore, namespace string, rows []store.ConfigRecord) []store.ConfigRecord {
+func agentScopeRowsCertified(ctx context.Context, st storeport.ConfigReadStore, namespace string, rows []store.ConfigRecord) []store.ConfigRecord {
 	prefix := kvPrefixForNamespace(namespace)
 	type lane struct{ userID, agentID string }
 	type laneMirror struct {

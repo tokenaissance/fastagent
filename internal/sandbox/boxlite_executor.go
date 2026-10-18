@@ -16,7 +16,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/fastclaw-ai/fastclaw/internal/workspace"
+	workspace "github.com/fastclaw-ai/fastclaw/internal/workspace/port"
 	"github.com/gorilla/websocket"
 )
 

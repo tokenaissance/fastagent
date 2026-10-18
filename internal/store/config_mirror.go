@@ -34,26 +34,8 @@ import (
 //
 // It is deliberately not a configs_kv row: a marker is metadata about the
 // mirroring, not a leaf of it, and it must not surface in a prefix scan.
-type ConfigMirror struct {
-	// Prefix is the configs_kv name prefix this marker covers ("openai.",
-	// "prefs.", "agent."). Stored so verification does not have to rebuild
-	// the namespace -> prefix mapping, which has a rename in it
-	// (agents.defaults -> agent.).
-	Prefix string
-	// KeyCount is the number of leaves the writer emitted.
-	KeyCount int
-	// Fingerprint is ConfigsKVFingerprint over those leaves. Empty means the
-	// marker certifies nothing and VerifyConfigMirror rejects it.
-	Fingerprint string
-	// Enabled is the configs row's on/off decision — the half of a row's
-	// read state that is not a leaf. It is a pointer because it has three
-	// values, not two: a marker written before configs_mirror carried the
-	// column recorded the leaves but not the decision, and neither boolean
-	// is then the row's answer. VerifyConfigMirror rejects such a marker, the
-	// same way it rejects an empty fingerprint, rather than defaulting it.
-	// Re-running store.ReconcileConfigMirrors or any dual-write records it.
-	Enabled *bool
-}
+// ConfigMirror lives in internal/store/model. The alias in store.go keeps
+// the adapter's public name stable.
 
 // NewConfigMirror builds the marker for a mirrored row: the prefix its leaves
 // live under, the row's enabled decision, how many there are, and their
@@ -195,43 +177,10 @@ const mirrorGapKeys = 8
 
 // ConfigMirrorGap is one configs row whose configs_kv rows are not a complete,
 // unmodified mirror of the blob.
-type ConfigMirrorGap struct {
-	Kind     string
-	Scope    string
-	ScopeID  string
-	Name     string
-	WantKeys int
-	GotKeys  int
-	// Missing is in the blob but not in configs_kv; Extra is the other
-	// way round; Changed is present in both but differs in value or value_kind.
-	// Each is capped at mirrorGapKeys.
-	Missing []string
-	Extra   []string
-	Changed []string
-}
+// ConfigMirrorGap lives in internal/store/model.
 
 // ConfigMirrorReconcile is the outcome of ReconcileConfigMirrors.
-type ConfigMirrorReconcile struct {
-	// Examined is how many configs rows have configs_kv rows (provider /
-	// setting / plugin_enabled).
-	Examined int
-	// Certified is how many rows matched the blob (exactly, or after only a
-	// value_kind backfill) and are now marked.
-	Certified int
-	// Untyped is how many certified rows needed that backfill first: their
-	// values already matched, only the value_kind tag was missing.
-	Untyped int
-	// Retagged is how many leaves gained a value_kind during the pass.
-	Retagged int
-	// Repaired is how many diverged rows --repair rewrote from the blob.
-	// Zero unless repair was requested.
-	Repaired int
-	// Rewritten is how many leaves --repair wrote while rewriting.
-	Rewritten int
-	// Gaps are rows whose mirror does not match the blob. They are left (or
-	// made) uncertified, so a mirror-first reader falls back to the blob.
-	Gaps []ConfigMirrorGap
-}
+// ConfigMirrorReconcile lives in internal/store/model.
 
 // mirrorDelta classifies how the stored configs_kv rows differ from the blob.
 type mirrorDelta int

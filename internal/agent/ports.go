@@ -19,6 +19,7 @@ package agent
 import (
 	"github.com/fastclaw-ai/fastclaw/internal/agent/goal"
 	"github.com/fastclaw-ai/fastclaw/internal/store"
+	storeport "github.com/fastclaw-ai/fastclaw/internal/store/port"
 )
 
 // Store is what the agent runtime needs from the database: the agent row, the
@@ -27,7 +28,7 @@ import (
 // the goal rows. Nothing here lets the agent create users, sessions, or
 // channels.
 type Store interface {
-	store.AgentRuntimeStore
+	storeport.AgentRuntimeStore
 	goal.Store
 }
 

@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/fastclaw-ai/fastclaw/internal/workspace"
+	workspace "github.com/fastclaw-ai/fastclaw/internal/workspace/port"
 )
 
 // DockerExecutor wraps DockerSandbox to implement Executor. The container

@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/fastclaw-ai/fastclaw/internal/cryptoutil"
-	"github.com/fastclaw-ai/fastclaw/internal/sandbox"
+	sandbox "github.com/fastclaw-ai/fastclaw/internal/sandbox/port"
 )
 
 // The DBStore implements sandbox.SandboxLeaseStore so the gateway can hand

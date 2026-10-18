@@ -24,7 +24,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/fastclaw-ai/fastclaw/internal/workspace"
+	workspace "github.com/fastclaw-ai/fastclaw/internal/workspace/port"
 )
 
 // E2B API: https://e2b.dev/docs
