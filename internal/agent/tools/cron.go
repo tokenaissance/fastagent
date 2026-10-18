@@ -28,8 +28,8 @@ type deleteCronJobArgs struct {
 // RegisterCronTools registers cron job management tools.
 //
 // Everything per-turn is read from the registry at execute time — the
-// bus address via r.MessageChannel() / r.MessageChatID(), and the
-// identity the job belongs to via r.ChatterUserID() — so a single
+// bus address via r.MessageChannel(ctx) / r.MessageChatID(ctx), and the
+// identity the job belongs to via r.ChatterUserID(ctx) — so a single
 // registration at agent construction handles every chat context the
 // agent runs in. The agent loop's bindSession stamps those values onto
 // the registry before any tool fires; the boot-time userID the
@@ -106,9 +106,9 @@ func makeCreateCronJob(st CronToolStore, r *Registry, agentID string) ToolFunc {
 		// Read the originating bus address at execute time — bindSession
 		// stamps it on every turn, so this captures the channel/chatID
 		// the user was on when they asked for the reminder.
-		channel := r.MessageChannel()
-		accountID := r.MessageAccountID()
-		chatID := r.MessageChatID()
+		channel := r.MessageChannel(ctx)
+		accountID := r.MessageAccountID(ctx)
+		chatID := r.MessageChatID(ctx)
 
 		// The chatter's effective timezone governs how the schedule is
 		// read: zone-less 'once' datetimes and cron wall-clock fields
@@ -116,7 +116,7 @@ func makeCreateCronJob(st CronToolStore, r *Registry, agentID string) ToolFunc {
 		// prompt's date line is rendered in), not the server's. The
 		// resolved name is frozen onto the row so the scheduler keeps
 		// evaluating recurrences in it even if the chatter later moves.
-		tzName := scope.Timezone(ctx, st, r.ChatterUserID(), agentID)
+		tzName := scope.Timezone(ctx, st, r.ChatterUserID(ctx), agentID)
 		loc := scope.LoadLocationOrLocal(tzName)
 
 		id := generateUUID()
@@ -155,7 +155,7 @@ func makeCreateCronJob(st CronToolStore, r *Registry, agentID string) ToolFunc {
 		job := &store.CronJobRecord{
 			ID:            id,
 			AgentID:       agentID,
-			CreatorUserID: r.ChatterUserID(),
+			CreatorUserID: r.ChatterUserID(ctx),
 			Name:          args.Name,
 			Type:          jobType,
 			Schedule:      args.Schedule,
@@ -198,8 +198,8 @@ func makeListCronJobs(st CronToolStore, r *Registry, agentID string) ToolFunc {
 			return "", fmt.Errorf("list cron jobs: %w", err)
 		}
 		filtered := jobs
-		if !cronCallerIsAgentAdmin(r) {
-			caller := r.ChatterUserID()
+		if !cronCallerIsAgentAdmin(ctx, r) {
+			caller := r.ChatterUserID(ctx)
 			filtered = nil
 			for _, j := range jobs {
 				if j.Creator() == caller {
@@ -234,7 +234,7 @@ func makeDeleteCronJob(st CronToolStore, r *Registry, agentID string) ToolFunc {
 		// reads as "no such job" — confirming the id exists would leak
 		// the other chatter's schedule just as the list used to.
 		if job == nil || job.AgentID != agentID ||
-			(!cronCallerIsAgentAdmin(r) && job.Creator() != r.ChatterUserID()) {
+			(!cronCallerIsAgentAdmin(ctx, r) && job.Creator() != r.ChatterUserID(ctx)) {
 			return "", fmt.Errorf("no cron job %s on this agent", args.ID)
 		}
 		if err := st.DeleteCronJob(ctx, args.ID); err != nil {
@@ -250,11 +250,11 @@ func makeDeleteCronJob(st CronToolStore, r *Registry, agentID string) ToolFunc {
 // comparison covers the same person arriving through a channel where no
 // admin allowlist is configured, since isAdminChatter falls back to deny
 // there.
-func cronCallerIsAgentAdmin(r *Registry) bool {
-	if r.callerIsAdmin {
+func cronCallerIsAgentAdmin(ctx context.Context, r *Registry) bool {
+	if r.callerIsAdmin(ctx) {
 		return true
 	}
-	caller := r.ChatterUserID()
+	caller := r.ChatterUserID(ctx)
 	return caller != "" && r.agentOwnerUserID != "" && caller == r.agentOwnerUserID
 }
 

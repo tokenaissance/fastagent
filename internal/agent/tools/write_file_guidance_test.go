@@ -10,10 +10,9 @@ package tools
 // was not wrong with the call. It had a path. It re-emitted the whole document
 // and hit the same cap.
 //
-// write_file is registered twice — once for the host filesystem, once by
-// SetExecutor for the sandbox — and the cloud deployment takes the second one,
-// which is the one that failed. Both texts are pinned on both registrations, so
-// a fix that lands on only one of them cannot pass.
+// write_file has one registration whose closure dispatches to the host or
+// sandbox path from the turn's executor, and the cloud deployment takes the
+// sandbox path. This pins the schema text for both deployment shapes.
 //
 // Falsification: remove the chunking sentence from the shared description and
 // both cases fail; drop the example from the error and the third does.
@@ -28,7 +27,7 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/sandbox"
 )
 
-// idleExecutor is enough to make SetExecutor take the sandbox branch: these
+// idleExecutor is enough to make the dispatch take the sandbox branch: these
 // cases read the schema, they never call a tool.
 type idleExecutor struct{}
 
@@ -46,7 +45,7 @@ var _ sandbox.Executor = idleExecutor{}
 func writeFileRegistrations(t *testing.T) map[string]*Registry {
 	t.Helper()
 	sandboxed := NewRegistry(t.TempDir(), t.TempDir())
-	sandboxed.SetExecutor(idleExecutor{})
+	bindTestTurn(sandboxed, &TurnScope{Executor: idleExecutor{}})
 	return map[string]*Registry{
 		"built-in":  NewRegistry(t.TempDir(), t.TempDir()),
 		"sandboxed": sandboxed,

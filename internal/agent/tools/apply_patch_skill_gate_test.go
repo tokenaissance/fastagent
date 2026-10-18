@@ -79,9 +79,9 @@ func TestApplyPatchRefusesToMoveABundledSkillManifestOutOfTheMount(t *testing.T)
 	ex := &skillRouteExecutor{}
 	r := NewRegistry(t.TempDir(), t.TempDir())
 	t.Cleanup(r.Close)
-	r.SetExecutor(ex)
+	bindTestTurn(r, &TurnScope{Executor: ex})
 
-	out, err := r.Execute(context.Background(), "apply_patch",
+	out, err := r.Execute(testTurnCtx(r), "apply_patch",
 		"{\"input\":\"*** Begin Patch\\n*** Update File: /skills/secret/SKILL.md\\n*** Move to: leaked.md\\n@@\\n+appended\\n*** End Patch\\n\"}")
 	if err != nil {
 		t.Fatalf("apply_patch errored instead of refusing: %v", err)
@@ -113,9 +113,9 @@ func TestApplyPatchRefusesTheChatSkillNamespace(t *testing.T) {
 		ex := &skillRouteExecutor{}
 		r := NewRegistry(t.TempDir(), t.TempDir())
 		t.Cleanup(r.Close)
-		r.SetExecutor(ex)
+		bindTestTurn(r, &TurnScope{Executor: ex})
 
-		out, err := r.Execute(context.Background(), "apply_patch", patch)
+		out, err := r.Execute(testTurnCtx(r), "apply_patch", patch)
 		if err != nil {
 			t.Fatalf("apply_patch errored instead of refusing: %v", err)
 		}
@@ -133,8 +133,9 @@ func TestApplyPatchRefusesTheChatSkillNamespace(t *testing.T) {
 		root := t.TempDir()
 		r := NewRegistry(root, t.TempDir())
 		t.Cleanup(r.Close)
+		bindTestTurn(r, &TurnScope{})
 
-		out, err := r.Execute(context.Background(), "apply_patch", patch)
+		out, err := r.Execute(testTurnCtx(r), "apply_patch", patch)
 		if err != nil {
 			t.Fatalf("apply_patch errored instead of refusing: %v", err)
 		}
@@ -154,10 +155,9 @@ func TestApplyPatchRefusesTheChatSkillNamespace(t *testing.T) {
 		ex := &skillRouteExecutor{}
 		r := NewRegistry(t.TempDir(), t.TempDir())
 		t.Cleanup(r.Close)
-		r.SetExecutor(ex)
-		r.SetCallerIsAdmin(true)
+		bindTestTurn(r, &TurnScope{Executor: ex, CallerIsAdmin: true})
 
-		out, err := r.Execute(context.Background(), "apply_patch", patch)
+		out, err := r.Execute(testTurnCtx(r), "apply_patch", patch)
 		if err != nil {
 			t.Fatalf("apply_patch errored instead of refusing: %v", err)
 		}

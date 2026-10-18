@@ -52,7 +52,7 @@ func TestMcpUndoReplaysLatestFromTraceE2E(t *testing.T) {
 	rc := config.ResolvedAgent{ID: "agent-undo-1", UserID: "owner-undo"}
 	seedAgentRow(t, db, rc)
 	ag := newUndoAgent(t, db, "chat-1")
-	fn := mcpToolFnWithAgent(&oauth.Bootstrap{}, rc, rc.UserID, ag)
+	fn := scopedToolFn("chat-1", mcpToolFnWithAgent(&oauth.Bootstrap{}, rc, rc.UserID, ag))
 
 	// add a, then add b — record each tool_result as the loop would.
 	outA := mustCall(t, fn, map[string]any{"action": "add", "serverName": "a", "url": "https://a.example/mcp"})
@@ -113,7 +113,7 @@ func TestMcpUndoRemoveReaddsOriginalEntryE2E(t *testing.T) {
 	rc := config.ResolvedAgent{ID: "agent-undo-2", UserID: "owner-undo"}
 	seedAgentRow(t, db, rc)
 	ag := newUndoAgent(t, db, "chat-1")
-	fn := mcpToolFnWithAgent(&oauth.Bootstrap{}, rc, rc.UserID, ag)
+	fn := scopedToolFn("chat-1", mcpToolFnWithAgent(&oauth.Bootstrap{}, rc, rc.UserID, ag))
 
 	addOut := mustCall(t, fn, map[string]any{
 		"action": "add", "serverName": "quandora",
@@ -175,12 +175,12 @@ func TestMcpUndoIsScopedToCurrentSession(t *testing.T) {
 	// Session 1 adds "a" (recorded in chat-1); session 2 adds "b"
 	// (recorded in chat-2) — b is NEWER but belongs to another session.
 	ag1 := newUndoAgent(t, db, "chat-1")
-	fn1 := mcpToolFnWithAgent(&oauth.Bootstrap{}, rc, rc.UserID, ag1)
+	fn1 := scopedToolFn("chat-1", mcpToolFnWithAgent(&oauth.Bootstrap{}, rc, rc.UserID, ag1))
 	outA := mustCall(t, fn1, map[string]any{"action": "add", "serverName": "a", "url": "https://a.example/mcp"})
 	recordToolResult(t, db, rc, "chat-1", "t-a", outA)
 
 	ag2 := newUndoAgent(t, db, "chat-2")
-	fn2 := mcpToolFnWithAgent(&oauth.Bootstrap{}, rc, rc.UserID, ag2)
+	fn2 := scopedToolFn("chat-2", mcpToolFnWithAgent(&oauth.Bootstrap{}, rc, rc.UserID, ag2))
 	outB := mustCall(t, fn2, map[string]any{"action": "add", "serverName": "b", "url": "https://b.example/mcp"})
 	recordToolResult(t, db, rc, "chat-2", "t-b", outB)
 
@@ -232,7 +232,6 @@ func seedAgentRow(t *testing.T, db *store.DBStore, rc config.ResolvedAgent) {
 func newUndoAgent(t *testing.T, db *store.DBStore, sessionKey string) *Agent {
 	t.Helper()
 	reg := tools.NewRegistry(t.TempDir(), t.TempDir())
-	reg.SetSessionID(sessionKey)
 	return &Agent{dataStore: db, registry: reg, mcpConfigNotify: func(string, string) {}}
 }
 
@@ -241,6 +240,12 @@ func recordToolResult(t *testing.T, db *store.DBStore, rc config.ResolvedAgent, 
 	blob, _ := json.Marshal(map[string]any{"id": id, "name": "mcp", "result": result})
 	if _, err := db.AppendSessionEvent(t.Context(), rc.UserID, rc.ID, sessionKey, "tool_result", blob); err != nil {
 		t.Fatalf("append tool_result: %v", err)
+	}
+}
+
+func scopedToolFn(sessionKey string, fn func(context.Context, json.RawMessage) (string, error)) func(context.Context, json.RawMessage) (string, error) {
+	return func(ctx context.Context, raw json.RawMessage) (string, error) {
+		return fn(withChatSession(ctx, sessionKey), raw)
 	}
 }
 
@@ -276,7 +281,7 @@ func TestMcpUndoCursorWriteFailureIsExplicitE2E(t *testing.T) {
 
 	// Record the mutation through the real store first.
 	ag := newUndoAgent(t, db, "chat-1")
-	fn := mcpToolFnWithAgent(&oauth.Bootstrap{}, rc, rc.UserID, ag)
+	fn := scopedToolFn("chat-1", mcpToolFnWithAgent(&oauth.Bootstrap{}, rc, rc.UserID, ag))
 	out := mustCall(t, fn, map[string]any{"action": "add", "serverName": "a", "url": "https://a.example/mcp"})
 	recordToolResult(t, db, rc, "chat-1", "t-a", out)
 
@@ -286,7 +291,7 @@ func TestMcpUndoCursorWriteFailureIsExplicitE2E(t *testing.T) {
 		registry:        ag.registry,
 		mcpConfigNotify: func(string, string) {},
 	}
-	fnFail := mcpToolFnWithAgent(&oauth.Bootstrap{}, rc, rc.UserID, agFail)
+	fnFail := scopedToolFn("chat-1", mcpToolFnWithAgent(&oauth.Bootstrap{}, rc, rc.UserID, agFail))
 	_, err := callToolJSON(t, fnFail, map[string]any{"action": "undo"})
 	if err == nil || !strings.Contains(err.Error(), "failed to record the cursor") {
 		t.Fatalf("undo with failing cursor err = %v; want explicit cursor-failure", err)

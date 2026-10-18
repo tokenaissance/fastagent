@@ -128,10 +128,14 @@ func TestMcpToolOutputCopyContract(t *testing.T) {
 			recordToolResult(t, db, rc, "chat-1", "t-add", out)
 			agFail := &Agent{
 				dataStore:       &failingCursorStore{Store: db},
-				registry:        newRegistryWithSession(t, "chat-1"),
+				registry:        newRegistryNoSession(t),
 				mcpConfigNotify: func(string, string) {},
 			}
-			return callToolJSON(t, mcpToolFnWithAgent(ob, rc, rc.UserID, agFail), map[string]any{"action": "undo"})
+			rawFailureFn := mcpToolFnWithAgent(ob, rc, rc.UserID, agFail)
+			scopedFailureFn := func(ctx context.Context, args json.RawMessage) (string, error) {
+				return rawFailureFn(withChatSession(ctx, "chat-1"), args)
+			}
+			return callToolJSON(t, scopedFailureFn, map[string]any{"action": "undo"})
 		}},
 	}
 
@@ -145,10 +149,13 @@ func TestMcpToolOutputCopyContract(t *testing.T) {
 			seedAgentRow(t, db, rc)
 			ag := &Agent{
 				dataStore:       db,
-				registry:        newRegistryWithSession(t, "chat-1"),
+				registry:        newRegistryNoSession(t),
 				mcpConfigNotify: func(string, string) {},
 			}
-			fn := mcpToolFnWithAgent(ob, rc, rc.UserID, ag)
+			rawFn := mcpToolFnWithAgent(ob, rc, rc.UserID, ag)
+			fn := func(ctx context.Context, args json.RawMessage) (string, error) {
+				return rawFn(withChatSession(ctx, "chat-1"), args)
+			}
 			return tc.steps(t, db, fn)
 		}})
 	}
@@ -197,14 +204,11 @@ func first(t *testing.T, fn func(context.Context, json.RawMessage) (string, erro
 	return out
 }
 
-func newRegistryWithSession(t *testing.T, sessionKey string) *tools.Registry {
-	t.Helper()
-	reg := tools.NewRegistry(t.TempDir(), t.TempDir())
-	reg.SetSessionID(sessionKey)
-	return reg
-}
-
 func newRegistryNoSession(t *testing.T) *tools.Registry {
 	t.Helper()
 	return tools.NewRegistry(t.TempDir(), t.TempDir())
+}
+
+func withChatSession(ctx context.Context, sessionKey string) context.Context {
+	return tools.WithTurnScope(ctx, &tools.TurnScope{SessionID: sessionKey})
 }

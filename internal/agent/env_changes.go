@@ -26,8 +26,8 @@ package agent
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/json"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -285,13 +285,14 @@ var identitySampleFiles = []string{
 // and reduces each to a fingerprint: names are reported, contents never are.
 // The extra reads are the price of the signal, and they are the same set the
 // prompt itself is about to read (docs 10 §3.3, G8).
-func (a *Agent) identityFingerprints(chatterUID string) map[string]string {
-	if a.ctxBuilder == nil {
+func (a *Agent) identityFingerprints(ctx context.Context, chatterUID string) map[string]string {
+	cb := a.runtimeFor(ctx).ctxBuilder
+	if cb == nil {
 		return nil
 	}
 	out := make(map[string]string, len(identitySampleFiles))
 	for _, name := range identitySampleFiles {
-		out[name] = hashMemory(a.ctxBuilder.loadFileForUser(name, chatterUID))
+		out[name] = hashMemory(cb.loadFileForUser(name, chatterUID))
 	}
 	return out
 }
@@ -306,12 +307,13 @@ func (a *Agent) identityFingerprints(chatterUID string) map[string]string {
 // the rebuilt agent state it anyway is not a baseline of its own: it is the
 // conversation's own turn receipt (configBaselineFromReceipt), which already
 // records what this conversation last ran under (docs 10 §4, G9).
-func (a *Agent) configFingerprint() string {
+func (a *Agent) configFingerprint(ctx context.Context) string {
+	rt := a.runtimeFor(ctx)
 	mode := ""
-	if a.ctxBuilder != nil {
-		mode = a.ctxBuilder.promptMode
+	if rt.ctxBuilder != nil {
+		mode = rt.ctxBuilder.promptMode
 	}
-	return "model=" + a.model + " prompt_mode=" + mode
+	return "model=" + rt.model + " prompt_mode=" + mode
 }
 
 // encodeEnvSnapshot renders one turn's world as the document the turn receipt
@@ -471,17 +473,18 @@ func (a *Agent) cronFingerprints(chatterUID string) (map[string]string, bool) {
 // The returned string is the receipt for THIS turn: the loop stamps it onto the
 // assistant message it is about to produce, so the next turn (any replica, any
 // instance) can diff against it. Empty when there is nothing to record.
-func (a *Agent) signalEnvironmentChanges(chatterUID, chatID string, history []provider.Message) string {
-	if a.ctxBuilder == nil {
-		return ""
+func (a *Agent) signalEnvironmentChanges(ctx context.Context, chatterUID, chatID string, history []provider.Message, skills turnSkills) (string, string) {
+	rt := a.runtimeFor(ctx)
+	if rt.ctxBuilder == nil {
+		return "", ""
 	}
 	cur := envSnapshot{
 		skills:           map[string]string{},
 		tools:            map[string]bool{},
-		skillsIncomplete: a.skillsHydrationFailed,
+		skillsIncomplete: skills.hydrationFailed,
 	}
-	cur.identity = a.identityFingerprints(chatterUID)
-	cur.config = a.configFingerprint()
+	cur.identity = a.identityFingerprints(ctx, chatterUID)
+	cur.config = a.configFingerprint(ctx)
 	if jobs, ok := a.cronFingerprints(chatterUID); ok {
 		cur.cron = jobs
 	} else if a.dataStore != nil {
@@ -492,13 +495,13 @@ func (a *Agent) signalEnvironmentChanges(chatterUID, chatID string, history []pr
 			cur.tools[name] = true
 		}
 	}
-	if a.skillsFingerprint != nil {
-		cur.skills = a.skillsFingerprint
+	if skills.fingerprint != nil {
+		cur.skills = skills.fingerprint
 	}
-	if a.memory != nil {
-		mem := a.memory
+	if rt.memory != nil {
+		mem := rt.memory
 		if chatterUID != "" {
-			mem = a.memory.WithUserID(chatterUID)
+			mem = rt.memory.WithUserID(chatterUID)
 		}
 		cur.memoryHash = hashMemory(mem.LoadMemory())
 	}
@@ -506,12 +509,12 @@ func (a *Agent) signalEnvironmentChanges(chatterUID, chatID string, history []pr
 	// per conversation, written by the turn that saw it), so nothing about this
 	// comparison depends on this instance still being alive (docs 10 §4, G20).
 	prev, seen := envBaselineFromReceipt(history)
-	a.ctxBuilder.SetEnvironmentSignal(renderEnvDelta(prev, seen, cur))
+	signal := renderEnvDelta(prev, seen, cur)
 	// Hand the sampled world back so the turn stamps it onto its own receipt —
 	// the next turn's baseline. The loop owns that write because the receipt
 	// rides the assistant message (session.Append), the same place the model
 	// that produced the reply is recorded.
-	return encodeEnvSnapshot(cur)
+	return signal, encodeEnvSnapshot(cur)
 }
 
 // String renders a snapshot for tests and logs. Unused fields are shown as

@@ -116,7 +116,8 @@ func TestSandboxBackgroundDockerE2E(t *testing.T) {
 	r := NewRegistry(t.TempDir(), t.TempDir())
 	defer r.Close()
 	ex := &dockerExecAdapter{sb: sb}
-	r.SetExecutor(ex)
+	scope := bindTestTurn(r, &TurnScope{Executor: ex})
+	ctx = WithTurnScope(ctx, scope)
 
 	// The job runs far longer than any single tool call may.
 	start := runBackgroundJob(t, ctx, r, `i=0; while [ $i -lt 600 ]; do i=$((i+1)); echo tick $i; sleep 1; done`)
@@ -191,7 +192,8 @@ func TestSandboxBackgroundE2BLive(t *testing.T) {
 
 	r := NewRegistry(t.TempDir(), t.TempDir())
 	defer r.Close()
-	r.SetExecutor(ex)
+	scope := bindTestTurn(r, &TurnScope{Executor: ex})
+	ctx = WithTurnScope(ctx, scope)
 
 	// Record which kill scope this image supports; the job itself must work
 	// either way.

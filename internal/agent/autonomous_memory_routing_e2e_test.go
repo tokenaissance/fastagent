@@ -123,7 +123,7 @@ func TestAutonomousTurnMemoryRouting_CloudPathE2E(t *testing.T) {
 			// The identity seam the fix lives in. A bare Agent is enough: only
 			// ownerUserID is read.
 			a := &Agent{ownerUserID: cronE2EOwnerID}
-			reg.SetChatterUserID(a.chatterUserID(tc.msg))
+			ctx = tools.WithTurnScope(ctx, &tools.TurnScope{ChatterUserID: a.chatterUserID(tc.msg)})
 
 			out, err := reg.Execute(ctx, "edit_file", toolArgs(t, map[string]any{
 				"path":       "MEMORY.md",
@@ -181,7 +181,7 @@ func TestVisitorTurnMemoryStaysPrivate_CloudPathE2E(t *testing.T) {
 
 	const visitorID = "u_visitor"
 	a := &Agent{ownerUserID: cronE2EOwnerID}
-	reg.SetChatterUserID(a.chatterUserID(bus.InboundMessage{Channel: "telegram", UserID: visitorID}))
+	ctx = tools.WithTurnScope(ctx, &tools.TurnScope{ChatterUserID: a.chatterUserID(bus.InboundMessage{Channel: "telegram", UserID: visitorID})})
 
 	out, err := reg.Execute(ctx, "read_file", toolArgs(t, map[string]any{"path": "MEMORY.md"}))
 	if err != nil {

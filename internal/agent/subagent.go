@@ -61,9 +61,10 @@ const subagentTurnMargin = subagentSalvageTimeout + 30*time.Second
 // parenthetical naming the clamp when it bit (empty otherwise), and an error
 // when the turn has no room to start at all.
 func (a *Agent) subagentWallBudget(ctx context.Context, explicit time.Duration) (time.Duration, string, error) {
+	rt := a.runtimeFor(ctx)
 	budget := subagentDefaultTimeout
-	if a.subagentTimeout > 0 {
-		budget = a.subagentTimeout
+	if rt.subagentTimeout > 0 {
+		budget = rt.subagentTimeout
 	}
 	if explicit > 0 {
 		budget = explicit
@@ -150,12 +151,13 @@ func (a *Agent) RunSubagent(ctx context.Context, req tools.SubagentRequest) (out
 // the text returned alongside the error is whatever the sub-agent managed to
 // write — see finalizeSubagent.
 func (a *Agent) runSubagentLoop(ctx context.Context, req tools.SubagentRequest) (string, error) {
-	if a.provider == nil {
+	rt := a.runtimeFor(ctx)
+	if rt.provider == nil {
 		return "", fmt.Errorf("agent has no provider configured")
 	}
 	maxIterations := req.MaxIterations
 	if maxIterations <= 0 {
-		maxIterations = a.maxToolIterations
+		maxIterations = rt.maxToolIterations
 	}
 	if maxIterations <= 0 {
 		maxIterations = 20
@@ -185,7 +187,7 @@ func (a *Agent) runSubagentLoop(ctx context.Context, req tools.SubagentRequest) 
 	// long before the loop ends — it is the floor salvage falls back to.
 	lastContent := ""
 
-	systemPrompt := a.ctxBuilder.BuildSystemPrompt() + subagentSystemSuffix()
+	systemPrompt := rt.ctxBuilder.BuildSystemPrompt() + subagentSystemSuffix()
 	messages := []provider.Message{
 		{Role: "system", Content: systemPrompt},
 		{Role: "user", Content: req.Task},
@@ -239,7 +241,7 @@ func (a *Agent) runSubagentLoop(ctx context.Context, req tools.SubagentRequest) 
 			llmMsgs = append(llmMsgs, failedRoundsNudge(allFailedRounds, true))
 		}
 
-		resp, err := a.provider.Chat(ctx, llmMsgs, callTools, a.model, a.maxTokens, a.temperature)
+		resp, err := rt.provider.Chat(ctx, llmMsgs, callTools, rt.model, rt.maxTokens, rt.temperature)
 		if err != nil {
 			// If the ctx itself expired, the parent caller has more
 			// useful framing than "context deadline exceeded" mid-
@@ -387,6 +389,7 @@ func (a *Agent) runSubagentLoop(ctx context.Context, req tools.SubagentRequest) 
 // reach this when the parent is alive, because a cancelled parent means nobody
 // is waiting for the result.
 func (a *Agent) finalizeSubagent(parentCtx context.Context, messages []provider.Message, lastContent string, nudge provider.Message, iteration int, budget time.Duration) (string, error) {
+	rt := a.runtimeFor(parentCtx)
 	emitEvent(parentCtx, subagentHeartbeat(parentCtx, map[string]any{
 		"iteration": iteration,
 		"phase":     "final-delivery",
@@ -395,7 +398,7 @@ func (a *Agent) finalizeSubagent(parentCtx context.Context, messages []provider.
 	finalCtx, cancel := context.WithTimeout(context.WithoutCancel(parentCtx), subagentSalvageTimeout)
 	defer cancel()
 
-	resp, err := a.provider.Chat(finalCtx, append(messages, nudge), nil, a.model, a.maxTokens, a.temperature)
+	resp, err := rt.provider.Chat(finalCtx, append(messages, nudge), nil, rt.model, rt.maxTokens, rt.temperature)
 	if err == nil && strings.TrimSpace(resp.Content) != "" {
 		slog.Info("subagent finalized from gathered material",
 			"agent", a.name, "iteration", iteration, "budget", budget)

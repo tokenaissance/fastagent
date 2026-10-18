@@ -59,7 +59,7 @@ func makeSetTimezone(st ConfigToolStore, r *Registry) ToolFunc {
 		if err != nil {
 			return "", fmt.Errorf("unknown timezone %q — use an IANA name like 'Asia/Shanghai': %w", args.Timezone, err)
 		}
-		chatterUID := r.ChatterUserID()
+		chatterUID := r.ChatterUserID(ctx)
 		if chatterUID == "" {
 			return "", fmt.Errorf("no chatter identity on this turn — cannot persist timezone")
 		}
@@ -68,7 +68,7 @@ func makeSetTimezone(st ConfigToolStore, r *Registry) ToolFunc {
 		// chatterLocation() reads USER.md first, so this guarantees the
 		// date line shows the correct timezone on every future session.
 		if r.systemFileStore != nil {
-			userMDUID := r.systemFileUserID("USER.md")
+			userMDUID := r.systemFileUserID(ctx, "USER.md")
 			upsertUserMDTimezone(ctx, r, userMDUID, args.Timezone)
 		}
 

@@ -78,8 +78,8 @@ func TestSlashModelPersistsTheAgentDefault(t *testing.T) {
 	if !strings.Contains(got.reply, "deepseek/deepseek-v4-flash") {
 		t.Fatalf("reply does not name the new model: %q", got.reply)
 	}
-	if ag.model != "deepseek/deepseek-v4-flash" {
-		t.Fatalf("in-memory model = %q, want the new one", ag.model)
+	if ag.Model() != "deepseek/deepseek-v4-flash" {
+		t.Fatalf("in-memory model = %q, want the new one", ag.Model())
 	}
 	if row := agentDefaultsRow(t, db, "agt_model"); row["model"] != "deepseek/deepseek-v4-flash" {
 		t.Fatalf("agents.defaults.model = %v, want the new model written to the dashboard's row", row["model"])
@@ -118,8 +118,8 @@ func TestSlashModelReportsAFailedWriteAndStaysPut(t *testing.T) {
 
 	got := ag.handleSlashCommand(modelCommand("/model deepseek/deepseek-v4-flash"))
 
-	if ag.model != "openai/gpt-5.5" {
-		t.Fatalf("in-memory model = %q, want it unchanged after a failed write", ag.model)
+	if ag.Model() != "openai/gpt-5.5" {
+		t.Fatalf("in-memory model = %q, want it unchanged after a failed write", ag.Model())
 	}
 	if notified != 0 {
 		t.Fatalf("notify calls = %d, want 0 after a failed write", notified)
@@ -137,8 +137,8 @@ func TestSlashModelSaysWhenItCannotPersist(t *testing.T) {
 
 	got := ag.handleSlashCommand(modelCommand("/model deepseek/deepseek-v4-flash"))
 
-	if ag.model != "deepseek/deepseek-v4-flash" {
-		t.Fatalf("in-memory model = %q, want the switch applied", ag.model)
+	if ag.Model() != "deepseek/deepseek-v4-flash" {
+		t.Fatalf("in-memory model = %q, want the switch applied", ag.Model())
 	}
 	if !strings.Contains(got.reply, "Not persisted") {
 		t.Fatalf("reply claims a persisted switch it could not make: %q", got.reply)

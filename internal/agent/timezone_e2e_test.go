@@ -71,15 +71,15 @@ func TestAgentChatterLocation_UserMDWinsOverDBPrefs(t *testing.T) {
 	a := &Agent{memory: mem, dataStore: db, agentID: agentID}
 
 	// USER.md beats DB prefs.
-	if loc := a.chatterLocation("u_a"); zoneOffsetOf(t, loc) != 8*3600 {
+	if loc := a.chatterLocation(context.Background(), "u_a"); zoneOffsetOf(t, loc) != 8*3600 {
 		t.Errorf("u_a: want Asia/Shanghai (+8h), got %v", loc)
 	}
 	// No USER.md → DB prefs.
-	if loc := a.chatterLocation("u_b"); zoneOffsetOf(t, loc) != 2*3600 {
+	if loc := a.chatterLocation(context.Background(), "u_b"); zoneOffsetOf(t, loc) != 2*3600 {
 		t.Errorf("u_b: want Europe/Berlin (+2h), got %v", loc)
 	}
 	// Neither → server-local, never nil.
-	if loc := a.chatterLocation("u_c"); loc == nil || loc != time.Local {
+	if loc := a.chatterLocation(context.Background(), "u_c"); loc == nil || loc != time.Local {
 		t.Errorf("u_c: want server-local, got %v", loc)
 	}
 }
@@ -109,8 +109,8 @@ func TestAgentChatterLocation_PerChatterIsolation(t *testing.T) {
 	mem := NewMemoryWithStoreForUser("", NewMemoryStoreAdapter(db), "owner", agentID)
 	a := &Agent{memory: mem, dataStore: db, agentID: agentID}
 
-	locA := a.chatterLocation("chatter-a")
-	locB := a.chatterLocation("chatter-b")
+	locA := a.chatterLocation(context.Background(), "chatter-a")
+	locB := a.chatterLocation(context.Background(), "chatter-b")
 
 	if offA, offB := zoneOffsetOf(t, locA), zoneOffsetOf(t, locB); offA == offB {
 		t.Fatalf("expected distinct offsets, both %d", offA)

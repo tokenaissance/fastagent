@@ -48,9 +48,11 @@ func prefFixture(t *testing.T) (*Registry, store.Store) {
 	return r, db
 }
 
-// setChatter simulates the agent loop stamping the per-turn chatter via
-// SetChatterUserID (bindSession's identity resolution).
-func setChatter(r *Registry, uid string) { r.SetChatterUserID(uid) }
+// setChatter simulates the agent loop stamping the per-turn chatter through
+// bindSession's turn scope.
+func setChatter(r *Registry, uid string) {
+	bindTestTurn(r, &TurnScope{ChatterUserID: uid})
+}
 
 // TestSetPreferenceWritesPerUserAgentScope: happy path persists a
 // preference at the (chatter, agent) layer — NOT the agent layer or the
@@ -145,7 +147,7 @@ func TestSetPreferenceRejectsEmptyValue(t *testing.T) {
 // write an empty-keyed row.
 func TestSetPreferenceNoChatterIdentity(t *testing.T) {
 	r, _ := prefFixture(t)
-	// Deliberately no SetChatterUserID / SetOwnerUserID.
+	// Deliberately no TurnScope chatter and no SetOwnerUserID.
 	_, err := callTool(t, r, "set_preference", `{"key":"timezone","value":"UTC"}`)
 	if err == nil || !strings.Contains(err.Error(), "no chatter identity") {
 		t.Fatalf("no chatter: want 'no chatter identity', got %v", err)
@@ -164,7 +166,7 @@ func TestSetPreferenceNoAgentIdentity(t *testing.T) {
 		t.Fatalf("migrate: %v", err)
 	}
 	r := NewRegistry("", "")
-	r.SetChatterUserID("chatter-1") // agentID never bound
+	bindTestTurn(r, &TurnScope{ChatterUserID: "chatter-1"}) // agentID never bound
 	RegisterPreferenceTool(r, db)
 
 	_, err = callTool(t, r, "set_preference", `{"key":"timezone","value":"UTC"}`)

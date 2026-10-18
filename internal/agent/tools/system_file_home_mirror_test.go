@@ -13,7 +13,6 @@ package tools
 // the visitor's bytes sitting in the agent home.
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -36,7 +35,7 @@ func TestTheAgentHomeMirrorIsOwnerOnly(t *testing.T) {
 	dir := t.TempDir()
 	st := newCompetingStore(map[string]string{})
 	r := newSystemFileRegistry(st, dir) // chatter = u_chatter, agent owner = u_owner
-	ctx := context.Background()
+	ctx := testTurnCtx(r)
 
 	// A visitor writes their own MEMORY.md: the row must land under their id, and the agent home must
 	// not learn about it.
@@ -63,7 +62,7 @@ func TestTheAgentHomeMirrorIsOwnerOnly(t *testing.T) {
 
 	// Positive control: the owner's own write still mirrors, so this pod's in-process readers keep
 	// seeing what the owner just saved.
-	r.chatterUserID = "u_owner"
+	testTurnScopeFor(r).ChatterUserID = "u_owner"
 	if _, err := r.Execute(ctx, "write_file", writeArgs(t, "MEMORY.md", "owner memory")); err != nil {
 		t.Fatalf("owner write: %v", err)
 	}
@@ -79,8 +78,8 @@ func TestIdentityFileMirrorsStillWorkForTheOwner(t *testing.T) {
 	dir := t.TempDir()
 	st := newCompetingStore(map[string]string{})
 	r := newSystemFileRegistry(st, dir)
-	r.callerIsAdmin = true // the owner path: admin/owner may write identity files
-	ctx := context.Background()
+	// The owner path: admin/owner may write identity files.
+	ctx := scopedCtx(&TurnScope{CallerIsAdmin: true})
 
 	if _, err := r.Execute(ctx, "write_file", writeArgs(t, "SOUL.md", "我是谁")); err != nil {
 		t.Fatalf("owner identity write: %v", err)

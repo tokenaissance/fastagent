@@ -64,7 +64,7 @@ func makeKnowledgeSearch(r *Registry, searcher KnowledgeSearcher) ToolFunc {
 		// resolution write-side file tools use (owner for owner-scoped
 		// system files, chatter otherwise) picks a valid id here and the
 		// store's owner fallback covers the rest.
-		userID := r.systemFileUserID("KNOWLEDGE.md")
+		userID := r.systemFileUserID(ctx, "KNOWLEDGE.md")
 		if userID == "" {
 			return "The knowledge base is not available in this deployment.", nil
 		}

@@ -20,7 +20,6 @@ package tools
 // And silence when there is nothing to say.
 
 import (
-	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -58,16 +57,15 @@ func newMirrorTestRegistry(t *testing.T, m *mirrorFake) *Registry {
 	r := NewRegistry(t.TempDir(), t.TempDir())
 	t.Cleanup(r.Close)
 	r.SetWorkspaceStore(workspace.NewLocalFS(t.TempDir()), "agent_under_test")
-	r.SetSessionID("sess_1")
-	r.SetExecutor(m)
+	bindTestTurn(r, &TurnScope{SessionID: "sess_1", Executor: m})
 	return r
 }
 
 // The replaced version is stated by SIZE, never by content.
 func TestWriteFileSignalsReplacedVersion(t *testing.T) {
-	ctx := context.Background()
 	m := &mirrorFake{outcome: sandbox.WriteThroughOutcome{Comparison: sandbox.CompareReplacedVerified, SandboxBytes: 4242}}
 	r := newMirrorTestRegistry(t, m)
+	ctx := testTurnCtx(r)
 
 	const body = "the host's new version"
 	out, err := r.Execute(ctx, "write_file", `{"path":"notes.md","content":"`+body+`"}`)
@@ -89,9 +87,9 @@ func TestWriteFileSignalsReplacedVersion(t *testing.T) {
 // reason. Until 2026-09-18 this branch claimed "(over 2 MiB)" for every write
 // that reached it, including 5-byte files (docs 10 §2.1, G5).
 func TestWriteFileSignalsUncheckedReplacement(t *testing.T) {
-	ctx := context.Background()
 	m := &mirrorFake{outcome: sandbox.WriteThroughOutcome{Comparison: sandbox.CompareReplacedUnchecked, SandboxBytes: 7}}
 	r := newMirrorTestRegistry(t, m)
+	ctx := testTurnCtx(r)
 
 	out, err := r.Execute(ctx, "write_file", `{"path":"model.bin","content":"x"}`)
 	if err != nil {
@@ -111,9 +109,9 @@ func TestWriteFileSignalsUncheckedReplacement(t *testing.T) {
 // The docker shape: one copy, nothing mirrored, nothing replaced. Any sentence
 // here would be a false alarm (docs 10 §2.1, G5).
 func TestWriteFileStaysQuietOnASharedBackend(t *testing.T) {
-	ctx := context.Background()
 	m := &mirrorFake{outcome: sandbox.WriteThroughOutcome{Comparison: sandbox.CompareNoSecondCopy}}
 	r := newMirrorTestRegistry(t, m)
+	ctx := testTurnCtx(r)
 
 	out, err := r.Execute(ctx, "write_file", `{"path":"notes.md","content":"hello"}`)
 	if err != nil {
@@ -131,9 +129,9 @@ func TestWriteFileStaysQuietOnASharedBackend(t *testing.T) {
 // mirror can tell a stale copy from the sandbox's own edit (docs 10 §2.1, G6).
 // The read only happened for edit_file before this.
 func TestWriteFilePassesThePreviousStoreVersionAsExpectation(t *testing.T) {
-	ctx := context.Background()
 	m := &mirrorFake{outcome: sandbox.WriteThroughOutcome{Comparison: sandbox.CompareNothingReplaced}}
 	r := newMirrorTestRegistry(t, m)
+	ctx := testTurnCtx(r)
 	st := r.workspaceStore
 	if err := st.Put(ctx, "agent_under_test", "", "sess_1", "notes.md", strings.NewReader("before"), int64(len("before")), ""); err != nil {
 		t.Fatalf("seed store: %v", err)
@@ -157,9 +155,9 @@ func TestWriteFilePassesThePreviousStoreVersionAsExpectation(t *testing.T) {
 
 // An unreachable sandbox has no version to choose and blocks nothing.
 func TestWriteFileSignalsUnreachableSandbox(t *testing.T) {
-	ctx := context.Background()
 	m := &mirrorFake{err: errors.New("sandbox is gone")}
 	r := newMirrorTestRegistry(t, m)
+	ctx := testTurnCtx(r)
 
 	out, err := r.Execute(ctx, "write_file", `{"path":"notes.md","content":"x"}`)
 	if err != nil {
@@ -176,9 +174,9 @@ func TestWriteFileSignalsUnreachableSandbox(t *testing.T) {
 
 // Silence otherwise: markers are an exception channel.
 func TestWriteFileStaysQuietWhenMirrorIsUneventful(t *testing.T) {
-	ctx := context.Background()
 	m := &mirrorFake{outcome: sandbox.WriteThroughOutcome{Comparison: sandbox.CompareNothingReplaced}}
 	r := newMirrorTestRegistry(t, m)
+	ctx := testTurnCtx(r)
 
 	out, err := r.Execute(ctx, "write_file", `{"path":"notes.md","content":"fine"}`)
 	if err != nil {
@@ -194,12 +192,12 @@ func TestWriteFileStaysQuietWhenMirrorIsUneventful(t *testing.T) {
 // container of the same project did not get it, so a preview running there keeps
 // showing the old version (docs 10 §4 G17, option H).
 func TestWriteFileStatesAPartialProjectMirror(t *testing.T) {
-	ctx := context.Background()
 	m := &mirrorFake{outcome: sandbox.WriteThroughOutcome{
 		Comparison:        sandbox.CompareNothingReplaced,
 		BroadcastFailures: 2,
 	}}
 	r := newMirrorTestRegistry(t, m)
+	ctx := testTurnCtx(r)
 
 	out, err := r.Execute(ctx, "write_file", `{"path":"notes.md","content":"new"}`)
 	if err != nil {
@@ -216,7 +214,7 @@ func TestWriteFileStatesAPartialProjectMirror(t *testing.T) {
 	// even though the mirror ran.
 	m2 := &mirrorFake{outcome: sandbox.WriteThroughOutcome{Comparison: sandbox.CompareNothingReplaced}}
 	r2 := newMirrorTestRegistry(t, m2)
-	out2, err := r2.Execute(ctx, "write_file", `{"path":"notes.md","content":"new"}`)
+	out2, err := r2.Execute(testTurnCtx(r2), "write_file", `{"path":"notes.md","content":"new"}`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,13 +231,14 @@ func TestWriteFileStatesAPartialProjectMirror(t *testing.T) {
 // tool path, so one write disagreed with itself — a file the patch had just
 // written was still read as the old one by exec inside the sandbox.
 func TestWriteThroughMirrorsOneKeyAndOnePath(t *testing.T) {
-	ctx := context.Background()
 	m := &mirrorFake{outcome: sandbox.WriteThroughOutcome{Comparison: sandbox.CompareNothingReplaced}}
 	r := newMirrorTestRegistry(t, m)
+	ctx := testTurnCtx(r)
 	// The coding shape: one shared app tree (no session segment in the store
 	// scope) with the app in a subdir (every tool path is prefixed with it).
-	r.SetCodingSubdir("app")
-	r.SetProjectID("proj-1")
+	scope := testTurnScopeFor(r)
+	scope.SetCodingSubdir("app")
+	scope.ProjectID = "proj-1"
 
 	const wantKey = "app/notes.md"
 	const wantPath = "/workspace/app/notes.md"

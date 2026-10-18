@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -18,7 +19,7 @@ func TestWithMessageTimestampsUsesExplicitChatterTimezone(t *testing.T) {
 	}
 	ts := time.Date(2026, 6, 21, 15, 9, 0, 0, time.UTC).UnixMilli()
 
-	got := a.withMessageTimestampsForChatter([]provider.Message{{
+	got := a.withMessageTimestampsForChatter(context.Background(), []provider.Message{{
 		Role:      "user",
 		Content:   "为什么是下午好",
 		Timestamp: ts,

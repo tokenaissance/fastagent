@@ -34,11 +34,11 @@ type execArgs struct {
 // Uses the ASCII Unit Separator so it never collides with shell output.
 const MetaSandboxPrefix = "\x1fFC_META:sandbox\x1f\n"
 
-// The exec tool is registered twice — once by the host/pool closure
-// (registerExecFull) and once by the sandbox closure (registerSandboxedExec) —
-// so its description exists in two copies. Keep them side by side: everything
-// except the first clause must stay identical, and TestExecDescriptionsStayInSync
-// fails when an edit lands on only one of them.
+// The exec tool has one registration whose closure dispatches to the host/pool
+// path (makeExecToolFull) or the sandbox path (makeSandboxedExec) from the
+// turn's executor. Both paths carry a description, so keep them side by side:
+// everything except the first clause must stay identical, and
+// TestExecDescriptionsStayInSync fails when an edit lands on only one of them.
 //
 // One sentence each, deliberately. The file-delivery rule (write binary output
 // into the workspace, reference it by path, never inline base64) used to be
@@ -230,22 +230,25 @@ func registerExec(r *Registry) {
 }
 
 func registerExecWithSandbox(r *Registry, sbCfg *SandboxConfig) {
-	registerExecFull(r, sbCfg, nil, nil)
+	registerExecFull(r, sbCfg, nil)
 }
 
-// RegisterExecWithSkillEnv registers the exec tool with skill environment injection support.
-// Caches envProvider + skillDirs on the Registry so a later SetExecutor
-// (per-session sandbox bind) can re-apply env injection when it
-// re-registers the exec closure — otherwise skills like image-tool run
-// in the container without their FAL_KEY / REPLICATE_API_TOKEN.
-func RegisterExecWithSkillEnv(r *Registry, sbCfg *SandboxConfig, envProvider SkillEnvProvider, skillDirs []string) {
+// RegisterExecWithSkillEnv registers the exec tool with skill environment
+// injection support. envProvider is the boot-time fallback: inside an admitted
+// turn exec resolves both the provider and the skill dirs from TurnScope, so a
+// chatter's personal layer wins. Outside a turn the fallback dirs come from
+// the list that RegisterLoadSkill publishes through LoadSkillDirs.
+func RegisterExecWithSkillEnv(r *Registry, sbCfg *SandboxConfig, envProvider SkillEnvProvider) {
 	r.envProvider = envProvider
-	r.skillDirs = skillDirs
-	registerExecFull(r, sbCfg, envProvider, skillDirs)
+	registerExecFull(r, sbCfg, envProvider)
+	r.EnableHostExecEscapeHatch()
 }
 
-func registerExecFull(r *Registry, sbCfg *SandboxConfig, envProvider SkillEnvProvider, skillDirs []string) {
-	r.Register("exec", execHostDescription, execHostParams(), makeExecToolFull(r, sbCfg, envProvider, skillDirs))
+func registerExecFull(r *Registry, sbCfg *SandboxConfig, envProvider SkillEnvProvider) {
+	host := makeExecToolFull(r, sbCfg, envProvider)
+	sandbox := makeSandboxedExec(r, envProvider)
+	r.RegisterTool("exec", execHostDescription, execHostParams(),
+		dualTool{registry: r, host: host, sandbox: sandbox})
 }
 
 // makeExecToolFull captures the registry pointer so it can consult the
@@ -254,7 +257,7 @@ func registerExecFull(r *Registry, sbCfg *SandboxConfig, envProvider SkillEnvPro
 // up the stack, even if it was off at agent construction. Without this,
 // a `pool.Get()` failure during bindSession would silently leak to the
 // host shell.
-func makeExecToolFull(r *Registry, sbCfg *SandboxConfig, envProvider SkillEnvProvider, skillDirs []string) ToolFunc {
+func makeExecToolFull(r *Registry, sbCfg *SandboxConfig, envProvider SkillEnvProvider) ToolFunc {
 	return func(ctx context.Context, rawArgs json.RawMessage) (string, error) {
 		var args execArgs
 		if err := json.Unmarshal(rawArgs, &args); err != nil {
@@ -306,13 +309,12 @@ func makeExecToolFull(r *Registry, sbCfg *SandboxConfig, envProvider SkillEnvPro
 		// sandboxRequired flag covers the case where the runtime decided
 		// sandbox is mandatory after construction (sibling agent wanted
 		// it, or admin flipped settings.sandbox.enabled mid-process).
-		useSandbox := args.Sandbox || (sbCfg != nil && sbCfg.Enabled) || (r != nil && r.sandboxRequired)
+		useSandbox := args.Sandbox || (sbCfg != nil && sbCfg.Enabled) || (r != nil && r.sandboxRequired.Load())
 
 		// Background mode. Host shells are owned by shellMgr; sandbox
-		// jobs are owned by the registry's job table and are wired in
-		// by registerSandboxedExec — the closure actually installed
-		// once a session has an executor bound (Registry.SetExecutor).
-		// Reaching the sandbox branch below means this deployment runs
+		// jobs are owned by the registry's job table and are reached by
+		// the sandbox closure whenever the turn carries an executor.
+		// Reaching this branch with useSandbox means the deployment runs
 		// sandbox commands through the legacy pool shape instead, and
 		// that shape carries no job table for bash_output to poll.
 		if args.RunInBackground {
@@ -326,8 +328,8 @@ func makeExecToolFull(r *Registry, sbCfg *SandboxConfig, envProvider SkillEnvPro
 			// never inherits raw os.Environ() — that's the leak path
 			// that put OSS AccessKey + DB DSN in chat replies.
 			var skillEnv map[string]string
-			if envProvider != nil && skillDirs != nil {
-				skillEnv = resolveSkillEnv(args.Command, envProvider, skillDirs)
+			if provider, dirs := skillEnvForTurn(ctx, r, envProvider); provider != nil {
+				skillEnv = resolveSkillEnv(args.Command, provider, dirs)
 			}
 			sessEnv := buildSubprocessEnv(skillEnv)
 			s, err := r.shellMgr.Start(command, sessEnv)
@@ -343,12 +345,12 @@ func makeExecToolFull(r *Registry, sbCfg *SandboxConfig, envProvider SkillEnvPro
 			return MetaSandboxPrefix + out, err
 		}
 		// Sandbox was requested but no executor is wired — refuse rather
-		// than running on the host shell. SetExecutor swaps this closure
-		// for the sandboxed variant on successful session bind, so we
-		// only land here when the executor pool failed (docker daemon
-		// down, image pull failed, container start error). Returning a
-		// clear error gives the model a chance to surface it instead of
-		// the user seeing host-shell `command not found` mysteries.
+		// than running on the host shell. The per-turn dispatch picks the
+		// sandbox closure when the turn carries an executor, so we only
+		// land here when the executor pool failed (docker daemon down,
+		// image pull failed, container start error). Returning a clear
+		// error gives the model a chance to surface it instead of the
+		// user seeing host-shell `command not found` mysteries.
 		if useSandbox {
 			return "", fmt.Errorf("sandbox required but no executor available — check that the sandbox backend (docker / e2b) is reachable and the configured image (%q) can start", sbCfgImage(sbCfg))
 		}
@@ -360,8 +362,8 @@ func makeExecToolFull(r *Registry, sbCfg *SandboxConfig, envProvider SkillEnvPro
 		// (FASTAGENT_STORAGE_DSN, FASTAGENT_OBJECT_STORE_*, ...) into
 		// every shell the model can run.
 		var skillEnv map[string]string
-		if envProvider != nil && skillDirs != nil {
-			skillEnv = resolveSkillEnv(args.Command, envProvider, skillDirs)
+		if provider, dirs := skillEnvForTurn(ctx, r, envProvider); provider != nil {
+			skillEnv = resolveSkillEnv(args.Command, provider, dirs)
 		}
 		cmd.Env = buildSubprocessEnv(skillEnv)
 
@@ -386,6 +388,29 @@ func sbCfgImage(sbCfg *SandboxConfig) string {
 		return "<unset>"
 	}
 	return sbCfg.Image
+}
+
+// skillEnvForTurn returns the skill env provider and search dirs for ctx.
+// Inside an admitted turn the scope carries the layers resolved for this
+// chatter, so a per-user skill contributes both its directory and its
+// primaryEnv mapping. Outside a turn both values fall back to boot-time
+// configuration: the provider captured at registration and the dirs that
+// RegisterLoadSkill publishes for the load_skill fallback.
+func skillEnvForTurn(ctx context.Context, r *Registry, fallback SkillEnvProvider) (SkillEnvProvider, []string) {
+	provider := fallback
+	var dirs []string
+	if r != nil {
+		dirs = r.LoadSkillDirs()
+	}
+	if scope := TurnScopeFrom(ctx); scope != nil {
+		if scope.SkillEnv != nil {
+			provider = scope.SkillEnv
+		}
+		if len(scope.SkillDirs) > 0 {
+			dirs = scope.SkillDirs
+		}
+	}
+	return provider, dirs
 }
 
 // resolveSkillEnv checks if the command path references a skill directory
@@ -462,9 +487,9 @@ const HostExecToolName = "host_exec"
 // registerHostExec adds an escape-hatch exec tool that bypasses the
 // sandbox executor and runs straight on the operator's host shell.
 // Gated by buildinfo.IsHostExecAllowed() — only registered when the
-// operator has explicitly opted in via FASTAGENT_ALLOW_HOST_EXEC=1
-// AND a sandbox executor is present (otherwise `exec` already IS the
-// host shell and host_exec would be a duplicate).
+// operator has explicitly opted in via FASTAGENT_ALLOW_HOST_EXEC=1.
+// Registration happens at agent boot so the escape hatch survives the
+// turn-scoped executor dispatch.
 //
 // Tool description spells out the boundary loudly so the model picks
 // `exec` (sandbox) by default and only escapes to host_exec for
@@ -477,7 +502,7 @@ const HostExecToolName = "host_exec"
 // external IM channel (WeChat, Discord, Feishu, …), an unsuspecting
 // chatter coaxing the model into host_exec is a privilege-escalation
 // path. Operators who need host shell access opt in explicitly.
-func registerHostExec(r *Registry, envProvider SkillEnvProvider, skillDirs []string) {
+func registerHostExec(r *Registry, envProvider SkillEnvProvider) {
 	r.Register(HostExecToolName,
 		"Execute a shell command on the OPERATOR's host machine, bypassing the sandbox. "+
 			"Use this ONLY for tasks tied to the user's actual environment — `fastagent upgrade`, "+
@@ -534,8 +559,8 @@ func registerHostExec(r *Registry, envProvider SkillEnvProvider, skillDirs []str
 			// rarely needs FASTAGENT_STORAGE_DSN reachable from a host
 			// shell, and never needs the model to be able to read it.
 			var skillEnv map[string]string
-			if envProvider != nil && skillDirs != nil {
-				skillEnv = resolveSkillEnv(args.Command, envProvider, skillDirs)
+			if provider, dirs := skillEnvForTurn(ctx, r, envProvider); provider != nil {
+				skillEnv = resolveSkillEnv(args.Command, provider, dirs)
 			}
 			cmd.Env = buildSubprocessEnv(skillEnv)
 			out, err := cmd.CombinedOutput()
@@ -547,17 +572,16 @@ func registerHostExec(r *Registry, envProvider SkillEnvProvider, skillDirs []str
 		})
 }
 
-// registerSandboxedExec re-registers the exec tool so it delegates to a
+// makeSandboxedExec builds the closure that delegates exec to the turn's
 // sandbox.Executor instead of running on the host. Skill env vars
 // (FAL_KEY, REPLICATE_API_TOKEN, etc.) configured via the admin UI are
 // injected into the container by prepending POSIX `export` statements
 // to the command — sandbox.Executor.Exec only accepts a single command
 // string so we can't pass env via process attribute the way the host
 // path does.
-func registerSandboxedExec(r *Registry, ex sandbox.Executor) {
-	envProvider := r.envProvider
-	skillDirs := r.skillDirs
-	r.Register("exec", execSandboxDescription, execSharedParams(), func(ctx context.Context, rawArgs json.RawMessage) (string, error) {
+func makeSandboxedExec(r *Registry, envProvider SkillEnvProvider) ToolFunc {
+	return func(ctx context.Context, rawArgs json.RawMessage) (string, error) {
+		ex := r.executorOrUnavailable(ctx)
 		var args execArgs
 		if err := json.Unmarshal(rawArgs, &args); err != nil {
 			return "", fmt.Errorf("parse args: %w", err)
@@ -591,9 +615,10 @@ func registerSandboxedExec(r *Registry, ex sandbox.Executor) {
 		// references (SK skill dirs may be host paths or the
 		// container-internal /skills/<name> mount — resolveSkillEnv
 		// matches both).
+		provider, dirs := skillEnvForTurn(ctx, r, envProvider)
 		injected := []string{}
-		if envProvider != nil {
-			skillEnv := resolveSkillEnv(args.Command, envProvider, skillDirs)
+		if provider != nil {
+			skillEnv := resolveSkillEnv(args.Command, provider, dirs)
 			if len(skillEnv) > 0 {
 				var sb strings.Builder
 				for k, v := range skillEnv {
@@ -620,8 +645,8 @@ func registerSandboxedExec(r *Registry, ex sandbox.Executor) {
 		}
 		slog.Info("sandboxed exec",
 			"backend", ex.Backend(),
-			"envProviderSet", envProvider != nil,
-			"skillDirsCount", len(skillDirs),
+			"envProviderSet", provider != nil,
+			"skillDirsCount", len(dirs),
 			"injected", injected,
 			"cmdHead", firstN(args.Command, 80))
 		out, err := ex.Exec(ctx, command, time.Duration(timeout)*time.Second)
@@ -639,7 +664,7 @@ func registerSandboxedExec(r *Registry, ex sandbox.Executor) {
 			err = fmt.Errorf("%w\n[hint: this looks like a sandbox-environment miss (binary or path not present in the container). If the command needs the user's actual host machine — e.g. `fastagent upgrade`, `~/Downloads`, host CLI tools — retry with the `host_exec` tool instead.]", err)
 		}
 		return MetaSandboxPrefix + out, err
-	})
+	}
 }
 
 // looksLikeSandboxAbsence sniffs an exec error / output for the common

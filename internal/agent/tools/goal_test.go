@@ -64,7 +64,7 @@ func (m *memGoalStore) DeleteGoal(context.Context, string) error { return nil }
 func fixture(t *testing.T) (*Registry, *memGoalStore) {
 	t.Helper()
 	r := NewRegistry("", "")
-	r.SetGoalSessionKey("s-fixture-1")
+	bindTestTurn(r, &TurnScope{GoalSessionKey: "s-fixture-1"})
 	st := newMemGoalStore()
 	RegisterGoalTools(r, st, "agent-A")
 	return r, st
@@ -78,7 +78,7 @@ func callTool(t *testing.T, r *Registry, name, argsJSON string) (string, error) 
 	if tool == nil {
 		t.Fatalf("tool %q not registered", name)
 	}
-	return tool.Call(context.Background(), json.RawMessage(argsJSON))
+	return tool.Call(testTurnCtx(r), json.RawMessage(argsJSON))
 }
 
 // seedGoal directly inserts an Active goal into the store, bypassing

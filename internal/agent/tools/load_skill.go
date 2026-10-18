@@ -15,8 +15,12 @@ type loadSkillArgs struct {
 	Name string `json:"name"`
 }
 
-// RegisterLoadSkill registers the load_skill tool that reads full SKILL.md content.
+// RegisterLoadSkill registers the load_skill tool that reads full SKILL.md
+// content. The dirs passed here are the fallback for calls outside an admitted
+// turn; inside a turn, TurnScope.SkillDirs wins so concurrent chats keep their
+// own per-chatter layers.
 func RegisterLoadSkill(r *Registry, skillDirs []string) {
+	r.SetLoadSkillDirs(skillDirs)
 	r.Register("load_skill", "Load the full content of a skill by name. Use this when you need detailed instructions for a specific skill.", map[string]interface{}{
 		"type": "object",
 		"properties": map[string]interface{}{
@@ -26,10 +30,25 @@ func RegisterLoadSkill(r *Registry, skillDirs []string) {
 			},
 		},
 		"required": []string{"name"},
-	}, makeLoadSkill(skillDirs))
+	}, makeLoadSkill(r))
 }
 
-func makeLoadSkill(skillDirs []string) ToolFunc {
+// SetLoadSkillDirs replaces the fallback search list. Hot reload uses this
+// instead of re-registering the tool.
+func (r *Registry) SetLoadSkillDirs(dirs []string) {
+	cp := append([]string(nil), dirs...)
+	r.loadSkillDirs.Store(&cp)
+}
+
+func (r *Registry) LoadSkillDirs() []string {
+	p := r.loadSkillDirs.Load()
+	if p == nil {
+		return nil
+	}
+	return append([]string(nil), (*p)...)
+}
+
+func makeLoadSkill(r *Registry) ToolFunc {
 	return func(ctx context.Context, rawArgs json.RawMessage) (string, error) {
 		var args loadSkillArgs
 		if err := json.Unmarshal(rawArgs, &args); err != nil {
@@ -40,8 +59,13 @@ func makeLoadSkill(skillDirs []string) ToolFunc {
 			return "", fmt.Errorf("skill name is required")
 		}
 
+		dirs := r.LoadSkillDirs()
+		if scope := TurnScopeFrom(ctx); scope != nil && len(scope.SkillDirs) > 0 {
+			dirs = scope.SkillDirs
+		}
+
 		// Search through directories in priority order
-		for _, dir := range skillDirs {
+		for _, dir := range dirs {
 			if dir == "" {
 				continue
 			}

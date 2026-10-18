@@ -89,7 +89,7 @@ func TestWorkspaceSignalSurvivesTheLifecycleProxyAndTheMetaStrip(t *testing.T) {
 	}
 	reg := tools.NewRegistry(t.TempDir(), t.TempDir())
 	defer reg.Close()
-	reg.SetExecutor(ex)
+	ctx = tools.WithTurnScope(ctx, &tools.TurnScope{Executor: ex})
 
 	out, err := reg.Execute(ctx, "exec", `{"command":"ls /workspace"}`)
 	if err != nil {
@@ -122,7 +122,7 @@ func TestWorkspaceSignalIsAbsentThroughTheLifecycleProxy(t *testing.T) {
 	}
 	reg := tools.NewRegistry(t.TempDir(), t.TempDir())
 	defer reg.Close()
-	reg.SetExecutor(ex)
+	ctx = tools.WithTurnScope(ctx, &tools.TurnScope{Executor: ex})
 
 	out, err := reg.Execute(ctx, "exec", `{"command":"ls /workspace"}`)
 	if err != nil {

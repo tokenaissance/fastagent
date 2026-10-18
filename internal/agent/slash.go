@@ -133,7 +133,7 @@ func (a *Agent) handleSlashCommand(msg bus.InboundMessage) slashResult {
 
 	case "/model":
 		if len(args) == 0 {
-			return slashResult{handled: true, reply: fmt.Sprintf("Current model: `%s`\n\nUsage: /model <model-name>\nExample: /model gpt-4o-mini", a.model)}
+			return slashResult{handled: true, reply: fmt.Sprintf("Current model: `%s`\n\nUsage: /model <model-name>\nExample: /model gpt-4o-mini", a.currentRuntime().model)}
 		}
 		return a.slashModel(msg, args[0])
 
@@ -159,7 +159,7 @@ func (a *Agent) handleSlashCommand(msg bus.InboundMessage) slashResult {
 		return slashResult{handled: true, reply: a.slashHelp()}
 
 	case "/version":
-		return slashResult{handled: true, reply: fmt.Sprintf("⚡ FastAgent\nAgent: %s\nModel: %s", a.name, a.model)}
+		return slashResult{handled: true, reply: fmt.Sprintf("⚡ FastAgent\nAgent: %s\nModel: %s", a.name, a.currentRuntime().model)}
 
 	case "/whoami":
 		return slashResult{
@@ -301,6 +301,7 @@ func (a *Agent) slashUndo(msg bus.InboundMessage) slashResult {
 }
 
 func (a *Agent) slashCompact(msg bus.InboundMessage) slashResult {
+	rt := a.currentRuntime()
 	sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID, msg.ProjectID)
 	sessionMsgs := sess.GetMessages()
 
@@ -308,7 +309,7 @@ func (a *Agent) slashCompact(msg bus.InboundMessage) slashResult {
 		return slashResult{handled: true, reply: "No messages to compact."}
 	}
 
-	result, err := CompactMessages(context.Background(), sessionMsgs, a.homePath, a.provider, a.model)
+	result, err := CompactMessages(context.Background(), sessionMsgs, a.homePath, rt.provider, rt.model)
 	if err != nil {
 		return slashResult{handled: true, reply: fmt.Sprintf("Compaction error: %v", err)}
 	}
@@ -320,10 +321,11 @@ func (a *Agent) slashCompact(msg bus.InboundMessage) slashResult {
 }
 
 func (a *Agent) slashStatus(msg bus.InboundMessage) slashResult {
+	rt := a.currentRuntime()
 	sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID, msg.ProjectID)
 	sessionMsgs := sess.GetMessages()
 
-	memContent := a.memory.LoadMemory()
+	memContent := rt.memory.LoadMemory()
 	memLines := 0
 	if memContent != "" {
 		memLines = strings.Count(memContent, "\n") + 1
@@ -342,8 +344,8 @@ func (a *Agent) slashStatus(msg bus.InboundMessage) slashResult {
 		"Session Msgs:%d\n"+
 		"Memory:      %d lines\n"+
 		"Workspace:   %s",
-		a.name, a.model, soul,
-		a.maxTokens, a.temperature, a.maxToolIterations,
+		a.name, rt.model, soul,
+		rt.maxTokens, rt.temperature, rt.maxToolIterations,
 		len(sessionMsgs), memLines, a.homePath,
 	)
 	return slashResult{handled: true, reply: status}
@@ -556,13 +558,13 @@ const agentDefaultsNamespace = "agents.defaults"
 // 30-minute idle eviction — which is indistinguishable from "the switch did not
 // work".
 func (a *Agent) slashModel(msg bus.InboundMessage, model string) slashResult {
-	old := a.model
+	old := a.currentRuntime().model
 	persisted, err := a.persistAgentModel(model)
 	if err != nil {
 		return slashResult{handled: true, reply: fmt.Sprintf(
 			"⚠️ Model **not** switched — saving the agent default failed: %v\nStill on `%s`.", err, old)}
 	}
-	a.model = model
+	a.mutateRuntime(func(next *agentRuntime) { next.model = model })
 	if persisted && a.mcpConfigNotify != nil && a.ownerUserID != "" {
 		a.mcpConfigNotify(a.ownerUserID, a.agentID)
 	}

@@ -21,8 +21,12 @@ func TestCreateCronJobPersistsMessageAccountID(t *testing.T) {
 
 	r := NewRegistry(t.TempDir(), t.TempDir())
 	r.SetOwnerUserID("user-1")
-	r.SetChatterUserID("user-1")
-	r.SetMessageContext("telegram", "dclaw_official_bot", "8169894742")
+	bindTestTurn(r, &TurnScope{
+		ChatterUserID:    "user-1",
+		MessageChannel:   "telegram",
+		MessageAccountID: "dclaw_official_bot",
+		MessageChatID:    "8169894742",
+	})
 	RegisterCronTools(r, db, "agent-1")
 
 	args, err := json.Marshal(createCronJobArgs{
@@ -35,7 +39,7 @@ func TestCreateCronJobPersistsMessageAccountID(t *testing.T) {
 		t.Fatalf("marshal args: %v", err)
 	}
 
-	if _, err := r.Execute(context.Background(), "create_cron_job", string(args)); err != nil {
+	if _, err := r.Execute(testTurnCtx(r), "create_cron_job", string(args)); err != nil {
 		t.Fatalf("create cron job: %v", err)
 	}
 

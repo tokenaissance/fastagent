@@ -89,11 +89,11 @@ func execArgsJSON(t *testing.T, command string, extra map[string]any) string {
 // A refused call must not reach the sandbox: refusing after firing the command
 // would still burn the wait.
 func TestExecRefusesLongForegroundSleepBeforeReachingTheSandbox(t *testing.T) {
-	ctx := context.Background()
 	ex := &bgRecordingExecutor{replies: []string{"fcbg 4242 1\n"}}
 	r := NewRegistry(t.TempDir(), t.TempDir())
 	defer r.Close()
-	r.SetExecutor(ex)
+	bindTestTurn(r, &TurnScope{Executor: ex})
+	ctx := testTurnCtx(r)
 
 	_, err := r.Execute(ctx, "exec", execArgsJSON(t,
 		"cd /workspace && setsid nohup bash job.sh > log 2>&1 </dev/null & sleep 175; tail -3 log", nil))
@@ -111,11 +111,11 @@ func TestExecRefusesLongForegroundSleepBeforeReachingTheSandbox(t *testing.T) {
 // run_in_background is the supported way to wait — the same command is accepted
 // there, waits and all.
 func TestExecAcceptsTheLongWaitOnRunInBackground(t *testing.T) {
-	ctx := context.Background()
 	ex := &bgRecordingExecutor{replies: []string{"fcbg 4242 1\n"}}
 	r := NewRegistry(t.TempDir(), t.TempDir())
 	defer r.Close()
-	r.SetExecutor(ex)
+	bindTestTurn(r, &TurnScope{Executor: ex})
+	ctx := testTurnCtx(r)
 
 	out, err := r.Execute(ctx, "exec", execArgsJSON(t,
 		"sleep 175; tail -3 log", map[string]any{"run_in_background": true}))
@@ -131,11 +131,11 @@ func TestExecAcceptsTheLongWaitOnRunInBackground(t *testing.T) {
 // advertised in the schema, never in the refusal text — the default answer
 // stays run_in_background.
 func TestExecAcceptsTheLongWaitWithTheOverride(t *testing.T) {
-	ctx := context.Background()
 	ex := &bgRecordingExecutor{replies: []string{"one"}}
 	r := NewRegistry(t.TempDir(), t.TempDir())
 	defer r.Close()
-	r.SetExecutor(ex)
+	bindTestTurn(r, &TurnScope{Executor: ex})
+	ctx := testTurnCtx(r)
 
 	out, err := r.Execute(ctx, "exec", execArgsJSON(t,
 		"sleep 175; tail -3 log", map[string]any{"allow_long_wait": true}))
@@ -159,11 +159,11 @@ func TestLongWaitRefusalDoesNotAdvertiseTheOverride(t *testing.T) {
 // Short waits stay allowed: a one-second readiness probe is a legitimate
 // foreground call and must not grow a refusal path.
 func TestExecAllowsShortForegroundSleep(t *testing.T) {
-	ctx := context.Background()
 	ex := &bgRecordingExecutor{replies: []string{"ok"}}
 	r := NewRegistry(t.TempDir(), t.TempDir())
 	defer r.Close()
-	r.SetExecutor(ex)
+	bindTestTurn(r, &TurnScope{Executor: ex})
+	ctx := testTurnCtx(r)
 
 	if _, err := r.Execute(ctx, "exec", execArgsJSON(t, "sleep 5; echo done", nil)); err != nil {
 		t.Fatalf("short sleep refused: %v", err)

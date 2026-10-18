@@ -177,7 +177,7 @@ func RegisterWebFetchChain(r *Registry, chain *toolproviders.Chain) {
 		// guessed URLs that all 404. Applies regardless of which
 		// provider is actually backing the call.
 		if r != nil {
-			if prev := r.PriorFailure("web_fetch", string(rawArgs)); prev != "" {
+			if prev := r.PriorFailure(ctx, "web_fetch", string(rawArgs)); prev != "" {
 				return "", fmt.Errorf(
 					"already tried %s earlier in this turn (%s). DO NOT retry the same URL — pick a different source, or use web_search to find a verified URL",
 					args.URL, prev,
@@ -228,7 +228,7 @@ func webFetchTool(ctx context.Context, r *Registry, rawArgs json.RawMessage) (st
 	// detector but the user is paying for round-trips that we know
 	// up-front will fail.
 	if r != nil {
-		if prev := r.PriorFailure("web_fetch", string(rawArgs)); prev != "" {
+		if prev := r.PriorFailure(ctx, "web_fetch", string(rawArgs)); prev != "" {
 			return "", fmt.Errorf(
 				"already tried %s earlier in this turn (%s). DO NOT retry the same URL — pick a different source, or use web_search to find a verified URL",
 				args.URL, prev,

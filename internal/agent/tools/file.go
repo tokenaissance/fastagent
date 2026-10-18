@@ -39,8 +39,8 @@ type editFileArgs struct {
 }
 
 // editSchema is the JSON schema advertised for edit_file. Defined once and
-// reused by registerFile / registerSandboxedFile so the two registration
-// paths can't drift on parameter shape.
+// reused by the host and sandbox branches so they can't drift on parameter
+// shape.
 var editSchema = map[string]interface{}{
 	"type": "object",
 	"properties": map[string]interface{}{
@@ -65,7 +65,7 @@ var editSchema = map[string]interface{}{
 }
 
 // writeFileDescription is the description advertised for write_file, shared by
-// registerFile and registerSandboxedFile for the same reason editSchema is.
+// the host and sandbox branches for the same reason editSchema is.
 //
 // The second sentence is load-bearing: one write_file call carries the whole
 // document as arguments, and arguments count against the model's output limit.
@@ -428,16 +428,28 @@ func (r *Registry) rootForPath(path string) string {
 }
 
 func registerFile(r *Registry) {
-	r.Register("read_file", "Read the contents of a file",
-		singlePathSchema("File path (relative to your working directory or absolute)"), makeReadFile(r))
+	host := sandboxFileTools{
+		read:  makeReadFile(r),
+		write: makeWriteFile(r),
+		edit:  makeEditFile(r),
+		list:  makeListDir(r),
+	}
+	sandbox := makeSandboxedFileTools(r)
 
-	r.Register("write_file", writeFileDescription,
-		writeFileSchema("File path (relative to your working directory or absolute)"), makeWriteFile(r))
+	r.RegisterTool("read_file", "Read the contents of a file",
+		singlePathSchema("File path (relative to your working directory or absolute)"),
+		dualTool{registry: r, host: host.read, sandbox: sandbox.read})
 
-	r.Register("list_dir", "List files and directories in a path",
-		singlePathSchema("Directory path (relative to your working directory or absolute)"), makeListDir(r))
+	r.RegisterTool("write_file", writeFileDescription,
+		writeFileSchema("File path (relative to your working directory or absolute)"),
+		dualTool{registry: r, host: host.write, sandbox: sandbox.write})
 
-	r.Register("edit_file", editDescription, editSchema, makeEditFile(r))
+	r.RegisterTool("list_dir", "List files and directories in a path",
+		singlePathSchema("Directory path (relative to your working directory or absolute)"),
+		dualTool{registry: r, host: host.list, sandbox: sandbox.list})
+
+	r.RegisterTool("edit_file", editDescription, editSchema,
+		dualTool{registry: r, host: host.edit, sandbox: sandbox.edit})
 }
 
 func resolvePath(root, path string) string {
@@ -539,19 +551,19 @@ func makeReadFile(r *Registry) ToolFunc {
 
 		// Identity-file confidentiality gate. A chatter who asks "show me
 		// your SOUL.md" must not get the verbatim persona spec back.
-		if r.identityFileBlocked(args.Path) {
+		if r.identityFileBlocked(ctx, args.Path) {
 			return IdentityFileRefusal, nil
 		}
 		// Skill-manifest gate. Same rationale for a bundled SKILL.md —
 		// the agent's IP, not for a chatter to pull verbatim.
-		if r.skillManifestBlocked(args.Path) {
+		if r.skillManifestBlocked(ctx, args.Path) {
 			return SkillManifestRefusal, nil
 		}
 
 		// Mirror makeWriteFile's routing: userRoot-destined paths go to the
 		// workspace store when one is configured.
 		if r.workspaceStore != nil && r.agentID != "" && r.isWorkspacePath(args.Path) {
-			rc, err := r.workspaceStore.Get(ctx, r.agentID, r.projectID, r.scopeSessionID(), r.wsPath(args.Path))
+			rc, err := r.workspaceStore.Get(ctx, r.agentID, r.projectID(ctx), r.scopeSessionID(ctx), r.wsPath(ctx, args.Path))
 			if err != nil {
 				return "", fmt.Errorf("workspace get: %w", err)
 			}
@@ -587,7 +599,7 @@ func makeReadFile(r *Registry) ToolFunc {
 			// agent treats the field as unset, matching how
 			// ContextBuilder.loadFile loads identity files for the system
 			// prompt.
-			return string(r.readSystemFileWithFallback(ctx, r.systemFileUserID(name), name)), nil
+			return string(r.readSystemFileWithFallback(ctx, r.systemFileUserID(ctx, name), name)), nil
 		}
 
 		root := r.rootForPath(args.Path)
@@ -628,10 +640,10 @@ func makeWriteFile(r *Registry) ToolFunc {
 
 		// Identity-file confidentiality gate — also blocks a chatter
 		// from REWRITING the agent's persona via prompt injection.
-		if r.identityFileBlocked(args.Path) {
+		if r.identityFileBlocked(ctx, args.Path) {
 			return IdentityFileRefusal, nil
 		}
-		if r.ownerManagedFileWriteBlocked(args.Path) {
+		if r.ownerManagedFileWriteBlocked(ctx, args.Path) {
 			return OwnerManagedFileWriteRefusal, nil
 		}
 
@@ -653,7 +665,7 @@ func makeWriteFile(r *Registry) ToolFunc {
 		// systemFileStore when available.
 		if r.systemFileStore != nil && r.agentID != "" && isSingleSegmentSystemFile(args.Path) {
 			name := filepath.Clean(args.Path)
-			uid := r.systemFileUserID(name)
+			uid := r.systemFileUserID(ctx, name)
 			if err := r.systemFileStore.SaveWorkspaceFile(ctx, r.agentID, uid, name, []byte(args.Content)); err != nil {
 				return "", fmt.Errorf("system file save: %w", err)
 			}
@@ -711,16 +723,16 @@ func makeEditFile(r *Registry) ToolFunc {
 		}
 
 		// Identity-file confidentiality gate.
-		if r.identityFileBlocked(args.Path) {
+		if r.identityFileBlocked(ctx, args.Path) {
 			return IdentityFileRefusal, nil
 		}
-		if r.ownerManagedFileWriteBlocked(args.Path) {
+		if r.ownerManagedFileWriteBlocked(ctx, args.Path) {
 			return OwnerManagedFileWriteRefusal, nil
 		}
 		// Skill-manifest gate — block edits to a bundled SKILL.md for
 		// non-admin chatters (editing returns surrounding content + lets
 		// them tamper with the agent's IP). Owner edits skills via the UI.
-		if r.skillManifestBlocked(args.Path) {
+		if r.skillManifestBlocked(ctx, args.Path) {
 			return SkillManifestRefusal, nil
 		}
 
@@ -730,7 +742,7 @@ func makeEditFile(r *Registry) ToolFunc {
 		// the same backend or an edit could silently land in a different
 		// store than the one the agent later reads from.
 		if r.workspaceStore != nil && r.agentID != "" && r.isWorkspacePath(args.Path) {
-			rc, err := r.workspaceStore.Get(ctx, r.agentID, r.projectID, r.scopeSessionID(), r.wsPath(args.Path))
+			rc, err := r.workspaceStore.Get(ctx, r.agentID, r.projectID(ctx), r.scopeSessionID(ctx), r.wsPath(ctx, args.Path))
 			if err != nil {
 				return "", fmt.Errorf("workspace get: %w", err)
 			}
@@ -754,7 +766,7 @@ func makeEditFile(r *Registry) ToolFunc {
 
 		if r.systemFileStore != nil && r.agentID != "" && isSingleSegmentSystemFile(args.Path) {
 			name := filepath.Clean(args.Path)
-			uid := r.systemFileUserID(name)
+			uid := r.systemFileUserID(ctx, name)
 			// Same resolution as read_file (registry.readSystemFileWithFallback):
 			// a never-saved per-chatter MEMORY.md / USER.md row, or an identity
 			// file that only exists on disk, is an EMPTY BASE — not the raw
@@ -851,7 +863,7 @@ func makeListDir(r *Registry) ToolFunc {
 		// listing" by filtering List output to entries whose agent-relative
 		// path sits under args.Path's prefix.
 		if r.workspaceStore != nil && r.agentID != "" && r.isWorkspacePath(args.Path) {
-			objs, err := r.workspaceStore.List(ctx, r.agentID, r.projectID, r.scopeSessionID())
+			objs, err := r.workspaceStore.List(ctx, r.agentID, r.projectID(ctx), r.scopeSessionID(ctx))
 			if err != nil {
 				return "", fmt.Errorf("workspace list: %w", err)
 			}
@@ -923,7 +935,7 @@ func (r *Registry) previousStoreVersion(ctx context.Context, key string) string 
 	if r.workspaceStore == nil || r.agentID == "" || key == "" {
 		return ""
 	}
-	rc, err := r.workspaceStore.Get(ctx, r.agentID, r.projectID, r.scopeSessionID(), key)
+	rc, err := r.workspaceStore.Get(ctx, r.agentID, r.projectID(ctx), r.scopeSessionID(ctx), key)
 	if err != nil {
 		return ""
 	}
@@ -949,12 +961,12 @@ const expectationReadMax = 2 << 20
 // optimisation is deliberately left out of this first cut: one extra HEAD is
 // cheaper than threading a version through three call sites.
 func (r *Registry) putGuarded(ctx context.Context, tool, path string, data []byte) error {
-	key := r.wsPath(path)
+	key := r.wsPath(ctx, path)
 	expected := workspace.VersionAbsent
-	if info, err := r.workspaceStore.Stat(ctx, r.agentID, r.projectID, r.scopeSessionID(), key); err == nil && info != nil {
+	if info, err := r.workspaceStore.Stat(ctx, r.agentID, r.projectID(ctx), r.scopeSessionID(ctx), key); err == nil && info != nil {
 		expected = info.Version
 	}
-	err := r.workspaceStore.PutIfVersion(ctx, r.agentID, r.projectID, r.scopeSessionID(), key,
+	err := r.workspaceStore.PutIfVersion(ctx, r.agentID, r.projectID(ctx), r.scopeSessionID(ctx), key,
 		strings.NewReader(string(data)), int64(len(data)), "", expected)
 	if errors.Is(err, workspace.ErrVersionConflict) {
 		return fmt.Errorf("another writer changed %s while this turn was working; nothing was overwritten — read it again and re-apply your change", path)
@@ -1046,14 +1058,15 @@ func storeOnlySignal(inSandbox map[string]bool, listed []string) string {
 // the agent, and nothing keeps a copy of what it replaced — the sandbox changes
 // the agent was told about in earlier exec results are what that version was.
 func (r *Registry) writeThroughSignal(ctx context.Context, path, content, previous string) string {
-	if r.executor == nil {
+	ex := r.executorFor(ctx)
+	if ex == nil {
 		return ""
 	}
-	wt, ok := r.executor.(sandbox.WriteThroughExecutor)
+	wt, ok := ex.(sandbox.WriteThroughExecutor)
 	if !ok {
 		return "" // backend without a separate copy (docker) — the host IS /workspace
 	}
-	storeKey := r.wsPath(path)
+	storeKey := r.wsPath(ctx, path)
 	dest := "/workspace/" + strings.TrimPrefix(filepath.ToSlash(storeKey), "/")
 	// The store scope travels with the call: this tool knows which key it just
 	// wrote (scopeSessionID() collapses in coding-root mode, so the project root
@@ -1061,7 +1074,7 @@ func (r *Registry) writeThroughSignal(ctx context.Context, path, content, previo
 	// that inference is what made the stamp silently miss in project sessions
 	// (docs 10 §4 G22).
 	outcome, err := wt.WriteThroughScope(
-		sandbox.StoreScope{ProjectID: r.projectID, SessionID: r.scopeSessionID()},
+		sandbox.StoreScope{ProjectID: r.projectID(ctx), SessionID: r.scopeSessionID(ctx)},
 		storeKey, dest, content, previous)
 	switch {
 	case err != nil:
@@ -1099,7 +1112,7 @@ func (r *Registry) writeThroughSignal(ctx context.Context, path, content, previo
 	return ""
 }
 
-// registerSandboxedFile re-registers file tools so they delegate to a
+// makeSandboxedFileTools builds the file tools that delegate to the turn's
 // sandbox.Executor for paths that don't belong to a store.
 //
 // IMPORTANT: identity files (SOUL.md, USER.md, MEMORY.md, …) live in
@@ -1111,10 +1124,24 @@ func (r *Registry) writeThroughSignal(ctx context.Context, path, content, previo
 // the path (absolute paths, `skills/...`, ad-hoc scripts, etc.). The
 // sandbox badge is emitted only for the executor-fallback path — store
 // hits intentionally don't badge, since they didn't run in the sandbox.
-func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
+type sandboxFileTools struct {
+	read  ToolFunc
+	write ToolFunc
+	edit  ToolFunc
+	list  ToolFunc
+}
+
+// makeSandboxedFileTools builds the executor-backed file tools. Each closure
+// resolves its executor from the turn context at call time; a sandboxRequired
+// turn whose bind failed gets the explicit unavailable error instead of the
+// host filesystem.
+func makeSandboxedFileTools(r *Registry) sandboxFileTools {
+	var tools sandboxFileTools
+
 	// One line on purpose, same as write_file below: wrapping the argument list
 	// would re-indent the closure and bury the change in whitespace.
-	r.Register("read_file", "Read the contents of a file", singlePathSchema("File path (identity file, workspace-relative, or absolute inside the sandbox)"), func(ctx context.Context, rawArgs json.RawMessage) (string, error) {
+	tools.read = func(ctx context.Context, rawArgs json.RawMessage) (string, error) {
+		ex := r.executorOrUnavailable(ctx)
 		var args readFileArgs
 		if err := json.Unmarshal(rawArgs, &args); err != nil {
 			return "", fmt.Errorf("parse args: %w", err)
@@ -1122,12 +1149,12 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 		// Identity-file confidentiality gate — same as the host path.
 		// Runs BEFORE the systemFileStore lookup so a chatter never
 		// reaches the DB row at all.
-		if r.identityFileBlocked(args.Path) {
+		if r.identityFileBlocked(ctx, args.Path) {
 			return IdentityFileRefusal, nil
 		}
 		// Skill-manifest gate — refuse before any routing so a chatter
 		// can't read a bundled `/skills/<name>/SKILL.md` off the mount.
-		if r.skillManifestBlocked(args.Path) {
+		if r.skillManifestBlocked(ctx, args.Path) {
 			return SkillManifestRefusal, nil
 		}
 		// Identity files (SOUL.md, IDENTITY.md, …) are routed by basename
@@ -1140,11 +1167,11 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 			// Same resolution as the host path: miss → unset (fresh agent),
 			// plus the owner-only disk fallback for a file that exists on the
 			// agent home but has no row yet.
-			return string(r.readSystemFileWithFallback(ctx, r.systemFileUserID(name), name)), nil
+			return string(r.readSystemFileWithFallback(ctx, r.systemFileUserID(ctx, name), name)), nil
 		}
-		switch r.routeFor(args.Path, OpRead) {
+		switch r.routeFor(ctx, args.Path, OpRead) {
 		case RouteWorkspaceStore:
-			rc, err := r.workspaceStore.Get(ctx, r.agentID, r.projectID, r.scopeSessionID(), r.wsPath(args.Path))
+			rc, err := r.workspaceStore.Get(ctx, r.agentID, r.projectID(ctx), r.scopeSessionID(ctx), r.wsPath(ctx, args.Path))
 			if err == nil {
 				defer rc.Close()
 				data, readErr := io.ReadAll(rc)
@@ -1200,11 +1227,12 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 			}
 			return MetaSandboxPrefix + out, err
 		}
-	})
+	}
 
 	// One line on purpose: wrapping the argument list would re-indent the closure
 	// below and bury the change this makes in a hundred lines of whitespace.
-	r.Register("write_file", writeFileDescription, writeFileSchema("File path (identity file, workspace-relative, or absolute inside the sandbox)"), func(ctx context.Context, rawArgs json.RawMessage) (string, error) {
+	tools.write = func(ctx context.Context, rawArgs json.RawMessage) (string, error) {
+		ex := r.executorOrUnavailable(ctx)
 		var args writeFileArgs
 		if err := json.Unmarshal(rawArgs, &args); err != nil {
 			return "", fmt.Errorf("parse args: %w", err)
@@ -1212,16 +1240,16 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 		if err := validateFileTargetPath(args.Path); err != nil {
 			return "", fmt.Errorf("write_file: %w", err)
 		}
-		if r.identityFileBlocked(args.Path) {
+		if r.identityFileBlocked(ctx, args.Path) {
 			return IdentityFileRefusal, nil
 		}
-		if r.ownerManagedFileWriteBlocked(args.Path) {
+		if r.ownerManagedFileWriteBlocked(ctx, args.Path) {
 			return OwnerManagedFileWriteRefusal, nil
 		}
-		switch r.routeFor(args.Path, OpWrite) {
+		switch r.routeFor(ctx, args.Path, OpWrite) {
 		case RouteSystemStore:
 			name := filepath.Clean(args.Path)
-			if err := r.systemFileStore.SaveWorkspaceFile(ctx, r.agentID, r.systemFileUserID(name), name, []byte(args.Content)); err != nil {
+			if err := r.systemFileStore.SaveWorkspaceFile(ctx, r.agentID, r.systemFileUserID(ctx, name), name, []byte(args.Content)); err != nil {
 				return "", fmt.Errorf("system file save: %w", err)
 			}
 			return fmt.Sprintf("Written %d bytes to %s", len(args.Content), name), nil
@@ -1230,13 +1258,12 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 			// mirror can tell a stale sandbox copy from the sandbox's own edit
 			// (docs 10 §2.1, G6). Best-effort: "" means "no expectation", and the
 			// mirror then only states what it could establish.
-			previous := r.previousStoreVersion(ctx, r.wsPath(args.Path))
-			// The SAME family-B guard as the non-sandbox registration above.
-			// These are two separate registrations, not one body called twice:
-			// this one is what SetExecutor installs, so it is the branch a cloud
-			// turn runs — a guard that lives only in the other branch leaves the
-			// production path blind-writing, whatever the tests on that branch
-			// say.
+			previous := r.previousStoreVersion(ctx, r.wsPath(ctx, args.Path))
+			// The SAME family-B guard as the host branch above. The two
+			// branches do not share a body: this one is what a turn with an
+			// executor runs — a guard that lives only in the other branch
+			// leaves the production path blind-writing, whatever the tests on
+			// that branch say.
 			if err := r.putGuarded(ctx, "write_file", args.Path, []byte(args.Content)); err != nil {
 				return "", err
 			}
@@ -1269,16 +1296,17 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 			out, err := ex.WriteFile(ctx, args.Path, args.Content)
 			return MetaSandboxPrefix + out, err
 		}
-	})
+	}
 
-	r.Register("list_dir", "List files and directories in a path", singlePathSchema("Directory path (workspace-relative or absolute inside the sandbox)"), func(ctx context.Context, rawArgs json.RawMessage) (string, error) {
+	tools.list = func(ctx context.Context, rawArgs json.RawMessage) (string, error) {
+		ex := r.executorOrUnavailable(ctx)
 		var args listDirArgs
 		if err := json.Unmarshal(rawArgs, &args); err != nil {
 			return "", fmt.Errorf("parse args: %w", err)
 		}
-		switch r.routeFor(args.Path, OpList) {
+		switch r.routeFor(ctx, args.Path, OpList) {
 		case RouteWorkspaceStore:
-			objs, err := r.workspaceStore.List(ctx, r.agentID, r.projectID, r.scopeSessionID())
+			objs, err := r.workspaceStore.List(ctx, r.agentID, r.projectID(ctx), r.scopeSessionID(ctx))
 			if err == nil {
 				prefix := strings.Trim(filepath.ToSlash(filepath.Clean(args.Path)), "/")
 				if prefix == "." {
@@ -1353,9 +1381,10 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 			out, err := ex.ListDir(ctx, args.Path)
 			return MetaSandboxPrefix + out, err
 		}
-	})
+	}
 
-	r.Register("edit_file", editDescription, editSchema, func(ctx context.Context, rawArgs json.RawMessage) (string, error) {
+	tools.edit = func(ctx context.Context, rawArgs json.RawMessage) (string, error) {
+		ex := r.executorOrUnavailable(ctx)
 		var args editFileArgs
 		if err := json.Unmarshal(rawArgs, &args); err != nil {
 			return "", fmt.Errorf("parse args: %w", err)
@@ -1363,13 +1392,13 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 		if err := validateFileTargetPath(args.Path); err != nil {
 			return "", fmt.Errorf("edit_file: %w", err)
 		}
-		if r.identityFileBlocked(args.Path) {
+		if r.identityFileBlocked(ctx, args.Path) {
 			return IdentityFileRefusal, nil
 		}
-		if r.ownerManagedFileWriteBlocked(args.Path) {
+		if r.ownerManagedFileWriteBlocked(ctx, args.Path) {
 			return OwnerManagedFileWriteRefusal, nil
 		}
-		if r.skillManifestBlocked(args.Path) {
+		if r.skillManifestBlocked(ctx, args.Path) {
 			return SkillManifestRefusal, nil
 		}
 
@@ -1394,13 +1423,13 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 			return MetaSandboxPrefix + fmt.Sprintf("Edited %s (%d replacement(s))", args.Path, count), nil
 		}
 
-		switch r.routeFor(args.Path, OpWrite) {
+		switch r.routeFor(ctx, args.Path, OpWrite) {
 		case RouteSystemStore:
-			if r.ownerManagedFileWriteBlocked(args.Path) {
+			if r.ownerManagedFileWriteBlocked(ctx, args.Path) {
 				return OwnerManagedFileWriteRefusal, nil
 			}
 			name := filepath.Clean(args.Path)
-			uid := r.systemFileUserID(name)
+			uid := r.systemFileUserID(ctx, name)
 			// See the store-backed branch above: missing row ⇒ empty base, not
 			// a leaked storage error.
 			data := r.readSystemFileWithFallback(ctx, uid, name)
@@ -1413,7 +1442,7 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 			}
 			return fmt.Sprintf("Edited %s (%d replacement(s))", name, count), nil
 		case RouteWorkspaceStore:
-			rc, err := r.workspaceStore.Get(ctx, r.agentID, r.projectID, r.scopeSessionID(), r.wsPath(args.Path))
+			rc, err := r.workspaceStore.Get(ctx, r.agentID, r.projectID(ctx), r.scopeSessionID(ctx), r.wsPath(ctx, args.Path))
 			if err == nil {
 				data, readErr := io.ReadAll(rc)
 				rc.Close()
@@ -1467,5 +1496,6 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 		default: // RouteSandbox
 			return editSandboxRMW()
 		}
-	})
+	}
+	return tools
 }

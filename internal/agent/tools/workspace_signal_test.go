@@ -32,14 +32,14 @@ func newSignalTestRegistry(t *testing.T, unhydrated bool) (*Registry, *unhydrate
 	ex.unhydrated.Store(unhydrated)
 	r := NewRegistry(t.TempDir(), t.TempDir())
 	t.Cleanup(r.Close)
-	r.SetExecutor(ex)
+	bindTestTurn(r, &TurnScope{Executor: ex})
 	return r, ex
 }
 
 // A result the model reads as "the file is not there" must carry the reason.
 func TestWorkspaceSignalIsDeclaredOnFileToolsWhenUnhydrated(t *testing.T) {
-	ctx := context.Background()
 	r, _ := newSignalTestRegistry(t, true)
+	ctx := testTurnCtx(r)
 
 	out, err := r.Execute(ctx, "read_file", `{"path":"refresh_paper_review.py"}`)
 	if err != nil {
@@ -70,8 +70,8 @@ func TestWorkspaceSignalIsDeclaredOnFileToolsWhenUnhydrated(t *testing.T) {
 // sit AFTER the meta marker, which the agent loop strips only when it is the
 // first line of the result.
 func TestWorkspaceSignalOnExecKeepsTheSandboxMetaMarkerFirst(t *testing.T) {
-	ctx := context.Background()
 	r, _ := newSignalTestRegistry(t, true)
+	ctx := testTurnCtx(r)
 
 	out, err := r.Execute(ctx, "exec", execArgsJSON(t, "ls /workspace", nil))
 	if err != nil {
@@ -89,8 +89,8 @@ func TestWorkspaceSignalOnExecKeepsTheSandboxMetaMarkerFirst(t *testing.T) {
 // The declaration is a fact about THIS turn's environment. A healthy scope must
 // not carry it, or it becomes wallpaper the model learns to skip.
 func TestWorkspaceSignalIsAbsentWhenTheWorkspaceIsHydrated(t *testing.T) {
-	ctx := context.Background()
 	r, _ := newSignalTestRegistry(t, false)
+	ctx := testTurnCtx(r)
 
 	out, err := r.Execute(ctx, "read_file", `{"path":"refresh_paper_review.py"}`)
 	if err != nil {
@@ -105,8 +105,8 @@ func TestWorkspaceSignalIsAbsentWhenTheWorkspaceIsHydrated(t *testing.T) {
 // about the world in general (search, fetch) should not be told about a local
 // infrastructure hiccup it cannot act on.
 func TestWorkspaceSignalStaysOffNonWorkspaceTools(t *testing.T) {
-	ctx := context.Background()
 	r, _ := newSignalTestRegistry(t, true)
+	ctx := testTurnCtx(r)
 	r.Register("web_search", "search the web", map[string]interface{}{"type": "object"}, func(context.Context, json.RawMessage) (string, error) {
 		return "results", nil
 	})
@@ -120,19 +120,20 @@ func TestWorkspaceSignalStaysOffNonWorkspaceTools(t *testing.T) {
 	}
 }
 
-// The agent loop re-binds the executor every turn (bindSession → SetExecutor),
-// so wrapping must be idempotent: two wraps would print the declaration twice.
-func TestWorkspaceSignalIsNotDuplicatedByRebinding(t *testing.T) {
-	ctx := context.Background()
-	r, ex := newSignalTestRegistry(t, true)
-	r.SetExecutor(ex)
-	r.SetExecutor(ex)
+// The declaration is attached at the single signal exit. Repeated executions
+// with the same turn scope must each carry it exactly once: no accumulation
+// across calls and no duplicate on a result that already carries it.
+func TestWorkspaceSignalIsNotDuplicatedAcrossCalls(t *testing.T) {
+	r, _ := newSignalTestRegistry(t, true)
+	ctx := testTurnCtx(r)
 
-	out, err := r.Execute(ctx, "read_file", `{"path":"report.md"}`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := strings.Count(out, workspaceUnhydratedSignal); got != 1 {
-		t.Fatalf("declaration appears %d times, want 1:\n%q", got, out)
+	for i := 0; i < 2; i++ {
+		out, err := r.Execute(ctx, "read_file", `{"path":"report.md"}`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Count(out, workspaceUnhydratedSignal); got != 1 {
+			t.Fatalf("call %d: declaration appears %d times, want 1:\n%q", i, got, out)
+		}
 	}
 }

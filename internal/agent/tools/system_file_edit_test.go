@@ -55,8 +55,8 @@ func newSystemFileRegistry(st SystemFileStore, systemRoot string) *Registry {
 	r.systemFileStore = st
 	r.agentID = "agt_1"
 	r.userID = "u_owner"
-	r.chatterUserID = "u_chatter"
 	r.agentOwnerUserID = "u_owner"
+	bindTestTurn(r, &TurnScope{ChatterUserID: "u_chatter"})
 	return r
 }
 
@@ -76,7 +76,7 @@ func editArgs(t *testing.T, path, oldS, newS string) string {
 func TestEditFileMissingMemoryRowDoesNotLeakStoreError(t *testing.T) {
 	r := newSystemFileRegistry(newMissingRowStore(), t.TempDir())
 
-	out, err := r.Execute(context.Background(), "edit_file",
+	out, err := r.Execute(testTurnCtx(r), "edit_file",
 		editArgs(t, "MEMORY.md", "- 旧事实", "- 新事实"))
 
 	if err != nil && strings.Contains(err.Error(), "store: not found") {
@@ -103,9 +103,9 @@ func TestEditFileOwnerUsesDiskBaseWhenRowIsMissing(t *testing.T) {
 	}
 	st := newMissingRowStore()
 	r := newSystemFileRegistry(st, dir)
-	r.chatterUserID = "u_owner" // the agent's own account
+	testTurnScopeFor(r).ChatterUserID = "u_owner" // the agent's own account
 
-	out, err := r.Execute(context.Background(), "edit_file",
+	out, err := r.Execute(testTurnCtx(r), "edit_file",
 		editArgs(t, "MEMORY.md", "USDC-USDT", "USDC-USDT、XAUT-USDT"))
 	if err != nil {
 		t.Fatalf("edit_file on a disk-only MEMORY.md: %v", err)
@@ -131,7 +131,7 @@ func TestPerChatterFileNeverInheritsTheOwnersDiskCopy(t *testing.T) {
 	st := newMissingRowStore()
 	r := newSystemFileRegistry(st, dir) // chatterUserID = u_chatter
 
-	out, err := r.Execute(context.Background(), "read_file", `{"path":"MEMORY.md"}`)
+	out, err := r.Execute(testTurnCtx(r), "read_file", `{"path":"MEMORY.md"}`)
 	if err != nil {
 		t.Fatalf("read_file: %v", err)
 	}
@@ -139,7 +139,7 @@ func TestPerChatterFileNeverInheritsTheOwnersDiskCopy(t *testing.T) {
 		t.Errorf("visitor read the owner's disk MEMORY.md: %q", out)
 	}
 
-	if _, err := r.Execute(context.Background(), "edit_file",
+	if _, err := r.Execute(testTurnCtx(r), "edit_file",
 		editArgs(t, "MEMORY.md", "disk memory", "leaked")); err == nil {
 		t.Error("edit_file used the owner's disk MEMORY.md as its base")
 	}
@@ -156,9 +156,9 @@ func TestOwnerReadsDiskCopyWhenRowIsMissing(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := newSystemFileRegistry(newMissingRowStore(), dir)
-	r.chatterUserID = "u_owner"
+	testTurnScopeFor(r).ChatterUserID = "u_owner"
 
-	out, err := r.Execute(context.Background(), "read_file", `{"path":"MEMORY.md"}`)
+	out, err := r.Execute(testTurnCtx(r), "read_file", `{"path":"MEMORY.md"}`)
 	if err != nil {
 		t.Fatalf("read_file: %v", err)
 	}
@@ -178,9 +178,9 @@ func TestSharedIdentityFileFallsBackToDiskForNonOwnerCaller(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := newSystemFileRegistry(newMissingRowStore(), dir) // chatterUserID = u_chatter
-	r.SetCallerIsAdmin(true)                              // the caller allowed to touch identity files
+	testTurnScopeFor(r).CallerIsAdmin = true              // the caller allowed to touch identity files
 
-	out, err := r.Execute(context.Background(), "read_file", `{"path":"SOUL.md"}`)
+	out, err := r.Execute(testTurnCtx(r), "read_file", `{"path":"SOUL.md"}`)
 	if err != nil {
 		t.Fatalf("read_file SOUL.md: %v", err)
 	}

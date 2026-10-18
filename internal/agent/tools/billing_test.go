@@ -26,10 +26,10 @@ func TestGetBillingUsageWithQuota(t *testing.T) {
 
 	r := NewRegistry("", "")
 	r.SetOwnerUserID("owner-1")
-	r.SetChatterUserID("chatter-1")
+	bindTestTurn(r, &TurnScope{ChatterUserID: "chatter-1"})
 	RegisterBillingTools(r, meter, quota)
 
-	got, err := r.Execute(ctx, "get_billing_usage", `{}`)
+	got, err := r.Execute(testTurnCtx(r), "get_billing_usage", `{}`)
 	if err != nil {
 		t.Fatal(err)
 	}

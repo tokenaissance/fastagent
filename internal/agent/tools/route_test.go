@@ -37,12 +37,13 @@ func TestFastAgentInternalPathsIncludeRootAndEnvHome(t *testing.T) {
 }
 
 func TestRouteForDoesNotExposeFastAgentInternalsViaHostFS(t *testing.T) {
-	r := &Registry{executor: fakeExecutor{}}
+	r := &Registry{}
+	ctx := WithTurnScope(context.Background(), &TurnScope{Executor: fakeExecutor{}})
 
-	if got := r.routeFor("/root/.fastagent/workspaces", OpList); got != RouteSandbox {
+	if got := r.routeFor(ctx, "/root/.fastagent/workspaces", OpList); got != RouteSandbox {
 		t.Fatalf("routeFor FastAgent internal path = %v, want RouteSandbox", got)
 	}
-	if got := r.routeFor("/Users/maxwell/Documents/report.txt", OpRead); got != RouteHostFS {
+	if got := r.routeFor(ctx, "/Users/maxwell/Documents/report.txt", OpRead); got != RouteHostFS {
 		t.Fatalf("routeFor explicit host document = %v, want RouteHostFS", got)
 	}
 }

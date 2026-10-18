@@ -45,7 +45,7 @@ func TestPreference_CloudPathE2E(t *testing.T) {
 	r.SetSystemFileStore(NewMemoryStoreAdapter(db), agentID)
 	tools.RegisterPreferenceTool(r, db)
 	// bindSession stamps the per-turn chatter for a real turn.
-	r.SetChatterUserID(chatter)
+	ctx = tools.WithTurnScope(ctx, &tools.TurnScope{ChatterUserID: chatter})
 
 	tool := r.GetTool("set_preference")
 	if tool == nil {

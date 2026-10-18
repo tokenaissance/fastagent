@@ -491,7 +491,7 @@ type applyPatchArgs struct {
 // -----------------------------------------------------------------------------
 
 // The three store touchpoints below resolve their key EXACTLY the way
-// write_file / edit_file / read_file do — r.scopeSessionID() + r.wsPath(path) —
+// write_file / edit_file / read_file do — r.scopeSessionID(ctx) + r.wsPath(ctx, path) —
 // because a path is one key, not one per tool. Before 2026-09-18 apply_patch
 // used r.sessionID + the raw path, so in a project session (a collapsed scope + a
 // coding subdir) the same logical "notes.md" produced two store objects: the
@@ -499,11 +499,11 @@ type applyPatchArgs struct {
 // — one file, two keys, and a read_file that disagreed with the patch that just
 // wrote it (docs 01 §8; docs 10 §4 G16 is the same family, one layer up).
 func (r *Registry) readForPatch(ctx context.Context, path string) (string, error) {
-	if r.identityFileBlocked(path) {
+	if r.identityFileBlocked(ctx, path) {
 		return "", fmt.Errorf("%s", IdentityFileRefusal)
 	}
 	if r.workspaceStore != nil && r.agentID != "" && r.isWorkspacePath(path) {
-		rc, err := r.workspaceStore.Get(ctx, r.agentID, r.projectID, r.scopeSessionID(), r.wsPath(path))
+		rc, err := r.workspaceStore.Get(ctx, r.agentID, r.projectID(ctx), r.scopeSessionID(ctx), r.wsPath(ctx, path))
 		if err != nil {
 			return "", fmt.Errorf("workspace get: %w", err)
 		}
@@ -520,7 +520,7 @@ func (r *Registry) readForPatch(ctx context.Context, path string) (string, error
 		// "empty file", not an error), then the agent home's disk copy — which
 		// only the agent's own account may read for per-chatter files, so a
 		// visitor can't inherit the owner's MEMORY.md through a patch.
-		return string(r.readSystemFileWithFallback(ctx, r.systemFileUserID(name), name)), nil
+		return string(r.readSystemFileWithFallback(ctx, r.systemFileUserID(ctx, name), name)), nil
 	}
 	root := r.rootForPath(path)
 	full, err := resolvePathSandboxed(root, r.effectiveSandboxRoot(root), path)
@@ -538,10 +538,10 @@ func (r *Registry) readForPatch(ctx context.Context, path string) (string, error
 }
 
 func (r *Registry) writeForPatch(ctx context.Context, path, content, previous string) error {
-	if r.identityFileBlocked(path) {
+	if r.identityFileBlocked(ctx, path) {
 		return fmt.Errorf("%s", IdentityFileRefusal)
 	}
-	if r.ownerManagedFileWriteBlocked(path) {
+	if r.ownerManagedFileWriteBlocked(ctx, path) {
 		return fmt.Errorf("%s", OwnerManagedFileWriteRefusal)
 	}
 	if r.workspaceStore != nil && r.agentID != "" && r.isWorkspacePath(path) {
@@ -554,7 +554,7 @@ func (r *Registry) writeForPatch(ctx context.Context, path, content, previous st
 		// Conditional on the pre-image runApplyPatch read and handed down: an identity file has
 		// several writers, and a patch that reports success while somebody else's version survives
 		// is the same false σ edit_file used to produce (§13.2 / row 83).
-		if err := r.systemFileStore.SaveWorkspaceFileIfUnchanged(ctx, r.agentID, r.systemFileUserID(name), name, []byte(content), previous); err != nil {
+		if err := r.systemFileStore.SaveWorkspaceFileIfUnchanged(ctx, r.agentID, r.systemFileUserID(ctx, name), name, []byte(content), previous); err != nil {
 			if errors.Is(err, store.ErrAgentFileConflict) {
 				return fmt.Errorf("another writer changed %s while this turn was working; nothing was overwritten — read it again and re-apply your change", path)
 			}
@@ -562,7 +562,7 @@ func (r *Registry) writeForPatch(ctx context.Context, path, content, previous st
 		}
 		// Mirror to disk so this pod's in-process readers (context builder, skills loader) see the
 		// new content immediately. Same invariant as makeWriteFile, including its owner-only gate.
-		r.mirrorToAgentHome(r.systemFileUserID(name), name, []byte(content))
+		r.mirrorToAgentHome(r.systemFileUserID(ctx, name), name, []byte(content))
 		return nil
 	}
 	root := r.rootForPath(path)
@@ -591,7 +591,7 @@ func (r *Registry) deleteForPatch(ctx context.Context, path string) error {
 		// HOST path: /workspace here *is* the store, so there is no second copy
 		// to chase. (The sandbox path is below, and it is the one that needed
 		// the mirror delete.)
-		return r.workspaceStore.Delete(ctx, r.agentID, r.projectID, r.scopeSessionID(), r.wsPath(path))
+		return r.workspaceStore.Delete(ctx, r.agentID, r.projectID(ctx), r.scopeSessionID(ctx), r.wsPath(ctx, path))
 	}
 	root := r.rootForPath(path)
 	full, err := resolvePathSandboxed(root, r.effectiveSandboxRoot(root), path)
@@ -605,21 +605,21 @@ func (r *Registry) deleteForPatch(ctx context.Context, path string) error {
 }
 
 // -----------------------------------------------------------------------------
-// Backend helpers — sandbox mode (mirrors registerSandboxedFile's routing)
+// Backend helpers — sandbox mode (mirrors makeSandboxedFileTools' routing)
 // -----------------------------------------------------------------------------
 
 func (r *Registry) readForPatchSandbox(ctx context.Context, ex sandbox.Executor, path string) (string, error) {
-	if r.identityFileBlocked(path) {
+	if r.identityFileBlocked(ctx, path) {
 		return "", fmt.Errorf("%s", IdentityFileRefusal)
 	}
 	if r.systemFileStore != nil && r.agentID != "" && basenameIsSystemFile(path) {
 		name := filepath.Base(filepath.Clean(path))
 		// Same resolution as the host path above — a store miss means "empty
 		// file", and the disk copy is owner-only for per-chatter files.
-		return string(r.readSystemFileWithFallback(ctx, r.systemFileUserID(name), name)), nil
+		return string(r.readSystemFileWithFallback(ctx, r.systemFileUserID(ctx, name), name)), nil
 	}
 	if r.workspaceStore != nil && r.agentID != "" && r.isWorkspacePath(path) {
-		rc, err := r.workspaceStore.Get(ctx, r.agentID, r.projectID, r.scopeSessionID(), r.wsPath(path))
+		rc, err := r.workspaceStore.Get(ctx, r.agentID, r.projectID(ctx), r.scopeSessionID(ctx), r.wsPath(ctx, path))
 		if err == nil {
 			defer rc.Close()
 			data, readErr := io.ReadAll(rc)
@@ -633,15 +633,15 @@ func (r *Registry) readForPatchSandbox(ctx context.Context, ex sandbox.Executor,
 }
 
 func (r *Registry) writeForPatchSandbox(ctx context.Context, ex sandbox.Executor, path, content, previous string) error {
-	if r.identityFileBlocked(path) {
+	if r.identityFileBlocked(ctx, path) {
 		return fmt.Errorf("%s", IdentityFileRefusal)
 	}
-	if r.ownerManagedFileWriteBlocked(path) {
+	if r.ownerManagedFileWriteBlocked(ctx, path) {
 		return fmt.Errorf("%s", OwnerManagedFileWriteRefusal)
 	}
 	if r.systemFileStore != nil && r.agentID != "" && isSingleSegmentSystemFile(path) {
 		name := filepath.Clean(path)
-		if err := r.systemFileStore.SaveWorkspaceFileIfUnchanged(ctx, r.agentID, r.systemFileUserID(name), name, []byte(content), previous); err != nil {
+		if err := r.systemFileStore.SaveWorkspaceFileIfUnchanged(ctx, r.agentID, r.systemFileUserID(ctx, name), name, []byte(content), previous); err != nil {
 			if errors.Is(err, store.ErrAgentFileConflict) {
 				return fmt.Errorf("another writer changed %s while this turn was working; nothing was overwritten — read it again and re-apply your change", path)
 			}
@@ -650,9 +650,9 @@ func (r *Registry) writeForPatchSandbox(ctx context.Context, ex sandbox.Executor
 		return nil
 	}
 	if r.workspaceStore != nil && r.agentID != "" && r.isWorkspacePath(path) {
-		// The SAME family-B guard as writeForPatch above. registerSandboxedApplyPatch
-		// is a second registration, not a wrapping of the first, and it is the one
-		// SetExecutor installs — so this is the branch a cloud turn runs.
+		// The SAME family-B guard as writeForPatch above. The sandbox branch
+		// does not wrap the host branch; this is the branch a turn with an
+		// executor runs.
 		return r.putGuarded(ctx, "apply_patch", path, []byte(content))
 	}
 	_, err := ex.WriteFile(ctx, path, content)
@@ -664,7 +664,7 @@ func (r *Registry) deleteForPatchSandbox(ctx context.Context, ex sandbox.Executo
 		return fmt.Errorf("apply_patch: refusing to delete identity file %q (use Update File with empty content instead)", path)
 	}
 	if r.workspaceStore != nil && r.agentID != "" && r.isWorkspacePath(path) {
-		if err := r.workspaceStore.Delete(ctx, r.agentID, r.projectID, r.scopeSessionID(), r.wsPath(path)); err != nil {
+		if err := r.workspaceStore.Delete(ctx, r.agentID, r.projectID(ctx), r.scopeSessionID(ctx), r.wsPath(ctx, path)); err != nil {
 			return err
 		}
 		// The store half is done; the sandbox holds a *second* copy, and without
@@ -685,8 +685,8 @@ func (r *Registry) deleteForPatchSandbox(ctx context.Context, ex sandbox.Executo
 		// on registry state stops being true the moment a caller binds a
 		// different executor for one scope.
 		if rem, ok := ex.(sandbox.LiveWorkspaceFileRemover); ok {
-			if err := rem.RemoveLiveWorkspaceFile(ctx, r.wsPath(path)); err != nil {
-				r.addSignal(ctx, "deleted "+r.wsPath(path)+" from the store, but the copy inside the live sandbox could not be removed ("+err.Error()+
+			if err := rem.RemoveLiveWorkspaceFile(ctx, r.wsPath(ctx, path)); err != nil {
+				r.addSignal(ctx, "deleted "+r.wsPath(ctx, path)+" from the store, but the copy inside the live sandbox could not be removed ("+err.Error()+
 					") — the next workspace sync may write the old version back. Re-running the delete, or a fresh exec listing, will show whether it did.")
 			}
 		}
@@ -715,7 +715,7 @@ func (r *Registry) deleteForPatchSandbox(ctx context.Context, ex sandbox.Executo
 //
 // A parse error is left to the engine (runApplyPatch reports it with the
 // offending line); this gate only speaks about the two namespaces.
-func (r *Registry) applyPatchRefusal(input string) (string, bool) {
+func (r *Registry) applyPatchRefusal(ctx context.Context, input string) (string, bool) {
 	p, err := parsePatch(input)
 	if err != nil {
 		return "", false
@@ -728,7 +728,7 @@ func (r *Registry) applyPatchRefusal(input string) (string, bool) {
 			if r.isSkillPath(path) {
 				return SkillNamespaceRefusal, true
 			}
-			if r.skillManifestBlocked(path) {
+			if r.skillManifestBlocked(ctx, path) {
 				return SkillManifestRefusal, true
 			}
 		}
@@ -737,12 +737,12 @@ func (r *Registry) applyPatchRefusal(input string) (string, bool) {
 }
 
 func registerApplyPatch(r *Registry) {
-	r.Register("apply_patch", applyPatchDescription, applyPatchSchema, func(ctx context.Context, raw json.RawMessage) (string, error) {
+	host := func(ctx context.Context, raw json.RawMessage) (string, error) {
 		var args applyPatchArgs
 		if err := json.Unmarshal(raw, &args); err != nil {
 			return "", fmt.Errorf("apply_patch: parse args: %w", err)
 		}
-		if refusal, refused := r.applyPatchRefusal(args.Input); refused {
+		if refusal, refused := r.applyPatchRefusal(ctx, args.Input); refused {
 			return refusal, nil
 		}
 		return runApplyPatch(ctx, args.Input,
@@ -750,16 +750,20 @@ func registerApplyPatch(r *Registry) {
 			func(ctx context.Context, p, c, previous string) error { return r.writeForPatch(ctx, p, c, previous) },
 			func(ctx context.Context, p string) error { return r.deleteForPatch(ctx, p) },
 		)
-	})
+	}
+	sandbox := makeSandboxedApplyPatch(r)
+	r.RegisterTool("apply_patch", applyPatchDescription, applyPatchSchema,
+		dualTool{registry: r, host: host, sandbox: sandbox})
 }
 
-func registerSandboxedApplyPatch(r *Registry, ex sandbox.Executor) {
-	r.Register("apply_patch", applyPatchDescription, applyPatchSchema, func(ctx context.Context, raw json.RawMessage) (string, error) {
+func makeSandboxedApplyPatch(r *Registry) ToolFunc {
+	return func(ctx context.Context, raw json.RawMessage) (string, error) {
+		ex := r.executorOrUnavailable(ctx)
 		var args applyPatchArgs
 		if err := json.Unmarshal(raw, &args); err != nil {
 			return "", fmt.Errorf("apply_patch: parse args: %w", err)
 		}
-		if refusal, refused := r.applyPatchRefusal(args.Input); refused {
+		if refusal, refused := r.applyPatchRefusal(ctx, args.Input); refused {
 			return refusal, nil
 		}
 		// Write-through, per file: runApplyPatch hands this closure one path at
@@ -782,7 +786,7 @@ func registerSandboxedApplyPatch(r *Registry, ex sandbox.Executor) {
 			return "", err
 		}
 		return MetaSandboxPrefix + out, nil
-	})
+	}
 }
 
 // runApplyPatch is the storage-agnostic engine. Phase 1: parse and compute

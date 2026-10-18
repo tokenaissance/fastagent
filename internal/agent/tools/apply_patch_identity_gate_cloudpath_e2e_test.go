@@ -149,7 +149,8 @@ func refusalMatches(t *testing.T, err error, what string) {
 }
 
 func TestApplyPatch_IdentityGate_CloudPathE2E(t *testing.T) {
-	ctx := context.Background()
+	adminCtx := scopedCtx(&TurnScope{CallerIsAdmin: true})
+	ctx := scopedCtx(&TurnScope{})
 	ws := &recordingWorkspaceStore{
 		files: map[string][]byte{"report.md": []byte("report-bytes")},
 	}
@@ -158,7 +159,7 @@ func TestApplyPatch_IdentityGate_CloudPathE2E(t *testing.T) {
 
 	// ── Host-fs mode (upstream fix): chatter + identity file → refusal,
 	// store never consulted (gate is the FIRST statement).
-	host := &Registry{workspaceStore: ws, agentID: "agt_1", callerIsAdmin: false}
+	host := &Registry{workspaceStore: ws, agentID: "agt_1"}
 	_, err := host.readForPatch(ctx, "SOUL.md")
 	refusalMatches(t, err, "readForPatch(SOUL.md)")
 	if err := host.writeForPatch(ctx, "SOUL.md", "hacked", ""); err == nil || !strings.Contains(err.Error(), IdentityFileRefusal) {
@@ -184,7 +185,7 @@ func TestApplyPatch_IdentityGate_CloudPathE2E(t *testing.T) {
 
 	// ── Sandbox mode (fork adaptation): chatter + identity file → refusal
 	// BEFORE the fork's systemFileStore serving or the executor.
-	sb := &Registry{workspaceStore: ws, systemFileStore: sfs, agentID: "agt_1", callerIsAdmin: false}
+	sb := &Registry{workspaceStore: ws, systemFileStore: sfs, agentID: "agt_1"}
 	_, err = sb.readForPatchSandbox(ctx, ex, "SOUL.md")
 	refusalMatches(t, err, "readForPatchSandbox(SOUL.md)")
 	if err := sb.writeForPatchSandbox(ctx, ex, "SOUL.md", "hacked", ""); err == nil || !strings.Contains(err.Error(), IdentityFileRefusal) {
@@ -208,11 +209,11 @@ func TestApplyPatch_IdentityGate_CloudPathE2E(t *testing.T) {
 
 	// ── Admin bypass: owner may legitimately read identity files — the
 	// gate respects callerIsAdmin and does NOT refuse.
-	admin := &Registry{workspaceStore: ws, systemFileStore: sfs, agentID: "agt_1", callerIsAdmin: true}
-	if admin.identityFileBlocked("SOUL.md") {
+	admin := &Registry{workspaceStore: ws, systemFileStore: sfs, agentID: "agt_1"}
+	if admin.identityFileBlocked(adminCtx, "SOUL.md") {
 		t.Error("admin must not be blocked on identity files")
 	}
-	_, err = admin.readForPatch(ctx, "SOUL.md")
+	_, err = admin.readForPatch(adminCtx, "SOUL.md")
 	if err != nil && strings.Contains(err.Error(), IdentityFileRefusal) {
 		t.Fatalf("admin readForPatch(SOUL.md) must bypass the gate, got refusal: %v", err)
 	}

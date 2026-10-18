@@ -50,10 +50,10 @@ func (r *routeRecExecutor) Backend() string { return "test" }
 func (r *routeRecExecutor) Close() error    { return nil }
 
 func TestRoute_Internals_CloudPathE2E(t *testing.T) {
-	ctx := context.Background()
 	ex := &routeRecExecutor{}
 	r := NewRegistry(t.TempDir(), t.TempDir())
-	r.SetExecutor(ex)
+	bindTestTurn(r, &TurnScope{Executor: ex})
+	ctx := testTurnCtx(r)
 
 	// Internal roots: /root/.fastagent, ~/.fastagent, and the env-var
 	// root must all route to the sandbox executor — never host disk.

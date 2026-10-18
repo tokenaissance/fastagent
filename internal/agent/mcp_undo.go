@@ -35,7 +35,7 @@ func mcpToolUndo(ctx context.Context, ag *Agent, rc config.ResolvedAgent) (strin
 	}
 	sessionKey := ""
 	if ag.registry != nil {
-		sessionKey = ag.registry.SessionID()
+		sessionKey = ag.registry.SessionID(ctx)
 	}
 	if sessionKey == "" {
 		return "", fmt.Errorf("mcp undo: no active chat journal — run it in the session that made the change")

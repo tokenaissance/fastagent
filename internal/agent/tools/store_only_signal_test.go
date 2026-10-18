@@ -45,8 +45,7 @@ func newStoreOnlyRegistry(t *testing.T, ex *sandboxListingExec, files map[string
 	r := NewRegistry(t.TempDir(), t.TempDir())
 	t.Cleanup(r.Close)
 	r.SetWorkspaceStore(st, "a")
-	r.SetSessionID("s1")
-	r.SetExecutor(ex)
+	bindTestTurn(r, &TurnScope{SessionID: "s1", Executor: ex})
 	return r
 }
 
@@ -54,9 +53,9 @@ func newStoreOnlyRegistry(t *testing.T, ex *sandboxListingExec, files map[string
 // live sandbox does not. It must be named, with the reason and a way out
 // (docs 10 §3.2, G7).
 func TestListDirNamesPathsTheSandboxDoesNotHave(t *testing.T) {
-	ctx := context.Background()
 	ex := &sandboxListingExec{sandboxPaths: []string{"shared.csv"}}
 	r := newStoreOnlyRegistry(t, ex, map[string]string{"shared.csv": "a,b\n", "uploaded.csv": "c,d\n"})
+	ctx := testTurnCtx(r)
 
 	out, err := r.Execute(ctx, "list_dir", `{"path":"."}`)
 	if err != nil {
@@ -82,9 +81,9 @@ func TestListDirNamesPathsTheSandboxDoesNotHave(t *testing.T) {
 
 // Silence when the two sides agree: an exception channel, not a per-listing banner.
 func TestListDirStaysQuietWhenStoreAndSandboxAgree(t *testing.T) {
-	ctx := context.Background()
 	ex := &sandboxListingExec{sandboxPaths: []string{"shared.csv"}}
 	r := newStoreOnlyRegistry(t, ex, map[string]string{"shared.csv": "a,b\n"})
+	ctx := testTurnCtx(r)
 
 	out, err := r.Execute(ctx, "list_dir", `{"path":"."}`)
 	if err != nil {
@@ -98,10 +97,10 @@ func TestListDirStaysQuietWhenStoreAndSandboxAgree(t *testing.T) {
 // A shared backend (docker) has one copy: nothing can diverge, and the sandbox
 // must not even be asked.
 func TestListDirDoesNotProbeASharedBackend(t *testing.T) {
-	ctx := context.Background()
 	ex := &sandboxListingExec{sandboxPaths: []string{}}
 	r := newStoreOnlyRegistry(t, ex, map[string]string{"uploaded.csv": "c,d\n"})
-	r.SetExecutor(sharedExec{inner: ex})
+	ctx := testTurnCtx(r)
+	testTurnScopeFor(r).Executor = sharedExec{inner: ex}
 
 	out, err := r.Execute(ctx, "list_dir", `{"path":"."}`)
 	if err != nil {

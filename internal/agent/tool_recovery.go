@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -53,7 +54,7 @@ func nextRecoveredCallID(i int) string {
 // (model, prompt) combinations — without this signal the recovery
 // silently papers over genuine prompt/tool-definition bugs that should
 // surface.
-func (a *Agent) maybeRecoverToolCalls(resp *provider.Response) {
+func (a *Agent) maybeRecoverToolCalls(ctx context.Context, resp *provider.Response) {
 	if resp == nil || resp.HasToolCalls() || resp.Content == "" {
 		return
 	}
@@ -61,7 +62,7 @@ func (a *Agent) maybeRecoverToolCalls(resp *provider.Response) {
 	if len(recovered) == 0 {
 		if residual != resp.Content {
 			slog.Info("scrubbed_leaked_tool_tokens",
-				"agent", a.name, "model", a.model)
+				"agent", a.name, "model", a.runtimeFor(ctx).model)
 			resp.Content = residual
 			resp.RawAssistant = nil
 		}
@@ -72,7 +73,7 @@ func (a *Agent) maybeRecoverToolCalls(resp *provider.Response) {
 		names = append(names, tc.Function.Name)
 	}
 	slog.Info("recovered_tool_calls from assistant content",
-		"agent", a.name, "model", a.model, "count", len(recovered),
+		"agent", a.name, "model", a.runtimeFor(ctx).model, "count", len(recovered),
 		"tools", names)
 	resp.ToolCalls = recovered
 	resp.Content = residual

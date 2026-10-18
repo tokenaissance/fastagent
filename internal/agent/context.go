@@ -53,6 +53,19 @@ type ContextBuilder struct {
 	environmentSignal string
 }
 
+// Clone returns a shallow copy of the builder for one turn. The turn then
+// applies its own skills summary and environment signal to the copy, so two
+// concurrent chats of the same agent cannot overwrite each other's prompt
+// state. Boot-time fields (paths, store handles, prompt mode) stay shared and
+// are never written by a turn.
+func (cb *ContextBuilder) Clone() *ContextBuilder {
+	if cb == nil {
+		return nil
+	}
+	clone := *cb
+	return &clone
+}
+
 // ctx returns a context tagged with this builder's user, used when reading
 // identity files (SOUL/IDENTITY/USER/...) from a store-backed setup so the
 // SQL row scope matches per-(user, agent).
@@ -76,17 +89,6 @@ func NewContextBuilder(home string, memory *Memory, skillsSummary string) *Conte
 // set, the system prompt advertises it as "Working Directory" and keeps it
 // distinct from the agent's home (identity) dir.
 func (cb *ContextBuilder) SetWorkspace(p string) { cb.workspace = p }
-
-// SetSkillsSummary updates the skills summary baked into the system prompt.
-// Called from refreshSkillsFromStore so skills hydrated from the object
-// store at turn start end up visible to the model without rebuilding the
-// whole context builder.
-func (cb *ContextBuilder) SetSkillsSummary(s string) { cb.skillsSummary = s }
-
-// SetEnvironmentSignal records the unified per-turn environment signal. Set by
-// the agent loop at turn start, next to the skill refresh, because that is where
-// all the subsystems that can change between turns are read.
-func (cb *ContextBuilder) SetEnvironmentSignal(s string) { cb.environmentSignal = s }
 
 // SetPromptMode selects the system-prompt assembly profile. Empty / unknown
 // values fall back to agent mode (current default). See config.PromptMode*.

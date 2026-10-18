@@ -17,13 +17,12 @@ package tools
 // matching case below red; each was verified to have landed with grep first.
 //
 // 2026-09-22 — the first cut of these witnesses was too narrow, and this file
-// now carries the correction. There are TWO registrations of these tools and
-// they do not share a body: registerFile (no executor) and registerSandboxedFile
-// (SetExecutor — the shape a cloud turn with an E2B sandbox runs). The three
-// cases above only ever built the first one, so they stayed green while the
-// production registration kept calling the plain Put. The cases below are the
-// same interleaving against the other registration, plus the guard's second
-// obligation: a write that FAILS must not come back as a successful one.
+// now carries the correction. The host and sandbox branches do not share a
+// body; a cloud turn with an E2B sandbox runs the sandbox branch. The cases
+// above only ever built the host branch, so they stayed green while the
+// production branch kept calling the plain Put. The cases below are the same
+// interleaving against the sandbox branch, plus the guard's second obligation:
+// a write that FAILS must not come back as a successful one.
 
 import (
 	"context"
@@ -89,7 +88,7 @@ func newPeerRegistry(t *testing.T, seeded map[string]string) (*Registry, *peerWr
 	r := NewRegistry(t.TempDir(), t.TempDir())
 	t.Cleanup(r.Close)
 	r.SetWorkspaceStore(peer, peerAgent)
-	r.SetSessionID(peerSession)
+	bindTestTurn(r, &TurnScope{SessionID: peerSession})
 	return r, peer
 }
 
@@ -128,7 +127,7 @@ func assertRefusedAndPeerSurvived(t *testing.T, out string, err error, peer *pee
 // tool is told.
 func TestWriteFileRefusesAWriteThatLostItsRace(t *testing.T) {
 	r, peer := newPeerRegistry(t, map[string]string{"notes.md": "v1\n"})
-	out, err := r.Execute(context.Background(), "write_file", `{"path":"notes.md","content":"v2\n"}`)
+	out, err := r.Execute(testTurnCtx(r), "write_file", `{"path":"notes.md","content":"v2\n"}`)
 	assertRefusedAndPeerSurvived(t, out, err, peer, "notes.md")
 }
 
@@ -137,7 +136,7 @@ func TestWriteFileRefusesAWriteThatLostItsRace(t *testing.T) {
 // clobbered either.
 func TestWriteFileRefusesACreateThatLostItsRace(t *testing.T) {
 	r, peer := newPeerRegistry(t, nil)
-	out, err := r.Execute(context.Background(), "write_file", `{"path":"fresh.md","content":"v1\n"}`)
+	out, err := r.Execute(testTurnCtx(r), "write_file", `{"path":"fresh.md","content":"v1\n"}`)
 	assertRefusedAndPeerSurvived(t, out, err, peer, "fresh.md")
 }
 
@@ -145,7 +144,7 @@ func TestWriteFileRefusesACreateThatLostItsRace(t *testing.T) {
 // version right before the write; the peer lands in between.
 func TestEditFileRefusesAnEditThatLostItsRace(t *testing.T) {
 	r, peer := newPeerRegistry(t, map[string]string{"notes.md": "one\ntwo\n"})
-	out, err := r.Execute(context.Background(), "edit_file",
+	out, err := r.Execute(testTurnCtx(r), "edit_file",
 		`{"path":"notes.md","old_string":"two","new_string":"THREE"}`)
 	assertRefusedAndPeerSurvived(t, out, err, peer, "notes.md")
 }
@@ -154,16 +153,16 @@ func TestEditFileRefusesAnEditThatLostItsRace(t *testing.T) {
 // writeForPatch → putGuarded; the peer lands between the two phases.
 func TestApplyPatchRefusesAPatchThatLostItsRace(t *testing.T) {
 	r, peer := newPeerRegistry(t, map[string]string{"notes.md": "one\n"})
-	out, err := r.Execute(context.Background(), "apply_patch",
+	out, err := r.Execute(testTurnCtx(r), "apply_patch",
 		"{\"input\":\"*** Begin Patch\\n*** Update File: notes.md\\n@@\\n-one\\n+two\\n*** End Patch\\n\"}")
 	assertRefusedAndPeerSurvived(t, out, err, peer, "notes.md")
 }
 
-// ── the same obligation, in the registration SetExecutor installs ─────────────
+// ── the same obligation, in the branch a sandbox turn runs ───────────────────
 //
-// registerSandboxedFile picks its own RouteWorkspaceStore branch; it is not a
-// wrapper around the one above. A guard in only one registration is a guard on
-// the mode nobody runs — everything above stays green while the branch a cloud
+// makeSandboxedFileTools picks its own RouteWorkspaceStore branch; it is not a
+// wrapper around the host one. A guard in only one branch is a guard on the
+// mode nobody runs — everything above stays green while the branch a cloud
 // turn actually takes keeps blind-writing. `peer.fired` is asserted first, so a
 // branch that consults no version at all fails for the reason that matters
 // ("a peer cannot even be noticed here"), not for a downstream symptom.
@@ -171,7 +170,7 @@ func TestApplyPatchRefusesAPatchThatLostItsRace(t *testing.T) {
 func newPeerRegistryWithExecutor(t *testing.T, seeded map[string]string) (*Registry, *peerWritesAfterTheRead) {
 	t.Helper()
 	r, peer := newPeerRegistry(t, seeded)
-	r.SetExecutor(fakeExecutor{}) // ← the production registration
+	bindTestTurn(r, &TurnScope{SessionID: peerSession, Executor: fakeExecutor{}})
 	return r, peer
 }
 
@@ -186,7 +185,7 @@ func assertSandboxRefused(t *testing.T, out string, err error, peer *peerWritesA
 // B7, sandbox registration — write_file.
 func TestSandboxWriteFileRefusesAWriteThatLostItsRace(t *testing.T) {
 	r, peer := newPeerRegistryWithExecutor(t, map[string]string{"notes.md": "v1\n"})
-	out, err := r.Execute(context.Background(), "write_file", `{"path":"notes.md","content":"v2\n"}`)
+	out, err := r.Execute(testTurnCtx(r), "write_file", `{"path":"notes.md","content":"v2\n"}`)
 	assertSandboxRefused(t, out, err, peer, "notes.md")
 }
 
@@ -195,7 +194,7 @@ func TestSandboxWriteFileRefusesAWriteThatLostItsRace(t *testing.T) {
 // cannot pass silently).
 func TestSandboxEditFileRefusesAnEditThatLostItsRace(t *testing.T) {
 	r, peer := newPeerRegistryWithExecutor(t, map[string]string{"notes.md": "one\ntwo\n"})
-	out, err := r.Execute(context.Background(), "edit_file",
+	out, err := r.Execute(testTurnCtx(r), "edit_file",
 		`{"path":"notes.md","old_string":"two","new_string":"THREE"}`)
 	assertSandboxRefused(t, out, err, peer, "notes.md")
 }
@@ -203,7 +202,7 @@ func TestSandboxEditFileRefusesAnEditThatLostItsRace(t *testing.T) {
 // B9, sandbox registration — apply_patch.
 func TestSandboxApplyPatchRefusesAPatchThatLostItsRace(t *testing.T) {
 	r, peer := newPeerRegistryWithExecutor(t, map[string]string{"notes.md": "one\n"})
-	out, err := r.Execute(context.Background(), "apply_patch",
+	out, err := r.Execute(testTurnCtx(r), "apply_patch",
 		"{\"input\":\"*** Begin Patch\\n*** Update File: notes.md\\n@@\\n-one\\n+two\\n*** End Patch\\n\"}")
 	assertSandboxRefused(t, out, err, peer, "notes.md")
 }
@@ -255,11 +254,12 @@ func TestAGuardedWriteReportsAStoreFailureInsteadOfSuccess(t *testing.T) {
 			r := NewRegistry(t.TempDir(), t.TempDir())
 			t.Cleanup(r.Close)
 			r.SetWorkspaceStore(store, peerAgent)
-			r.SetSessionID(peerSession)
+			scope := &TurnScope{SessionID: peerSession}
 			if tc.sandbox {
-				r.SetExecutor(fakeExecutor{})
+				scope.Executor = fakeExecutor{}
 			}
-			out, err := r.Execute(ctx, tc.tool, tc.args)
+			bindTestTurn(r, scope)
+			out, err := r.Execute(testTurnCtx(r), tc.tool, tc.args)
 			if err == nil {
 				t.Fatalf("the store failed the write and the tool still reported success: out=%q", out)
 			}
