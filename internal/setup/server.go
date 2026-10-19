@@ -78,10 +78,14 @@ type AgentProvider interface {
 // Server hosts the web UI + admin API. Multi-user is unconditional —
 // every request must resolve to a real users.id via the auth.Resolver.
 type Server struct {
-	port           int
-	bind           string
-	gatewayCfg     *config.GatewayCfg
-	userResolver   api.UserResolver
+	port         int
+	bind         string
+	gatewayCfg   *config.GatewayCfg
+	userResolver api.UserResolver
+	// cp is the explicit control-plane contract. Production wiring sets it
+	// through SetUserResolver; tests that use a narrower resolver leave it nil
+	// and the handlers fall back to their legacy capability assertions.
+	cp             ControlPlane
 	taskQueue      *taskqueue.Queue
 	apiServer      *api.Server
 	authResolver   *auth.Resolver
@@ -167,6 +171,16 @@ func (s *Server) SetAPIServer(apiSrv *api.Server) {
 // SetUserResolver sets the per-user agent routing resolver.
 func (s *Server) SetUserResolver(resolver api.UserResolver) {
 	s.userResolver = resolver
+	if cp, ok := resolver.(ControlPlane); ok {
+		s.cp = cp
+	}
+}
+
+// SetControlPlane wires the explicit mutation contract separately from the
+// read resolver. Call this at the composition root when the resolver is known
+// to provide every capability; a missing method then fails at compile time.
+func (s *Server) SetControlPlane(cp ControlPlane) {
+	s.cp = cp
 }
 
 // SetConfigCacheStats wires the resolved-agent read cache's stats reader. The

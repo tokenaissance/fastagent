@@ -325,6 +325,15 @@ func (s *Server) notifyUserChanged(userID string) {
 	if userID == "" {
 		return
 	}
+	if cp := s.controlPlane(); cp != nil {
+		if err := cp.BumpAgentReloadEpoch(userID); err != nil {
+			slog.Warn("bump agent reload epoch after an agent config change", "user", userID, "error", err)
+		}
+		if err := cp.BroadcastAgentReload(userID); err != nil {
+			slog.Warn("broadcast agent reload after an agent config change", "user", userID, "error", err)
+		}
+		return
+	}
 	if b, ok := s.userResolver.(interface{ BumpAgentReloadEpoch(userID string) error }); ok {
 		if err := b.BumpAgentReloadEpoch(userID); err != nil {
 			slog.Warn("bump agent reload epoch after an agent config change", "user", userID, "error", err)

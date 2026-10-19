@@ -584,180 +584,20 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 	if rec == nil {
 		return
 	}
-	var req struct {
-		Name             string  `json:"name,omitempty"`
-		Description      *string `json:"description,omitempty"` // ptr so empty-string clears it
-		Model            *string `json:"model,omitempty"`       // ptr so empty-string clears the agent-scope override
-		IsPublic         *bool   `json:"isPublic,omitempty"`    // ptr so caller can leave it unchanged
-		ShareModelConfig *bool   `json:"shareModelConfig,omitempty"`
-		// PromptMode is a ptr so the caller can distinguish "leave
-		// unchanged" (omitted / null) from "clear override" (empty
-		// string). Allowed string values: "agent" | "chatbot" |
-		// "customize" — empty falls back to system default ("agent").
-		// PromptMode also drives the built-in tool surface; there is
-		// no separate allowlist field by design (extend via plugins).
-		PromptMode *string `json:"promptMode,omitempty"`
-		// SplitReplies per-agent override: nil = leave unchanged,
-		// non-nil pointer-to-bool = set explicit value (true/false).
-		// Distinct from "clear" which is a separate signal — the
-		// dashboard sends `splitRepliesReset: true` to delete
-		// the override and fall back to system default.
-		SplitReplies      *bool `json:"splitReplies,omitempty"`
-		SplitRepliesReset bool  `json:"splitRepliesReset,omitempty"`
-		// AutoPersist per-agent override. `autoPersistReset:true` clears it,
-		// and the agent then inherits the system ← user `memory` row
-		// (memory.autoPersist.enabled) — which can be on. The "currently
-		// effectively disabled" that used to sit at this spot was true while
-		// that row had no reader; register row 52 gave it one on 2026-09-22.
-		AutoPersist      *bool `json:"autoPersist,omitempty"`
-		AutoPersistReset bool  `json:"autoPersistReset,omitempty"`
-		// SharedIdentity toggles cross-channel session/memory sharing.
-		// When true, all channels bound to this agent use the channel
-		// owner's user_id as the chatter identity, so sessions and
-		// memory are shared across web + IM channels. Default false.
-		SharedIdentity *bool `json:"sharedIdentity,omitempty"`
-		// Plugins per-agent enable overlay. Keys are plugin IDs, values
-		// are bool. Patch semantics: only the keys present in this map
-		// get written; other keys in the existing row are preserved.
-		// To clear all overrides for this agent, send pluginsReset:true.
-		Plugins      map[string]bool `json:"plugins,omitempty"`
-		PluginsReset bool            `json:"pluginsReset,omitempty"`
-		// MCPServers is a whole-map replace: omit to leave untouched,
-		// send {} to clear, or send the full desired map to replace.
-		MCPServers      map[string]config.MCPServerConfig `json:"mcpServers,omitempty"`
-		MCPServersReset bool                              `json:"mcpServersReset,omitempty"`
-	}
+	var req updateAgentRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
-	if req.Name != "" {
-		rec.Name = req.Name
-	}
-	if req.Description != nil {
-		if rec.Config == nil {
-			rec.Config = map[string]interface{}{}
+	rec, err := s.updateAgentConfig(r, rec, req)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, errInvalidPromptMode) {
+			status = http.StatusBadRequest
 		}
-		if *req.Description == "" {
-			delete(rec.Config, "description")
-		} else {
-			rec.Config["description"] = *req.Description
-		}
-	}
-	if req.IsPublic != nil {
-		rec.IsPublic = *req.IsPublic
-	}
-	// shareModelConfig controls whether a chatter using this agent
-	// inherits the owner's model + provider configuration. Default
-	// true: sharing is on unless the owner explicitly opts out.
-	// Encoding: absent key = on (the new-agent default), explicit
-	// `false` = opt-out. We never store `true` — storing absence for
-	// the default keeps existing rows minimal and means a future
-	// default flip needs only one place to change (agentShareModelConfig
-	// above). Stored in the agent's config blob so we don't need a
-	// schema migration; runtime reads it back in EnsureAgent to gate
-	// the owner-fallback + agent-scope overlays.
-	if req.ShareModelConfig != nil {
-		if rec.Config == nil {
-			rec.Config = map[string]interface{}{}
-		}
-		if *req.ShareModelConfig {
-			delete(rec.Config, "shareModelConfig")
-		} else {
-			rec.Config["shareModelConfig"] = false
-		}
-	}
-	// MCP servers live one row per server in agent_mcp_servers (not in
-	// agents.config). Whole-map replace is a transactional diff over rows:
-	// an empty map / mcpServersReset clears every row.
-	if req.MCPServersReset || req.MCPServers != nil {
-		servers := req.MCPServers
-		if err := s.dataStore.ReplaceMCPServers(r.Context(), rec.ID, servers); err != nil {
-			jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-			return
-		}
-	}
-	if err := s.dataStore.SaveAgent(r.Context(), rec); err != nil {
-		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		jsonResponse(w, status, map[string]any{"error": err.Error()})
 		return
 	}
-	// Per-agent defaults live in one configs row (kind=setting, scope=agent,
-	// namespace=agents.defaults). Collect every field the caller touched
-	// into a single merge-aware patch so e.g. updating promptMode doesn't
-	// clobber an existing model override and vice versa. nil pointer =
-	// caller didn't touch the field; ptr-to-empty = "clear this override".
-	defaultsPatch := map[string]interface{}{}
-	if req.Model != nil {
-		m := strings.TrimSpace(*req.Model)
-		if m == "" {
-			defaultsPatch["model"] = nil
-		} else {
-			defaultsPatch["model"] = m
-		}
-	}
-	if req.PromptMode != nil {
-		pm := strings.TrimSpace(*req.PromptMode)
-		// Allow only the documented values plus empty (= clear).
-		// Anything else is a 400 — silently coercing to "agent" would
-		// mask typos from the dashboard or CLI.
-		switch pm {
-		case "":
-			defaultsPatch["promptMode"] = nil
-		case config.PromptModeAgent, config.PromptModeChatbot, config.PromptModeCustomize:
-			defaultsPatch["promptMode"] = pm
-		default:
-			jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "promptMode must be one of: agent, chatbot, customize"})
-			return
-		}
-	}
-	if req.SplitRepliesReset {
-		// Reset wins over set in the same request — the dashboard's
-		// "Inherit" pill writes this flag.
-		defaultsPatch["splitReplies"] = nil
-	} else if req.SplitReplies != nil {
-		defaultsPatch["splitReplies"] = *req.SplitReplies
-	}
-	if req.AutoPersistReset {
-		defaultsPatch["autoPersist"] = nil
-	} else if req.AutoPersist != nil {
-		defaultsPatch["autoPersist"] = *req.AutoPersist
-	}
-	if err := s.applyAgentScopeDefaultsPatch(r, rec.ID, defaultsPatch); err != nil {
-		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-		return
-	}
-	// Plugins-enabled overlay: separate config row (scope=agent,
-	// name=plugins.enabled), so doesn't go through the agents.defaults
-	// patch path. Reset clears the row entirely; otherwise we merge
-	// the incoming map keys into the existing data.
-	if req.PluginsReset || req.Plugins != nil {
-		if err := s.applyAgentScopePluginsPatch(r, rec.ID, req.Plugins, req.PluginsReset); err != nil {
-			jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-			return
-		}
-	}
-	// SharedIdentity: batch-update all channels for this agent.
-	if req.SharedIdentity != nil {
-		chs, _ := s.dataStore.ListChannels(r.Context(), rec.UserID, rec.ID)
-		for i := range chs {
-			if chs[i].SharedIdentity != *req.SharedIdentity {
-				chs[i].SharedIdentity = *req.SharedIdentity
-				_ = s.dataStore.SaveChannel(r.Context(), &chs[i])
-			}
-		}
-	}
-	// The agent's resolved runtime changed (model / promptMode / plugins), so
-	// every replica holding it cached must rebuild it — this pod included.
-	// notifyAgentChanged does the local InvalidateAgent (owner's space plus any
-	// super_admin / public-link / apikey caller that lazy-attached the agent)
-	// and stamps the per-user reload marker: the DB epoch replicas without Redis
-	// poll, plus the Redis broadcast that reaches the rest instantly.
-	//
-	// Local-only invalidation was the earlier behavior: chatters whose next
-	// message landed on a sibling replica kept firing the previous model until
-	// that replica's 30-minute idle eviction, which reads exactly like "the
-	// dashboard switch did not work".
-	s.notifyAgentChanged(rec.UserID, rec.ID)
 	share := agentShareModelConfig(rec)
 	jsonResponse(w, http.StatusOK, map[string]any{
 		"agent": map[string]any{
@@ -1732,6 +1572,9 @@ func (s *Server) removeLiveSandboxFile(ctx context.Context, agentID, projectID, 
 	if s.userResolver == nil {
 		return nil
 	}
+	if cp := s.controlPlane(); cp != nil {
+		return cp.RemoveWorkspaceFile(ctx, agentID, projectID, sessionID, storePath)
+	}
 	remover, ok := s.userResolver.(interface {
 		RemoveWorkspaceFile(ctx context.Context, agentID, projectID, sessionID, storePath string) error
 	})
@@ -1748,7 +1591,9 @@ func (s *Server) invalidateUser(userID string) {
 	if userID == "" || s.userResolver == nil {
 		return
 	}
-	if r, ok := s.userResolver.(interface{ InvalidateUser(string) }); ok {
+	if cp := s.controlPlane(); cp != nil {
+		cp.InvalidateUser(userID)
+	} else if r, ok := s.userResolver.(interface{ InvalidateUser(string) }); ok {
 		r.InvalidateUser(userID)
 	}
 	slog.Debug("invalidated user space", "user", userID)
@@ -1764,7 +1609,9 @@ func (s *Server) invalidateAgent(agentID string) {
 	if agentID == "" || s.userResolver == nil {
 		return
 	}
-	if r, ok := s.userResolver.(interface{ InvalidateAgent(string) }); ok {
+	if cp := s.controlPlane(); cp != nil {
+		cp.InvalidateAgent(agentID)
+	} else if r, ok := s.userResolver.(interface{ InvalidateAgent(string) }); ok {
 		r.InvalidateAgent(agentID)
 	}
 	slog.Debug("invalidated user spaces holding agent", "agent", agentID)

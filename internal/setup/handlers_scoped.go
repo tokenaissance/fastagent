@@ -657,6 +657,12 @@ func (s *Server) invalidateScope(sc, scopeID string) {
 		// is read by every user's UserSpace, so the write has to reach every
 		// replica — a local-only drop leaves siblings on the pre-save snapshot,
 		// which is exactly "I switched the model and nothing happened".
+		if cp := s.controlPlane(); cp != nil {
+			if err := cp.NotifySystemReload(); err != nil {
+				slog.Warn("system reload notify failed", "error", err)
+			}
+			return
+		}
 		if r, ok := s.userResolver.(systemNotifier); ok {
 			if err := r.NotifySystemReload(); err != nil {
 				slog.Warn("system reload notify failed", "error", err)
@@ -669,7 +675,9 @@ func (s *Server) invalidateScope(sc, scopeID string) {
 			_ = r.ReloadAgents()
 		}
 	case scope.User:
-		if r, ok := s.userResolver.(userInvalidator); ok {
+		if cp := s.controlPlane(); cp != nil {
+			cp.InvalidateUser(scopeID)
+		} else if r, ok := s.userResolver.(userInvalidator); ok {
 			r.InvalidateUser(scopeID)
 		}
 		s.notifyUserChanged(scopeID)
@@ -682,6 +690,13 @@ func (s *Server) invalidateScope(sc, scopeID string) {
 		// that don't implement the newer hook. Either way the owner's
 		// cross-replica marker is stamped, so a sibling replica that holds the
 		// agent rebuilds instead of serving the old resolved config.
+		if cp := s.controlPlane(); cp != nil {
+			cp.InvalidateAgent(scopeID)
+			if owner := s.agentOwnerID(scopeID); owner != "" {
+				s.notifyUserChanged(owner)
+			}
+			return
+		}
 		if r, ok := s.userResolver.(agentInvalidator); ok {
 			r.InvalidateAgent(scopeID)
 			if owner := s.agentOwnerID(scopeID); owner != "" {
@@ -726,6 +741,12 @@ func (s *Server) hotRegisterChannel(rec store.ConfigRecord) {
 	if s.userResolver == nil {
 		return
 	}
+	if cp := s.controlPlane(); cp != nil {
+		if err := cp.RegisterChannelFromConfig(rec); err != nil {
+			slog.Warn("hot-register channel failed", "type", rec.Name, "error", err)
+		}
+		return
+	}
 	type chanRegistrar interface {
 		RegisterChannelFromConfig(rec store.ConfigRecord) error
 	}
@@ -745,6 +766,12 @@ func (s *Server) hotRegisterChannel(rec store.ConfigRecord) {
 // new interface (e.g. older test stubs).
 func (s *Server) hotRegisterChannelRecord(rec store.ChannelRecord) {
 	if s.userResolver == nil {
+		return
+	}
+	if cp := s.controlPlane(); cp != nil {
+		if err := cp.RegisterChannel(rec); err != nil {
+			slog.Warn("hot-register channel record failed", "type", rec.Type, "error", err)
+		}
 		return
 	}
 	type chanRecordRegistrar interface {
@@ -775,6 +802,10 @@ func (s *Server) hotRegisterChannelRecord(rec store.ChannelRecord) {
 // hotUnregisterChannel — paired with hotRegisterChannel for delete paths.
 func (s *Server) hotUnregisterChannel(channelType, accountID string) {
 	if s.userResolver == nil {
+		return
+	}
+	if cp := s.controlPlane(); cp != nil {
+		cp.UnregisterChannel(channelType, accountID)
 		return
 	}
 	type chanUnregistrar interface {

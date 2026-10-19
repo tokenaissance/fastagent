@@ -31,6 +31,8 @@ type apiResolver struct {
 	gw *gateway.Gateway
 }
 
+var _ setup.ControlPlane = (*apiResolver)(nil)
+
 func (a *apiResolver) UserSpaceFor(userID string) (*api.UserSpaceView, error) {
 	sp, err := a.gw.UserSpaceFor(userID)
 	if err != nil {
@@ -110,6 +112,10 @@ func (a *apiResolver) RegisterChannel(rec store.ChannelRecord) error {
 
 func (a *apiResolver) UnregisterChannel(channelType, accountID string) {
 	a.gw.UnregisterChannel(channelType, accountID)
+}
+
+func (a *apiResolver) RemoveWorkspaceFile(ctx context.Context, agentID, projectID, sessionID, storePath string) error {
+	return a.gw.RemoveWorkspaceFile(ctx, agentID, projectID, sessionID, storePath)
 }
 
 func (a *apiResolver) DispatchFeishuWebhook(accountID string, body []byte) ([]byte, int, error) {
