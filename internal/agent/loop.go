@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -2635,77 +2634,15 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		return rejection
 	}
 
-	// Turn admission: one turn at a time per session. A turn-start request
-	// that finds the session busy waits here (FIFO, cancellable) instead of
-	// running a second ReAct loop over the same history — two concurrent
-	// writers are what let a cron-fired turn and a dashboard turn interleave
-	// their messages and permanently poison a session with a duplicated
-	// tool_call_id (docs/session-turn-integrity.md, clause W).
-	//
-	// Acquired before the plan-mode branch so plan turns are covered too, and
-	// released by the outermost defer so a leftover-steer write still lands
-	// inside the turn that owned the session.
-	sess := a.sessions.Get(sessionTriple(msg, msg.ProjectID))
-	waitStart := time.Now()
-	// Counted from here to the moment the session is owned: the lease gate is where a real wait
-	// happens, and it is the count the history read publishes (session_waiters.go).
-	stopWaiting := a.noteSessionWaiter(sess.Key())
-	// Cross-replica gate first (docs/session-turn-integrity.md A1): the lease is
-	// the one that can be lost to a peer, and the one a queued caller must wait
-	// on. It reports every wait as a `queued` event carrying the holder and its
-	// ETA, so the dashboard can say who is ahead.
-	lease, leased := a.beginTurnLease(ctx, sess, func(evt ChatEvent) { emitEvent(ctx, evt) })
-	if !leased {
-		stopWaiting()
-		slog.Info("turn admission: lease not acquired",
-			"agent", a.name, "channel", msg.Channel, "chat_id", msg.ChatID,
-			"queued_ms", time.Since(waitStart).Milliseconds())
+	turn, admitted := a.admitTurn(ctx, msg)
+	if !admitted {
 		return ""
 	}
-	// Release the lease last: freeing it first lets a local waiter (already
-	// parked on the in-process slot) take over without another retry.
-	defer lease.Stop()
-	// Local FIFO gate second. In practice it is free: a locally running turn
-	// must itself have held the lease, and we hold it now.
-	if sess.TurnActive() {
-		// Tell the dashboard why nothing is happening yet: its turn is queued
-		// behind the turn that currently owns the session (a cron/goal tick or
-		// another client). Position 1 = next in line, and the turn id says
-		// *whose* submission is waiting — the same field the lease-wait emitter
-		// sends, for the same reason (a tab that did not POST can only withdraw
-		// the turn it can name).
-		// Position by the count taken where the waiting happens (session_waiters.go): this turn is
-		// already counted, and `sess.TurnWaiters()` watches a slot a turn parked here never reaches.
-		data := map[string]any{"position": a.queuedSubmissionsFor(sess.Key())}
-		if id := TurnIDFromContext(ctx); id != "" {
-			data["turnId"] = id
-		}
-		emitEvent(ctx, ChatEvent{Type: "queued", Data: data})
-	}
-	if !sess.AcquireTurn(ctx) {
-		stopWaiting()
-		slog.Info("turn admission: caller gave up while queued",
-			"agent", a.name, "channel", msg.Channel, "chat_id", msg.ChatID,
-			"queued_ms", time.Since(waitStart).Milliseconds())
-		return ""
-	}
-	stopWaiting()
-	if waited := time.Since(waitStart); waited > time.Second {
-		slog.Info("turn admission: waited for the in-flight turn",
-			"agent", a.name, "channel", msg.Channel, "chat_id", msg.ChatID,
-			"waited_ms", waited.Milliseconds(), "still_queued", sess.TurnWaiters())
-	}
-	// Past this point the turn owns the session and can no longer be
-	// withdrawn from the queue (see WithAdmissionSignal).
-	signalAdmission(ctx)
-	defer sess.ReleaseTurn()
-
-	// Turn start, used at the end of the turn to tell the web transcript which
-	// files THIS turn produced (see turn_files.go). Captured after admission so
-	// time spent queued behind another turn can't drag earlier writes in.
-	turnStart := time.Now()
-	rt := a.currentRuntime()
-	ctx = withAgentRuntime(ctx, rt)
+	defer turn.release()
+	ctx = turn.ctx
+	sess := turn.sess
+	rt := turn.rt
+	lease := turn.lease
 
 	// Plan mode short-circuits the ReAct loop: tools off, the model
 	// emits a numbered plan, the user reviews it and replies normally
@@ -2731,149 +2668,21 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		}
 	}
 
-	chatterUID := a.chatterUserID(msg)
-	// Tag ctx so the sandbox layer can bind-mount this chatter's
-	// per-user skills dir into the container at /root/.agents/skills
-	// (where `npx skills add -g -y` writes). Tagging happens before
-	// any sandbox.Get call below so attachments + exec inherit it.
-	ctx = sandbox.WithUserID(ctx, chatterUID)
-	// Tag ctx with the chatter so DBStore session writes stamp the
-	// chatter_user_id column (sessions / session_messages /
-	// session_events). user_id stays = UserSpace owner so admin views
-	// continue to list "all sessions on my bots"; chatter_user_id
-	// records the actual participant for per-chatter queries.
-	ctx = store.WithChatterUserID(ctx, chatterUID)
-	ctx = store.WithChannel(ctx, msg.Channel)
-	// Per-turn channel context for the skill-refresh diagnostic. Lets
-	// us correlate the "skills summary refreshed" log emitted inside
-	// refreshSkillsFromStore with the channel the request arrived on,
-	// to chase the "IM doesn't see agent skills" report.
-	slog.Info("turn: refreshing skills",
-		"agent", a.name, "channel", msg.Channel, "chat_id", msg.ChatID, "user", chatterUID)
-	skills := a.refreshSkillsFromStore(ctx, chatterUID)
-	// The same moment is where every other "the world changed between turns"
-	// subsystem can be sampled, so the environment signal is built here rather
-	// than by each of them separately (env_changes.go).
-	// The conversation's own history is the durable record of what it last ran
-	// in (session.Append stamps each assistant receipt), which is what lets this
-	// turn state a change that happened while nobody was looking — including one
-	// that rebuilt the agent itself (docs 10 §4, G9 + G20). What comes back is
-	// this turn's receipt, stamped onto the reply below.
-	envSignal, runReceipt := a.signalEnvironmentChanges(ctx, chatterUID, msg.ChatID, sess.GetMessages(), skills)
-	// sess was resolved when the turn slot was acquired above; reuse it so
-	// the whole turn writes through one session object.
-	// Bind chatter onto sess. Session.ctx() builds its own
-	// context.Background-rooted ctx for store calls, so the
-	// WithChatterUserID we stamped onto the caller ctx above does NOT
-	// reach AppendSessionMessage / SaveSession on its own — sess has to
-	// carry the chatter itself.
-	sess.SetChatter(chatterUID)
-	{
-		prov, mdl := provider.SplitProviderModel(rt.model)
-		sess.SetProviderModel(prov, mdl)
-		// Stamp this turn's receipt as well: "which LLM produced this reply" and
-		// "what world this turn started in" are the same kind of fact about the
-		// same turn, and the receipt is what lets a later turn — any replica,
-		// after any restart — state what changed (docs 10 §4, G9 + G20).
-		sess.SetRunReceipt(runReceipt)
+	prompt := a.prepareTurnPrompt(turn, true)
+	if prompt.flushSteer != nil {
+		defer prompt.flushSteer()
 	}
-	// Bind the registry to this chat's session so workspace.Store reads
-	// + writes get session-scoped paths and (when a sandbox pool is
-	// wired) the executor used by exec/read_file/list_dir is tied to a
-	// session-private container.
-	ctx = a.bindSession(ctx, msg, chatterUID, sess.SessionKey(), a.isAdminChatter(msg), skills)
-
-	// Steering: mark a turn in-flight so messages arriving mid-run are
-	// buffered onto the session (drained between tool iterations below)
-	// instead of starting a separate turn. flushLeftoverSteer parks any
-	// steer that lost the end-of-turn race into history. Registered before
-	// the turn-slot release so a parked steer still lands inside the turn
-	// that owns the session.
-	sess.BeginTurn()
-	defer a.flushLeftoverSteer(sess)
-
-	// A turn that exits with a tool_use still unanswered (client Stop, budget
-	// expiry, the loop detector breaking out) leaves that call OPEN in the
-	// session on purpose: history records what happened, and the next request
-	// is made valid by normalizeForPrompt, which fills exactly one synthetic
-	// reply at prompt-build time. Persisting a pad here is what used to collide
-	// with a late real result (docs/session-turn-integrity.md, Q4).
-
-	// Hook: BeforeSystemPrompt
-	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: BeforeSystemPrompt, UserID: a.ownerUserID})
-
-	chatterMem := rt.memory.WithUserID(chatterUID)
-	systemPrompt := a.promptBuilderForTurn(ctx, skills, envSignal).BuildSystemPromptAs(chatterUID, chatterMem)
-	knowledgeMeta := knowledgeMetadata(extractKnowledgeCitationSources(systemPrompt))
-	a.logSystemPromptFingerprint(ctx, msg.Channel, msg.ChatID, chatterUID, systemPrompt)
-
-	// Hook: AfterSystemPrompt
-	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: AfterSystemPrompt, UserID: a.ownerUserID})
-
-	// Store the raw user message. Images may arrive via the legacy
-	// PhotoURL (single, used by IM bridges) or PhotoURLs (multi, used by
-	// the web chat upload path); flatten both into one content-parts
-	// slice so the provider sees `[text, image, image, …]`.
-	// buildUserMessage handles multi-image flatten + senderMetadata.
-	// `[SenderName]:` content-prefix policy lives there (group-only;
-	// DMs stay bare to avoid SOUL.md language-bias regressions).
-	userMsg := buildUserMessage(msg)
-	sess.Append(userMsg)
-
-	// Context compaction: check if session messages are too large
-	sessionMsgs := sess.GetMessages()
-	compactResult, err := CompactMessages(ctx, sessionMsgs, a.homePath, rt.provider, rt.model)
-	if err != nil {
-		slog.Warn("compaction error", "agent", a.name, "error", err)
-	}
-	if compactResult != nil && compactResult.Pruned {
-		// Replace session messages with compacted version
-		sess.ReplaceMessages(compactResult.Messages)
-		sessionMsgs = compactResult.Messages
-		slog.Info("context compacted", "agent", a.name, "log_file", compactResult.LogFile)
-	}
-
-	messages := make([]provider.Message, 0, len(sessionMsgs)+4)
-	messages = append(messages, provider.Message{Role: "system", Content: systemPrompt})
-	if hints := renderChannelHints(msg, rt.splitReplies); hints != "" {
-		messages = append(messages, provider.Message{Role: "system", Content: hints})
-	}
-	if senderMsg := renderSender(msg); senderMsg != "" {
-		messages = append(messages, provider.Message{Role: "system", Content: senderMsg})
-	}
-	if paramsMsg := renderClientParams(msg.Params); paramsMsg != "" {
-		messages = append(messages, provider.Message{Role: "system", Content: paramsMsg})
-	}
-	// Persistence reminder — chatbot-only, positioned just before the
-	// session history so recency weight outranks the model's training
-	// prior of "I have no cross-session memory". See
-	// renderChatbotPersistenceReminder for why this isn't enough to put
-	// in the main system prompt alone.
-	if reminder := renderChatbotPersistenceReminder(rt.promptMode, a.displayName, chatterMem.LoadUserFile(), chatterMem.LoadMemory()); reminder != "" {
-		messages = append(messages, provider.Message{Role: "system", Content: reminder})
-	}
-	// Everything above is this turn's own scaffolding (system prompt, channel
-	// hints, sender, client params, persistence reminder) — it is not part of
-	// the session and must never be compacted, replaced or written back.
-	// Everything below is history, and history is what a round boundary is
-	// allowed to compact. See compactPromptAtRoundBoundary.
-	historyStart := len(messages)
-	// The prompt is a NORMALISED PROJECTION of stored history: the session
-	// keeps what actually happened, the model only ever sees well-formed
-	// call/reply pairs (docs/session-turn-integrity.md, clause P). Without
-	// this, a duplicated or orphaned reply from any past turn is replayed
-	// verbatim and can 400 every later request on the session.
-	messages = append(messages, a.withMessageTimestampsForChatter(ctx,
-		normalizeForPromptWith(sessionMsgs, a.openCallAnswer(ctx, sess)), chatterUID)...)
-
-	toolDefs := a.registry.DefinitionsForMode(builtinAllowForMode(rt.promptMode))
+	ctx = prompt.ctx
+	chatterUID := prompt.chatterUID
+	chatterMem := prompt.chatterMem
+	knowledgeMeta := prompt.knowledgeMeta
+	messages := prompt.messages
+	toolDefs := prompt.toolDefs
+	historyStart := prompt.historyStart
+	turnStart := turn.turnStart
 
 	// Loop detection: track consecutive identical tool calls
-	type toolCallSig struct {
-		name string
-		hash [32]byte
-	}
-	var lastSig toolCallSig
+	var lastSig toolCallSignature
 	consecutiveCount := 0
 	totalToolCalls := 0
 	// allFailedRounds is the count of CONSECUTIVE rounds where every
@@ -2910,29 +2719,8 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	// real reason was emitted at the boundary itself.
 	stopReason := ""
 	for i := 0; i < rounds; i++ {
-		// Superseded mid-turn? The lease moved to a peer (and every later write
-		// would be refused by the fence anyway): stop spending model and tool
-		// budget on a history this turn no longer owns. The notice was already
-		// emitted by the renewal loop, at the moment of the loss.
-		if lease.Lost() || sess.FenceLost() != nil {
-			slog.Warn("turn: superseded, stopping", "agent", a.name, "chat_id", msg.ChatID, "iteration", i+1)
-			stopReason = "superseded"
-			break
-		}
-		// The user's own stop request (design X1–X6): the request rode the lease
-		// row from wherever it was made, and this boundary is the delivery
-		// point. Say it — a turn that vanishes without a word is the failure
-		// mode the state-observability principle exists to prevent.
-		if lease.Cancelled(ctx) {
-			slog.Info("turn: cancelled by request", "agent", a.name, "chat_id", msg.ChatID, "iteration", i+1)
-			emitEvent(ctx, ChatEvent{Type: lostNoticeEvent, Data: map[string]any{
-				"message": turnCancelledNotice,
-				// The structured half: a task read reports `stopped` without reading the sentence
-				// (internal/agent/endings.go). `reason` keeps the diagnosis the prose carries.
-				"ending": EndingStopped,
-				"reason": "cancelled",
-			}})
-			stopReason = "cancelled"
+		if reason := a.turnBoundaryStop(ctx, lease, sess, msg, i+1); reason != "" {
+			stopReason = reason
 			break
 		}
 		slog.Info("agent loop iteration",
@@ -3062,26 +2850,11 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		messages = append(messages, assistantMsg)
 
 		// Loop detection: check before executing
-		loopDetected := false
-		for _, tc := range resp.ToolCalls {
-			sig := toolCallSig{
-				name: tc.Function.Name,
-				hash: sha256.Sum256([]byte(tc.Function.Arguments)),
-			}
-			if sig.name == lastSig.name && sig.hash == lastSig.hash {
-				consecutiveCount++
-			} else {
-				consecutiveCount = 1
-				lastSig = sig
-			}
-			if consecutiveCount >= 3 {
-				slog.Warn("tool loop detected", "agent", a.name, "tool", tc.Function.Name)
-				warnMsg := loopDetectedWarning(false)
-				sess.Append(warnMsg)
-				messages = append(messages, warnMsg)
-				loopDetected = true
-				break
-			}
+		loopDetected := detectToolLoop(a.name, resp.ToolCalls, &lastSig, &consecutiveCount)
+		if loopDetected {
+			warnMsg := loopDetectedWarning(false)
+			sess.Append(warnMsg)
+			messages = append(messages, warnMsg)
 		}
 		if loopDetected {
 			break
@@ -3100,11 +2873,8 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		// is 0 = unlimited; users hit specific rate-limited APIs
 		// (Brave free tier 1RPS, etc.) set it to 1 / 2 to force
 		// strict serial / lightly-parallel execution.
-		executeCalls := resp.ToolCalls
-		var deferredCalls []provider.ToolCall
-		if rt.maxParallelToolCalls > 0 && len(resp.ToolCalls) > rt.maxParallelToolCalls {
-			executeCalls = resp.ToolCalls[:rt.maxParallelToolCalls]
-			deferredCalls = resp.ToolCalls[rt.maxParallelToolCalls:]
+		executeCalls, deferredCalls := splitToolCallsForParallelCap(resp.ToolCalls, rt.maxParallelToolCalls)
+		if len(deferredCalls) > 0 {
 			slog.Info("deferring tool calls beyond parallel cap",
 				"agent", a.name,
 				"cap", rt.maxParallelToolCalls,
@@ -3117,19 +2887,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 			"agent", a.name,
 			"count", len(executeCalls),
 		)
-		// Let an in-flight tool finish (bounded) even when this turn's budget
-		// just expired: the round records its real result instead of leaving an
-		// open tool_use for the projection to answer, and no further round starts
-		// because the loop's own ctx is already cancelled.
-		toolCtx, endToolGrace := toolGraceContext(ctx, a.graceWindow())
-		// The turn's clock survives the grace boundary as a value: a tool that
-		// sizes its own work (delegate_task) has to know when the turn ends even
-		// though this context outlives it on purpose.
-		toolCtx = withTurnDeadline(toolCtx, ctx)
-		// A tool call has no iteration boundary, so a stop request and a loss
-		// are read on a timer while the tools run: a turn parked inside one
-		// call is still reachable (the 10-11 incident).
-		toolCtx, endToolWatch := lease.watchCancel(toolCtx, a.turnLeaseWatchInterval())
+		toolCtx, endToolRound := a.toolRoundContext(ctx, lease)
 		tcByID := make(map[string]provider.ToolCall, len(resp.ToolCalls))
 		for _, tc := range resp.ToolCalls {
 			tcByID[tc.ID] = tc
@@ -3168,48 +2926,9 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		}
 
 		results := a.engine.executeToolsConcurrently(toolCtx, a.registry, executeCalls, a.workspacePath, onResult)
-		endToolWatch()
-		endToolGrace()
-		// Append synthetic deferred results so every original tool_use
-		// id has a paired tool_result. The deferred message tells the
-		// model exactly why it didn't run — it can re-issue next
-		// round once it has the executed batch's results.
-		for _, tc := range deferredCalls {
-			results = append(results, toolCallResult{
-				toolCallID: tc.ID,
-				toolName:   tc.Function.Name,
-				result: fmt.Sprintf(
-					"Deferred — this turn's parallel-tool cap is %d, and you emitted %d. Re-issue this exact call next round if you still need it; you'll have the other tools' results to inform the decision then.",
-					rt.maxParallelToolCalls, len(resp.ToolCalls),
-				),
-			})
-		}
-
-		// Defensive backstop: if the SDK returned fewer results than tool
-		// calls (and the bridge somehow didn't already pad — belt and
-		// suspenders since orphan tool_use ids poison the next API request
-		// with HTTP 400), synthesize a failure result so every tool_use
-		// gets a paired tool_result in the conversation history.
-		if len(results) < len(resp.ToolCalls) {
-			padded := make([]toolCallResult, len(resp.ToolCalls))
-			gotByID := make(map[string]toolCallResult, len(results))
-			for _, r := range results {
-				gotByID[r.toolCallID] = r
-			}
-			for i, tc := range resp.ToolCalls {
-				if r, ok := gotByID[tc.ID]; ok {
-					padded[i] = r
-					continue
-				}
-				padded[i] = toolCallResult{
-					toolCallID: tc.ID,
-					toolName:   tc.Function.Name,
-					result:     "tool execution did not return a result",
-					err:        fmt.Errorf("missing executor response for %s", tc.ID),
-				}
-			}
-			results = padded
-		}
+		endToolRound()
+		results = append(results, deferredToolResults(deferredCalls, rt.maxParallelToolCalls, len(resp.ToolCalls))...)
+		results = padToolResults(resp.ToolCalls, results)
 
 		// Append the round's tool messages in declared order — the order the
 		// assistant message listed its tool_calls. A call that already finished
@@ -3253,11 +2972,13 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		// Last round of this segment: extend it when the work is going
 		// somewhere. A pure-failure segment keeps the old behavior (forced
 		// final delivery) — another budget would just burn on the same wall.
-		if i == rounds-1 && segProgress && segmentsUsed <= rt.maxToolContinues {
-			segmentsUsed++
-			rounds += rt.maxToolIterations
+		if nextRounds, nextSegments, nudge, extended := extendIterationBudget(
+			rt, i, rounds, segmentsUsed, segProgress,
+		); extended {
+			rounds = nextRounds
+			segmentsUsed = nextSegments
 			segProgress = false
-			messages = append(messages, iterationContinueNudge(rt.maxToolIterations, segmentsUsed, 1+rt.maxToolContinues))
+			messages = append(messages, nudge)
 			slog.Info("iteration budget extended",
 				"agent", a.name, "segment", segmentsUsed,
 				"segments", 1+rt.maxToolContinues, "rounds", rounds)
@@ -3647,133 +3368,26 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 		return a.stringStream(rejection)
 	}
 
-	// Same turn admission as HandleMessage: one turn at a time per session,
-	// queued callers wait (FIFO, cancellable). See HandleMessage for the
-	// rationale and docs/session-turn-integrity.md for the incident.
-	sess := a.sessions.Get(sessionTriple(msg, msg.ProjectID))
-	waitStart := time.Now()
-	// Same counting as the non-streaming twin: from contention to ownership.
-	stopWaiting := a.noteSessionWaiter(sess.Key())
-	// Same two gates as HandleMessage, same order (see there for why the lease
-	// goes first and is released last).
-	lease, leased := a.beginTurnLease(ctx, sess, func(evt ChatEvent) { emitEvent(ctx, evt) })
-	if !leased {
-		stopWaiting()
-		slog.Info("turn admission: lease not acquired",
-			"agent", a.name, "channel", msg.Channel, "chat_id", msg.ChatID,
-			"queued_ms", time.Since(waitStart).Milliseconds())
+	turn, admitted := a.admitTurn(ctx, msg)
+	if !admitted {
 		return a.stringStream("")
 	}
-	defer lease.Stop()
-	if sess.TurnActive() {
-		emitEvent(ctx, ChatEvent{Type: "queued", Data: map[string]any{
-			// Same as the non-streaming twin: the count includes this turn.
-			"position": a.queuedSubmissionsFor(sess.Key()),
-		}})
-	}
-	if !sess.AcquireTurn(ctx) {
-		stopWaiting()
-		slog.Info("turn admission: caller gave up while queued",
-			"agent", a.name, "channel", msg.Channel, "chat_id", msg.ChatID,
-			"queued_ms", time.Since(waitStart).Milliseconds())
-		return a.stringStream("")
-	}
-	stopWaiting()
-	if waited := time.Since(waitStart); waited > time.Second {
-		slog.Info("turn admission: waited for the in-flight turn",
-			"agent", a.name, "channel", msg.Channel, "chat_id", msg.ChatID,
-			"waited_ms", waited.Milliseconds(), "still_queued", sess.TurnWaiters())
-	}
-	// Past this point the turn owns the session and can no longer be
-	// withdrawn from the queue (see WithAdmissionSignal).
-	signalAdmission(ctx)
-	defer sess.ReleaseTurn()
-	rt := a.currentRuntime()
-	ctx = withAgentRuntime(ctx, rt)
+	defer turn.release()
+	ctx = turn.ctx
+	sess := turn.sess
+	rt := turn.rt
+	lease := turn.lease
 
-	chatterUID := a.chatterUserID(msg)
-	ctx = sandbox.WithUserID(ctx, chatterUID)
-	// Tag ctx so DBStore session writes stamp chatter_user_id — see
-	// the HandleMessage path for the rationale.
-	ctx = store.WithChatterUserID(ctx, chatterUID)
-	ctx = store.WithChannel(ctx, msg.Channel)
-	slog.Info("turn: refreshing skills",
-		"agent", a.name, "channel", msg.Channel, "chat_id", msg.ChatID, "user", chatterUID)
-	skills := a.refreshSkillsFromStore(ctx, chatterUID)
-	// sess was resolved when the turn slot was acquired above; reuse it.
-	// The API's streaming path is a turn too: same sampling, same receipt, so a
-	// change made while the agent was away is stated here as well (docs 10 §4,
-	// G20).
-	envSignal, runReceipt := a.signalEnvironmentChanges(ctx, chatterUID, msg.ChatID, sess.GetMessages(), skills)
-	// Bind chatter onto sess so its ctx() embeds WithChatterUserID
-	// for DBStore session writes — Session.ctx() rebuilds ctx from its
-	// own fields, so the chatter has to live on sess itself.
-	sess.SetChatter(chatterUID)
-	{
-		prov, mdl := provider.SplitProviderModel(rt.model)
-		sess.SetProviderModel(prov, mdl)
-		sess.SetRunReceipt(runReceipt)
-	}
-	ctx = a.bindSession(ctx, msg, chatterUID, sess.SessionKey(), a.isAdminChatter(msg), skills)
+	prompt := a.prepareTurnPrompt(turn, false)
+	ctx = prompt.ctx
+	chatterUID := prompt.chatterUID
+	chatterMem := prompt.chatterMem
+	knowledgeMeta := prompt.knowledgeMeta
+	messages := prompt.messages
+	toolDefs := prompt.toolDefs
+	historyStart := prompt.historyStart
 
-	// Same contract as HandleMessage: an unanswered tool_use stays open in the
-	// session, and normalizeForPrompt fills it at prompt-build time.
-
-	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: BeforeSystemPrompt, UserID: a.ownerUserID})
-	chatterMem := rt.memory.WithUserID(chatterUID)
-	systemPrompt := a.promptBuilderForTurn(ctx, skills, envSignal).BuildSystemPromptAs(chatterUID, chatterMem)
-	knowledgeMeta := knowledgeMetadata(extractKnowledgeCitationSources(systemPrompt))
-	a.logSystemPromptFingerprint(ctx, msg.Channel, msg.ChatID, chatterUID, systemPrompt)
-	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: AfterSystemPrompt, UserID: a.ownerUserID})
-
-	// Store raw user message — buildUserMessage handles multi-image
-	// flatten + senderMetadata. Group msgs keep their `[SenderName]:`
-	// prefix (applied in buildUserMessage); DMs stay bare.
-	userMsg := buildUserMessage(msg)
-	sess.Append(userMsg)
-
-	sessionMsgs := sess.GetMessages()
-	compactResult, err := CompactMessages(ctx, sessionMsgs, a.homePath, rt.provider, rt.model)
-	if err != nil {
-		slog.Warn("compaction error", "agent", a.name, "error", err)
-	}
-	if compactResult != nil && compactResult.Pruned {
-		sess.ReplaceMessages(compactResult.Messages)
-		sessionMsgs = compactResult.Messages
-	}
-
-	messages := make([]provider.Message, 0, len(sessionMsgs)+4)
-	messages = append(messages, provider.Message{Role: "system", Content: systemPrompt})
-	if hints := renderChannelHints(msg, rt.splitReplies); hints != "" {
-		messages = append(messages, provider.Message{Role: "system", Content: hints})
-	}
-	if senderMsg := renderSender(msg); senderMsg != "" {
-		messages = append(messages, provider.Message{Role: "system", Content: senderMsg})
-	}
-	if paramsMsg := renderClientParams(msg.Params); paramsMsg != "" {
-		messages = append(messages, provider.Message{Role: "system", Content: paramsMsg})
-	}
-	if reminder := renderChatbotPersistenceReminder(rt.promptMode, a.displayName, chatterMem.LoadUserFile(), chatterMem.LoadMemory()); reminder != "" {
-		messages = append(messages, provider.Message{Role: "system", Content: reminder})
-	}
-	// Same boundary as the non-streaming loop: the scaffolding above is not
-	// history, everything below is. See compactPromptAtRoundBoundary.
-	historyStart := len(messages)
-	// The prompt is a NORMALISED PROJECTION of stored history: the session
-	// keeps what actually happened, the model only ever sees well-formed
-	// call/reply pairs (docs/session-turn-integrity.md, clause P). Without
-	// this, a duplicated or orphaned reply from any past turn is replayed
-	// verbatim and can 400 every later request on the session.
-	messages = append(messages, a.withMessageTimestampsForChatter(ctx,
-		normalizeForPromptWith(sessionMsgs, a.openCallAnswer(ctx, sess)), chatterUID)...)
-
-	toolDefs := a.registry.DefinitionsForMode(builtinAllowForMode(rt.promptMode))
-
-	type toolCallSig struct {
-		name string
-		hash [32]byte
-	}
-	var lastSig toolCallSig
+	var lastSig toolCallSignature
 	consecutiveCount := 0
 	totalToolCalls := 0
 
@@ -3789,27 +3403,8 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 	// reply whose real reason is the user's stop.
 	stopReason := ""
 	for i := 0; i < rounds; i++ {
-		// Same supersession check as the non-streaming loop: stop writing into
-		// a history another turn now owns.
-		if lease.Lost() || sess.FenceLost() != nil {
-			slog.Warn("turn: superseded, stopping", "agent", a.name, "chat_id", msg.ChatID, "iteration", i+1)
-			stopReason = "superseded"
-			break
-		}
-		// The user's own stop request (design X1–X6): the request rode the lease
-		// row from wherever it was made, and this boundary is the delivery
-		// point. Say it — a turn that vanishes without a word is the failure
-		// mode the state-observability principle exists to prevent.
-		if lease.Cancelled(ctx) {
-			slog.Info("turn: cancelled by request", "agent", a.name, "chat_id", msg.ChatID, "iteration", i+1)
-			emitEvent(ctx, ChatEvent{Type: lostNoticeEvent, Data: map[string]any{
-				"message": turnCancelledNotice,
-				// Same structured ending as the non-streaming loop's stop (endings.go): a task read
-				// reports `stopped` from the field, never from the sentence.
-				"ending": EndingStopped,
-				"reason": "cancelled",
-			}})
-			stopReason = "cancelled"
+		if reason := a.turnBoundaryStop(ctx, lease, sess, msg, i+1); reason != "" {
+			stopReason = reason
 			break
 		}
 		hcBefore := &HookContext{AgentName: a.name, Point: BeforeModelCall, Messages: messages, Channel: msg.Channel, AccountID: msg.AccountID, ChatID: msg.ChatID, UserID: a.ownerUserID}
@@ -3931,26 +3526,11 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 		messages = append(messages, assistantMsg)
 
 		// Loop detection
-		loopDetected := false
-		for _, tc := range resp.ToolCalls {
-			sig := toolCallSig{
-				name: tc.Function.Name,
-				hash: sha256.Sum256([]byte(tc.Function.Arguments)),
-			}
-			if sig.name == lastSig.name && sig.hash == lastSig.hash {
-				consecutiveCount++
-			} else {
-				consecutiveCount = 1
-				lastSig = sig
-			}
-			if consecutiveCount >= 3 {
-				slog.Warn("tool loop detected", "agent", a.name, "tool", tc.Function.Name)
-				warnMsg := loopDetectedWarning(false)
-				sess.Append(warnMsg)
-				messages = append(messages, warnMsg)
-				loopDetected = true
-				break
-			}
+		loopDetected := detectToolLoop(a.name, resp.ToolCalls, &lastSig, &consecutiveCount)
+		if loopDetected {
+			warnMsg := loopDetectedWarning(false)
+			sess.Append(warnMsg)
+			messages = append(messages, warnMsg)
 		}
 		if loopDetected {
 			break
@@ -3960,19 +3540,12 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 		toolStarts := a.fireBeforeToolCalls(ctx, msg, resp.ToolCalls)
 
 		// Execute tools concurrently via SDK engine
-		toolCtx, endToolGrace := toolGraceContext(ctx, a.graceWindow())
-		// See the note in HandleMessage: the turn's deadline travels as a value.
-		toolCtx = withTurnDeadline(toolCtx, ctx)
-		// Same reason as the non-streaming loop: a tool call has no boundary,
-		// so the stop request and the loss are read on a timer while the
-		// tools run.
-		toolCtx, endToolWatch := lease.watchCancel(toolCtx, a.turnLeaseWatchInterval())
+		toolCtx, endToolRound := a.toolRoundContext(ctx, lease)
 		// The streaming endpoint emits no tool_call/tool_result events (its
 		// consumers read the stream, not the chat-event fan-out), so it passes
 		// no per-call callback — see executeToolsConcurrently.
 		results := a.engine.executeToolsConcurrently(toolCtx, a.registry, resp.ToolCalls, a.workspacePath, nil)
-		endToolWatch()
-		endToolGrace()
+		endToolRound()
 		totalToolCalls += len(results)
 
 		for idx, r := range results {
@@ -4003,11 +3576,13 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 			}
 		}
 
-		if i == rounds-1 && segProgress && segmentsUsed <= rt.maxToolContinues {
-			segmentsUsed++
-			rounds += rt.maxToolIterations
+		if nextRounds, nextSegments, nudge, extended := extendIterationBudget(
+			rt, i, rounds, segmentsUsed, segProgress,
+		); extended {
+			rounds = nextRounds
+			segmentsUsed = nextSegments
 			segProgress = false
-			messages = append(messages, iterationContinueNudge(rt.maxToolIterations, segmentsUsed, 1+rt.maxToolContinues))
+			messages = append(messages, nudge)
 			slog.Info("iteration budget extended",
 				"agent", a.name, "segment", segmentsUsed,
 				"segments", 1+rt.maxToolContinues, "rounds", rounds)
