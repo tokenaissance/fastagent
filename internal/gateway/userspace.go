@@ -927,149 +927,19 @@ func managerOptions(cfg *config.Config, userID string, st store.Store, ws worksp
 // system scope; agents will run with path-only file roots in that
 // case.
 func loadUserSpace(ctx context.Context, userID string, mb *bus.MessageBus, st store.Store, ws workspace.Store, meter usage.Meter, quotaStore usage.QuotaStore, systemSandboxPool sandbox.ExecutorPool, pluginMgr *plugin.Manager, projectRuntime *coderuntime.Manager, notifyAgent func(userID, agentID string), rcProvider func(ctx context.Context, scope agentconfig.Scope) (config.ResolvedAgent, error)) (*UserSpace, error) {
-	if userID == "" {
-		return nil, fmt.Errorf("loadUserSpace: userID required")
-	}
-	if st == nil {
-		return nil, fmt.Errorf("loadUserSpace: store required")
-	}
-	cfg, err := assembleConfig(ctx, st, userID, "")
-	if err != nil {
-		return nil, fmt.Errorf("assemble config: %w", err)
-	}
-	config.LoadEnv().ApplyToConfig(cfg)
-	config.ApplyDefaults(cfg)
-
-	prov := newProviderFromConfig(cfg)
-
-	// Pull the user's agents from the DB. ResolveAgents merges in the
-	// system+user defaults; per-agent overrides come from the configs
-	// table via the agent-scope `agents.defaults` row that the create /
-	// update agent handlers write to.
-	agentRecords, err := st.ListAgents(ctx, userID)
-	if err != nil {
-		return nil, fmt.Errorf("list agents: %w", err)
-	}
-
-	// Public agents owned by other users are NOT loaded eagerly here —
-	// they get lazy-attached via UserSpace.EnsureAgent the first time
-	// the chatter hits the public-agent chat URL (see resolveAgent).
-	// Sessions / memory / agent_files stay keyed by the chatter's
-	// user_id so each visitor gets a private history while the
-	// agent identity (SOUL/IDENTITY/skills) is shared from the
-	// owner's row.
-
-	entries := make([]config.AgentEntry, 0, len(agentRecords))
-	for _, ar := range agentRecords {
-		entries = append(entries, config.AgentEntry{ID: ar.ID, UserID: ar.UserID, Name: ar.Name})
-	}
-
-	// Bindings used to live in their own kind=setting/name=bindings
-	// row. After the configs schema refactor, channel rows carry
-	// agent_id directly, so we synthesize Bindings from the channel
-	// table itself — every row whose agent_id == one of this user's
-	// owned agents contributes one Binding per Account in its data.
-	cfg.Bindings = append(cfg.Bindings, bindingsFromChannelRows(ctx, st, userID, agentRecords)...)
-	resolved := config.ResolveAgents(cfg, entries, makeStoreFirstAgentFileLoader(st))
-	for i := range resolved {
-		// Layer the agent-scope agents.defaults on top of the
-		// system→user merge that ResolveAgents already applied. We
-		// read the agent-scope row directly (not via SettingInto
-		// system+user, which would re-merge those layers and clobber
-		// the user-scoped Model already in cfg.Agents.Defaults).
-		//
-		// Index into resolved (not range-by-value) so the writes
-		// land on the slice element the manager later reads —
-		// otherwise the agent-scope Model never reaches NewManager
-		// and chat silently uses the system/user default.
-		rc := &resolved[i]
-		resolveAgentScopeOverrides(ctx, st, rc)
-		ensureAgentHome(*rc)
-		if ws != nil {
-			if err := skills.HydrateSkillsDown(
-				ctx, ws, rc.ID, filepath.Join(rc.Home, "skills"),
-			); err != nil {
-				slog.Warn("skill hydrate failed", "agent", rc.ID, "error", err)
-			}
-		}
-	}
-	if ws != nil {
-		if dir, gerr := globalSkillsDirPath(); gerr == nil {
-			if err := skills.HydrateSkillsDown(
-				ctx, ws, skills.GlobalSkillOwner, dir,
-				agent.BundledSkillNames()...,
-			); err != nil {
-				slog.Warn("global skill hydrate failed", "error", err)
-			}
-		}
-	}
-
-	managerOpts := managerOptions(cfg, userID, st, ws, meter, quotaStore, notifyAgent)
-	if rcProvider != nil {
-		// Read the resolved agent through the versioned cache: `mcp add` in a
-		// session must be visible to `mcp login` in the same session.
-		managerOpts = append(managerOpts, agent.WithAgentConfigProvider(rcProvider))
-	}
-	if ws != nil {
-		managerOpts = append(managerOpts, agent.WithWorkspaceStore(ws))
-	}
-	if meter != nil {
-		managerOpts = append(managerOpts, agent.WithMeter(meter))
-	}
-	if quotaStore != nil {
-		managerOpts = append(managerOpts, agent.WithQuotaStore(quotaStore))
-	}
-	agentMgr, err := agent.NewManager(resolved, prov, mb, managerOpts...)
-	if err != nil {
-		return nil, fmt.Errorf("create agent manager for user %q: %w", userID, err)
-	}
-
-	// Tool chains are resolved per agent, not once for the whole space:
-	// agent-scope rows written by `fastagent tools ... --agent X` are part
-	// of the agent's effective config and were previously stored and then
-	// ignored. Two batched queries cover every agent, and agents with no
-	// overlay reuse `cfg` unchanged.
-	agentIDs := make([]string, 0, len(agentMgr.All()))
-	for _, ag := range agentMgr.All() {
-		agentIDs = append(agentIDs, ag.Name())
-	}
-	agentToolOverlays := toolOverlaysForAgents(ctx, st, userID, agentIDs)
-	for _, ag := range agentMgr.All() {
-		registerAgentToolChains(applyToolOverlay(cfg, agentToolOverlays[ag.Name()]), []*agent.Agent{ag}, makeStoreFirstAgentFileLoader(st))
-	}
-
-	pool := attachSandboxToAgents(systemSandboxPool, userID, resolved, agentMgr)
-
-	// Coding-agent runtime: hand every agent the preview tools. Nil when
-	// no runtime is configured, in which case agents stay plain
-	// assistants (no preview tools, per-chat file isolation unchanged).
-	if projectRuntime != nil {
-		for _, ag := range agentMgr.All() {
-			ag.SetProjectRuntime(projectRuntime)
-		}
-	}
-
-	// Wire hook plugins onto each agent's HookRegistry. Per-agent
-	// enable comes from the configs row at (scope=agent, agent_id=X,
-	// name=plugins.enabled) — falling back to the plugin manifest's
-	// boot-time enabled state when there's no per-agent override.
-	if pluginMgr != nil {
-		for _, ag := range agentMgr.All() {
-			registerHookPluginsForAgent(ctx, pluginMgr, st, ag)
-		}
-	}
-
-	slog.Info("loaded user space", "user", userID, "agents", agentMgr.Names())
-
-	return &UserSpace{
-		UserID:         userID,
-		Config:         cfg,
-		Provider:       prov,
-		Agents:         agentMgr,
-		SandboxPool:    pool,
-		PluginMgr:      pluginMgr,
-		ProjectRuntime: projectRuntime,
-	}, nil
+	return (&userSpaceFactory{
+		userID:            userID,
+		mb:                mb,
+		st:                st,
+		ws:                ws,
+		meter:             meter,
+		quotaStore:        quotaStore,
+		systemSandboxPool: systemSandboxPool,
+		pluginMgr:         pluginMgr,
+		projectRuntime:    projectRuntime,
+		notifyAgent:       notifyAgent,
+		rcProvider:        rcProvider,
+	}).Build(ctx)
 }
 
 // registerHookPluginsForAgent walks every running hook-type plugin
