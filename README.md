@@ -56,9 +56,6 @@ Two consequences are worth knowing:
 - A checkout of this repository carries two remotes. `git remote -v` shows them,
   and `fastagent` is the canonical one.
 
-The rename, and what it touched, is recorded in
-[docs/REBRAND/REBRAND_PLAN.md](./docs/REBRAND/REBRAND_PLAN.md).
-
 ## Quick Start
 
 ### 1. First Run
