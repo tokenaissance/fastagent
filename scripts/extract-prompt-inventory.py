@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
-"""Extract every model-facing prompt string into docs/prompt-inventory/.
+"""Extract every model-facing prompt string into internal/agent/testdata/prompt-inventory/.
 
-The prompt text of this repo lives in six places (see docs/prompt-inventory.md):
+The prompt text of this repo lives in six places:
 system-prompt modules, per-turn system blocks, tool descriptions, tool-result
 text, sub-process prompts, and skills. Nobody can review that in one sitting
 from the source alone, and somebody has to notice when the wording drifts.
 
 This script writes the VERBATIM text — Go string literals joined the way the
 compiler joins them, with `%s`/`%d` placeholders left in place — into
-docs/prompt-inventory/*.md, each block carrying its `file:line` provenance.
+internal/agent/testdata/prompt-inventory/*.md, each block carrying its `file:line` provenance.
 
 Regenerate after touching any prompt:
 
     python3 scripts/extract-prompt-inventory.py
 
-Then update docs/prompt-inventory.md if the inventory's structure changed (a new
+Then update the inventory structure notes in the private archive if the shape changed (a new
 tool, a new module, a new nudge).
 """
 
@@ -25,7 +25,7 @@ import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-OUT = os.path.join(ROOT, "docs", "prompt-inventory")
+OUT = os.path.join(ROOT, "internal", "agent", "testdata", "prompt-inventory")
 
 # Rendered content by filename; main() writes it or — with --check — verifies that
 # what is on disk still matches the source.
@@ -363,7 +363,7 @@ def main():
         # still line ranges: a shift that lands on different text is the one
         # drift this file cannot yet see, and a shift that lands on no literal
         # fails the run — see PLACEHOLDERS.)
-        + [pinned("internal/agent/loop.go", "Deferred — this turn's parallel-tool cap",
+        + [pinned("internal/agent/turn_tool_round.go", "Deferred — this turn's parallel-tool cap",
                   "deferred tool result")]
         + symbols("internal/agent/subagent.go", ["subagentSystemSuffix"]),
         "b-per-turn-blocks.md",
