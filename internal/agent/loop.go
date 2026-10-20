@@ -2643,6 +2643,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	sess := turn.sess
 	rt := turn.rt
 	lease := turn.lease
+	finalizer := newTurnFinalizer(a)
 
 	// Plan mode short-circuits the ReAct loop: tools off, the model
 	// emits a numbered plan, the user reviews it and replies normally
@@ -2744,7 +2745,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 			noProviderMsg := "Agent is not configured with a usable LLM provider. Check that cfg.Providers contains the prefix referenced by model `" + rt.model + "`."
 			emitEvent(ctx, ChatEvent{Type: "error", Data: map[string]any{"message": noProviderMsg, "ending": EndingFailed}})
 			emitEvent(ctx, ChatEvent{Type: "done", Data: map[string]any{"ending": EndingFailed}})
-			a.afterFailedTurn(ctx, msg, messages, totalToolCalls, chatterMem)
+			finalizer.finalizeFailed(ctx, turnFinalizeInput{msg: msg, messages: messages, toolCallCount: totalToolCalls, chatterMemory: chatterMem})
 			return noProviderMsg
 		}
 		// After enough consecutive rounds where every tool came back
@@ -2772,7 +2773,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 			slog.Error("LLM chat failed after retries", "agent", a.name, "error", err)
 			emitEvent(ctx, ChatEvent{Type: "error", Data: map[string]any{"message": err.Error(), "ending": EndingFailed}})
 			emitEvent(ctx, ChatEvent{Type: "done", Data: map[string]any{"ending": EndingFailed}})
-			a.afterFailedTurn(ctx, msg, messages, totalToolCalls, chatterMem)
+			finalizer.finalizeFailed(ctx, turnFinalizeInput{msg: msg, messages: messages, toolCallCount: totalToolCalls, chatterMemory: chatterMem})
 			return "Sorry, I encountered an error processing your request."
 		}
 		a.meterTokens(ctx, sess.Key(), resp.Usage, 0)
@@ -2785,7 +2786,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 				// reader should take is "ask again", which is why §14.3 keeps the value separate.
 				emitEvent(ctx, ChatEvent{Type: "error", Data: map[string]any{"message": emptyMsg, "ending": EndingEmpty}})
 				emitEvent(ctx, ChatEvent{Type: "done", Data: map[string]any{"ending": EndingEmpty}})
-				a.afterFailedTurn(ctx, msg, messages, totalToolCalls, chatterMem)
+				finalizer.finalizeFailed(ctx, turnFinalizeInput{msg: msg, messages: messages, toolCallCount: totalToolCalls, chatterMemory: chatterMem})
 				return emptyMsg
 			}
 			// Stamp this turn's produced files onto the reply that closes it:
@@ -2818,7 +2819,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 			// The turn is over and it answered: the content event was emitted just above (this
 			// branch is only reached with non-empty content — the empty case returned earlier).
 			emitEvent(ctx, ChatEvent{Type: "done", Data: map[string]any{"ending": EndingReplied}})
-			a.runPostTurn(ctx, msg, messages, totalToolCalls, chatterMem)
+			finalizer.finalizeSucceeded(ctx, turnFinalizeInput{msg: msg, messages: messages, toolCallCount: totalToolCalls, chatterMemory: chatterMem})
 			return joinReplyParts(replyParts)
 		}
 
@@ -3036,7 +3037,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		replyParts = append(replyParts, finalContent)
 	}
 	emitEvent(ctx, ChatEvent{Type: "done", Data: map[string]any{"ending": EndingReplied}})
-	a.runPostTurn(ctx, msg, messages, totalToolCalls, chatterMem)
+	finalizer.finalizeSucceeded(ctx, turnFinalizeInput{msg: msg, messages: messages, toolCallCount: totalToolCalls, chatterMemory: chatterMem})
 	return joinReplyParts(replyParts)
 }
 
@@ -3100,26 +3101,6 @@ func firstNonEmptyLine(s string) string {
 		return line
 	}
 	return ""
-}
-
-// afterFailedTurn runs the PostTurn hooks for a turn that ended in FAILURE, and it is not
-// decoration: the goal continuation is one of those hooks, so a goal whose turn failed used to
-// stop for good — the chain only advanced on a clean exit. Measured 2026-09-28 on production: a
-// goal turn was cut at its 300 s budget, the early return skipped PostTurn, and the goal sat
-// `active` for 86 minutes with nobody scheduled to move it until the user typed "continue"; a
-// provider 402 (insufficient balance) broke the same chain the same way an hour earlier.
-//
-// It deliberately does NOT run for a turn that was stopped or superseded: a stop is the user's
-// decision and a supersede means another holder owns the session — re-firing a continuation in
-// either case would fight the decision that just happened.
-//
-// The hooks write (token accounting, the goal store) and the failed turn's ctx is frequently
-// already past its deadline — which is exactly why the failure happened — so they run through
-// recordCtx: values kept, no inherited deadline, a short bound of their own.
-func (a *Agent) afterFailedTurn(ctx context.Context, msg bus.InboundMessage, messages []provider.Message, toolCallCount int, chatterMem *Memory) {
-	hookCtx, cancel := recordCtx(ctx, postTurnAfterFailureBudget)
-	defer cancel()
-	a.runPostTurn(hookCtx, msg, messages, toolCallCount, chatterMem)
 }
 
 // msg is the InboundMessage that drove this turn — its (channel, account,
@@ -3372,11 +3353,24 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 	if !admitted {
 		return a.stringStream("")
 	}
-	defer turn.release()
+	// The stream owns the turn until its final message is persisted. A plain
+	// defer here released the session slot the moment this function returned,
+	// while the goroutine that appends the reply was still running — the next
+	// turn could then write the same session concurrently. The flag transfers
+	// the release to the goroutine that finishes the turn.
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(turn.release) }
+	streamOwnsRelease := false
+	defer func() {
+		if !streamOwnsRelease {
+			release()
+		}
+	}()
 	ctx = turn.ctx
 	sess := turn.sess
 	rt := turn.rt
 	lease := turn.lease
+	finalizer := newTurnFinalizer(a)
 
 	prompt := a.prepareTurnPrompt(turn, false)
 	ctx = prompt.ctx
@@ -3420,6 +3414,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 
 		if err != nil {
 			slog.Error("LLM chat failed after retries", "agent", a.name, "error", err)
+			finalizer.finalizeFailed(ctx, turnFinalizeInput{msg: msg, messages: messages, toolCallCount: totalToolCalls, chatterMemory: chatterMem})
 			return a.stringStream("Sorry, I encountered an error processing your request.")
 		}
 		a.meterTokens(ctx, sess.Key(), resp.Usage, 0)
@@ -3432,7 +3427,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 				slog.Error("LLM stream failed, falling back", "agent", a.name, "error", err)
 				fallbackMsg := provider.Message{Role: "assistant", Content: resp.Content, Metadata: knowledgeMeta}
 				sess.Append(fallbackMsg)
-				a.runPostTurn(ctx, msg, append(messages, fallbackMsg), totalToolCalls, chatterMem)
+				finalizer.finalizeSucceeded(ctx, turnFinalizeInput{msg: msg, messages: append(messages, fallbackMsg), toolCallCount: totalToolCalls, chatterMemory: chatterMem})
 				return a.stringStream(resp.Content)
 			}
 
@@ -3446,8 +3441,10 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 			capturedChatterMem := chatterMem
 			outCh := make(chan provider.StreamChunk, 64)
 			outReader := provider.NewStreamReader(outCh)
+			streamOwnsRelease = true
 			go func() {
 				defer close(outCh)
+				defer release()
 				var full strings.Builder
 				var thinking, thinkingSig string
 				var rawAssistant json.RawMessage
@@ -3507,7 +3504,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 				// silently skipped it. (This line used to point at "the
 				// FIXME at runPostTurn"; there has never been one — the call
 				// below is what closed the gap, so the pointer is retired.)
-				a.runPostTurn(ctx, inboundMsg, append(messagesAtTurnStart, msg), capturedToolCalls, capturedChatterMem)
+				finalizer.finalizeSucceeded(ctx, turnFinalizeInput{msg: inboundMsg, messages: append(messagesAtTurnStart, msg), toolCallCount: capturedToolCalls, chatterMemory: capturedChatterMem})
 			}()
 			return outReader
 		}
@@ -3600,7 +3597,9 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 	}
 	capBudget := segmentsUsed * rt.maxToolIterations
 	slog.Warn("max tool iterations reached — streaming forced final delivery", "agent", a.name, "max", capBudget)
-	return a.streamFinalDeliveryAfterCap(ctx, msg, messages, sess, totalToolCalls, chatterMem, capBudget)
+	reader, streamOwnsTurn := a.streamFinalDeliveryAfterCap(ctx, msg, messages, sess, totalToolCalls, chatterMem, capBudget, finalizer, release)
+	streamOwnsRelease = streamOwnsTurn
+	return reader
 }
 
 // streamFinalDeliveryAfterCap runs one extra ChatStream with tools
@@ -3608,7 +3607,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 // with iteration-cap metadata so the chat UI can badge the bubble.
 // Returned StreamReader matches the contract of the normal "final
 // response" branch above so callers don't need a special case.
-func (a *Agent) streamFinalDeliveryAfterCap(ctx context.Context, inboundMsg bus.InboundMessage, messages []provider.Message, sess *session.Session, toolCallCount int, chatterMem *Memory, capBudget int) *provider.StreamReader {
+func (a *Agent) streamFinalDeliveryAfterCap(ctx context.Context, inboundMsg bus.InboundMessage, messages []provider.Message, sess *session.Session, toolCallCount int, chatterMem *Memory, capBudget int, finalizer *turnFinalizer, release func()) (*provider.StreamReader, bool) {
 	rt := a.runtimeFor(ctx)
 	capMeta := mergeMetadata(iterationCapMetadata(capBudget), knowledgeMetadata(extractKnowledgeCitationSources(firstSystemContent(messages))))
 	finalMessages := append(messages, capReachedNudge(capBudget))
@@ -3620,14 +3619,15 @@ func (a *Agent) streamFinalDeliveryAfterCap(ctx context.Context, inboundMsg bus.
 		fallbackMsg := provider.Message{Role: "assistant", Content: fallback, Metadata: capMeta, Timestamp: time.Now().UnixMilli()}
 		sess.Append(fallbackMsg)
 		emitEvent(ctx, ChatEvent{Type: "content", Data: map[string]any{"content": fallback, "metadata": capMeta}})
-		a.runPostTurn(ctx, inboundMsg, append(messages, fallbackMsg), toolCallCount, chatterMem)
-		return a.stringStream(fallback)
+		finalizer.finalizeSucceeded(ctx, turnFinalizeInput{msg: inboundMsg, messages: append(messages, fallbackMsg), toolCallCount: toolCallCount, chatterMemory: chatterMem})
+		return a.stringStream(fallback), false
 	}
 
 	outCh := make(chan provider.StreamChunk, 64)
 	outReader := provider.NewStreamReader(outCh)
 	go func() {
 		defer close(outCh)
+		defer release()
 		var full strings.Builder
 		var thinking, thinkingSig string
 		var rawAssistant json.RawMessage
@@ -3694,9 +3694,9 @@ func (a *Agent) streamFinalDeliveryAfterCap(ctx context.Context, inboundMsg bus.
 		// Fire PostTurn so AutoPersist (and any future PostTurn hook)
 		// runs on the streaming path too — see the no-tool-calls
 		// branch in HandleMessageStream for the rationale.
-		a.runPostTurn(ctx, inboundMsg, append(messages, finalMsg), toolCallCount, chatterMem)
+		finalizer.finalizeSucceeded(ctx, turnFinalizeInput{msg: inboundMsg, messages: append(messages, finalMsg), toolCallCount: toolCallCount, chatterMemory: chatterMem})
 	}()
-	return outReader
+	return outReader, true
 }
 
 // extractToolMeta strips a FC_META prefix (if present) from a tool result and
