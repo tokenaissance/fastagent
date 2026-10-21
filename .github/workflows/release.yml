@@ -35,15 +35,32 @@ jobs:
 
       - name: Build binaries
         run: |
+          set -eu
+          version="${GITHUB_REF_NAME}"
+          commit="${GITHUB_SHA}"
+          built="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          # Two readers of the version: the CLI's main package and the admin UI's
+          # buildinfo package. The Makefile stamps both, so this step stamps both
+          # as well; a release that only stamped main would show "dev" in the UI.
+          ldflags="-s -w \
+            -X main.version=${version} -X main.commit=${commit} -X main.date=${built} \
+            -X github.com/fastclaw-ai/fastclaw/internal/buildinfo.Version=${version} \
+            -X github.com/fastclaw-ai/fastclaw/internal/buildinfo.Commit=${commit} \
+            -X github.com/fastclaw-ai/fastclaw/internal/buildinfo.Date=${built}"
           mkdir -p dist
           for pair in darwin/arm64 darwin/amd64 linux/arm64 linux/amd64 windows/arm64 windows/amd64; do
-            GOOS="${pair%/*}" GOARCH="${pair#*/}" CGO_ENABLED=0 \
-              go build -ldflags "${{ env.LDFLAGS }}" \
-              -o "dist/fastagent_${pair%/*}_${pair#*/}/fastagent$( [ "${pair%/*}" = windows ] && echo .exe )" \
-              ./cmd/fastagent
+            os="${pair%/*}"
+            arch="${pair#*/}"
+            out="dist/fastagent_${os}_${arch}/fastagent"
+            [ "$os" = windows ] && out="${out}.exe"
+
+            GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 \
+              go build -ldflags "$ldflags" -o "$out" ./cmd/fastclaw
           done
-        env:
-          LDFLAGS: -s -w -X main.version=${{ github.ref_name }} -X main.commit=${{ github.sha }} -X main.date=${{ github.event.head_commit.timestamp }}
+
+          # The stamped values are the one claim a release must not get wrong, so
+          # read them back from a binary the runner can execute natively.
+          dist/fastagent_linux_amd64/fastagent version
 
       - name: Package artifacts
         run: |
