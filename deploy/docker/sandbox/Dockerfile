@@ -1,7 +1,15 @@
 # fastclaw-sandbox (rebuilt 2026-09-30) — runtime image for the agent's exec sandbox.
 #
 # Built from scratch, but PINNED to the version set that works:
-#   camoufox-cli 0.7.3  → camoufox==0.4.11, playwright==1.52.0   (its own pins; recorded in labels)
+#   camoufox-cli 0.7.6  → camoufox==0.4.11, playwright==1.52.0   (its own pins; recorded in labels)
+#
+# 0.7.3 left PyPI (2026-10-22: the release list is 0.7.0 and 0.7.6, nothing in between), which
+# made this file unbuildable without touching anything else. Moving to 0.7.6 rather than 0.7.0
+# because 0.7.6 declares the SAME two pins recorded above — camoufox[geoip]==0.4.11 and
+# playwright==1.52.0 — so the jump cannot reintroduce the schema/config mismatch that the
+# 0.4.0 line shipped; 0.7.0 would be a downgrade into older code for no reason. The browser
+# gate below re-proved the pair in a real build (2026-10-22, linux/arm64): open about:blank
+# exited 0 and `pip show` printed 0.7.6 / 0.4.11 / 1.52.0.
 # Read out of local/fastclaw-sandbox-ourbuild (the earlier from-scratch build, which opens a
 # browser fine). The 0.4.0 line cannot be reproduced — its `install --with-deps` now fails
 # because the remote asset it points at has moved — and an UNPINNED install resolves to
@@ -99,7 +107,7 @@ RUN set -eu; \
 # the same mistake this file's header already records for camoufox. It also has its own copy
 # of the roots, so the Debian strip above does not reach it.
 RUN pip install --break-system-packages --no-cache-dir \
-        camoufox-cli==0.7.3 \
+        camoufox-cli==0.7.6 \
         uv==0.13.4 \
         requests==2.33.1 \
         "certifi>=2026.10.19" \
@@ -133,7 +141,7 @@ RUN mv /usr/local/bin/camoufox-cli /usr/local/bin/camoufox-cli-bin \
  && mv /usr/local/bin/camoufox-cli-shim /usr/local/bin/camoufox-cli \
  && chmod 0755 /usr/local/bin/camoufox-cli
 
-LABEL org.fastagent.camoufox-cli="0.7.3" \
+LABEL org.fastagent.camoufox-cli="0.7.6" \
       org.fastagent.camoufox="0.4.11" \
       org.fastagent.playwright="1.52.0" \
       org.fastagent.sandbox-shim="camoufox-cli-shim (proxy + one retry)" \
