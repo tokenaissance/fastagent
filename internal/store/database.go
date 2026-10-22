@@ -2092,6 +2092,23 @@ func migrationSQLForDialect(dialect string) []string {
 			cancel_requested BIGINT NOT NULL DEFAULT 0,
 			PRIMARY KEY (user_id, agent_id, session_key)
 		)`,
+		// session_queue is the durable wait list for dashboard turns. It exists
+		// because the wait used to live only in one pod's process: a reload, a
+		// pod restart, or a cancel routed to another replica lost it. seq is
+		// assigned per session at acceptance, so position and admission order
+		// are facts of the store, not of whichever pod answered.
+		`CREATE TABLE IF NOT EXISTS session_queue (
+			id          TEXT PRIMARY KEY,
+			user_id     TEXT NOT NULL,
+			agent_id    TEXT NOT NULL,
+			session_key TEXT NOT NULL,
+			seq         BIGINT NOT NULL,
+			text        TEXT NOT NULL DEFAULT '',
+			state       TEXT NOT NULL,
+			created_at  TIMESTAMP NOT NULL,
+			expires_at  TIMESTAMP NOT NULL,
+			UNIQUE (user_id, agent_id, session_key, seq)
+		)`,
 		// session_turns is the cross-replica turn lease (docs/session-turn-integrity.md
 		// A1, docs/文件系统形式化证明/12-lease-formal-design.md L1–L6): one row per
 		// session, claiming "at most one turn is writing this history". It is a
