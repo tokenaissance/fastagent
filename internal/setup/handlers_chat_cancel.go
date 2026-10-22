@@ -22,11 +22,9 @@ import (
 type pendingWebTurn struct {
 	cancel  context.CancelFunc
 	started bool
-	// seq is the order this submission was ACCEPTED in. The map has no order of its own, and "the
-	// earliest queued instruction" is a contract (§14.2's withdraw_task), so the registration assigns
-	// one. It is a per-process counter on purpose: this queue's lifetime is the process (path 1 gave the
-	// entry the wait's lifetime; a pod restart or a hand-off still loses it, and that boundary is
-	// declared rather than papered over — see docs/mcp-task-submission.md §14.6).
+	// seq is only the no-store test fallback's ordering. Production chooses the
+	// earliest queued instruction by session_queue.seq, so this cache never
+	// decides what withdraw_task returns.
 	seq int64
 }
 
@@ -59,9 +57,9 @@ func (s *Server) registerPendingTurn(key string, cancel context.CancelFunc) *pen
 // lives in the pending entry (the text never reached this layer, and the position is a live count the
 // emitter owns), so the answer names the submission and nothing else rather than inventing the rest.
 func (s *Server) withdrawEarliestPendingTurn(ctx context.Context, uid, agentID, sessionID string) (string, bool) {
-	// Durable first: MCP's withdraw_task asks for the OLDEST queued submission,
-	// and that submission may belong to another pod. The local map is only a
-	// fast path for this pod's own waiters.
+	// The store is the only source for "the OLDEST queued submission": MCP's
+	// withdraw_task may land on another pod. The local map is a cancellation
+	// cache, never an ordering source.
 	if qs, ok := s.dataStore.(store.SessionQueueStore); ok {
 		if list, err := qs.ListSessionQueue(ctx, uid, agentID, sessionID); err == nil {
 			now := time.Now()
@@ -80,7 +78,16 @@ func (s *Server) withdrawEarliestPendingTurn(ctx context.Context, uid, agentID, 
 				}
 			}
 		}
+		// A store that is present but has no queued row is the answer; the
+		// local map is a cancellation cache, not a second queue.
+		return "", false
 	}
+	if s.dataStore != nil {
+		// Production always wires a queue store. A different store without the
+		// capability must not silently fall back to pod-local ordering.
+		return "", false
+	}
+	// Test-only fallback for harnesses with no store at all.
 	s.pendingTurnsMu.Lock()
 	defer s.pendingTurnsMu.Unlock()
 	prefix := uid + "|" + agentID + "|" + sessionID + "|"

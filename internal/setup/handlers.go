@@ -1248,22 +1248,25 @@ func (s *Server) handleChatSteer(w http.ResponseWriter, r *http.Request) {
 		dupScope = idempotencyScopeKey("steer", uid, ag.Name(), req.SessionID, clientIdentityOf(r), dupKey)
 		dupDigest = instructionDigest([]string{req.Message})
 		verdict := idempotencyMiss
-		if ids, ok := s.dataStore.(store.ChatIdempotencyStore); ok {
-			v, _, err := ids.ClaimChatIdempotency(r.Context(), dupScope, dupDigest, "", idempotencyTTL)
-			if err == nil {
-				idemStore, stored = ids, true
-				switch v {
-				case store.IdempotencyDuplicate:
-					verdict = idempotencyDuplicate
-				case store.IdempotencyConflict:
-					verdict = idempotencyConflict
-				}
-			} else {
-				slog.Warn("steer: durable idempotency claim failed; using the local window", "error", err)
-			}
-		}
-		if !stored {
+		if s.dataStore == nil {
 			verdict, _ = s.idempotencyVerdictFor(dupScope, dupDigest)
+		} else if ids, ok := s.dataStore.(store.ChatIdempotencyStore); !ok {
+			// Test-only fallback; the DB store always implements this.
+			verdict, _ = s.idempotencyVerdictFor(dupScope, dupDigest)
+		} else {
+			v, _, err := ids.ClaimChatIdempotency(r.Context(), dupScope, dupDigest, "", idempotencyTTL)
+			if err != nil {
+				slog.Error("steer: durable idempotency claim failed", "error", err)
+				jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": "idempotency_failed"})
+				return
+			}
+			idemStore, stored = ids, true
+			switch v {
+			case store.IdempotencyDuplicate:
+				verdict = idempotencyDuplicate
+			case store.IdempotencyConflict:
+				verdict = idempotencyConflict
+			}
 		}
 		switch verdict {
 		case idempotencyConflict:
@@ -1346,25 +1349,29 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		dupDigest = instructionDigest(parts)
 		verdict := idempotencyMiss
 		firstTurnID := ""
-		if ids, ok := s.dataStore.(store.ChatIdempotencyStore); ok {
-			v, first, err := ids.ClaimChatIdempotency(r.Context(), dupScope, dupDigest, turnID, idempotencyTTL)
-			if err == nil {
-				idempotencyStored = true
-				firstTurnID = first
-				switch v {
-				case store.IdempotencyDuplicate:
-					verdict = idempotencyDuplicate
-				case store.IdempotencyConflict:
-					verdict = idempotencyConflict
-				default:
-					verdict = idempotencyMiss
-				}
-			} else {
-				slog.Warn("chat: durable idempotency claim failed; using the local window", "error", err)
-			}
-		}
-		if !idempotencyStored {
+		if s.dataStore == nil {
+			// Test harnesses without a store keep the old in-process window.
 			verdict, firstTurnID = s.idempotencyVerdictFor(dupScope, dupDigest)
+		} else if ids, ok := s.dataStore.(store.ChatIdempotencyStore); !ok {
+			// A non-DB test store. Production's store always implements this.
+			verdict, firstTurnID = s.idempotencyVerdictFor(dupScope, dupDigest)
+		} else {
+			v, first, err := ids.ClaimChatIdempotency(r.Context(), dupScope, dupDigest, turnID, idempotencyTTL)
+			if err != nil {
+				slog.Error("chat: durable idempotency claim failed", "error", err)
+				jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": "idempotency_failed"})
+				return
+			}
+			idempotencyStored = true
+			firstTurnID = first
+			switch v {
+			case store.IdempotencyDuplicate:
+				verdict = idempotencyDuplicate
+			case store.IdempotencyConflict:
+				verdict = idempotencyConflict
+			default:
+				verdict = idempotencyMiss
+			}
 		}
 		switch verdict {
 		case idempotencyConflict:

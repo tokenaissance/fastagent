@@ -44,6 +44,7 @@ func (d *DBStore) ClaimChatIdempotency(ctx context.Context, scopeKey, digest, tu
 			return "", "", err
 		}
 		if n, err := res.RowsAffected(); err == nil && n == 1 {
+			d.cleanupChatIdempotency(ctx, ttl)
 			return IdempotencyMiss, turnID, nil
 		}
 
@@ -90,4 +91,21 @@ func (d *DBStore) DeleteChatIdempotency(ctx context.Context, scopeKey string) er
 		"DELETE FROM chat_idempotency WHERE scope_key = "+d.ph(1), scopeKey,
 	)
 	return err
+}
+
+// cleanupChatIdempotency drops rows past the window so the table is bounded by
+// live keys, not by every key the deployment has ever seen. It runs on the rare
+// insert path, behind the created_at index.
+func (d *DBStore) cleanupChatIdempotency(ctx context.Context, ttl time.Duration) {
+	if d.dialect == "postgres" {
+		_, _ = d.handle().ExecContext(ctx,
+			"DELETE FROM chat_idempotency WHERE created_at < now() - ("+d.ph(1)+" * interval '1 second')",
+			int64(ttl.Seconds()),
+		)
+		return
+	}
+	_, _ = d.handle().ExecContext(ctx,
+		"DELETE FROM chat_idempotency WHERE created_at < "+d.ph(1),
+		time.Now().Add(-ttl),
+	)
 }

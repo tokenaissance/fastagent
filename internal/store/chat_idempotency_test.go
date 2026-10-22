@@ -41,6 +41,28 @@ func TestChatIdempotencyClaim(t *testing.T) {
 	}
 }
 
+func TestChatIdempotencyCleanupBoundsTheTable(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	defer db.Close()
+	if _, _, err := db.ClaimChatIdempotency(ctx, "old", "d", "t1", time.Minute); err != nil {
+		t.Fatalf("old claim: %v", err)
+	}
+	if _, err := db.handle().ExecContext(ctx, "UPDATE chat_idempotency SET created_at = ? WHERE scope_key = ?", time.Now().Add(-2*time.Minute), "old"); err != nil {
+		t.Fatalf("age row: %v", err)
+	}
+	if _, _, err := db.ClaimChatIdempotency(ctx, "new", "d", "t2", time.Minute); err != nil {
+		t.Fatalf("new claim: %v", err)
+	}
+	var n int
+	if err := db.handle().QueryRowContext(ctx, "SELECT COUNT(*) FROM chat_idempotency").Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("rows after cleanup = %d; want 1", n)
+	}
+}
+
 func TestChatIdempotencyConcurrentClaims(t *testing.T) {
 	ctx := context.Background()
 	db := openTestDB(t)

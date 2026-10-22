@@ -106,20 +106,19 @@ type Server struct {
 	// the composition root; nil keeps the admin endpoint at 503 rather than
 	// reporting zeros for a cache nobody built.
 	configCacheStats func(context.Context) (agentconfig.Snapshot, bool)
-	// pendingTurns tracks dashboard chat POSTs whose turn has not started yet
-	// (queued behind another turn on the same session) so the client can
-	// withdraw them. Keyed by uid|agent|session|turnID — see
-	// handlers_chat_cancel.go.
+	// pendingTurns is a LOCAL CANCELLATION CACHE for dashboard chat POSTs whose
+	// turn has not started. It exists so this pod can stop its own waiter
+	// without waiting for the 2s store poll. It is not a source of truth:
+	// presence/absence, order, and withdrawal all read session_queue. Keyed by
+	// uid|agent|session|turnID — see handlers_chat_cancel.go.
 	pendingTurnsMu sync.Mutex
 	pendingTurns   map[string]*pendingWebTurn
-	// pendingSeq numbers submissions in acceptance order, which is the only order this queue has
-	// (see pendingWebTurn.seq).
+	// pendingSeq numbers submissions in acceptance order for the no-store test
+	// fallback only. Production order is session_queue.seq.
 	pendingSeq int64
-	// idempotency holds the de-duplication keys this pod has accepted, so a retry of one
-	// instruction by one client does not become two. Process-local BY CHOICE
-	// (docs/fastagent/design/14-turn-identity.md §3.2): it is checked in the acceptance
-	// critical section, and it is trustworthy exactly as far as session affinity is — the rows
-	// where that fails are named in docs/chat-event-delivery-placement.md §4.
+	// idempotency is the TEST-ONLY fallback for harnesses with no store. Production
+	// uses chat_idempotency, so a retry on another pod cannot create a second
+	// instruction. The handler never reads this map when dataStore is non-nil.
 	idempotencyMu sync.Mutex
 	idempotency   map[string]idempotencyEntry
 	// runtimeMgr powers the coding-agent project runtime (live dev server

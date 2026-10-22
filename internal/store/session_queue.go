@@ -62,6 +62,11 @@ func (d *DBStore) EnqueueSessionQueue(ctx context.Context, entry *SessionQueueEn
 	if entry.State == "" {
 		entry.State = SessionQueueQueued
 	}
+	switch entry.State {
+	case SessionQueueQueued, SessionQueueStarted, SessionQueueCanceled:
+	default:
+		return 0, fmt.Errorf("store: invalid queue state %q", entry.State)
+	}
 	if entry.CreatedAt.IsZero() {
 		entry.CreatedAt = time.Now()
 	}
@@ -89,6 +94,9 @@ func (d *DBStore) EnqueueSessionQueue(ctx context.Context, entry *SessionQueueEn
 		})
 		if err == nil {
 			entry.Seq = seq
+			// Bound the finished rows without depending on a web read: every
+			// new submission also sweeps entries older than the retention hour.
+			_, _ = d.CleanupSessionQueue(ctx, time.Hour)
 			return seq, nil
 		}
 		if ctx.Err() != nil {
@@ -190,4 +198,34 @@ func (d *DBStore) CleanupSessionQueue(ctx context.Context, olderThan time.Durati
 		return 0, err
 	}
 	return res.RowsAffected()
+}
+
+// ensureSessionQueueStateGuard applies the state constraint to a database that
+// already has the table: CREATE TABLE IF NOT EXISTS does not add a CHECK to an
+// existing table. Postgres gets a named constraint; SQLite gets equivalent
+// insert/update triggers.
+func (d *DBStore) ensureSessionQueueStateGuard(ctx context.Context) error {
+	if d.dialect == "postgres" {
+		_, err := d.handle().ExecContext(ctx, `DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'session_queue_state_check'
+  ) THEN
+    ALTER TABLE session_queue
+      ADD CONSTRAINT session_queue_state_check
+      CHECK (state IN ('queued','started','canceled'));
+  END IF;
+END $$;`)
+		return err
+	}
+	trigger := func(name, event string) string {
+		return "CREATE TRIGGER IF NOT EXISTS " + name + " BEFORE " + event + " ON session_queue " +
+			"WHEN NEW.state NOT IN ('queued','started','canceled') " +
+			"BEGIN SELECT RAISE(ABORT, 'session_queue: invalid state'); END"
+	}
+	if _, err := d.handle().ExecContext(ctx, trigger("session_queue_state_insert", "INSERT")); err != nil {
+		return err
+	}
+	_, err := d.handle().ExecContext(ctx, trigger("session_queue_state_update", "UPDATE"))
+	return err
 }

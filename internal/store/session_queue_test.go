@@ -99,6 +99,25 @@ func TestSessionQueueSeqIsUniqueUnderConcurrency(t *testing.T) {
 	}
 }
 
+func TestEnqueueSweepsFinishedQueueRows(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	defer db.Close()
+	old := &SessionQueueEntry{ID: "old", UserID: "u1", AgentID: "a1", SessionID: "s1", CreatedAt: time.Now().Add(-2 * time.Hour), ExpiresAt: time.Now().Add(time.Hour)}
+	if _, err := db.EnqueueSessionQueue(ctx, old); err != nil {
+		t.Fatalf("enqueue old: %v", err)
+	}
+	if err := db.MarkSessionQueueStarted(ctx, "old"); err != nil {
+		t.Fatalf("start old: %v", err)
+	}
+	if _, err := db.EnqueueSessionQueue(ctx, &SessionQueueEntry{ID: "new", UserID: "u1", AgentID: "a1", SessionID: "s1", ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+		t.Fatalf("enqueue new: %v", err)
+	}
+	if _, err := db.GetSessionQueue(ctx, "old"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("old row err = %v; want gone", err)
+	}
+}
+
 func TestSessionQueueCleanupKeepsLiveEntries(t *testing.T) {
 	ctx := context.Background()
 	db := openTestDB(t)

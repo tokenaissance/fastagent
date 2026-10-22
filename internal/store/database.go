@@ -139,6 +139,9 @@ func (d *DBStore) Migrate(ctx context.Context) error {
 			return fmt.Errorf("migrate: %w\nSQL: %s", err, stmt)
 		}
 	}
+	if err := d.ensureSessionQueueStateGuard(ctx); err != nil {
+		return fmt.Errorf("migrate session_queue state guard: %w", err)
+	}
 	if err := d.migrateAgentFilesUserID(ctx); err != nil {
 		return fmt.Errorf("migrate agent_files.user_id: %w", err)
 	}
@@ -2104,11 +2107,13 @@ func migrationSQLForDialect(dialect string) []string {
 			session_key TEXT NOT NULL,
 			seq         BIGINT NOT NULL,
 			text        TEXT NOT NULL DEFAULT '',
-			state       TEXT NOT NULL,
+			state       TEXT NOT NULL CHECK (state IN ('queued', 'started', 'canceled')),
 			created_at  TIMESTAMP NOT NULL,
 			expires_at  TIMESTAMP NOT NULL,
 			UNIQUE (user_id, agent_id, session_key, seq)
 		)`,
+		`CREATE INDEX IF NOT EXISTS idx_session_queue_state_created
+			ON session_queue (state, created_at)`,
 		// chat_idempotency is the cross-replica de-duplication window for chat
 		// submissions. The in-process map lost a retry that landed on another
 		// pod, so a run_task retry could enqueue the same instruction twice.
@@ -2118,6 +2123,8 @@ func migrationSQLForDialect(dialect string) []string {
 			turn_id    TEXT NOT NULL,
 			created_at TIMESTAMP NOT NULL
 		)`,
+		`CREATE INDEX IF NOT EXISTS idx_chat_idempotency_created
+			ON chat_idempotency (created_at)`,
 		// session_turns is the cross-replica turn lease (docs/session-turn-integrity.md
 		// A1, docs/文件系统形式化证明/12-lease-formal-design.md L1–L6): one row per
 		// session, claiming "at most one turn is writing this history". It is a
