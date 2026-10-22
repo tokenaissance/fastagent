@@ -300,6 +300,19 @@ func (a *Agent) turnLeaseWatchInterval() time.Duration {
 // ok=false means the turn must not start: ctx ended while queued, or the store
 // was unreachable. The latter fails closed on purpose — refusing to start is
 // recoverable, two writers are not.
+type queuedTextKey struct{}
+
+// withQueuedText carries the waiting submission's text so the queued fact can
+// name what is waiting; a reloaded tab otherwise renders an empty Edit box.
+func withQueuedText(ctx context.Context, text string) context.Context {
+	return context.WithValue(ctx, queuedTextKey{}, text)
+}
+
+func queuedTextFrom(ctx context.Context) string {
+	text, _ := ctx.Value(queuedTextKey{}).(string)
+	return text
+}
+
 func (a *Agent) beginTurnLease(ctx context.Context, sess *session.Session, emit func(ChatEvent)) (*turnLeaseGuard, bool) {
 	key := a.turnLeaseKey(sess)
 	ttl := a.turnLeaseTTL(ctx)
@@ -351,6 +364,9 @@ func (a *Agent) beginTurnLease(ctx context.Context, sess *session.Session, emit 
 		// second reader is the kind of thing this roster keeps deleting.
 		if id := TurnIDFromContext(ctx); id != "" {
 			data["turnId"] = id
+		}
+		if text := queuedTextFrom(ctx); text != "" {
+			data["text"] = text
 		}
 		emit(ChatEvent{Type: "queued", Data: data})
 		retry := turnLeaseRetry

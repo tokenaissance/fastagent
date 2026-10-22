@@ -58,6 +58,7 @@ func TestRunTurnQueuesUserSourceAndEmitsQueuedEvent(t *testing.T) {
 
 	// The queued notice must arrive while the turn is still waiting.
 	var queuedPosition float64
+	var queuedText string
 	deadline := time.Now().Add(2 * time.Second)
 	for queuedPosition == 0 && time.Now().Before(deadline) {
 		select {
@@ -65,6 +66,9 @@ func TestRunTurnQueuesUserSourceAndEmitsQueuedEvent(t *testing.T) {
 			if e.Type == "queued" {
 				if p, ok := e.Data["position"].(int); ok {
 					queuedPosition = float64(p)
+				}
+				if text, ok := e.Data["text"].(string); ok {
+					queuedText = text
 				}
 			}
 		case <-time.After(20 * time.Millisecond):
@@ -75,6 +79,9 @@ func TestRunTurnQueuesUserSourceAndEmitsQueuedEvent(t *testing.T) {
 	}
 	if queuedPosition != 1 {
 		t.Fatalf("queued position = %v; want 1 (next in line)", queuedPosition)
+	}
+	if queuedText != "hello" {
+		t.Fatalf("queued text = %q; want hello", queuedText)
 	}
 	select {
 	case err := <-done:

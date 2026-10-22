@@ -34,6 +34,7 @@ type admittedTurn struct {
 // then returns the same empty answer the old duplicated blocks returned.
 func (a *Agent) admitTurn(ctx context.Context, msg bus.InboundMessage) (*admittedTurn, bool) {
 	sess := a.sessions.Get(sessionTriple(msg, msg.ProjectID))
+	ctx = withQueuedText(ctx, msg.Text)
 	waitStart := time.Now()
 	stopWaiting := a.noteSessionWaiter(sess.Key())
 	lease, leased := a.beginTurnLease(ctx, sess, func(evt ChatEvent) { emitEvent(ctx, evt) })
@@ -48,6 +49,9 @@ func (a *Agent) admitTurn(ctx context.Context, msg bus.InboundMessage) (*admitte
 		data := map[string]any{"position": a.queuedSubmissionsFor(sess.Key())}
 		if id := TurnIDFromContext(ctx); id != "" {
 			data["turnId"] = id
+		}
+		if text := queuedTextFrom(ctx); text != "" {
+			data["text"] = text
 		}
 		emitEvent(ctx, ChatEvent{Type: "queued", Data: data})
 	}
