@@ -32,7 +32,11 @@ earlier measurement came back with numbers that did not belong to the template i
   ~90 MiB of RSS across ~77 processes and has 771 MiB of its 976 MiB still available.
 - browser work pays, once per fresh sandbox, the browser launch: first `open` measured 15–28 s
   (the spread is host disk/CPU on the daemon's cold import plus the launch), exit 0; every call
-  after that 0.3–0.5 s. With the browser up the sandbox runs ~86 processes and MemAvailable drops
+  after that 0.3–0.5 s. Re-measured 2026-10-23 (16 fresh sandboxes across the 0.7.6 image and
+  the 2026-10-01 one): it is BIMODAL, not spread — 12–16 s or 35–45 s, and the slow half was
+  the majority that night (11 of 16). Both images show it, so it predates 0.7.6 and the font
+  prune; treat ~45 s as the worst case a first browser call can cost, not 28 s.
+  With the browser up the sandbox runs ~86 processes and MemAvailable drops
   771 → ~405 MiB, i.e. the browser costs ~370 MiB of the ~1 GB box (camoufox-bin ~320 MiB, its
   WebExtensions/Web Content children the rest).
 - `ls … .cache/camoufox` — whether the 1.3 GB browser cache reached the RUNTIME user (`user`,
