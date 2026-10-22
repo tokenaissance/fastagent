@@ -38,7 +38,7 @@ type AgentHandle interface {
 	// QueuedSubmissions is the QUEUE half of §14.8's F2 (`status` ← lease + queue): how many
 	// submissions are waiting behind the holder of that session. It is answered by the pod that owns
 	// the session — the read that asks is session-affine (docs/chat-event-delivery-placement.md §3).
-	QueuedSubmissions(userID, agentID, sessionId string) int
+	QueuedSubmissions(userID, agentID, sessionId string) (int, error)
 	// SteerWeb buffers a message into an in-flight turn for the session;
 	// returns false when no turn is running (caller falls back to a
 	// normal send).

@@ -29,6 +29,10 @@ type ChatIdempotencyStore interface {
 // Everyone else reads the winner and gets duplicate (same digest, the first
 // turn stands) or conflict (same key, different content).
 func (d *DBStore) ClaimChatIdempotency(ctx context.Context, scopeKey, digest, turnID string, ttl time.Duration) (string, string, error) {
+	return d.claimChatIdempotency(ctx, scopeKey, digest, turnID, ttl)
+}
+
+func (d *DBStore) claimChatIdempotency(ctx context.Context, scopeKey, digest, turnID string, ttl time.Duration) (string, string, error) {
 	if ttl <= 0 {
 		ttl = 10 * time.Minute
 	}

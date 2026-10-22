@@ -1696,24 +1696,26 @@ func (a *Agent) TurnInFlight() bool {
 // the queue half of §14.8's F2 (`status` ← lease + queue) and it is meaningful on the pod that OWNS the
 // session: the read that asks for it is session-affine (docs/chat-event-delivery-placement.md §3), and
 // the boundaries where that stops being true (a rolling deploy, a caller with no session id) are §4's.
-func (a *Agent) QueuedSubmissions(userID, agentID, sessionId string) int {
+func (a *Agent) QueuedSubmissions(userID, agentID, sessionId string) (int, error) {
 	// The durable queue is the global answer: entries may have been accepted by
 	// another pod, and a per-pod count would under-report `waiting` to MCP.
 	if qs := a.queueStore(); qs != nil {
-		if list, err := qs.ListSessionQueue(context.Background(), userID, agentID, sessionId); err == nil {
-			now := time.Now()
-			n := 0
-			for _, e := range list {
-				if e.State == store.SessionQueueQueued && e.ExpiresAt.After(now) {
-					n++
-				}
-			}
-			return n
+		list, err := qs.ListSessionQueue(context.Background(), userID, agentID, sessionId)
+		if err != nil {
+			return 0, err
 		}
+		now := time.Now()
+		n := 0
+		for _, e := range list {
+			if e.State == store.SessionQueueQueued && e.ExpiresAt.After(now) {
+				n++
+			}
+		}
+		return n, nil
 	}
 	// From the moment a turn contends for the session, not from the moment it reaches the session
 	// slot: a turn parked at the lease gate never gets there (session_waiters.go).
-	return a.queuedSubmissionsFor(sessionId)
+	return a.queuedSubmissionsFor(sessionId), nil
 }
 
 // includeSynthetic surfaces the runtime-injected rows (today: goal continuations) as the FACT they

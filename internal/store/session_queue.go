@@ -230,3 +230,14 @@ END $$;`)
 	_, err := d.handle().ExecContext(ctx, trigger("session_queue_state_update", "UPDATE"))
 	return err
 }
+
+// UpdateSessionQueueText refreshes the queued row's text after attachments are
+// materialised. It only touches a still-queued row; once admitted, history owns
+// the annotated message.
+func (d *DBStore) UpdateSessionQueueText(ctx context.Context, id, text string) error {
+	_, err := d.handle().ExecContext(ctx,
+		"UPDATE session_queue SET text = "+d.ph(1)+" WHERE id = "+d.ph(2)+" AND state = "+d.ph(3),
+		text, id, SessionQueueQueued,
+	)
+	return err
+}

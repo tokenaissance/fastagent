@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -50,7 +51,16 @@ func clientIdentityOf(r *http.Request) string {
 // a steer are different things to do with a task, so the same string names two different
 // operations rather than colliding in one domain.
 func idempotencyScopeKey(verb, uid, agentID, sessionID, client, key string) string {
-	return verb + "|" + uid + "|" + agentID + "|" + sessionID + "|" + client + "|" + key
+	// Length-prefix every part. A plain "|" join lets a client id or key that
+	// contains the delimiter collide with a different tuple.
+	var b strings.Builder
+	for _, part := range []string{verb, uid, agentID, sessionID, client, key} {
+		b.WriteString(strconv.Itoa(len(part)))
+		b.WriteByte(':')
+		b.WriteString(part)
+		b.WriteByte('|')
+	}
+	return b.String()
 }
 
 // instructionDigest identifies the CONTENT that a key stands for: "body + attachment summary",

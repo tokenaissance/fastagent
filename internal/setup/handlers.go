@@ -1326,15 +1326,18 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	// and URLs — never over raw JSON: a retry that differs only in framing is a retry
 	// (§3.1 item 5).
 	turnID := agent.MintTurnID()
+	agentID := ag.Name()
+	queueAccepted := false
+	acceptExpiresAt := time.Now().Add(agentTurnTimeout)
 	dupKey := idempotencyKeyOf(req)
 	if dupKey != "" {
 		parts := []string{req.Message}
 		for _, a := range req.allAttachments() {
 			parts = append(parts, a.Name, a.URL)
 		}
-		dupScope := idempotencyScopeKey("run", uid, ag.Name(), req.SessionID, clientIdentityOf(r), dupKey)
+		dupScope := idempotencyScopeKey("run", uid, agentID, req.SessionID, clientIdentityOf(r), dupKey)
 		dupDigest := instructionDigest(parts)
-		ids, ok := s.dataStore.(store.ChatIdempotencyStore)
+		ids, ok := s.dataStore.(store.ChatSubmissionStore)
 		if !ok {
 			jsonResponse(w, http.StatusServiceUnavailable, map[string]any{
 				"error":   "idempotency_unavailable",
@@ -1342,10 +1345,17 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		v, first, err := ids.ClaimChatIdempotency(r.Context(), dupScope, dupDigest, turnID, idempotencyTTL)
+		v, first, _, err := ids.AcceptChatSubmission(r.Context(), dupScope, dupDigest, turnID, &store.SessionQueueEntry{
+			ID:        turnID,
+			UserID:    uid,
+			AgentID:   agentID,
+			SessionID: req.SessionID,
+			Text:      req.Message,
+			ExpiresAt: acceptExpiresAt,
+		}, idempotencyTTL)
 		if err != nil {
-			slog.Error("chat: durable idempotency claim failed", "error", err)
-			jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": "idempotency_failed"})
+			slog.Error("chat: durable submission acceptance failed", "error", err)
+			jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": "acceptance_failed"})
 			return
 		}
 		switch v {
@@ -1364,6 +1374,8 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 				Data: map[string]any{"turnId": first},
 			})
 			return
+		default:
+			queueAccepted = true
 		}
 	}
 
@@ -1388,7 +1400,6 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	// the first emitted event. The hub buffers in-flight events so
 	// dispatch from emitEvent never blocks even if we're slow to drain.
 	hub := s.chatEventHub()
-	agentID := ag.Name()
 	sub, unsubscribe := hub.Subscribe(uid, agentID, req.SessionID)
 	defer unsubscribe()
 
@@ -1436,7 +1447,16 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	// The durable wait entry: seq is assigned at acceptance, so position and
 	// cancellation are facts of the store, not of whichever pod accepted the
 	// request. A non-dashboard producer never creates one and keeps the old path.
-	if qs, ok := s.dataStore.(store.SessionQueueStore); ok {
+	if queueAccepted {
+		// Attachments were materialised after the atomic claim+enqueue, so
+		// refresh the queued text with the breadcrumb. A row already admitted
+		// ignores this; history has the annotated message.
+		if updater, ok := s.dataStore.(interface {
+			UpdateSessionQueueText(ctx context.Context, id, text string) error
+		}); ok {
+			_ = updater.UpdateSessionQueueText(agentCtx, turnID, msgText)
+		}
+	} else if qs, ok := s.dataStore.(store.SessionQueueStore); ok {
 		if _, err := qs.EnqueueSessionQueue(agentCtx, &store.SessionQueueEntry{
 			ID:        turnID,
 			UserID:    uid,
@@ -1997,7 +2017,12 @@ func (s *Server) handleChatHistory(w http.ResponseWriter, r *http.Request) {
 	// make "nobody is queued" indistinguishable from "this pod cannot say", and the two boundaries that
 	// make the second case real are enumerated in §4 of that document (a rolling deploy, or a caller
 	// that carries no session id).
-	resp["queued"] = ag.QueuedSubmissions(s.effectiveUserID(r), agentID, sessionID)
+	queued, err := ag.QueuedSubmissions(s.effectiveUserID(r), agentID, sessionID)
+	if err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	resp["queued"] = queued
 	jsonResponse(w, http.StatusOK, resp)
 }
 

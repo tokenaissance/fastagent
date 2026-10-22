@@ -50,33 +50,39 @@ func (s *Server) registerPendingTurn(key string, cancel context.CancelFunc) *pen
 // What it deliberately does NOT do: report the withdrawn instruction's text or its position. Neither
 // lives in the pending entry (the text never reached this layer, and the position is a live count the
 // emitter owns), so the answer names the submission and nothing else rather than inventing the rest.
-func (s *Server) withdrawEarliestPendingTurn(ctx context.Context, uid, agentID, sessionID string) (string, bool) {
+func (s *Server) withdrawEarliestPendingTurn(ctx context.Context, uid, agentID, sessionID string) (string, bool, error) {
 	// The store is the only source for "the OLDEST queued submission": MCP's
 	// withdraw_task may land on another pod. The local map is a cancellation
 	// cache, never an ordering source.
-	if qs, ok := s.dataStore.(store.SessionQueueStore); ok {
-		if list, err := qs.ListSessionQueue(ctx, uid, agentID, sessionID); err == nil {
-			now := time.Now()
-			for _, e := range list {
-				if e.State != store.SessionQueueQueued || !e.ExpiresAt.After(now) {
-					continue
-				}
-				if canceled, err := qs.CancelSessionQueue(ctx, e.ID); err == nil && canceled {
-					key := chatTurnKey(uid, agentID, sessionID, e.ID)
-					s.pendingTurnsMu.Lock()
-					if turn, found := s.pendingTurns[key]; found {
-						turn.cancel()
-					}
-					s.pendingTurnsMu.Unlock()
-					return e.ID, true
-				}
-			}
-		}
-		// A store that is present but has no queued row is the answer; the
-		// local map is a cancellation cache, not a second queue.
-		return "", false
+	qs, ok := s.dataStore.(store.SessionQueueStore)
+	if !ok {
+		return "", false, nil
 	}
-	return "", false
+	list, err := qs.ListSessionQueue(ctx, uid, agentID, sessionID)
+	if err != nil {
+		return "", false, err
+	}
+	now := time.Now()
+	for _, e := range list {
+		if e.State != store.SessionQueueQueued || !e.ExpiresAt.After(now) {
+			continue
+		}
+		canceled, err := qs.CancelSessionQueue(ctx, e.ID)
+		if err != nil {
+			return "", false, err
+		}
+		if !canceled {
+			continue
+		}
+		key := chatTurnKey(uid, agentID, sessionID, e.ID)
+		s.pendingTurnsMu.Lock()
+		if turn, found := s.pendingTurns[key]; found {
+			turn.cancel()
+		}
+		s.pendingTurnsMu.Unlock()
+		return e.ID, true, nil
+	}
+	return "", false, nil
 }
 
 func (s *Server) unregisterPendingTurn(key string) {
@@ -141,7 +147,11 @@ func (s *Server) handleChatCancel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.WithdrawEarliest {
-		turnID, withdrawn := s.withdrawEarliestPendingTurn(r.Context(), uid, ag.Name(), req.SessionID)
+		turnID, withdrawn, err := s.withdrawEarliestPendingTurn(r.Context(), uid, ag.Name(), req.SessionID)
+		if err != nil {
+			jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
 		jsonResponse(w, http.StatusOK, map[string]any{
 			"withdrawn": withdrawn,
 			"turnId":    turnID,

@@ -148,7 +148,7 @@ func TestSecondReplicaQueuesBehindTheRunningTurnE2E(t *testing.T) {
 	// actually waits at — the LEASE — because a turn parked there never reaches the session slot,
 	// and counting the slot (what this used to do) answered 0 here. Falsification: count
 	// `sess.TurnWaiters()` again and this assertion reads 0.
-	if got := agB.QueuedSubmissions("u1", "a1", session); got != 2 {
+	if got, err := agB.QueuedSubmissions("u1", "a1", session); err != nil || got != 2 {
 		t.Fatalf("agB.QueuedSubmissions = %d while TWO turns waited at the lease gate; want 2", got)
 	}
 
