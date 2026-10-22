@@ -322,6 +322,7 @@ func (s *Server) Run(ctx context.Context) error {
 	// Chat
 	mux.HandleFunc("POST /api/chat", auth(s.handleChat))
 	mux.HandleFunc("POST /api/chat/stream", auth(s.handleChatStream))
+	mux.HandleFunc("POST /api/chat/submissions", auth(s.handleChatSubmission))
 	mux.HandleFunc("POST /api/chat/team/stream", auth(s.handleTeamChatStream))
 	mux.HandleFunc("POST /api/chat/steer", auth(s.handleChatSteer))
 	// Withdraw a queued (not yet started) turn — the dashboard's "Cancel" /

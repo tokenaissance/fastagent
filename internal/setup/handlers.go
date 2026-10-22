@@ -1298,6 +1298,16 @@ func (s *Server) handleChatSteer(w http.ResponseWriter, r *http.Request) {
 const agentTurnTimeout = 45 * time.Minute
 
 func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
+	s.handleChatStreamMode(w, r, false)
+}
+
+// handleChatSubmission accepts a run and answers 202. The turn's output is not
+// carried on this response; the session subscription carries it.
+func (s *Server) handleChatSubmission(w http.ResponseWriter, r *http.Request) {
+	s.handleChatStreamMode(w, r, true)
+}
+
+func (s *Server) handleChatStreamMode(w http.ResponseWriter, r *http.Request, acceptOnly bool) {
 	var req chatRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
@@ -1308,10 +1318,14 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "agent not found"})
 		return
 	}
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": "streaming unsupported"})
-		return
+	var flusher http.Flusher
+	if !acceptOnly {
+		var ok bool
+		flusher, ok = w.(http.Flusher)
+		if !ok {
+			jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": "streaming unsupported"})
+			return
+		}
 	}
 	uid := s.effectiveUserID(r)
 	if uid == "" {
@@ -1369,6 +1383,13 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	case store.IdempotencyDuplicate:
+		if acceptOnly {
+			jsonResponse(w, http.StatusOK, map[string]any{
+				"turnId":    first,
+				"duplicate": true,
+			})
+			return
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		forwardSyntheticEvent(w, flusher, agent.ChatEvent{
@@ -1378,14 +1399,16 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	// Defeat nginx / Cloudflare buffering of long-lived responses; the
-	// agent loop emits chunks at human-typing pace and we want them on
-	// the wire immediately, not held until the response closes.
-	w.Header().Set("X-Accel-Buffering", "no")
-	flusher.Flush()
+	if !acceptOnly {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		// Defeat nginx / Cloudflare buffering of long-lived responses; the
+		// agent loop emits chunks at human-typing pace and we want them on
+		// the wire immediately, not held until the response closes.
+		w.Header().Set("X-Accel-Buffering", "no")
+		flusher.Flush()
+	}
 	atts := req.allAttachments()
 	imageURLs := req.inlineImageURLs()
 	msgText := req.Message
@@ -1504,6 +1527,14 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		// path is no longer needed for this handler.
 		_ = ag.HandleWebChatStream(agentCtx, req.SessionID, req.ProjectID, uid, msgText, imageURLs, req.Params, nil)
 	}()
+
+	if acceptOnly {
+		jsonResponse(w, http.StatusAccepted, map[string]any{
+			"turnId":     turnID,
+			"acceptedAt": acceptExpiresAt.UTC().Format(time.RFC3339),
+		})
+		return
+	}
 
 	// Heartbeat keeps proxies (nginx 60s default, Cloudflare 100s, ELB
 	// 60s) from killing an idle SSE connection while the agent is
@@ -1710,6 +1741,32 @@ func (s *Server) handleChatSubscribe(w http.ResponseWriter, r *http.Request) {
 			payload, _ := json.Marshal(newTurnActivePayload(rec)) // C1: one fact, one wire shape
 			fmt.Fprintf(w, "event: turn_active\ndata: %s\n\n", payload)
 			flusher.Flush()
+		}
+	}
+	// One snapshot at connect, before replay: the client renders every waiting
+	// submission even though `queued` is live-only and is never persisted.
+	if qs, ok := s.dataStore.(store.SessionQueueStore); ok {
+		if list, err := qs.ListSessionQueue(r.Context(), uid, agentID, sessionID); err == nil {
+			now := time.Now()
+			position := 0
+			entries := make([]map[string]any, 0, len(list))
+			for _, e := range list {
+				if e.State != store.SessionQueueQueued || !e.ExpiresAt.After(now) {
+					continue
+				}
+				position++
+				entries = append(entries, map[string]any{
+					"turnId":    e.ID,
+					"position":  position,
+					"text":      e.Text,
+					"expiresAt": e.ExpiresAt.UTC().Format(time.RFC3339),
+					"createdAt": e.CreatedAt.UTC().Format(time.RFC3339),
+				})
+			}
+			if payload, err := json.Marshal(map[string]any{"entries": entries}); err == nil {
+				fmt.Fprintf(w, "event: queue_snapshot\ndata: %s\n\n", payload)
+				flusher.Flush()
+			}
 		}
 	}
 
