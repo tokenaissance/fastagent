@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/fastclaw-ai/fastclaw/internal/store"
 )
@@ -57,7 +58,29 @@ func (s *Server) registerPendingTurn(key string, cancel context.CancelFunc) *pen
 // What it deliberately does NOT do: report the withdrawn instruction's text or its position. Neither
 // lives in the pending entry (the text never reached this layer, and the position is a live count the
 // emitter owns), so the answer names the submission and nothing else rather than inventing the rest.
-func (s *Server) withdrawEarliestPendingTurn(uid, agentID, sessionID string) (string, bool) {
+func (s *Server) withdrawEarliestPendingTurn(ctx context.Context, uid, agentID, sessionID string) (string, bool) {
+	// Durable first: MCP's withdraw_task asks for the OLDEST queued submission,
+	// and that submission may belong to another pod. The local map is only a
+	// fast path for this pod's own waiters.
+	if qs, ok := s.dataStore.(store.SessionQueueStore); ok {
+		if list, err := qs.ListSessionQueue(ctx, uid, agentID, sessionID); err == nil {
+			now := time.Now()
+			for _, e := range list {
+				if e.State != store.SessionQueueQueued || !e.ExpiresAt.After(now) {
+					continue
+				}
+				if canceled, err := qs.CancelSessionQueue(ctx, e.ID); err == nil && canceled {
+					key := chatTurnKey(uid, agentID, sessionID, e.ID)
+					s.pendingTurnsMu.Lock()
+					if turn, found := s.pendingTurns[key]; found {
+						turn.cancel()
+					}
+					s.pendingTurnsMu.Unlock()
+					return e.ID, true
+				}
+			}
+		}
+	}
 	s.pendingTurnsMu.Lock()
 	defer s.pendingTurnsMu.Unlock()
 	prefix := uid + "|" + agentID + "|" + sessionID + "|"
@@ -140,7 +163,7 @@ func (s *Server) handleChatCancel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.WithdrawEarliest {
-		turnID, withdrawn := s.withdrawEarliestPendingTurn(uid, ag.Name(), req.SessionID)
+		turnID, withdrawn := s.withdrawEarliestPendingTurn(r.Context(), uid, ag.Name(), req.SessionID)
 		jsonResponse(w, http.StatusOK, map[string]any{
 			"withdrawn": withdrawn,
 			"turnId":    turnID,

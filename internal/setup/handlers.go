@@ -1974,7 +1974,7 @@ func (s *Server) handleChatHistory(w http.ResponseWriter, r *http.Request) {
 	// make "nobody is queued" indistinguishable from "this pod cannot say", and the two boundaries that
 	// make the second case real are enumerated in §4 of that document (a rolling deploy, or a caller
 	// that carries no session id).
-	resp["queued"] = ag.QueuedSubmissions(sessionID)
+	resp["queued"] = ag.QueuedSubmissions(s.effectiveUserID(r), agentID, sessionID)
 	jsonResponse(w, http.StatusOK, resp)
 }
 

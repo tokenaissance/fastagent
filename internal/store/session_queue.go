@@ -134,8 +134,11 @@ func (d *DBStore) ListSessionQueue(ctx context.Context, userID, agentID, session
 // CancelSessionQueue marks a queued entry canceled. It is deliberately a
 // compare-and-set on state=queued: a started turn cannot be withdrawn here.
 func (d *DBStore) CancelSessionQueue(ctx context.Context, id string) (bool, error) {
+	// Drop the prompt on withdrawal: a canceled instruction must not keep its
+	// text in the queue table for the cleanup hour. Edit already restored it
+	// client-side before this call.
 	res, err := d.handle().ExecContext(ctx,
-		"UPDATE session_queue SET state = "+d.ph(1)+" WHERE id = "+d.ph(2)+" AND state = "+d.ph(3),
+		"UPDATE session_queue SET state = "+d.ph(1)+", text = '' WHERE id = "+d.ph(2)+" AND state = "+d.ph(3),
 		SessionQueueCanceled, id, SessionQueueQueued,
 	)
 	if err != nil {
@@ -149,7 +152,9 @@ func (d *DBStore) CancelSessionQueue(ctx context.Context, id string) (bool, erro
 // left alone: withdrawal wins over a late start.
 func (d *DBStore) MarkSessionQueueStarted(ctx context.Context, id string) error {
 	_, err := d.handle().ExecContext(ctx,
-		"UPDATE session_queue SET state = "+d.ph(1)+" WHERE id = "+d.ph(2)+" AND state = "+d.ph(3),
+		// The turn has started, so its text is already in session history. Drop
+		// the queue copy instead of retaining a second prompt for the cleanup hour.
+		"UPDATE session_queue SET state = "+d.ph(1)+", text = '' WHERE id = "+d.ph(2)+" AND state = "+d.ph(3),
 		SessionQueueStarted, id, SessionQueueQueued,
 	)
 	return err
