@@ -1,6 +1,7 @@
 package setup
 
 import (
+	"context"
 	"net/http"
 	"time"
 
@@ -29,6 +30,13 @@ func (s *Server) handleChatQueue(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		jsonResponse(w, http.StatusOK, map[string]any{"entries": []any{}})
 		return
+	}
+	// Opportunistic cleanup keeps finished rows bounded without a separate
+	// sweeper: only the reader of this session's queue pays for it.
+	if cleaner, ok := s.dataStore.(interface {
+		CleanupSessionQueue(ctx context.Context, before time.Time) (int64, error)
+	}); ok {
+		_, _ = cleaner.CleanupSessionQueue(r.Context(), time.Now().Add(-time.Hour))
 	}
 	list, err := qs.ListSessionQueue(r.Context(), uid, agentID, sessionID)
 	if err != nil {

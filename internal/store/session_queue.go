@@ -154,3 +154,17 @@ func (d *DBStore) MarkSessionQueueStarted(ctx context.Context, id string) error 
 	)
 	return err
 }
+
+// CleanupSessionQueue drops finished entries older than before. Started and
+// canceled rows are kept only long enough for a reader that still names them;
+// the wait list itself is the queued state.
+func (d *DBStore) CleanupSessionQueue(ctx context.Context, before time.Time) (int64, error) {
+	res, err := d.handle().ExecContext(ctx,
+		"DELETE FROM session_queue WHERE state <> "+d.ph(1)+" AND created_at < "+d.ph(2),
+		SessionQueueQueued, before,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}

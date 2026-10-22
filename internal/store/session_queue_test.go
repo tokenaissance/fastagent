@@ -98,3 +98,32 @@ func TestSessionQueueSeqIsUniqueUnderConcurrency(t *testing.T) {
 		}
 	}
 }
+
+func TestSessionQueueCleanupKeepsLiveEntries(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	defer db.Close()
+
+	old := time.Now().Add(-2 * time.Hour)
+	for _, e := range []*SessionQueueEntry{
+		{ID: "live", UserID: "u1", AgentID: "a1", SessionID: "s1", CreatedAt: old, ExpiresAt: time.Now().Add(time.Hour)},
+		{ID: "done", UserID: "u1", AgentID: "a1", SessionID: "s1", CreatedAt: old, ExpiresAt: time.Now().Add(time.Hour)},
+	} {
+		if _, err := db.EnqueueSessionQueue(ctx, e); err != nil {
+			t.Fatalf("enqueue %s: %v", e.ID, err)
+		}
+	}
+	if err := db.MarkSessionQueueStarted(ctx, "done"); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	n, err := db.CleanupSessionQueue(ctx, time.Now().Add(-time.Hour))
+	if err != nil || n != 1 {
+		t.Fatalf("cleanup n=%d err=%v; want 1", n, err)
+	}
+	if _, err := db.GetSessionQueue(ctx, "live"); err != nil {
+		t.Fatalf("live entry was removed: %v", err)
+	}
+	if _, err := db.GetSessionQueue(ctx, "done"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("done entry err=%v; want ErrNotFound", err)
+	}
+}
