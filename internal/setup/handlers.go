@@ -1306,9 +1306,11 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	// (§3.1 item 7, §3.2). The digest is over the normalized payload — body + attachment names
 	// and URLs — never over raw JSON: a retry that differs only in framing is a retry
 	// (§3.1 item 5).
+	turnID := agent.MintTurnID()
 	dupKey := idempotencyKeyOf(req)
 	dupScope := ""
 	dupDigest := ""
+	idempotencyStored := false
 	if dupKey != "" {
 		parts := []string{req.Message}
 		for _, a := range req.allAttachments() {
@@ -1316,7 +1318,29 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		}
 		dupScope = idempotencyScopeKey("run", uid, ag.Name(), req.SessionID, clientIdentityOf(r), dupKey)
 		dupDigest = instructionDigest(parts)
-		switch verdict, firstTurnID := s.idempotencyVerdictFor(dupScope, dupDigest); verdict {
+		verdict := idempotencyMiss
+		firstTurnID := ""
+		if ids, ok := s.dataStore.(store.ChatIdempotencyStore); ok {
+			v, first, err := ids.ClaimChatIdempotency(r.Context(), dupScope, dupDigest, turnID, idempotencyTTL)
+			if err == nil {
+				idempotencyStored = true
+				firstTurnID = first
+				switch v {
+				case store.IdempotencyDuplicate:
+					verdict = idempotencyDuplicate
+				case store.IdempotencyConflict:
+					verdict = idempotencyConflict
+				default:
+					verdict = idempotencyMiss
+				}
+			} else {
+				slog.Warn("chat: durable idempotency claim failed; using the local window", "error", err)
+			}
+		}
+		if !idempotencyStored {
+			verdict, firstTurnID = s.idempotencyVerdictFor(dupScope, dupDigest)
+		}
+		switch verdict {
 		case idempotencyConflict:
 			jsonResponse(w, http.StatusConflict, map[string]any{
 				"error": "idempotency_conflict",
@@ -1403,7 +1427,6 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	// (docs/fastagent/design/14-turn-identity.md §2, I1/I2). The stored user message also
 	// carries the identity, in metadata["turnId"], so a reader that arrives after the turn
 	// can name the turn that produced a reply. internal/agent/turn_id.go lists the readers.
-	turnID := agent.MintTurnID()
 	agentCtx = agent.ContextWithTurnID(agentCtx, turnID)
 	// The durable wait entry: seq is assigned at acceptance, so position and
 	// cancellation are facts of the store, not of whichever pod accepted the
@@ -1422,7 +1445,7 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	}
 	// Remembered in the same breath as the mint, before the turn's goroutine exists: a retry
 	// that arrives while this one is starting must find the entry, not a gap.
-	if dupScope != "" {
+	if dupScope != "" && !idempotencyStored {
 		s.rememberIdempotency(dupScope, dupDigest, turnID)
 	}
 	// admissionStarted closes when the agent holds the session's turn slot;

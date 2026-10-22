@@ -2109,6 +2109,15 @@ func migrationSQLForDialect(dialect string) []string {
 			expires_at  TIMESTAMP NOT NULL,
 			UNIQUE (user_id, agent_id, session_key, seq)
 		)`,
+		// chat_idempotency is the cross-replica de-duplication window for chat
+		// submissions. The in-process map lost a retry that landed on another
+		// pod, so a run_task retry could enqueue the same instruction twice.
+		`CREATE TABLE IF NOT EXISTS chat_idempotency (
+			scope_key  TEXT PRIMARY KEY,
+			digest     TEXT NOT NULL,
+			turn_id    TEXT NOT NULL,
+			created_at TIMESTAMP NOT NULL
+		)`,
 		// session_turns is the cross-replica turn lease (docs/session-turn-integrity.md
 		// A1, docs/文件系统形式化证明/12-lease-formal-design.md L1–L6): one row per
 		// session, claiming "at most one turn is writing this history". It is a
