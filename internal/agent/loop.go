@@ -2864,29 +2864,14 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		// Fire BeforeToolCall hooks
 		toolStarts := a.fireBeforeToolCalls(ctx, msg, resp.ToolCalls)
 
-		// Apply per-round parallel cap. The LLM decides how many
-		// tool calls to emit; we cap how many run concurrently this
-		// round. Overflow gets a synthetic "deferred" tool_result so
-		// the model sees them as resolved (no orphan tool_use ids
-		// that would poison the next API request) but without
-		// content — naturally re-issuing them next round when it can
-		// react to the executed batch's results. Effective default
-		// is 0 = unlimited; users hit specific rate-limited APIs
-		// (Brave free tier 1RPS, etc.) set it to 1 / 2 to force
-		// strict serial / lightly-parallel execution.
-		executeCalls, deferredCalls := splitToolCallsForParallelCap(resp.ToolCalls, rt.maxParallelToolCalls)
-		if len(deferredCalls) > 0 {
-			slog.Info("deferring tool calls beyond parallel cap",
-				"agent", a.name,
-				"cap", rt.maxParallelToolCalls,
-				"deferred", len(deferredCalls),
-			)
-		}
-
+		// The per-round parallel cap, deferred results, and padding live in
+		// executeToolRound (turn_tool_round.go) so the streaming loop cannot
+		// drift from this one.
+		//
 		// Execute tools concurrently via SDK engine
 		slog.Info("executing tools concurrently",
 			"agent", a.name,
-			"count", len(executeCalls),
+			"count", len(resp.ToolCalls),
 		)
 		toolCtx, endToolRound := a.toolRoundContext(ctx, lease)
 		tcByID := make(map[string]provider.ToolCall, len(resp.ToolCalls))
@@ -2926,10 +2911,8 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 			processed[r.toolCallID] = m
 		}
 
-		results := a.engine.executeToolsConcurrently(toolCtx, a.registry, executeCalls, a.workspacePath, onResult)
+		results := a.executeToolRound(toolCtx, resp.ToolCalls, rt.maxParallelToolCalls, onResult)
 		endToolRound()
-		results = append(results, deferredToolResults(deferredCalls, rt.maxParallelToolCalls, len(resp.ToolCalls))...)
-		results = padToolResults(resp.ToolCalls, results)
 
 		// Append the round's tool messages in declared order — the order the
 		// assistant message listed its tool_calls. A call that already finished
@@ -3536,12 +3519,13 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 		// Fire BeforeToolCall hooks
 		toolStarts := a.fireBeforeToolCalls(ctx, msg, resp.ToolCalls)
 
-		// Execute tools concurrently via SDK engine
+		// Execute tools concurrently via SDK engine. The streaming endpoint
+		// emits no tool_call/tool_result events (its consumers read the stream,
+		// not the chat-event fan-out), so it passes no per-call callback — see
+		// executeToolsConcurrently. The parallel cap, deferred results and
+		// padding come from the same helper as the non-streaming loop.
 		toolCtx, endToolRound := a.toolRoundContext(ctx, lease)
-		// The streaming endpoint emits no tool_call/tool_result events (its
-		// consumers read the stream, not the chat-event fan-out), so it passes
-		// no per-call callback — see executeToolsConcurrently.
-		results := a.engine.executeToolsConcurrently(toolCtx, a.registry, resp.ToolCalls, a.workspacePath, nil)
+		results := a.executeToolRound(toolCtx, resp.ToolCalls, rt.maxParallelToolCalls, nil)
 		endToolRound()
 		totalToolCalls += len(results)
 

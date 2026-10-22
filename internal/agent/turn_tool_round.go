@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/fastclaw-ai/fastclaw/internal/provider"
 )
@@ -33,6 +34,26 @@ func splitToolCallsForParallelCap(
 		return calls, nil
 	}
 	return calls[:cap], calls[cap:]
+}
+
+// executeToolRound is the single tool-round implementation shared by the
+// streaming and non-streaming loops: apply the per-round parallel cap, run the
+// admitted calls, pair deferred calls with synthetic results, and pad any
+// missing result so every tool_use id has a tool_result in declared order.
+func (a *Agent) executeToolRound(
+	ctx context.Context,
+	calls []provider.ToolCall,
+	maxParallel int,
+	onResult func(toolCallResult),
+) []toolCallResult {
+	execute, deferred := splitToolCallsForParallelCap(calls, maxParallel)
+	if len(deferred) > 0 {
+		slog.Info("deferring tool calls beyond parallel cap",
+			"agent", a.name, "cap", maxParallel, "deferred", len(deferred))
+	}
+	results := a.engine.executeToolsConcurrently(ctx, a.registry, execute, a.workspacePath, onResult)
+	results = append(results, deferredToolResults(deferred, maxParallel, len(calls))...)
+	return padToolResults(calls, results)
 }
 
 // deferredToolResults pairs every deferred call with a synthetic result so the
