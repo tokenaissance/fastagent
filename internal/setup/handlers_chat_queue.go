@@ -34,9 +34,9 @@ func (s *Server) handleChatQueue(w http.ResponseWriter, r *http.Request) {
 	// Opportunistic cleanup keeps finished rows bounded without a separate
 	// sweeper: only the reader of this session's queue pays for it.
 	if cleaner, ok := s.dataStore.(interface {
-		CleanupSessionQueue(ctx context.Context, before time.Time) (int64, error)
+		CleanupSessionQueue(ctx context.Context, olderThan time.Duration) (int64, error)
 	}); ok {
-		_, _ = cleaner.CleanupSessionQueue(r.Context(), time.Now().Add(-time.Hour))
+		_, _ = cleaner.CleanupSessionQueue(r.Context(), time.Hour)
 	}
 	list, err := qs.ListSessionQueue(r.Context(), uid, agentID, sessionID)
 	if err != nil {

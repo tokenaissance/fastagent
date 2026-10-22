@@ -116,7 +116,10 @@ func TestSessionQueueCleanupKeepsLiveEntries(t *testing.T) {
 	if err := db.MarkSessionQueueStarted(ctx, "done"); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	n, err := db.CleanupSessionQueue(ctx, time.Now().Add(-time.Hour))
+	var ca, ty, jc, jn string
+	_ = db.handle().QueryRowContext(ctx, "SELECT created_at, typeof(created_at), julianday(created_at), julianday('now','-3600 seconds') FROM session_queue WHERE id='done'").Scan(&ca, &ty, &jc, &jn)
+	t.Logf("created=%q type=%s jc=%s jn=%s", ca, ty, jc, jn)
+	n, err := db.CleanupSessionQueue(ctx, time.Hour)
 	if err != nil || n != 1 {
 		t.Fatalf("cleanup n=%d err=%v; want 1", n, err)
 	}

@@ -155,13 +155,31 @@ func (d *DBStore) MarkSessionQueueStarted(ctx context.Context, id string) error 
 	return err
 }
 
-// CleanupSessionQueue drops finished entries older than before. Started and
-// canceled rows are kept only long enough for a reader that still names them;
-// the wait list itself is the queued state.
-func (d *DBStore) CleanupSessionQueue(ctx context.Context, before time.Time) (int64, error) {
+// CleanupSessionQueue drops finished entries older than olderThan. The cutoff
+// is evaluated by the database, not by a Go timestamp: the column is TIMESTAMP
+// WITHOUT TIME ZONE, and a local +08:00 cutoff compared against UTC rows is
+// eight hours ahead and deletes just-finished entries (measured in the
+// two-pod dev run, 2026-10-22).
+func (d *DBStore) CleanupSessionQueue(ctx context.Context, olderThan time.Duration) (int64, error) {
+	if olderThan <= 0 {
+		olderThan = time.Hour
+	}
+	secs := int64(olderThan.Seconds())
+	var expr string
+	var args []any
+	if d.dialect == "postgres" {
+		expr = "created_at < now() - (" + d.ph(2) + " * interval '1 second')"
+		args = []any{SessionQueueQueued, secs}
+	} else {
+		// SQLite has no portable timestamp arithmetic on the text form the
+		// driver writes (it includes the +08:00 offset), so compare against a
+		// Go cutoff in the same local zone.
+		expr = "created_at < " + d.ph(2)
+		args = []any{SessionQueueQueued, time.Now().Add(-olderThan)}
+	}
 	res, err := d.handle().ExecContext(ctx,
-		"DELETE FROM session_queue WHERE state <> "+d.ph(1)+" AND created_at < "+d.ph(2),
-		SessionQueueQueued, before,
+		"DELETE FROM session_queue WHERE state <> "+d.ph(1)+" AND "+expr,
+		args...,
 	)
 	if err != nil {
 		return 0, err
