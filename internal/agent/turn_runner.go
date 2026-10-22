@@ -69,6 +69,12 @@ func (a *Agent) admitTurn(ctx context.Context, msg bus.InboundMessage) (*admitte
 	}
 	stopWaiting()
 	a.queueMarkStarted(ctx)
+	// Admission is the moment the queue block stops being true. The stream has
+	// carried the holder's events until now, and turns are serialized without
+	// an identity on every envelope, so name this transition explicitly.
+	if id := TurnIDFromContext(ctx); id != "" {
+		emitEvent(ctx, ChatEvent{Type: "turn_started", Data: map[string]any{"turnId": id}})
+	}
 	if waited := time.Since(waitStart); waited > time.Second {
 		slog.Info("turn admission: waited for the in-flight turn",
 			"agent", a.name, "channel", msg.Channel, "chat_id", msg.ChatID,
