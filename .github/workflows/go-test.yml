@@ -29,7 +29,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.26"
+          go-version: "1.26.10"
       # `internal/setup/embed.go` does `//go:embed all:web`, and `internal/setup/web` is created by
       # `make build-web` (gitignored; the image build produces the real one). A clean checkout therefore
       # cannot COMPILE `internal/setup` or `cmd/fastclaw` at all: `pattern all:web: no matching files
@@ -82,7 +82,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.26"
+          go-version: "1.26.10"
       # The credential gate is a STEP condition, not a job condition. `secrets` is
       # not an available context in `jobs.<id>.if`, and an expression that names an
       # unavailable context fails the whole run at evaluation time — which is what
@@ -125,7 +125,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.26"
+          go-version: "1.26.10"
       # The offline tests run the composed launcher/probe/kill against a real
       # /bin/sh; the docker e2e runs the same flow through a real container, so
       # "the job outlives the tool call" is checked against a kernel rather
@@ -160,7 +160,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.26"
+          go-version: "1.26.10"
       # Why this exists: Dependabot's 164 alerts did not include the one finding
       # that was actually reachable — klauspost/compress/s2's out-of-bounds read
       # (GO-2026-5841, fixed in v1.18.7) — because it only tracks advisories it
@@ -201,8 +201,13 @@ jobs:
       #
       # It asserts they agree rather than hard-coding a version: a later move
       # stays possible, it just has to be said out loud in all three. The current
-      # line is Go 1.26.9: Go 1.25 has reachable net/http, net/textproto and
-      # crypto/tls advisories that only 1.26.9 fixes.
+      # line is Go 1.26.10: GO-2026-6809 (compromised intermediate certificates
+      # are trusted) is reachable through setup.Server.Run, and 1.26.10 fixes it.
+      #
+      # The patch number is spelled out in every go-version pin above because
+      # setup-go resolves a bare "1.26" from the runner's tool cache, which is
+      # not the newest patch. "1.26" ran on go1.26.9 while 1.26.10 was already
+      # out, and govulncheck could only report the gap, not close it.
       - name: go.mod matches the image's Go version
         run: |
           want=$(grep -oE 'FROM golang:[0-9]+\.[0-9]+' Dockerfile | head -1 | sed 's/.*golang://')
