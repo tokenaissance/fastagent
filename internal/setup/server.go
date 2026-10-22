@@ -336,6 +336,7 @@ func (s *Server) Run(ctx context.Context) error {
 	// Withdraw a queued (not yet started) turn — the dashboard's "Cancel" /
 	// "Edit" action on a queued message.
 	mux.HandleFunc("POST /api/chat/cancel", auth(s.handleChatCancel))
+	mux.HandleFunc("GET /api/chat/queue", auth(s.handleChatQueue))
 	mux.HandleFunc("GET /api/chats", auth(s.handleChats))
 	mux.HandleFunc("GET /api/chat/history", auth(s.handleChatHistory))
 	mux.HandleFunc("GET /api/chat/todo", auth(s.handleChatTodo))
