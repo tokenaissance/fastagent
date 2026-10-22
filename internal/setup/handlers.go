@@ -1405,6 +1405,21 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	// can name the turn that produced a reply. internal/agent/turn_id.go lists the readers.
 	turnID := agent.MintTurnID()
 	agentCtx = agent.ContextWithTurnID(agentCtx, turnID)
+	// The durable wait entry: seq is assigned at acceptance, so position and
+	// cancellation are facts of the store, not of whichever pod accepted the
+	// request. A non-dashboard producer never creates one and keeps the old path.
+	if qs, ok := s.dataStore.(store.SessionQueueStore); ok {
+		if _, err := qs.EnqueueSessionQueue(agentCtx, &store.SessionQueueEntry{
+			ID:        turnID,
+			UserID:    uid,
+			AgentID:   agentID,
+			SessionID: req.SessionID,
+			Text:      msgText,
+			ExpiresAt: turnDeadline,
+		}); err != nil {
+			slog.Warn("chat: could not persist the queued submission", "turn", turnID, "error", err)
+		}
+	}
 	// Remembered in the same breath as the mint, before the turn's goroutine exists: a retry
 	// that arrives while this one is starting must find the entry, not a gap.
 	if dupScope != "" {
@@ -1417,6 +1432,11 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	agentDone := make(chan struct{})
 	go func() {
 		defer close(agentDone)
+		// The wait entry must not outlive the goroutine: a turn that exits before
+		// admission (slash command, quota, timeout) is no longer a queued head.
+		if qs, ok := s.dataStore.(store.SessionQueueStore); ok {
+			defer func() { _ = qs.MarkSessionQueueStarted(agentCtx, turnID) }()
+		}
 		// cancel is deferred HERE, not on the handler — see the incident above.
 		// Owned by the goroutine, the turn is released exactly when its work
 		// ends, which is what makes the detach above real: a client that

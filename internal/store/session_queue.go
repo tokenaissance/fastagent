@@ -145,10 +145,12 @@ func (d *DBStore) CancelSessionQueue(ctx context.Context, id string) (bool, erro
 	return n > 0, err
 }
 
+// MarkSessionQueueStarted advances a still-queued entry. A canceled entry is
+// left alone: withdrawal wins over a late start.
 func (d *DBStore) MarkSessionQueueStarted(ctx context.Context, id string) error {
 	_, err := d.handle().ExecContext(ctx,
-		"UPDATE session_queue SET state = "+d.ph(1)+" WHERE id = "+d.ph(2),
-		SessionQueueStarted, id,
+		"UPDATE session_queue SET state = "+d.ph(1)+" WHERE id = "+d.ph(2)+" AND state = "+d.ph(3),
+		SessionQueueStarted, id, SessionQueueQueued,
 	)
 	return err
 }

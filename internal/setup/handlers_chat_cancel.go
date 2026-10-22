@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+
+	"github.com/fastclaw-ai/fastclaw/internal/store"
 )
 
 // pendingWebTurn is a dashboard chat POST that has been accepted but whose turn
@@ -150,6 +152,24 @@ func (s *Server) handleChatCancel(w http.ResponseWriter, r *http.Request) {
 	s.pendingTurnsMu.Lock()
 	pending, found := s.pendingTurns[key]
 	s.pendingTurnsMu.Unlock()
+
+	// Durable first: a queued entry can be withdrawn from any pod. The local
+	// cancel func only shortens the wait when this pod happens to own it.
+	if req.TurnID != "" {
+		if qs, ok := s.dataStore.(store.SessionQueueStore); ok {
+			if canceled, err := qs.CancelSessionQueue(r.Context(), req.TurnID); err == nil && canceled {
+				if found && pending != nil {
+					pending.cancel()
+				}
+				jsonResponse(w, http.StatusOK, map[string]any{
+					"canceled":   true,
+					"wasRunning": false,
+					"isRunning":  false,
+				})
+				return
+			}
+		}
+	}
 
 	// The use case lives in turn_cancel.go: this handler only resolves the
 	// caller and maps the outcome onto HTTP.

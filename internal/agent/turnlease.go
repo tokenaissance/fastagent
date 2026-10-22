@@ -317,6 +317,32 @@ func (a *Agent) beginTurnLease(ctx context.Context, sess *session.Session, emit 
 	key := a.turnLeaseKey(sess)
 	ttl := a.turnLeaseTTL(ctx)
 	for {
+		if a.queueCanceled(ctx) {
+			return nil, false
+		}
+		if a.queueHeadWait(ctx) {
+			data := map[string]any{"position": 1}
+			if pos, ok := a.queuePosition(ctx); ok {
+				data["position"] = pos
+			}
+			if id := TurnIDFromContext(ctx); id != "" {
+				data["turnId"] = id
+			}
+			if text := queuedTextFrom(ctx); text != "" {
+				data["text"] = text
+			}
+			emit(ChatEvent{Type: "queued", Data: data})
+			retry := turnLeaseRetry
+			if a.turnLeaseRetryOverride > 0 {
+				retry = a.turnLeaseRetryOverride
+			}
+			select {
+			case <-ctx.Done():
+				return nil, false
+			case <-time.After(retry):
+			}
+			continue
+		}
 		turn, err := a.lease().Acquire(ctx, key, ttl)
 		if err == nil {
 			sess.SetTurnFence(turn.Holder, turn.Epoch)
@@ -343,7 +369,11 @@ func (a *Agent) beginTurnLease(ctx context.Context, sess *session.Session, emit 
 		// the waiting happens (session_waiters.go), which already includes this turn, so it is the
 		// count itself and not count+1. `sess.TurnWaiters()` would say 1 for every waiter: a turn
 		// parked here never reaches the session slot that counter watches.
-		data := map[string]any{"position": a.queuedSubmissionsFor(sess.Key())}
+		position := a.queuedSubmissionsFor(sess.Key())
+		if p, ok := a.queuePosition(ctx); ok {
+			position = p
+		}
+		data := map[string]any{"position": position}
 		if busy.Holder != "" {
 			data["holder"] = busy.Holder
 		}

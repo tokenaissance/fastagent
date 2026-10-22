@@ -46,7 +46,11 @@ func (a *Agent) admitTurn(ctx context.Context, msg bus.InboundMessage) (*admitte
 		return nil, false
 	}
 	if sess.TurnActive() {
-		data := map[string]any{"position": a.queuedSubmissionsFor(sess.Key())}
+		position := a.queuedSubmissionsFor(sess.Key())
+		if p, ok := a.queuePosition(ctx); ok {
+			position = p
+		}
+		data := map[string]any{"position": position}
 		if id := TurnIDFromContext(ctx); id != "" {
 			data["turnId"] = id
 		}
@@ -64,6 +68,7 @@ func (a *Agent) admitTurn(ctx context.Context, msg bus.InboundMessage) (*admitte
 		return nil, false
 	}
 	stopWaiting()
+	a.queueMarkStarted(ctx)
 	if waited := time.Since(waitStart); waited > time.Second {
 		slog.Info("turn admission: waited for the in-flight turn",
 			"agent", a.name, "channel", msg.Channel, "chat_id", msg.ChatID,
