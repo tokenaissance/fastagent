@@ -313,25 +313,50 @@ func queuedTextFrom(ctx context.Context) string {
 	return text
 }
 
+type queuedEmitKey struct {
+	position int
+	holder   string
+}
+
 func (a *Agent) beginTurnLease(ctx context.Context, sess *session.Session, emit func(ChatEvent)) (*turnLeaseGuard, bool) {
 	key := a.turnLeaseKey(sess)
 	ttl := a.turnLeaseTTL(ctx)
+	lastQueued := queuedEmitKey{position: -1}
+	emitQueued := func(position int, holder string, fallbackExpiry time.Time) {
+		k := queuedEmitKey{position: position, holder: holder}
+		if k == lastQueued {
+			return
+		}
+		lastQueued = k
+		data := map[string]any{"position": position}
+		if holder != "" {
+			data["holder"] = holder
+		}
+		expiry := fallbackExpiry
+		if e, ok := a.queueClaimExpiry(ctx); ok {
+			expiry = e
+		}
+		if !expiry.IsZero() {
+			data["expiresAt"] = expiry.UTC().Format(time.RFC3339)
+		}
+		if id := TurnIDFromContext(ctx); id != "" {
+			data["turnId"] = id
+		}
+		if text := queuedTextFrom(ctx); text != "" {
+			data["text"] = text
+		}
+		emit(ChatEvent{Type: "queued", Data: data})
+	}
 	for {
 		if a.queueCanceled(ctx) {
 			return nil, false
 		}
 		if a.queueHeadWait(ctx) {
-			data := map[string]any{"position": 1}
+			position := 1
 			if pos, ok := a.queuePosition(ctx); ok {
-				data["position"] = pos
+				position = pos
 			}
-			if id := TurnIDFromContext(ctx); id != "" {
-				data["turnId"] = id
-			}
-			if text := queuedTextFrom(ctx); text != "" {
-				data["text"] = text
-			}
-			emit(ChatEvent{Type: "queued", Data: data})
+			emitQueued(position, "", time.Time{})
 			retry := turnLeaseRetry
 			if a.turnLeaseRetryOverride > 0 {
 				retry = a.turnLeaseRetryOverride
@@ -361,44 +386,11 @@ func (a *Agent) beginTurnLease(ctx context.Context, sess *session.Session, emit 
 		}
 		// Tell the dashboard who is ahead of it and until when: "position 1"
 		// alone cannot say whose turn you are waiting for (A4.1).
-		// The position is this waiter's place in THIS pod's queue for the session — counted where
-		// the waiting happens (session_waiters.go), which already includes this turn, so it is the
-		// count itself and not count+1. `sess.TurnWaiters()` would say 1 for every waiter: a turn
-		// parked here never reaches the session slot that counter watches.
-		// The position is this waiter's place in THIS pod's queue for the session — counted where
-		// the waiting happens (session_waiters.go), which already includes this turn, so it is the
-		// count itself and not count+1. `sess.TurnWaiters()` would say 1 for every waiter: a turn
-		// parked here never reaches the session slot that counter watches.
 		position := a.queuedSubmissionsFor(sess.Key())
 		if p, ok := a.queuePosition(ctx); ok {
 			position = p
 		}
-		data := map[string]any{"position": position}
-		if busy.Holder != "" {
-			data["holder"] = busy.Holder
-		}
-		if !busy.ExpiresAt.IsZero() {
-			// camelCase, to match the live-turn fact (`turnActivePayload`): the
-			// same concept — "when does this possession lapse" — had two wire
-			// spellings across two events, and the client tolerated both. One
-			// fact, one shape (contract C1, docs 08 §10.4).
-			data["expiresAt"] = busy.ExpiresAt.UTC().Format(time.RFC3339)
-		}
-		// Whose submission is waiting. This is the one fact whose reader has to act on a specific
-		// submission: a tab that learns "something of mine is queued" from a re-emission (a reload,
-		// or any tab that did not POST) can only withdraw it if it knows the submission's identity —
-		// the id the SERVER minted at acceptance (internal/agent/turn_id.go), never a value the
-		// caller chose.
-		// The event ENVELOPE deliberately carries no identity of its own — turns are serialized per
-		// session, so "the holder ended" answers every other question, and a wire field with no
-		// second reader is the kind of thing this roster keeps deleting.
-		if id := TurnIDFromContext(ctx); id != "" {
-			data["turnId"] = id
-		}
-		if text := queuedTextFrom(ctx); text != "" {
-			data["text"] = text
-		}
-		emit(ChatEvent{Type: "queued", Data: data})
+		emitQueued(position, busy.Holder, busy.ExpiresAt)
 		retry := turnLeaseRetry
 		if a.turnLeaseRetryOverride > 0 {
 			retry = a.turnLeaseRetryOverride

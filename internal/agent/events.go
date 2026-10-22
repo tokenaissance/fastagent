@@ -67,7 +67,7 @@ func emitEventChecked(ctx context.Context, evt ChatEvent) (int64, error) {
 	// no replay value: the trailing `content` event carries the full
 	// final text, so a refresh in the middle of a turn just rejoins
 	// the live hub and gets the final on completion.
-	persist := evt.Type != "content_delta"
+	persist := evt.Type != "content_delta" && evt.Type != "queued"
 
 	if persist && stream != nil && stream.sink != nil && stream.userID != "" && stream.sessionKey != "" {
 		blob, _ := json.Marshal(evt.Data)

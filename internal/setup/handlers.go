@@ -1327,56 +1327,55 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	// (§3.1 item 5).
 	turnID := agent.MintTurnID()
 	agentID := ag.Name()
-	queueAccepted := false
 	acceptExpiresAt := time.Now().Add(agentTurnTimeout)
 	dupKey := idempotencyKeyOf(req)
+	dupScope := ""
+	dupDigest := ""
 	if dupKey != "" {
 		parts := []string{req.Message}
 		for _, a := range req.allAttachments() {
 			parts = append(parts, a.Name, a.URL)
 		}
-		dupScope := idempotencyScopeKey("run", uid, agentID, req.SessionID, clientIdentityOf(r), dupKey)
-		dupDigest := instructionDigest(parts)
-		ids, ok := s.dataStore.(store.ChatSubmissionStore)
-		if !ok {
-			jsonResponse(w, http.StatusServiceUnavailable, map[string]any{
-				"error":   "idempotency_unavailable",
-				"message": "the configured store cannot enforce idempotency",
-			})
-			return
-		}
-		v, first, _, err := ids.AcceptChatSubmission(r.Context(), dupScope, dupDigest, turnID, &store.SessionQueueEntry{
-			ID:        turnID,
-			UserID:    uid,
-			AgentID:   agentID,
-			SessionID: req.SessionID,
-			Text:      req.Message,
-			ExpiresAt: acceptExpiresAt,
-		}, idempotencyTTL)
-		if err != nil {
-			slog.Error("chat: durable submission acceptance failed", "error", err)
-			jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": "acceptance_failed"})
-			return
-		}
-		switch v {
-		case store.IdempotencyConflict:
-			jsonResponse(w, http.StatusConflict, map[string]any{
-				"error": "idempotency_conflict",
-				"message": "this idempotencyKey was already used with different content; " +
-					"a new instruction needs a new key",
-			})
-			return
-		case store.IdempotencyDuplicate:
-			w.Header().Set("Content-Type", "text/event-stream")
-			w.Header().Set("Cache-Control", "no-cache")
-			forwardSyntheticEvent(w, flusher, agent.ChatEvent{
-				Type: "duplicate",
-				Data: map[string]any{"turnId": first},
-			})
-			return
-		default:
-			queueAccepted = true
-		}
+		dupScope = idempotencyScopeKey("run", uid, agentID, req.SessionID, clientIdentityOf(r), dupKey)
+		dupDigest = instructionDigest(parts)
+	}
+	ids, ok := s.dataStore.(store.ChatSubmissionStore)
+	if !ok {
+		jsonResponse(w, http.StatusServiceUnavailable, map[string]any{
+			"error":   "acceptance_unavailable",
+			"message": "the configured store cannot accept submissions",
+		})
+		return
+	}
+	v, first, _, err := ids.AcceptChatSubmission(r.Context(), dupScope, dupDigest, turnID, &store.SessionQueueEntry{
+		ID:        turnID,
+		UserID:    uid,
+		AgentID:   agentID,
+		SessionID: req.SessionID,
+		Text:      req.Message,
+		ExpiresAt: acceptExpiresAt,
+	}, idempotencyTTL)
+	if err != nil {
+		slog.Error("chat: durable submission acceptance failed", "error", err)
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": "acceptance_failed"})
+		return
+	}
+	switch v {
+	case store.IdempotencyConflict:
+		jsonResponse(w, http.StatusConflict, map[string]any{
+			"error": "idempotency_conflict",
+			"message": "this idempotencyKey was already used with different content; " +
+				"a new instruction needs a new key",
+		})
+		return
+	case store.IdempotencyDuplicate:
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		forwardSyntheticEvent(w, flusher, agent.ChatEvent{
+			Type: "duplicate",
+			Data: map[string]any{"turnId": first},
+		})
+		return
 	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -1447,26 +1446,13 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	// The durable wait entry: seq is assigned at acceptance, so position and
 	// cancellation are facts of the store, not of whichever pod accepted the
 	// request. A non-dashboard producer never creates one and keeps the old path.
-	if queueAccepted {
-		// Attachments were materialised after the atomic claim+enqueue, so
-		// refresh the queued text with the breadcrumb. A row already admitted
-		// ignores this; history has the annotated message.
-		if updater, ok := s.dataStore.(interface {
-			UpdateSessionQueueText(ctx context.Context, id, text string) error
-		}); ok {
-			_ = updater.UpdateSessionQueueText(agentCtx, turnID, msgText)
-		}
-	} else if qs, ok := s.dataStore.(store.SessionQueueStore); ok {
-		if _, err := qs.EnqueueSessionQueue(agentCtx, &store.SessionQueueEntry{
-			ID:        turnID,
-			UserID:    uid,
-			AgentID:   agentID,
-			SessionID: req.SessionID,
-			Text:      msgText,
-			ExpiresAt: turnDeadline,
-		}); err != nil {
-			slog.Warn("chat: could not persist the queued submission", "turn", turnID, "error", err)
-		}
+	// Attachments were materialised after the atomic accept, so refresh the
+	// queued text with the breadcrumb. A row already admitted ignores this;
+	// history has the annotated message.
+	if updater, ok := s.dataStore.(interface {
+		UpdateSessionQueueText(ctx context.Context, id, text string) error
+	}); ok {
+		_ = updater.UpdateSessionQueueText(agentCtx, turnID, msgText)
 	}
 	// admissionStarted closes when the agent holds the session's turn slot;
 	// until then this turn is still queued and may be withdrawn.

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"time"
 
 	"github.com/fastclaw-ai/fastclaw/internal/store"
 )
@@ -69,6 +70,14 @@ func (a *Agent) queuePosition(ctx context.Context) (int, bool) {
 
 // queueHeadWait reports whether this submission must wait for an earlier
 // ticket. The store's seq is the FIFO order; the lease is only exclusion.
+func (a *Agent) queueClaimExpiry(ctx context.Context) (time.Time, bool) {
+	qs, entry := a.queueEntry(ctx)
+	if qs == nil || entry == nil || entry.ExpiresAt.IsZero() {
+		return time.Time{}, false
+	}
+	return entry.ExpiresAt, true
+}
+
 func (a *Agent) queueHeadWait(ctx context.Context) bool {
 	qs, entry := a.queueEntry(ctx)
 	if qs == nil || entry == nil || entry.State != store.SessionQueueQueued {

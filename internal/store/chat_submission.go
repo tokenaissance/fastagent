@@ -41,13 +41,16 @@ func (d *DBStore) AcceptChatSubmission(
 		var seq int64
 		err := d.WithTx(ctx, func(tx Store) error {
 			db := tx.(*DBStore)
-			v, f, err := db.claimChatIdempotency(ctx, scopeKey, digest, turnID, ttl)
-			if err != nil {
-				return err
-			}
-			verdict, first = v, f
-			if v != IdempotencyMiss {
-				return nil
+			verdict, first = IdempotencyMiss, turnID
+			if scopeKey != "" {
+				v, f, err := db.claimChatIdempotency(ctx, scopeKey, digest, turnID, ttl)
+				if err != nil {
+					return err
+				}
+				verdict, first = v, f
+				if v != IdempotencyMiss {
+					return nil
+				}
 			}
 			var maxSeq sql.NullInt64
 			if err := db.handle().QueryRowContext(ctx,
@@ -57,7 +60,7 @@ func (d *DBStore) AcceptChatSubmission(
 				return err
 			}
 			seq = maxSeq.Int64 + 1
-			_, err = db.handle().ExecContext(ctx,
+			_, err := db.handle().ExecContext(ctx,
 				"INSERT INTO session_queue (id, user_id, agent_id, session_key, seq, text, state, created_at, expires_at) VALUES ("+
 					db.ph(1)+","+db.ph(2)+","+db.ph(3)+","+db.ph(4)+","+db.ph(5)+","+db.ph(6)+","+db.ph(7)+","+db.ph(8)+","+db.ph(9)+")",
 				entry.ID, entry.UserID, entry.AgentID, entry.SessionID, seq, entry.Text, entry.State, entry.CreatedAt, entry.ExpiresAt,
