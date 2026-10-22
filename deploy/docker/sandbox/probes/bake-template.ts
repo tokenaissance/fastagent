@@ -24,4 +24,6 @@ if (!name || !tag) {
 }
 
 console.log(`baking ${name} from registry.digitalocean.com/tokenaissance/fastagent-sandbox:${tag}`)
-await Template.build(template, name, { onBuildLogs: defaultBuildLogger() })
+// skipCache: the bake must not reuse E2B's cached layers — see build.dev.ts for why
+// (CVE-2026-111943, 2026-10-22: cached layers can retain the old CA bundle).
+await Template.build(template, name, { onBuildLogs: defaultBuildLogger(), skipCache: true })

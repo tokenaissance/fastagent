@@ -10,6 +10,12 @@
 #   deploy/docker/sandbox/build.sh --push               # build + push
 #   deploy/docker/sandbox/build.sh --platform linux/amd64,linux/arm64 --push
 #                                                       # multi-arch buildx
+#   deploy/docker/sandbox/build.sh --no-cache            # ignore every cached layer
+#
+# --no-cache is not normally needed: the CA strip in the Dockerfile is its own RUN on top of
+# the apt layer, so a cached apt result still gets stripped. Reach for it when the *input*
+# moved under you (a new ca-certificates in bookworm-security, or a rebuild of the same tag)
+# and you want the build to re-resolve everything.
 #
 # After building, point the gateway at it via Settings → Sandbox →
 # Image, or during onboard. Default:
@@ -30,6 +36,7 @@ IMAGE_NAME=${IMAGE_NAME:-registry.digitalocean.com/tokenaissance/fastagent-sandb
 TAG=$(date +%Y%m%d%H%M%S)
 PUSH=0
 PLATFORM=""
+NO_CACHE=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -41,8 +48,10 @@ while [[ $# -gt 0 ]]; do
       PUSH=1; shift ;;
     --platform)
       PLATFORM="$2"; shift 2 ;;
+    --no-cache)
+      NO_CACHE=1; shift ;;
     -h|--help)
-      sed -n '2,18p' "$0"; exit 0 ;;
+      sed -n '2,26p' "$0"; exit 0 ;;
     *)
       echo "unknown arg: $1" >&2; exit 2 ;;
   esac
@@ -58,11 +67,12 @@ if [[ -n "$PLATFORM" ]]; then
   # against a registry without first loading into the local daemon.
   docker buildx build \
     --platform "$PLATFORM" \
+    $([[ $NO_CACHE -eq 1 ]] && echo --no-cache) \
     $([[ $PUSH -eq 1 ]] && echo --push || echo --load) \
     -t "$REF" \
     "$SCRIPT_DIR"
 else
-  docker build -t "$REF" "$SCRIPT_DIR"
+  docker build $([[ $NO_CACHE -eq 1 ]] && echo --no-cache) -t "$REF" "$SCRIPT_DIR"
   if [[ $PUSH -eq 1 ]]; then
     echo "==> pushing ${REF}"
     docker push "$REF"
