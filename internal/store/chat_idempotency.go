@@ -16,8 +16,8 @@ const (
 	IdempotencyConflict  = "conflict"
 )
 
-// ChatIdempotencyStore is the cross-replica de-duplication window. The in-process
-// map is only a fallback for stores that do not implement it.
+// ChatIdempotencyStore is the cross-replica de-duplication window. Every
+// environment claims this store; there is no in-memory implementation.
 type ChatIdempotencyStore interface {
 	ClaimChatIdempotency(ctx context.Context, scopeKey, digest, turnID string, ttl time.Duration) (verdict, firstTurnID string, err error)
 	DeleteChatIdempotency(ctx context.Context, scopeKey string) error

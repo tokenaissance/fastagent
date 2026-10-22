@@ -35,7 +35,8 @@ type SessionQueueEntry struct {
 }
 
 // SessionQueueStore is the narrow capability the agent and the chat handler
-// need. *DBStore implements it; a nil store means the legacy in-process wait.
+// need. *DBStore implements it. Web acceptance requires it; a nil store only
+// remains for non-web callers that never enqueue.
 type SessionQueueStore interface {
 	EnqueueSessionQueue(ctx context.Context, entry *SessionQueueEntry) (int64, error)
 	GetSessionQueue(ctx context.Context, id string) (*SessionQueueEntry, error)
