@@ -84,7 +84,10 @@ func newContinuesHarness(t *testing.T, prov provider.Provider, iterations, conti
 	if ag == nil {
 		t.Fatal("agent not registered")
 	}
-	s := &Server{userResolver: e2eResolver{space: &api.UserSpaceView{UserID: "u_1", Agents: mgr}, agents: mgr}}
+	s := &Server{
+		userResolver: e2eResolver{space: &api.UserSpaceView{UserID: "u_1", Agents: mgr}, agents: mgr},
+		dataStore:    newChatStore(t, home),
+	}
 	return s, ag
 }
 

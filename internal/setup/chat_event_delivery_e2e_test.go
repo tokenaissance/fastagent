@@ -248,7 +248,7 @@ func TestAChatSubscribeReplaySkipsLiveOnlyEvents(t *testing.T) {
 // failingTailStore is a real store whose tail query always fails: the handler
 // must degrade to hub-only, not drop the subscription.
 type failingTailStore struct {
-	store.Store
+	*store.DBStore
 }
 
 func (f failingTailStore) ListSessionEventsSince(context.Context, string, string, string, int64) ([]store.SessionEventRecord, error) {
@@ -257,7 +257,7 @@ func (f failingTailStore) ListSessionEventsSince(context.Context, string, string
 
 func TestChatSubscribeSurvivesATailQueryFailure(t *testing.T) {
 	podA, _, db := newReplicaPair(t, &e2eProvider{reply: "still alive"}, 2)
-	podA.dataStore = failingTailStore{Store: db}
+	podA.dataStore = failingTailStore{DBStore: db}
 
 	sub, subDone, stopSub := subscribeOn(t, podA, "agt_e2e", "chat-tail-fails")
 	defer stopSub()

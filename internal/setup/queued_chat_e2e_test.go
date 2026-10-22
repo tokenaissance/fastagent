@@ -17,6 +17,7 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/bus"
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 	"github.com/fastclaw-ai/fastclaw/internal/provider"
+	"github.com/fastclaw-ai/fastclaw/internal/store"
 )
 
 // sseRecorder is an http.ResponseWriter that records the SSE body while the
@@ -171,8 +172,28 @@ func newChatHarnessWith(t *testing.T, prov provider.Provider, maxToolIterations 
 	if ag == nil {
 		t.Fatal("agent not registered")
 	}
-	s := &Server{userResolver: e2eResolver{space: &api.UserSpaceView{UserID: "u_1", Agents: mgr}, agents: mgr}}
+	db := newChatStore(t, home)
+	s := &Server{
+		userResolver: e2eResolver{space: &api.UserSpaceView{UserID: "u_1", Agents: mgr}, agents: mgr},
+		dataStore:    db,
+	}
 	return s, ag
+}
+
+// newChatStore gives a harness the durable idempotency/queue store. The
+// production handler has no in-memory fallback, so a test that passes an
+// idempotency key (or the legacy turnId spelling) needs this.
+func newChatStore(t *testing.T, home string) *store.DBStore {
+	t.Helper()
+	db, err := store.NewDBStore("sqlite", "file:"+filepath.Join(home, "chat-e2e.db"))
+	if err != nil {
+		t.Fatalf("open chat store: %v", err)
+	}
+	if err := db.Migrate(context.Background()); err != nil {
+		t.Fatalf("migrate chat store: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return db
 }
 
 func chatStreamRequest(t *testing.T, req chatRequest) *http.Request {

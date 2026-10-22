@@ -113,14 +113,6 @@ type Server struct {
 	// uid|agent|session|turnID — see handlers_chat_cancel.go.
 	pendingTurnsMu sync.Mutex
 	pendingTurns   map[string]*pendingWebTurn
-	// pendingSeq numbers submissions in acceptance order for the no-store test
-	// fallback only. Production order is session_queue.seq.
-	pendingSeq int64
-	// idempotency is the TEST-ONLY fallback for harnesses with no store. Production
-	// uses chat_idempotency, so a retry on another pod cannot create a second
-	// instruction. The handler never reads this map when dataStore is non-nil.
-	idempotencyMu sync.Mutex
-	idempotency   map[string]idempotencyEntry
 	// runtimeMgr powers the coding-agent project runtime (live dev server
 	// + preview). Optional: nil when the deployment hasn't wired a
 	// sandbox-backed runtime, in which case the /runtime endpoints return

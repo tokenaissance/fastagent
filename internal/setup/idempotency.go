@@ -11,12 +11,11 @@ import (
 /**
  * [INPUT]: one submission's four scope parts (account, task, authorized client, key) plus
  *          the digest of its normalized instruction payload.
- * [OUTPUT]: idempotencyVerdictFor / rememberIdempotency — miss, duplicate (the first answer
- *           stands) or conflict (same key, different content: refuse loudly).
- * [POS]: The single checker §3.1 of docs/fastagent/design/14-turn-identity.md demands. It runs
- *        in the same process and the same lock-step as admission, which is what makes the
- *        promise below honest — and what makes its boundary the same boundary as the queued
- *        entry's lifetime (§14.6 path 1).
+ * [OUTPUT]: the scope key and content digest the store claims. The store answers miss,
+ *           duplicate (the first answer stands) or conflict (same key, different content).
+ * [POS]: The input half of §3.1 of docs/fastagent/design/14-turn-identity.md. The checker
+ *        itself is chat_idempotency in the store, so a retry that lands on another replica
+ *        sees the same window.
  * [PROTOCOL]: The wire field is `idempotencyKey` (`turnId` is its legacy spelling, read and
  *        nothing more). The client identity arrives as `X-Fastagent-Client`; the pod cannot
  *        derive it, because it sees the cloud account and the end user, never "which
@@ -25,32 +24,8 @@ import (
 
 // The window is a promise with an edge, not a lease: it holds nothing, and outside it the same
 // key is simply a new instruction (§3.1 items 3 and 8). Ten minutes is comfortably larger than
-// any client's retry horizon while small enough that the map cannot grow without bound.
+// any client's retry horizon; expired rows are swept on the next claim.
 const idempotencyTTL = 10 * time.Minute
-
-// Above this many live entries, a write sweeps the expired ones. A sweep on every write would
-// be O(n) per request; a sweep never would let a long-lived pod accumulate one entry per
-// distinct key forever. Sweeping on a rare boundary is the cheap middle, and it is enough
-// because the entries expire by time, not by use.
-const idempotencySweepThreshold = 512
-
-type idempotencyEntry struct {
-	digest string
-	turnID string
-	at     time.Time
-}
-
-type idempotencyVerdict int
-
-const (
-	idempotencyMiss idempotencyVerdict = iota
-	// idempotencyDuplicate: same key, same content. It is a retry of an instruction this pod
-	// already accepted, so the first turn stands and this call creates nothing.
-	idempotencyDuplicate
-	// idempotencyConflict: same key, different content. Never a silent overwrite — appending a
-	// NEW instruction means choosing a NEW key (§3.1 items 2 and 5).
-	idempotencyConflict
-)
 
 // idempotencyKeyOf is the caller's string, in either spelling. `turnId` came first and used to
 // mean identity; since 2026-09-28 identity is minted here (internal/agent/turn_id.go), so the
@@ -89,39 +64,4 @@ func instructionDigest(parts []string) string {
 	}
 	sum := h.Sum(nil)
 	return hex.EncodeToString(sum[:])
-}
-
-func (s *Server) idempotencyVerdictFor(scopeKey, digest string) (idempotencyVerdict, string) {
-	s.idempotencyMu.Lock()
-	defer s.idempotencyMu.Unlock()
-	entry, ok := s.idempotency[scopeKey]
-	if !ok {
-		return idempotencyMiss, ""
-	}
-	if time.Since(entry.at) > idempotencyTTL {
-		// Expired: the same key outside the window is a new instruction, not a retry.
-		delete(s.idempotency, scopeKey)
-		return idempotencyMiss, ""
-	}
-	if entry.digest != digest {
-		return idempotencyConflict, entry.turnID
-	}
-	return idempotencyDuplicate, entry.turnID
-}
-
-func (s *Server) rememberIdempotency(scopeKey, digest, turnID string) {
-	s.idempotencyMu.Lock()
-	defer s.idempotencyMu.Unlock()
-	if s.idempotency == nil {
-		s.idempotency = make(map[string]idempotencyEntry)
-	}
-	if len(s.idempotency) >= idempotencySweepThreshold {
-		now := time.Now()
-		for k, e := range s.idempotency {
-			if now.Sub(e.at) > idempotencyTTL {
-				delete(s.idempotency, k)
-			}
-		}
-	}
-	s.idempotency[scopeKey] = idempotencyEntry{digest: digest, turnID: turnID, at: time.Now()}
 }

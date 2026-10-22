@@ -1242,56 +1242,46 @@ func (s *Server) handleChatSteer(w http.ResponseWriter, r *http.Request) {
 	dupScope := ""
 	dupDigest := ""
 	var idemStore store.ChatIdempotencyStore
-	stored := false
 	if dupKey != "" {
 		uid := s.effectiveUserID(r)
 		dupScope = idempotencyScopeKey("steer", uid, ag.Name(), req.SessionID, clientIdentityOf(r), dupKey)
 		dupDigest = instructionDigest([]string{req.Message})
-		verdict := idempotencyMiss
-		if s.dataStore == nil {
-			verdict, _ = s.idempotencyVerdictFor(dupScope, dupDigest)
-		} else if ids, ok := s.dataStore.(store.ChatIdempotencyStore); !ok {
-			// Test-only fallback; the DB store always implements this.
-			verdict, _ = s.idempotencyVerdictFor(dupScope, dupDigest)
-		} else {
-			v, _, err := ids.ClaimChatIdempotency(r.Context(), dupScope, dupDigest, "", idempotencyTTL)
-			if err != nil {
-				slog.Error("steer: durable idempotency claim failed", "error", err)
-				jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": "idempotency_failed"})
-				return
-			}
-			idemStore, stored = ids, true
-			switch v {
-			case store.IdempotencyDuplicate:
-				verdict = idempotencyDuplicate
-			case store.IdempotencyConflict:
-				verdict = idempotencyConflict
-			}
+		ids, ok := s.dataStore.(store.ChatIdempotencyStore)
+		if !ok {
+			jsonResponse(w, http.StatusServiceUnavailable, map[string]any{
+				"error":   "idempotency_unavailable",
+				"message": "the configured store cannot enforce idempotency",
+			})
+			return
 		}
-		switch verdict {
-		case idempotencyConflict:
+		v, _, err := ids.ClaimChatIdempotency(r.Context(), dupScope, dupDigest, "", idempotencyTTL)
+		if err != nil {
+			slog.Error("steer: durable idempotency claim failed", "error", err)
+			jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": "idempotency_failed"})
+			return
+		}
+		idemStore = ids
+		switch v {
+		case store.IdempotencyConflict:
 			jsonResponse(w, http.StatusConflict, map[string]any{
 				"error": "idempotency_conflict",
 				"message": "this idempotencyKey was already used with different content; " +
 					"a new instruction needs a new key",
 			})
 			return
-		case idempotencyDuplicate:
+		case store.IdempotencyDuplicate:
 			jsonResponse(w, http.StatusOK, map[string]any{"buffered": true, "duplicate": true})
 			return
 		}
 	}
 	if ag.SteerWeb(req.SessionID, req.ProjectID, req.Message) {
-		if dupScope != "" && !stored {
-			s.rememberIdempotency(dupScope, dupDigest, "")
-		}
 		jsonResponse(w, http.StatusOK, map[string]any{"buffered": true})
 		return
 	}
 	// The steer changed nothing (no live turn). Release the claim so the
 	// caller can retry or queue the instruction instead of reading a stale
 	// "duplicate".
-	if stored && idemStore != nil {
+	if idemStore != nil {
 		_ = idemStore.DeleteChatIdempotency(r.Context(), dupScope)
 	}
 	jsonResponse(w, http.StatusConflict, map[string]any{"buffered": false})
@@ -1337,59 +1327,41 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	// (§3.1 item 5).
 	turnID := agent.MintTurnID()
 	dupKey := idempotencyKeyOf(req)
-	dupScope := ""
-	dupDigest := ""
-	idempotencyStored := false
 	if dupKey != "" {
 		parts := []string{req.Message}
 		for _, a := range req.allAttachments() {
 			parts = append(parts, a.Name, a.URL)
 		}
-		dupScope = idempotencyScopeKey("run", uid, ag.Name(), req.SessionID, clientIdentityOf(r), dupKey)
-		dupDigest = instructionDigest(parts)
-		verdict := idempotencyMiss
-		firstTurnID := ""
-		if s.dataStore == nil {
-			// Test harnesses without a store keep the old in-process window.
-			verdict, firstTurnID = s.idempotencyVerdictFor(dupScope, dupDigest)
-		} else if ids, ok := s.dataStore.(store.ChatIdempotencyStore); !ok {
-			// A non-DB test store. Production's store always implements this.
-			verdict, firstTurnID = s.idempotencyVerdictFor(dupScope, dupDigest)
-		} else {
-			v, first, err := ids.ClaimChatIdempotency(r.Context(), dupScope, dupDigest, turnID, idempotencyTTL)
-			if err != nil {
-				slog.Error("chat: durable idempotency claim failed", "error", err)
-				jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": "idempotency_failed"})
-				return
-			}
-			idempotencyStored = true
-			firstTurnID = first
-			switch v {
-			case store.IdempotencyDuplicate:
-				verdict = idempotencyDuplicate
-			case store.IdempotencyConflict:
-				verdict = idempotencyConflict
-			default:
-				verdict = idempotencyMiss
-			}
+		dupScope := idempotencyScopeKey("run", uid, ag.Name(), req.SessionID, clientIdentityOf(r), dupKey)
+		dupDigest := instructionDigest(parts)
+		ids, ok := s.dataStore.(store.ChatIdempotencyStore)
+		if !ok {
+			jsonResponse(w, http.StatusServiceUnavailable, map[string]any{
+				"error":   "idempotency_unavailable",
+				"message": "the configured store cannot enforce idempotency",
+			})
+			return
 		}
-		switch verdict {
-		case idempotencyConflict:
+		v, first, err := ids.ClaimChatIdempotency(r.Context(), dupScope, dupDigest, turnID, idempotencyTTL)
+		if err != nil {
+			slog.Error("chat: durable idempotency claim failed", "error", err)
+			jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": "idempotency_failed"})
+			return
+		}
+		switch v {
+		case store.IdempotencyConflict:
 			jsonResponse(w, http.StatusConflict, map[string]any{
 				"error": "idempotency_conflict",
 				"message": "this idempotencyKey was already used with different content; " +
 					"a new instruction needs a new key",
 			})
 			return
-		case idempotencyDuplicate:
-			// The first submission stands and this call creates nothing. The answer names it —
-			// in the stream's own shape, so a client that parses SSE can read it like any other
-			// event — and the caller can go read the turn it already has.
+		case store.IdempotencyDuplicate:
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.Header().Set("Cache-Control", "no-cache")
 			forwardSyntheticEvent(w, flusher, agent.ChatEvent{
 				Type: "duplicate",
-				Data: map[string]any{"turnId": firstTurnID},
+				Data: map[string]any{"turnId": first},
 			})
 			return
 		}
@@ -1475,11 +1447,6 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		}); err != nil {
 			slog.Warn("chat: could not persist the queued submission", "turn", turnID, "error", err)
 		}
-	}
-	// Remembered in the same breath as the mint, before the turn's goroutine exists: a retry
-	// that arrives while this one is starting must find the entry, not a gap.
-	if dupScope != "" && !idempotencyStored {
-		s.rememberIdempotency(dupScope, dupDigest, turnID)
 	}
 	// admissionStarted closes when the agent holds the session's turn slot;
 	// until then this turn is still queued and may be withdrawn.

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/fastclaw-ai/fastclaw/internal/store"
@@ -22,10 +21,6 @@ import (
 type pendingWebTurn struct {
 	cancel  context.CancelFunc
 	started bool
-	// seq is only the no-store test fallback's ordering. Production chooses the
-	// earliest queued instruction by session_queue.seq, so this cache never
-	// decides what withdraw_task returns.
-	seq int64
 }
 
 // chatTurnKey identifies one chat POST. turnID is the identity the server minted when it
@@ -42,8 +37,7 @@ func (s *Server) registerPendingTurn(key string, cancel context.CancelFunc) *pen
 	if s.pendingTurns == nil {
 		s.pendingTurns = make(map[string]*pendingWebTurn)
 	}
-	s.pendingSeq++
-	turn := &pendingWebTurn{cancel: cancel, seq: s.pendingSeq}
+	turn := &pendingWebTurn{cancel: cancel}
 	s.pendingTurns[key] = turn
 	return turn
 }
@@ -82,30 +76,7 @@ func (s *Server) withdrawEarliestPendingTurn(ctx context.Context, uid, agentID, 
 		// local map is a cancellation cache, not a second queue.
 		return "", false
 	}
-	if s.dataStore != nil {
-		// Production always wires a queue store. A different store without the
-		// capability must not silently fall back to pod-local ordering.
-		return "", false
-	}
-	// Test-only fallback for harnesses with no store at all.
-	s.pendingTurnsMu.Lock()
-	defer s.pendingTurnsMu.Unlock()
-	prefix := uid + "|" + agentID + "|" + sessionID + "|"
-	var best *pendingWebTurn
-	var bestTurnID string
-	for key, turn := range s.pendingTurns {
-		if turn.started || !strings.HasPrefix(key, prefix) {
-			continue
-		}
-		if best == nil || turn.seq < best.seq {
-			best, bestTurnID = turn, strings.TrimPrefix(key, prefix)
-		}
-	}
-	if best == nil {
-		return "", false
-	}
-	best.cancel()
-	return bestTurnID, true
+	return "", false
 }
 
 func (s *Server) unregisterPendingTurn(key string) {

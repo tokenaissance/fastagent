@@ -48,7 +48,7 @@ func TestAFinishedTurnStampsItsEndingE2E(t *testing.T) {
 // critical section, so every case asks the same question from a different side — did the model
 // run once or twice?
 //
-// Falsification, run for the record when this landed: drop the `idempotencyVerdictFor` call
+// Falsification, run for the record when this landed: drop the `ClaimChatIdempotency` call
 // from handleChatStream and `a retry does not run the model twice` goes red (startCount 2);
 // widen the scope key by removing `client` and `two clients sharing a key are two
 // instructions` goes red (the second client is answered from the first one's entry).
