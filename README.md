@@ -473,7 +473,9 @@ nothing below works out of order:
 1. Build and push the base image, which is what the template's `fromImage` names
    (`deploy/docker/sandbox/template.ts`):
    ```bash
-   deploy/docker/sandbox/build.sh --push      # -> registry.digitalocean.com/tokenaissance/fastagent-sandbox:latest
+   deploy/docker/sandbox/build.sh --push      # -> registry.digitalocean.com/tokenaissance/fastagent-sandbox:<build date>
+   # The tag is the build's date, never `latest` (build.sh header, user ruling 2026-09-30), so the
+   # image a template was baked from can still be named after the fact.
    ```
 2. Register the E2B template from its SDK definition — a TS script, not the TOML the
    retired Build System 1.0 read:
@@ -494,9 +496,9 @@ nothing below works out of order:
 > Docker image reference, and two places can carry it — the per-backend field wins: the dashboard at
 > Settings -> Runtime -> Sandbox -> **E2B Template** (writes `sandbox.e2bTemplate`), and `sandbox.image`
 > above, which lands in the legacy shared slot (`FASTAGENT_SANDBOX_IMAGE`) and is read only when
-> `e2bTemplate` is empty. The chart default is a Docker reference (`values.yaml`:
-> `image: registry.digitalocean.com/tokenaissance/fastagent-sandbox:latest`) and `base` is the last fallback, so override one of them
-> or the gateway asks E2B for a template by that literal name.
+> `e2bTemplate` is empty. The chart default (`values.yaml`: `sandbox.image`) is a date-tagged Docker
+> reference, and `base` is the last fallback, so override one of them or the gateway asks E2B for a
+> template by that literal name.
 
 #### Raw manifests
 
