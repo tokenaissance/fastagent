@@ -2,7 +2,7 @@
 
 ## renderClientParams
 
-<!-- source: internal/agent/loop.go:2047 -->
+<!-- source: internal/agent/loop.go:2063 -->
 
 <!-- NOTE: 2 branch point(s) — literals concatenated in source order, not rendered -->
 
@@ -18,7 +18,7 @@ The user's client app submitted these parameters alongside the message. Forward 
 
 ## renderChatbotPersistenceReminder
 
-<!-- source: internal/agent/loop.go:2190 -->
+<!-- source: internal/agent/loop.go:2206 -->
 
 <!-- NOTE: 5 branch point(s) — literals concatenated in source order, not rendered -->
 
@@ -56,7 +56,7 @@ Long-term facts you've recorded about this chatter (from MEMORY.md):
 
 ## renderChannelHints
 
-<!-- source: internal/agent/loop.go:2254 -->
+<!-- source: internal/agent/loop.go:2270 -->
 
 <!-- NOTE: 1 branch point(s) — literals concatenated in source order, not rendered -->
 
@@ -70,7 +70,7 @@ Use this when a short, conversational, multi-beat reply reads more naturally tha
 
 ## renderSender
 
-<!-- source: internal/agent/loop.go:2297 -->
+<!-- source: internal/agent/loop.go:2313 -->
 
 <!-- NOTE: 4 branch point(s) — literals concatenated in source order, not rendered -->
 
@@ -86,7 +86,7 @@ The latest user turn was sent by:
 
 ## planModeNudge
 
-<!-- source: internal/agent/loop.go:2350 -->
+<!-- source: internal/agent/loop.go:2366 -->
 
 ````text
 # PLAN MODE — output a plan only
@@ -106,7 +106,7 @@ Do not start the work. Do not apologize for needing a plan. Just the plan.
 
 ## buildToolCatalogForPlan
 
-<!-- source: internal/agent/loop.go:2395 -->
+<!-- source: internal/agent/loop.go:2411 -->
 
 <!-- NOTE: 3 branch point(s) — literals concatenated in source order, not rendered -->
 
@@ -157,7 +157,7 @@ The last %d rounds of tool calls all failed (HTTP errors or empty results). Stop
 
 ## deferred tool result
 
-<!-- source: internal/agent/turn_tool_round.go:50 -->
+<!-- source: internal/agent/turn_tool_round.go:71 -->
 
 ````text
 Deferred — this turn's parallel-tool cap is %d, and you emitted %d. Re-issue this exact call next round if you still need it; you'll have the other tools' results to inform the decision then.

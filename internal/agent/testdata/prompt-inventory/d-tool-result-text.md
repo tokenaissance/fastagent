@@ -42,7 +42,7 @@ deadline_exceeded [hint: the output above was delivered, but a process this comm
 
 ## sandbox-absence hint
 
-<!-- source: internal/agent/tools/exec.go:664 -->
+<!-- source: internal/agent/tools/exec.go:669 -->
 
 ````text
 %w
@@ -51,7 +51,7 @@ deadline_exceeded [hint: the output above was delivered, but a process this comm
 
 ## background job started
 
-<!-- source: internal/agent/tools/sandbox_background.go:466 -->
+<!-- source: internal/agent/tools/sandbox_background.go:474 -->
 
 ````text
 Started background job %s (pid %s) in the sandbox: %s
@@ -63,10 +63,13 @@ The job keeps running after this call returns, and its output is captured at %s 
 
 <!-- source: internal/agent/tools/sandbox_background.go:330-360 -->
 
-<!-- NOTE: 5 branch point(s) — literals concatenated in source order, not rendered -->
+<!-- NOTE: 4 branch point(s) — literals concatenated in source order, not rendered -->
 
 ````text
-fcbg1sandbox background launch: no job handle in output %q — the shell could not start a detached processsandbox background poll: no status marker in output %qsandbox background poll: unterminated status marker in output %qfcbgsandbox background poll: malformed status marker %q
+pkill -KILL -P  2>/dev/null || true
+kill -KILL  2>/dev/null || true
+
+fcbg1sandbox background launch: no job handle in output %q — the shell could not start a detached processsandbox background poll: no status marker in output %qsandbox background poll: unterminated status marker in output %q
 ````
 
 ## interrupted-call placeholder
