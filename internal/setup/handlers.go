@@ -1241,11 +1241,31 @@ func (s *Server) handleChatSteer(w http.ResponseWriter, r *http.Request) {
 	dupKey := idempotencyKeyOf(req)
 	dupScope := ""
 	dupDigest := ""
+	var idemStore store.ChatIdempotencyStore
+	stored := false
 	if dupKey != "" {
 		uid := s.effectiveUserID(r)
 		dupScope = idempotencyScopeKey("steer", uid, ag.Name(), req.SessionID, clientIdentityOf(r), dupKey)
 		dupDigest = instructionDigest([]string{req.Message})
-		switch verdict, _ := s.idempotencyVerdictFor(dupScope, dupDigest); verdict {
+		verdict := idempotencyMiss
+		if ids, ok := s.dataStore.(store.ChatIdempotencyStore); ok {
+			v, _, err := ids.ClaimChatIdempotency(r.Context(), dupScope, dupDigest, "", idempotencyTTL)
+			if err == nil {
+				idemStore, stored = ids, true
+				switch v {
+				case store.IdempotencyDuplicate:
+					verdict = idempotencyDuplicate
+				case store.IdempotencyConflict:
+					verdict = idempotencyConflict
+				}
+			} else {
+				slog.Warn("steer: durable idempotency claim failed; using the local window", "error", err)
+			}
+		}
+		if !stored {
+			verdict, _ = s.idempotencyVerdictFor(dupScope, dupDigest)
+		}
+		switch verdict {
 		case idempotencyConflict:
 			jsonResponse(w, http.StatusConflict, map[string]any{
 				"error": "idempotency_conflict",
@@ -1259,11 +1279,17 @@ func (s *Server) handleChatSteer(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if ag.SteerWeb(req.SessionID, req.ProjectID, req.Message) {
-		if dupScope != "" {
+		if dupScope != "" && !stored {
 			s.rememberIdempotency(dupScope, dupDigest, "")
 		}
 		jsonResponse(w, http.StatusOK, map[string]any{"buffered": true})
 		return
+	}
+	// The steer changed nothing (no live turn). Release the claim so the
+	// caller can retry or queue the instruction instead of reading a stale
+	// "duplicate".
+	if stored && idemStore != nil {
+		_ = idemStore.DeleteChatIdempotency(r.Context(), dupScope)
 	}
 	jsonResponse(w, http.StatusConflict, map[string]any{"buffered": false})
 }

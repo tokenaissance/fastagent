@@ -20,6 +20,7 @@ const (
 // map is only a fallback for stores that do not implement it.
 type ChatIdempotencyStore interface {
 	ClaimChatIdempotency(ctx context.Context, scopeKey, digest, turnID string, ttl time.Duration) (verdict, firstTurnID string, err error)
+	DeleteChatIdempotency(ctx context.Context, scopeKey string) error
 }
 
 // ClaimChatIdempotency inserts the key or classifies the existing row.
@@ -79,4 +80,14 @@ func (d *DBStore) ClaimChatIdempotency(ctx context.Context, scopeKey, digest, tu
 		return IdempotencyConflict, gotTurn, nil
 	}
 	return "", "", fmt.Errorf("store: idempotency claim kept racing for %q", scopeKey)
+}
+
+// DeleteChatIdempotency releases a claim that did not change anything, such as
+// a steer that found no running turn. Without it a failed steer would answer
+// duplicate to every retry for the rest of the window.
+func (d *DBStore) DeleteChatIdempotency(ctx context.Context, scopeKey string) error {
+	_, err := d.handle().ExecContext(ctx,
+		"DELETE FROM chat_idempotency WHERE scope_key = "+d.ph(1), scopeKey,
+	)
+	return err
 }

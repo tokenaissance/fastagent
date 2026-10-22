@@ -25,6 +25,15 @@ func TestChatIdempotencyClaim(t *testing.T) {
 		t.Fatalf("conflict = %q %v", verdict, err)
 	}
 
+	// Releasing a claim lets the key be used again (a failed steer).
+	if err := db.DeleteChatIdempotency(ctx, "run|u|a|s|client|k"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	verdict, turn, err = db.ClaimChatIdempotency(ctx, "run|u|a|s|client|k", "d1", "t5", time.Minute)
+	if err != nil || verdict != IdempotencyMiss || turn != "t5" {
+		t.Fatalf("after delete = %q %q %v", verdict, turn, err)
+	}
+
 	// Expired key is a new instruction.
 	verdict, turn, err = db.ClaimChatIdempotency(ctx, "run|u|a|s|client|k", "d1", "t4", time.Nanosecond)
 	if err != nil || verdict != IdempotencyMiss || turn != "t4" {
