@@ -81,6 +81,10 @@ type WebhookMeter struct {
 	retryBase    time.Duration
 	retryMax     time.Duration
 	pollInterval time.Duration
+	// maxAttempts bounds retries for retryable failures (5xx/429/timeout).
+	// Without a cap a poison row retried forever; after this many attempts the
+	// row is marked dead and can be inspected or replayed deliberately.
+	maxAttempts int
 
 	wake      chan struct{}
 	stop      chan struct{}
@@ -95,8 +99,28 @@ func NewWebhookMeter(localMeter Meter, webhookURL, webhookToken string, getCostF
 	return NewWebhookMeterWithOutbox(localMeter, NewMemOutbox(), webhookURL, webhookToken, getCostFunc)
 }
 
+// webhookMeterOptions are fixed at construction: the dispatcher goroutine
+// reads them, so tests must not mutate them after the meter starts.
+type webhookMeterOptions struct {
+	retryBase    time.Duration
+	retryMax     time.Duration
+	pollInterval time.Duration
+	maxAttempts  int
+}
+
+var defaultWebhookMeterOptions = webhookMeterOptions{
+	retryBase:    2 * time.Second,
+	retryMax:     5 * time.Minute,
+	pollInterval: 5 * time.Second,
+	maxAttempts:  20,
+}
+
 // NewWebhookMeterWithOutbox creates a meter backed by a durable outbox.
 func NewWebhookMeterWithOutbox(localMeter Meter, outbox Outbox, webhookURL, webhookToken string, getCostFunc func(string, string) *config.ModelCost) *WebhookMeter {
+	return newWebhookMeter(localMeter, outbox, webhookURL, webhookToken, getCostFunc, defaultWebhookMeterOptions)
+}
+
+func newWebhookMeter(localMeter Meter, outbox Outbox, webhookURL, webhookToken string, getCostFunc func(string, string) *config.ModelCost, opts webhookMeterOptions) *WebhookMeter {
 	if outbox == nil {
 		outbox = NewMemOutbox()
 	}
@@ -107,9 +131,10 @@ func NewWebhookMeterWithOutbox(localMeter Meter, outbox Outbox, webhookURL, webh
 		webhookToken: webhookToken,
 		httpClient:   &http.Client{Timeout: 10 * time.Second},
 		getCostFunc:  getCostFunc,
-		retryBase:    2 * time.Second,
-		retryMax:     5 * time.Minute,
-		pollInterval: 5 * time.Second,
+		retryBase:    opts.retryBase,
+		retryMax:     opts.retryMax,
+		pollInterval: opts.pollInterval,
+		maxAttempts:  opts.maxAttempts,
 		wake:         make(chan struct{}, 1),
 		stop:         make(chan struct{}),
 		done:         make(chan struct{}),
@@ -227,6 +252,13 @@ func (m *WebhookMeter) dispatch() {
 			log.Printf("[WebhookMeter] Report %s rejected permanently: %s", entry.ID, outcome.err)
 		default:
 			attempts := entry.Attempts + 1
+			if m.maxAttempts > 0 && attempts >= m.maxAttempts {
+				if err := m.outbox.MarkDead(ctx, entry.ID, attempts, outcome.err); err != nil {
+					log.Printf("[WebhookMeter] Mark report %s dead failed: %v", entry.ID, err)
+				}
+				log.Printf("[WebhookMeter] Report %s exhausted %d attempts, marked dead: %s", entry.ID, attempts, outcome.err)
+				continue
+			}
 			next := time.Now().Add(m.backoff(attempts))
 			if err := m.outbox.MarkRetry(ctx, entry.ID, attempts, next, outcome.err); err != nil {
 				log.Printf("[WebhookMeter] Schedule retry for report %s failed: %v", entry.ID, err)
