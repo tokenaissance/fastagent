@@ -116,10 +116,32 @@ RUN pip install --break-system-packages --no-cache-dir \
         lxml==6.1.0
 
 # Install as root (apt needs it), then hand the cache to the runtime user in the same layer.
-RUN camoufox-cli install --with-deps \
+#
+# The font prune sits INSIDE this layer, not in a later RUN, for the same reason the `mv`
+# does: a delete in a later layer only writes a whiteout and leaves the bytes in the image.
+# camoufox ships one font set per spoofed OS — fonts/groups.json says "lin" reads
+# L/LM/LMW/LW, and M (810 MB), W (354 MB), MW (20 MB) serve mac/win. The spoofed OS is the
+# HOST os (camoufox_cli/identity.py `_host_os()`, "fingerprint: browserforge, firefox, host
+# OS"), and in a Linux container sys.platform is always linux, so those three can never be
+# read here. 0.7.6 started shipping all of them; 0.7.3 shipped only what Linux reads, which
+# is the 1.2 GB this step takes back.
+#
+# The guard fails the build if a Linux group disappears: the browser gate only opens
+# about:blank and would not notice an image that renders every page in fallback fonts.
+RUN set -eu; \
+    camoufox-cli install --with-deps \
  && mkdir -p /home/user/.cache \
  && mv /root/.cache/camoufox /home/user/.cache/camoufox \
+ && rm -rf /home/user/.cache/camoufox/fonts/M \
+           /home/user/.cache/camoufox/fonts/MW \
+           /home/user/.cache/camoufox/fonts/W \
+ && for g in L LM LMW LW; do \
+      test -d "/home/user/.cache/camoufox/fonts/$g" \
+        || { echo "font group $g is missing after the prune; groups.json renamed?" >&2; exit 1; }; \
+    done \
+ && test -s /home/user/.cache/camoufox/fonts/TwemojiMozilla.ttf \
  && chown -R 1000:1000 /home/user/.cache
+
 
 RUN rm -rf /var/lib/apt/lists/*
 
