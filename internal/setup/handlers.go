@@ -149,7 +149,19 @@ func saveAgentSkillEntries(ctx context.Context, st store.Store, agentID string, 
 // a whole config (cron, plugins, tools) want. The PATCH-style /api/config
 // uses saveUserConfigNamespaces instead.
 func (s *Server) saveUserConfig(r *http.Request, cfg *config.Config) error {
-	return s.saveUserConfigNamespaces(r, cfg, nil)
+	return s.configCommitter().Commit(r, func() error {
+		return s.saveUserConfigNamespaces(r, cfg, nil)
+	}, CommitOptions{})
+}
+
+// configCommitter wires the use case to this server's persistence and cache.
+func (s *Server) configCommitter() ConfigCommitter {
+	return ConfigCommitter{
+		scope:           s.scopeForSave,
+		invalidate:      s.invalidateScope,
+		reloadSandbox:   s.reloadSystemSandbox,
+		reloadTaskQueue: s.reloadSystemTaskQueue,
+	}
 }
 
 // saveUserConfigNamespaces writes only the namespaces in `only` (nil = all).
@@ -734,28 +746,20 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	sc, _ := s.scopeForSave(r)
 	// Cached UserSpaces hold a snapshot of the merged config (including
 	// agents.defaults.model and the provider chain). Without this, an
 	// agent loaded before the change keeps seeing the stale model and
-	// surfaces "no usable LLM provider" in chat.
-	sc, scopeID := s.scopeForSave(r)
-	if sc == scope.System && raw.Sandbox != nil {
-		if err := s.reloadSystemSandbox(); err != nil {
-			jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
-			return
-		}
+	// surfaces "no usable LLM provider" in chat. Commit invalidates the
+	// scope before running the reloads, so a reload failure still drops the
+	// stale cache.
+	if err := s.configCommitter().Commit(r, nil, CommitOptions{
+		ReloadSandbox:   sc == scope.System && raw.Sandbox != nil,
+		ReloadTaskQueue: sc == scope.System && touched["taskqueue"],
+	}); err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
 	}
-	// Same contract for the turn-queue namespace: an operator changing
-	// maxConcurrent / taskTimeoutSec / cronTimeoutSec expects it to apply to
-	// the next turn, not at the next rollout. Gate on the touched-namespace set
-	// (not a typed field) because taskqueue has no special decode path.
-	if sc == scope.System && touched["taskqueue"] {
-		if err := s.reloadSystemTaskQueue(); err != nil {
-			jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
-			return
-		}
-	}
-	s.invalidateScope(sc, scopeID)
 	jsonResponse(w, http.StatusOK, map[string]any{"ok": true})
 }
 
