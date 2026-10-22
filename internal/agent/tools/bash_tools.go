@@ -77,12 +77,18 @@ func registerBashOutput(r *Registry) {
 		}
 		if s == nil {
 			if job := r.sandboxJobByID(args.BashID); job != nil {
+				if err := authorizeJobAccess(ctx, job.ownerSessionID, job.ownerChatterID); err != nil {
+					return "", err
+				}
 				return job.output(ctx, filter)
 			}
 			if r.shellMgr == nil {
 				return "", fmt.Errorf("bash_output: shell manager not initialised")
 			}
 			return "", fmt.Errorf("bash_output: no such bash_id %q (call exec(run_in_background=true) first; ids are valid only within the same agent process)", args.BashID)
+		}
+		if err := authorizeJobAccess(ctx, s.ownerSessionID, s.ownerChatterID); err != nil {
+			return "", err
 		}
 
 		raw2, dropped := s.readNew()
@@ -158,12 +164,18 @@ func registerKillShell(r *Registry) {
 		}
 		if s == nil {
 			if job := r.sandboxJobByID(args.BashID); job != nil {
+				if err := authorizeJobAccess(ctx, job.ownerSessionID, job.ownerChatterID); err != nil {
+					return "", err
+				}
 				return job.kill(ctx)
 			}
 			if r.shellMgr == nil {
 				return "", fmt.Errorf("kill_shell: shell manager not initialised")
 			}
 			return "", fmt.Errorf("kill_shell: no such bash_id %q", args.BashID)
+		}
+		if err := authorizeJobAccess(ctx, s.ownerSessionID, s.ownerChatterID); err != nil {
+			return "", err
 		}
 		if s.done.Load() {
 			_, code, _ := s.snapshot()
@@ -172,6 +184,27 @@ func registerKillShell(r *Registry) {
 		_ = s.kill()
 		return fmt.Sprintf("Sent kill to %s.", s.id), nil
 	})
+}
+
+// authorizeJobAccess refuses a bash_id created by another turn or chatter.
+// Shells and sandbox jobs live on the agent-wide registry, so the id alone
+// must not be enough to read or kill another conversation's background work.
+// Empty owner fields mean a legacy/host caller: those keep the old behaviour.
+func authorizeJobAccess(ctx context.Context, ownerSessionID, ownerChatterID string) error {
+	if ownerSessionID == "" && ownerChatterID == "" {
+		return nil
+	}
+	scope := TurnScopeFrom(ctx)
+	if scope == nil {
+		return fmt.Errorf("bash_id belongs to another turn and is not readable from here")
+	}
+	if ownerSessionID != "" && scope.SessionID != ownerSessionID {
+		return fmt.Errorf("bash_id belongs to another session")
+	}
+	if ownerChatterID != "" && scope.ChatterUserID != ownerChatterID {
+		return fmt.Errorf("bash_id belongs to another chatter")
+	}
+	return nil
 }
 
 // filterLines retains only lines matching re. Trailing newline policy

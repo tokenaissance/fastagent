@@ -145,6 +145,14 @@ type bashSession struct {
 	command   string
 	startedAt time.Time
 
+	// ownerSessionID / ownerChatterID stamp the turn that created this shell.
+	// Shells live on the agent-wide manager, so bash_output / kill_shell check
+	// these before exposing another conversation's output. Empty means a
+	// legacy or host caller with no turn scope; access checks then allow the
+	// call for backwards compatibility.
+	ownerSessionID string
+	ownerChatterID string
+
 	cmd    *exec.Cmd
 	cancel context.CancelFunc
 	out    *outputBuffer
@@ -238,6 +246,16 @@ func newShellManager() *shellManager {
 // propagate to the child — that ctx dies at turn end and would take
 // every backgrounded process with it.
 func (m *shellManager) Start(command string, env []string) (*bashSession, error) {
+	return m.start(command, env, "", "")
+}
+
+// StartOwned is Start for an admitted turn. It stamps the session and chatter
+// that own the shell so another turn cannot read or kill it by id.
+func (m *shellManager) StartOwned(command string, env []string, sessionID, chatterID string) (*bashSession, error) {
+	return m.start(command, env, sessionID, chatterID)
+}
+
+func (m *shellManager) start(command string, env []string, sessionID, chatterID string) (*bashSession, error) {
 	if command == "" {
 		return nil, errors.New("command is required")
 	}
@@ -300,12 +318,14 @@ func (m *shellManager) Start(command string, env []string) (*bashSession, error)
 	m.counter++
 	id := fmt.Sprintf("bash_%d", m.counter)
 	s := &bashSession{
-		id:        id,
-		command:   command,
-		startedAt: time.Now(),
-		cmd:       cmd,
-		cancel:    cancel,
-		out:       out,
+		id:             id,
+		command:        command,
+		startedAt:      time.Now(),
+		ownerSessionID: sessionID,
+		ownerChatterID: chatterID,
+		cmd:            cmd,
+		cancel:         cancel,
+		out:            out,
 	}
 	m.shells[id] = s
 	m.mu.Unlock()

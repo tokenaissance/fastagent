@@ -80,6 +80,10 @@ type sandboxJob struct {
 	exitPath string
 	command  string
 	runner   sandboxRunner
+	// ownerSessionID / ownerChatterID stamp the turn that started the job, so
+	// bash_output / kill_shell can refuse a bash_id leaked from another chat.
+	ownerSessionID string
+	ownerChatterID string
 	// table is the job table this job belongs to, so a poll that observes the
 	// job has finished can retire it (nil for jobs built by hand in tests).
 	table *sandboxJobs
@@ -170,6 +174,10 @@ func (s *sandboxJobs) start(ctx context.Context, runner sandboxRunner, command s
 		command:  command,
 		runner:   runner,
 		table:    s,
+	}
+	if scope := TurnScopeFrom(ctx); scope != nil {
+		job.ownerSessionID = scope.SessionID
+		job.ownerChatterID = scope.ChatterUserID
 	}
 	s.mu.Lock()
 	if s.closed {

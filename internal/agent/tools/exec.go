@@ -332,7 +332,12 @@ func makeExecToolFull(r *Registry, sbCfg *SandboxConfig, envProvider SkillEnvPro
 				skillEnv = resolveSkillEnv(args.Command, provider, dirs)
 			}
 			sessEnv := buildSubprocessEnv(skillEnv)
-			s, err := r.shellMgr.Start(command, sessEnv)
+			var ownerSessionID, ownerChatterID string
+			if scope := TurnScopeFrom(ctx); scope != nil {
+				ownerSessionID = scope.SessionID
+				ownerChatterID = scope.ChatterUserID
+			}
+			s, err := r.shellMgr.StartOwned(command, sessEnv, ownerSessionID, ownerChatterID)
 			if err != nil {
 				return "", err
 			}
